@@ -421,16 +421,16 @@ class TikTokUserFacingError(RuntimeError):
 #    (<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">, структура подтверждена по
 #    исходникам github.com/davidteather/TikTok-Api). HTML реально скачивался (200,
 #    ~330 КБ, JSON внутри валидный), НО __DEFAULT_SCOPE__ содержал только служебные
-#    ключи (seo.abtest, webapp.a-b, webapp.app-context, webapp.biz-context,
-#    webapp.i18n-translation) — БЕЗ какого-либо ключа с данными о звуке вообще.
-#    Это не баг парсинга — TikTok в принципе не прислал контентные данные на этот
-#    запрос, что похоже на то же самое, известное по многим независимым источникам,
-#    выборочное урезание страницы для дата-центровых/подозрительных IP (bot-scoring),
-#    — ровно та же причина, по которой в этом проекте уже отключено скачивание с
-#    YouTube (см. README, "Известные ограничения"). Раз сама страница не содержит
-#    нужных данных на этом хостинге, никакая правка регулярных выражений/путей в
-#    JSON это не исправит — поэтому эта попытка полностью убрана, а не оставлена
-#    как "иногда работает".
+#    ключи (seo.abtest, webapp.a-b, webapp.app-context, webapp.i18n-translation) —
+#    БЕЗ какого-либо ключа с данными о звуке вообще. Это не баг парсинга — TikTok
+#    в принципе не прислал контентные данные на этот запрос, что похоже на то же
+#    самое, известное по многим независимым источникам, выборочное урезание
+#    страницы для дата-центровых/подозрительных IP (bot-scoring), — ровно та же
+#    причина, по которой в этом проекте уже отключено скачивание с YouTube (см.
+#    README, "Известные ограничения"). Раз сама страница не содержит нужных
+#    данных на этом хостинге, никакая правка регулярных выражений/путей в JSON
+#    это не исправит — поэтому эта попытка полностью убрана, а не оставлена как
+#    "иногда работает".
 #
 # ВЫВОД: скачать звук ОТДЕЛЬНО по одной лишь ссылке на его страницу с текущей
 # инфраструктурой бота (TikWM + без прокси/резидентных IP для скрапинга самого
@@ -539,27 +539,51 @@ async def _generate_video_thumbnail(path: str, duration: int) -> bytes | None:
     return None
 
 
+async def _probe_and_thumbnail_from_path(path: str) -> tuple[int, int, int, bytes | None]:
+    """Запускает ffprobe (длительность/размеры) и ffmpeg (кадр-превью) НАД ОДНИМ
+    файлом ПАРАЛЛЕЛЬНО (asyncio.gather), а не последовательно, как было раньше
+    (сначала полностью отрабатывал ffprobe, и только ПОТОМ, дождавшись его
+    результата, стартовал ffmpeg).
+
+    НАЙДЕНО ПРИ РЕВИЗИИ СКОРОСТИ (запрос владельца, 15 августа 2026 — "долговато
+    скидывает скачанные видео и музыку"): _generate_video_thumbnail использует
+    duration ТОЛЬКО чтобы выбрать точку seek — `min(1.0, duration / 2)`, иначе
+    0.5с при duration=0. Для типичного TikTok-видео (почти всегда длиннее 2
+    секунд) это выражение и так почти всегда упирается в потолок 1.0с независимо
+    от точного значения duration — то есть реальная зависимость thumbnail от
+    результата probe на практике иллюзорна, а раньше это было ПОЛНОЕ
+    последовательное ожидание одного отдельного процесса (ffprobe, читает только
+    метаданные, обычно быстро) другим (ffmpeg, декодирует и масштабирует целый
+    кадр — заметно медленнее). Передаём в _generate_video_thumbnail duration=0
+    (тот же дефолт 0.5с seek, что и раньше применялся для видео короче 2с) и
+    запускаем оба процесса ОДНОВРЕМЕННО — экономит время, примерно равное
+    меньшей из двух длительностей (обычно это время ffprobe, целиком)."""
+    duration, width, height, thumb_bytes = 0, 0, 0, None
+    try:
+        (duration, width, height), thumb_bytes = await asyncio.gather(
+            _probe_video_dimensions(path), _generate_video_thumbnail(path, 0),
+        )
+    except Exception as probe_exc:
+        log.warning("[tiktok] Video metadata probe failed, sending without: %s", probe_exc)
+    return duration, width, height, thumb_bytes
+
+
 async def _probe_and_thumbnail_from_bytes(video_bytes: bytes) -> tuple[int, int, int, bytes | None]:
-    """Обёртка над _probe_video_dimensions/_generate_video_thumbnail для уже
-    скачанных В ПАМЯТИ байтов видео (а не файла на диске) — нужна видео-слайдам
-    TikTok-слайдшоу (см. handle_tiktok/_looks_like_video_bytes). НАЙДЕНО ПРИ
-    РЕВИЗИИ: у обычного цельного TikTok-видео уже применяется этот же приём
-    (Telegram не всегда сам умеет вытащить длительность/размеры из TikTok-
-    контейнера без явной передачи их вместе с превью, см. handle_tiktok в bot.py) —
-    видео-слайды внутри слайдшоу используют тот же CDN и, вероятно, ту же
-    особенность контейнера, но раньше отправлялись вообще без этих метаданных."""
-    duration, width, height = 0, 0, 0
-    thumb_bytes = None
+    """Обёртка над _probe_and_thumbnail_from_path для уже скачанных В ПАМЯТИ
+    байтов видео (а не файла на диске) — нужна видео-слайдам TikTok-слайдшоу (см.
+    handle_tiktok/_looks_like_video_bytes). Пишет байты во временный файл (ffprobe/
+    ffmpeg умеют работать только с файлами на диске, не с байтами в памяти) и
+    делегирует в _probe_and_thumbnail_from_path — та же логика параллельного
+    probe+thumbnail, что и для обычного цельного TikTok-видео в handle_tiktok."""
     try:
         with tempfile.TemporaryDirectory() as tdir:
             raw_path = os.path.join(tdir, "slide.mp4")
             with open(raw_path, "wb") as f:
                 f.write(video_bytes)
-            duration, width, height = await _probe_video_dimensions(raw_path)
-            thumb_bytes = await _generate_video_thumbnail(raw_path, duration)
+            return await _probe_and_thumbnail_from_path(raw_path)
     except Exception as probe_exc:
         log.warning("[tiktok] Video-slide metadata probe failed, sending without: %s", probe_exc)
-    return duration, width, height, thumb_bytes
+        return 0, 0, 0, None
 
 
 # ─────────────────── проверка "это реально резолвленный URL поста?" ───────────────────

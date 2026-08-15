@@ -11,3 +11,8 @@
 -r requirements.txt
 pytest==9.1.1
 pyflakes==3.4.0
+# pip-audit — сканирование requirements.txt на известные CVE (см. CI workflow
+# .github/workflows/ci.yml) — часть аудита техдолга (dependency debt): версии
+# зависимостей зафиксированы через == (см. requirements.txt) и без отдельной
+# проверки могли бы годами не замечать новую опубликованную уязвимость.
+pip-audit==2.9.0
