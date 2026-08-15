@@ -1,0 +1,31 @@
+# Секреты — не должны попасть в образ ни при каких обстоятельствах
+.env
+*.env
+
+# git-метаданные не нужны в контейнере
+.git
+.gitignore
+
+# Тесты и dev-инструменты — не нужны в рантайме, только раздувают образ
+test_bot_helpers.py
+conftest.py
+requirements-dev.txt
+tests.yml
+.pytest_cache/
+README.md
+
+# Байткод/кэш
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Эфемерное состояние — не должно "запекаться" в образ со старого билда
+bot.log
+*.log
+chat_state.json
+chat_state.tmp
+global_quota.json
+global_quota.tmp
+
+.DS_Store

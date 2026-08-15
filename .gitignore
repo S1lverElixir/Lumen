@@ -1,0 +1,26 @@
+# Секреты и локальный конфиг — никогда не должны попасть в git
+.env
+*.env
+
+# Байткод/кэш Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Виртуальные окружения
+.venv/
+venv/
+
+# Эфемерное состояние бота (генерируется в рантайме, не часть кода)
+bot.log
+*.log
+chat_state.json
+chat_state.tmp
+global_quota.json
+global_quota.tmp
+
+# ОС/редакторы
+.DS_Store
+.idea/
+.vscode/
