@@ -2624,6 +2624,139 @@ def test_ask_openrouter_multimodal_empty_model_chain_fallback_is_current_vision_
 
 # ─────────────────── дедуп мёртвой ветки ретраев в _or_chat_completion_with_fallback ───────────────────
 
+# ─────────────────── разбиение _handle_message_core на именованные шаги (аудит техдолга) ───────────────────
+# Раньше это была одна функция ~215 строк без единого прямого теста на свои
+# внутренние решения (rate limit, приоритет медиа, текст ответа на ошибку) —
+# только опосредованно через полный прогон _handle_message_core. Вынесенные
+# чистые/почти чистые функции теперь тестируются в изоляции.
+
+def test_check_and_register_rate_limit_blocks_after_five_requests():
+    bot.user_rate_limits.pop(999950, None)
+    try:
+        for _ in range(5):
+            assert bot._check_and_register_rate_limit(999950) is False
+        assert bot._check_and_register_rate_limit(999950) is True
+    finally:
+        bot.user_rate_limits.pop(999950, None)
+
+
+def test_check_and_register_rate_limit_does_not_extend_punishment():
+    # Регрессия: после срабатывания лимита новый timestamp НЕ должен добавляться,
+    # иначе пользователь, продолжающий писать, никогда не выйдет из-под лимита.
+    bot.user_rate_limits.pop(999951, None)
+    try:
+        for _ in range(5):
+            bot._check_and_register_rate_limit(999951)
+        assert bot._check_and_register_rate_limit(999951) is True
+        assert len(bot.user_rate_limits[999951]) == 5
+    finally:
+        bot.user_rate_limits.pop(999951, None)
+
+
+def test_check_and_register_rate_limit_noop_for_missing_user_id():
+    assert bot._check_and_register_rate_limit(None) is False
+    assert bot._check_and_register_rate_limit(0) is False
+
+
+def test_should_only_record_passively_true_for_unmentioned_group_text():
+    msg = _FakeIncomingMessage(1)
+    assert bot._should_only_record_passively(msg, "привет всем", is_private=False, is_guest=False, mentioned=False) is True
+
+
+def test_should_only_record_passively_false_when_mentioned_or_private_or_guest():
+    msg = _FakeIncomingMessage(1)
+    assert bot._should_only_record_passively(msg, "привет", is_private=True, is_guest=False, mentioned=False) is False
+    assert bot._should_only_record_passively(msg, "привет", is_private=False, is_guest=True, mentioned=False) is False
+    assert bot._should_only_record_passively(msg, "привет", is_private=False, is_guest=False, mentioned=True) is False
+
+
+def test_should_only_record_passively_false_for_tiktok_link_without_mention():
+    # TikTok-ссылка обрабатывается всегда, даже без упоминания бота в группе.
+    msg = _FakeIncomingMessage(1)
+    text = "гляньте https://www.tiktok.com/@user/video/123"
+    assert bot._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=False) is False
+
+
+def test_route_error_reply_text_youtube_takes_priority_over_exception_type():
+    exc = bot.OpenRouterAPIError("boom", status_code=500)
+    text = bot._route_error_reply_text(exc, "gemini-3.6-flash", youtube_url_to_analyze="https://youtu.be/x")
+    assert "видео" in text.lower()
+
+
+def test_route_error_reply_text_maps_known_exception_types():
+    quota_exc = bot.GeminiAllModelsExhaustedError(["gemini-3.6-flash"])
+    assert bot._route_error_reply_text(quota_exc, "gemini-3.6-flash", youtube_url_to_analyze=None) == bot._gemini_error_msg(quota_exc, "gemini-3.6-flash")
+
+    budget_exc = bot.RouteBudgetExceededError(["gemini-3.6-flash"])
+    assert "перегруж" in bot._route_error_reply_text(budget_exc, "gemini-3.6-flash", youtube_url_to_analyze=None).lower()
+
+    or_exc = bot.OpenRouterAPIError("boom", status_code=500)
+    assert bot._route_error_reply_text(or_exc, "gemini-3.6-flash", youtube_url_to_analyze=None) == bot._or_error_msg(or_exc, "text")
+
+    other_exc = RuntimeError("что-то сломалось")
+    assert bot._route_error_reply_text(other_exc, "gemini-3.6-flash", youtube_url_to_analyze=None) == bot._gemini_error_msg(other_exc, "gemini-3.6-flash")
+
+
+def test_resolve_incoming_media_priority_2_reply_attachment_wins_over_priority_3_recent_media():
+    # Явный реплай на медиа (приоритет 2) должен побеждать словесную отсылку к
+    # недавнему медиа (приоритет 3), даже если оба технически применимы.
+    chat_id = 999952
+    state = bot.get_state(chat_id)
+    state["recent_media_ids"] = {"555": [("old_file_id", "image/jpeg")]}
+    try:
+        msg = _FakeIncomingMessage(chat_id)
+        msg.from_user = SimpleNamespace(id=555)
+        reply_photo = SimpleNamespace(file_id="reply_file_id", mime_type="image/png", file_name="")
+        msg.reply_to_message = SimpleNamespace(photo=[reply_photo], video=None, animation=None, video_note=None, voice=None, audio=None, document=None, sticker=None, text=None, caption=None)
+
+        async def fake_fetch_media(file_id, mime):
+            return (b"bytes-for-" + file_id.encode(), mime)
+
+        original_fetch = bot._fetch_media
+        bot._fetch_media = fake_fetch_media
+        try:
+            med_path, med_mime, med_name, media_tuple = asyncio.run(
+                bot._resolve_incoming_media(msg, state, "что на фото", is_private=True)
+            )
+            assert media_tuple == (b"bytes-for-reply_file_id", "image/png")
+            assert med_path is None  # приоритеты 2/3 не пишут временный файл на диск
+        finally:
+            bot._fetch_media = original_fetch
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_resolve_incoming_media_priority_3_only_with_explicit_media_reference_words():
+    # Без явного слова-указания на медиа (см. _looks_like_media_reference)
+    # словесная отсылка не должна срабатывать вообще.
+    chat_id = 999953
+    state = bot.get_state(chat_id)
+    state["recent_media_ids"] = {"555": [("old_file_id", "image/jpeg")]}
+    try:
+        msg = _FakeIncomingMessage(chat_id)
+        msg.from_user = SimpleNamespace(id=555)
+        msg.reply_to_message = None
+
+        called = []
+
+        async def fake_fetch_media(file_id, mime):
+            called.append(file_id)
+            return (b"bytes", mime)
+
+        original_fetch = bot._fetch_media
+        bot._fetch_media = fake_fetch_media
+        try:
+            _, _, _, media_tuple = asyncio.run(
+                bot._resolve_incoming_media(msg, state, "расскажи про эту компанию", is_private=True)
+            )
+            assert media_tuple is None
+            assert called == []
+        finally:
+            bot._fetch_media = original_fetch
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_or_chat_completion_with_fallback_no_longer_accepts_attempts_per_model():
     # attempts_per_model убран целиком (был мёртвым кодом — см. аудит техдолга):
     # единственное реальное значение всегда было 1, поэтому внутренний повторный

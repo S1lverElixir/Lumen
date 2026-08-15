@@ -4073,6 +4073,28 @@ async def cmd_stats(message: Message) -> None:
 # другой провайдер лучше, чем отказ там, где ответ в принципе можно было дать.
 
 
+def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_analyze: str | None) -> str:
+    """Текст ответа пользователю на исключение из _run_route — чистая функция
+    без побочных эффектов (сам owner-алерт на GeminiAllModelsExhaustedError
+    остаётся в _handle_message_core, до вызова этой функции, т.к. это сетевой
+    вызов, а не выбор текста). Вынесено при разбиении _handle_message_core на
+    именованные шаги (аудит техдолга) — было последней веткой if/elif внутри
+    самой длинной функции проекта, тестировать её отдельно раньше было нельзя
+    без гонки всего _handle_message_core целиком."""
+    if youtube_url_to_analyze:
+        return (
+            "Не получилось открыть это видео (возможно, оно приватное, удалено, слишком длинное "
+            "или недоступно для анализа). Опишите, пожалуйста, о чём оно словами — тогда смогу помочь."
+        )
+    if isinstance(exc, GeminiAllModelsExhaustedError):
+        return _gemini_error_msg(exc, head_model)
+    if isinstance(exc, RouteBudgetExceededError):
+        return "Сейчас все доступные модели перегружены или недоступны. Попробуйте, пожалуйста, ещё раз через минуту."
+    if isinstance(exc, OpenRouterAPIError):
+        return _or_error_msg(exc, "text")
+    return _gemini_error_msg(exc, head_model)
+
+
 class RouteBudgetExceededError(RuntimeError):
     """Общий бюджет времени на подбор модели (см. ROUTE_TOTAL_BUDGET_SEC) закончился
     раньше, чем нашёлся рабочий ответ — защита от многоминутного ожидания при
@@ -4221,6 +4243,116 @@ async def _process_media_group_buffers(mgid: str) -> None:
             extra_media.append(fetched)
     await _handle_message_core(main_msg, extra_media=extra_media or None)
 
+def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
+    """Пассивная запись сообщения группы в фон чата (бот не упомянут) — только
+    логирование контекста и запоминание последнего медиа отправителя, без
+    какого-либо ответа. Вынесено из _handle_message_core (см. аудит техдолга,
+    разбиение самой длинной функции проекта на именованные шаги) — чистый
+    побочный эффект над state, поведение не изменилось."""
+    if t.strip():
+        username = message.from_user.username or message.from_user.first_name or "User"
+        state["ctx"].append(f"@{username}: {t.strip()}")
+    _save_media_to_history(_msg_media_source(message), state, message.from_user.id if message.from_user else None)
+    mark_state_dirty(message.chat.id)
+
+
+def _should_only_record_passively(message: Message, t: str, *, is_private: bool, is_guest: bool, mentioned: bool) -> bool:
+    """True, если сообщение — это фон группового чата без обращения к боту (см.
+    _record_passive_group_context выше) и активная обработка не нужна вообще.
+    Единственное исключение — ссылка на TikTok обрабатывается ВСЕГДА, даже без
+    упоминания бота (исторически так и задумано, см. комментарий в исходной
+    _handle_message_core)."""
+    if is_private or is_guest or mentioned:
+        return False
+    url = extract_url(t)
+    return not url or not is_tiktok(url)
+
+
+def _check_and_register_rate_limit(user_id: int | None) -> bool:
+    """Скользящее окно 5 запросов/30 сек на пользователя. Возвращает True, если
+    лимит уже исчерпан (вызывающий код должен ответить и прекратить обработку) —
+    в этом случае, в отличие от успешного случая, TIMESTAMP НЕ добавляется, чтобы
+    не продлевать наказание бесконечно на каждое следующее сообщение сверху лимита."""
+    if not user_id:
+        return False
+    now = time.time()
+    timestamps = user_rate_limits.setdefault(user_id, [])
+    while timestamps and now - timestamps[0] > 30.0:
+        timestamps.pop(0)
+    if len(timestamps) >= 5:
+        return True
+    timestamps.append(now)
+    return False
+
+
+async def _resolve_incoming_media(
+    message: Message, state: dict[str, Any], clean_prompt: str, *, is_private: bool,
+) -> tuple[str | None, str, str, tuple[bytes, str] | None]:
+    """Три приоритета определения "о каком медиа речь" для текущего сообщения —
+    вынесено из _handle_message_core (аудит техдолга, разбиение самой длинной
+    функции проекта) как один логический шаг, дальше используется как есть.
+
+    1. Прямое вложение в САМОМ сообщении (фото/видео/аудио/документ и т.п.).
+    2. Явный реплай на сообщение с медиа — пользователь прямо указал файл.
+    3. Словесная отсылка ("что на фото") без реплая — берётся последнее медиа
+       ИМЕННО этого пользователя (не всего чата, см. комментарий ниже).
+
+    Возвращает (med_path, med_mime, med_name, media_tuple) — та же четвёрка,
+    что раньше собиралась инлайн; med_path непустой ТОЛЬКО для приоритета №1
+    (файл реально лежит на диске и должен быть удалён вызывающим кодом в
+    finally), приоритеты №2/№3 работают через _fetch_media (в память, без
+    временного файла)."""
+    asking_user_id = message.from_user.id if message.from_user else None
+    media_src = _msg_media_source(message)
+    med_path, med_mime, med_name = None, "", ""
+    media_tuple = None
+
+    if media_src:
+        res = await _download_message_attachment_to_tmp(media_src)
+        if res:
+            med_path, med_mime, med_name = res
+            _save_media_to_history(media_src, state, asking_user_id)
+            with open(med_path, "rb") as f:
+                media_tuple = (f.read(), med_mime)
+
+    # Приоритет №2: явный реплай на сообщение с медиа — самый надёжный сигнал,
+    # пользователь прямо указал, о каком файле речь. Работает без триггер-слов.
+    if media_tuple is None and message.reply_to_message is not None:
+        reply_src = _msg_media_source(message.reply_to_message)
+        if reply_src:
+            reply_fid, reply_mime, _ = _media_file_id_and_mime(reply_src)
+            if reply_fid:
+                fetched = await _fetch_media(reply_fid, reply_mime)
+                if fetched:
+                    media_tuple = fetched
+
+    # Приоритет №3: словесная отсылка к "тому самому" файлу без реплая.
+    # Ищем СНАЧАЛА среди недавних медиа именно этого пользователя (не всего чата —
+    # в группе разные люди шлют разные файлы, и общий "последний в чате" элемент
+    # почти всегда окажется чужим и не тем, о чём спрашивают).
+    if media_tuple is None and state.get("recent_media_ids"):
+        should_fetch = _looks_like_media_reference(clean_prompt)
+        if should_fetch:
+            buckets: dict[str, Any] = state["recent_media_ids"]
+            own_bucket = buckets.get(str(asking_user_id)) if asking_user_id is not None else None
+            fid_mime = None
+            if own_bucket:
+                fid_mime = own_bucket[-1]
+            elif is_private:
+                # В личке с ботом собеседник ровно один — не так критично,
+                # можно взять последний известный файл из чата вообще.
+                for bucket in buckets.values():
+                    if bucket:
+                        fid_mime = bucket[-1]
+            if fid_mime:
+                fid, mime = fid_mime
+                fetched = await _fetch_media(fid, mime)
+                if fetched:
+                    media_tuple = fetched
+
+    return med_path, med_mime, med_name, media_tuple
+
+
 async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
     state = get_state(message.chat.id)
     t = message.text or message.caption or ""
@@ -4228,32 +4360,15 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     is_guest = is_guest_message(message)
     mentioned = message_mentions_bot(message)
 
-    # Проверка на пассивную запись контекста в группах (не лимитируем)
-    if not is_private and not is_guest and not mentioned:
-        url = extract_url(t)
-        # Без упоминания бота обрабатываем сразу только TikTok-ссылки (исторически
-        # так и задумано — не нужно тегать бота ради скачивания видео). Любая
-        # другая ссылка (YouTube, обычный сайт и т.д.) без упоминания — это
-        # обычный текст в группе, бот на неё реагировать не должен вовсе.
-        if not url or not is_tiktok(url):
-            if t.strip():
-                 username = message.from_user.username or message.from_user.first_name or "User"
-                 state["ctx"].append(f"@{username}: {t.strip()}")
-            _save_media_to_history(_msg_media_source(message), state, message.from_user.id if message.from_user else None)
-            mark_state_dirty(message.chat.id)
-            return
+    if _should_only_record_passively(message, t, is_private=is_private, is_guest=is_guest, mentioned=mentioned):
+        _record_passive_group_context(message, state, t)
+        return
 
     # Начинаем обработку активного запроса с проверкой rate limit
     user_id = message.from_user.id if message.from_user else None
-    if user_id:
-        now = time.time()
-        timestamps = user_rate_limits.setdefault(user_id, [])
-        while timestamps and now - timestamps[0] > 30.0:
-            timestamps.pop(0)
-        if len(timestamps) >= 5:
-            await _tg_call(message.reply, "Вы отправляете слишком много запросов. Подождите немного.")
-            return
-        timestamps.append(now)
+    if _check_and_register_rate_limit(user_id):
+        await _tg_call(message.reply, "Вы отправляете слишком много запросов. Подождите немного.")
+        return
 
     # Проверка на ссылки загрузки (TikTok — сразу всегда, даже в группах без упоминания)
     url = extract_url(t)
@@ -4320,53 +4435,10 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         if tts_content:
             await inline_tts(message, tts_content)
             return
-    media_src = _msg_media_source(message)
-    med_path, med_mime, med_name = None, "", ""
-    media_tuple = None
-    asking_user_id = message.from_user.id if message.from_user else None
 
-    if media_src:
-         res = await _download_message_attachment_to_tmp(media_src)
-         if res:
-              med_path, med_mime, med_name = res
-              _save_media_to_history(media_src, state, asking_user_id)
-              with open(med_path, "rb") as f:
-                   media_tuple = (f.read(), med_mime)
-
-    # Приоритет №2: явный реплай на сообщение с медиа — самый надёжный сигнал,
-    # пользователь прямо указал, о каком файле речь. Работает без триггер-слов.
-    if media_tuple is None and message.reply_to_message is not None:
-         reply_src = _msg_media_source(message.reply_to_message)
-         if reply_src:
-              reply_fid, reply_mime, _ = _media_file_id_and_mime(reply_src)
-              if reply_fid:
-                   fetched = await _fetch_media(reply_fid, reply_mime)
-                   if fetched:
-                        media_tuple = fetched
-
-    # Приоритет №3: словесная отсылка к "тому самому" файлу без реплая.
-    # Ищем СНАЧАЛА среди недавних медиа именно этого пользователя (не всего чата —
-    # в группе разные люди шлют разные файлы, и общий "последний в чате" элемент
-    # почти всегда окажется чужим и не тем, о чём спрашивают).
-    if media_tuple is None and state.get("recent_media_ids"):
-         should_fetch = _looks_like_media_reference(clean_prompt)
-         if should_fetch:
-              buckets: dict[str, Any] = state["recent_media_ids"]
-              own_bucket = buckets.get(str(asking_user_id)) if asking_user_id is not None else None
-              fid_mime = None
-              if own_bucket:
-                   fid_mime = own_bucket[-1]
-              elif is_private:
-                   # В личке с ботом собеседник ровно один — не так критично,
-                   # можно взять последний известный файл из чата вообще.
-                   for bucket in buckets.values():
-                        if bucket:
-                             fid_mime = bucket[-1]
-              if fid_mime:
-                   fid, mime = fid_mime
-                   fetched = await _fetch_media(fid, mime)
-                   if fetched:
-                        media_tuple = fetched
+    med_path, med_mime, med_name, media_tuple = await _resolve_incoming_media(
+        message, state, clean_prompt, is_private=is_private,
+    )
 
     if media_tuple and not clean_prompt:
          clean_prompt = _ensure_prompt_text(None, media_tuple[1])
@@ -4416,21 +4488,9 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     except Exception as exc:
         log.exception("Chat AI processing failed: ")
         head_model = route[0][1] if route else DEFAULT_GEMINI_MODEL
-        if youtube_url_to_analyze:
-             await _safe_reply(
-                 message,
-                 "Не получилось открыть это видео (возможно, оно приватное, удалено, слишком длинное "
-                 "или недоступно для анализа). Опишите, пожалуйста, о чём оно словами — тогда смогу помочь."
-             )
-        elif isinstance(exc, GeminiAllModelsExhaustedError):
-             await _maybe_alert_gemini_exhausted()
-             await _safe_reply(message, _gemini_error_msg(exc, head_model))
-        elif isinstance(exc, RouteBudgetExceededError):
-             await _safe_reply(message, "Сейчас все доступные модели перегружены или недоступны. Попробуйте, пожалуйста, ещё раз через минуту.")
-        elif isinstance(exc, OpenRouterAPIError):
-             await _safe_reply(message, _or_error_msg(exc, "text"))
-        else:
-             await _safe_reply(message, _gemini_error_msg(exc, head_model))
+        if isinstance(exc, GeminiAllModelsExhaustedError):
+            await _maybe_alert_gemini_exhausted()
+        await _safe_reply(message, _route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze))
     finally:
         if med_path and os.path.exists(med_path):
              with contextlib.suppress(Exception):
