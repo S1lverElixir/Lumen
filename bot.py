@@ -180,6 +180,19 @@ _TELEGRAM_PROXY_FALLBACKS = [
 _TELEGRAM_PROXY_CANDIDATES: list[str] = [TELEGRAM_API_BASE_URL] + [u for u in _TELEGRAM_PROXY_FALLBACKS if u != TELEGRAM_API_BASE_URL]
 _telegram_proxy_idx = 0  # индекс текущего активного прокси в _TELEGRAM_PROXY_CANDIDATES
 
+# НАЙДЕНО ПРИ ОТЛАДКЕ (11-12 августа 2026, реальный инцидент): TikWM стабильно
+# отвечает HTTP 403 с ПУСТЫМ телом на запросы с IP HF Spaces (см. историю правок
+# в lumen_tiktok.py — троттлинг, ретраи и подмена заголовков не помогли, реальная
+# причина — блокировка исходящего IP, а не что-либо, что чинится на нашей
+# стороне). TIKWM_API_BASE_URL — опциональная база для прокси-запроса к TikWM
+# (единый прокси с Telegram, см. README/proxy.ts — тот же принцип, что уже
+# применяется для TELEGRAM_API_BASE_URL). Пусто по умолчанию — _fetch_tikwm_media_data
+# в этом случае стучится в TikWM напрямую (два зеркала), как и раньше; если
+# задано — идёт ОДНИМ запросом через прокси вместо прямого обращения к двум
+# зеркалам напрямую (сам прокси уже решает, к какому реальному хосту TikWM
+# стучаться — см. proxy.ts).
+TIKWM_API_BASE_URL = os.getenv("TIKWM_API_BASE_URL", "").strip().rstrip("/")
+
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_KEY") or "").strip()
@@ -2496,17 +2509,15 @@ async def handle_tiktok(message: Message, url: str) -> None:
          # передавался, и бот молча всегда скачивал видео в обычном качестве, даже
          # когда у TikWM реально была версия получше (см. _tiktok_video_candidates).
          #
-         # ИСПРАВЛЕНО (отладка 11-12 августа 2026, реальный инцидент — оба зеркала TikWM
-         # стабильно отвечали HTTP 403 почти на любую ссылку): запрос к обоим зеркалам
-         # TikWM (www.tikwm.com/tikwm.com) с троттлингом и одной повторной попыткой при
-         # 403 у ОБОИХ зеркал вынесен в _fetch_tikwm_media_data (lumen_tiktok.py). ВАЖНО —
-         # честно зафиксировано по итогам повторной отладки: троттлинг и валидность
-         # резолвленного URL (см. _looks_like_resolved_tiktok_url) сами по себе инцидент
-         # НЕ закрыли — 403 с пустым телом продолжал приходить даже при полностью
-         # корректном URL и правильно разнесённых по времени запросах. См. подробный
-         # диагностический комментарий и лог "[tikwm][diag]" внутри _fetch_tikwm_media_data
-         # — похоже на блокировку исходящего IP этого сервера, а не на баг в нашем коде.
-         media_data = await _fetch_tikwm_media_data(session, resolved_url, headers)
+         # ИСПРАВЛЕНО (отладка 11-13 августа 2026, реальный инцидент — оба зеркала TikWM
+         # стабильно отвечали HTTP 403 почти на любую ссылку): троттлинг, ретраи, валидация
+         # резолвленного URL (см. _looks_like_resolved_tiktok_url) и заголовки Referer/Origin
+         # — НЕ помогли, 403 с пустым телом продолжал приходить даже при полностью корректном
+         # URL и правильно разнесённых по времени запросах. Причина подтверждена вручную —
+         # блокировка исходящего IP HF Spaces (см. подробный диагностический комментарий в
+         # _fetch_tikwm_media_data). TIKWM_API_BASE_URL — единственное реально работающее
+         # решение: запрос уходит через выделенный прокси с другого IP (см. proxy.ts).
+         media_data = await _fetch_tikwm_media_data(session, resolved_url, headers, proxy_base_url=TIKWM_API_BASE_URL)
 
          if not media_data:
               raise TikTokUserFacingError("Не удалось получить видео по этой ссылке — возможно, оно приватное, удалено, заблокировано по региону или ссылка битая.")

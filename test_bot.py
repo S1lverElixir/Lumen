@@ -3319,6 +3319,65 @@ def test_fetch_tikwm_media_data_sends_referer_and_origin_headers():
     assert sent_headers["User-Agent"] == "test-ua"
 
 
+# ─────────────────── _fetch_tikwm_media_data: запрос через выделенный прокси (proxy_base_url) ───────────────────
+# Регрессия на итог отладки блокировки IP (см. README/proxy.ts): throttle, ретраи,
+# валидация URL и Referer/Origin не помогли — единственное подтверждённое рабочее
+# решение — прокси с другого IP. Тесты ниже проверяют именно ветку `proxy_base_url`
+# в отрыве от прямых зеркал (та ветка уже покрыта тестами выше).
+
+def test_fetch_tikwm_media_data_uses_single_proxy_endpoint_when_configured():
+    resp = _FakeTikwmApiResponse(status=200, json_body={"code": 0, "data": {"play": "via-proxy"}})
+    session = _FakeTikwmApiSession([resp])
+    result = asyncio.run(bot._fetch_tikwm_media_data(
+        session, "https://www.tiktok.com/@u/video/1", {},
+        proxy_base_url="https://proxy.example.com/fetch/www.tikwm.com",
+    ))
+    assert result == {"play": "via-proxy"}
+    # Ровно ОДИН запрос (не два зеркала) — прокси сам решает, к какому реальному
+    # хосту TikWM стучаться, дублировать зеркала через него уже незачем.
+    assert session.requested_urls == [
+        "https://proxy.example.com/fetch/www.tikwm.com/api/?url=https%3A//www.tiktok.com/%40u/video/1&hd=1"
+    ]
+
+
+def test_fetch_tikwm_media_data_proxy_endpoint_respects_hd_flag():
+    resp = _FakeTikwmApiResponse(status=200, json_body={"code": 0, "data": {"play": "x"}})
+    session = _FakeTikwmApiSession([resp])
+    asyncio.run(bot._fetch_tikwm_media_data(
+        session, "https://www.tiktok.com/@u/video/1", {}, hd=False,
+        proxy_base_url="https://proxy.example.com/fetch/www.tikwm.com",
+    ))
+    assert "&hd=1" not in session.requested_urls[0]
+
+
+def test_fetch_tikwm_media_data_proxy_still_retries_once_on_403():
+    # Ретрай-раунд при 403 (см. _TIKWM_RETRY_BACKOFF_SEC) не завязан на наличие
+    # двух зеркал — с одним прокси-эндпоинтом повторная попытка тоже должна
+    # сработать (мало ли транзиентная ошибка именно на стороне прокси).
+    responses = [
+        _FakeTikwmApiResponse(status=403, body_bytes=b""),
+        _FakeTikwmApiResponse(status=200, json_body={"code": 0, "data": {"play": "retried"}}),
+    ]
+    session = _FakeTikwmApiSession(responses)
+    result = asyncio.run(bot._fetch_tikwm_media_data(
+        session, "https://www.tiktok.com/@u/video/1", {},
+        proxy_base_url="https://proxy.example.com/fetch/www.tikwm.com",
+    ))
+    assert result == {"play": "retried"}
+    assert len(session.requested_urls) == 2
+
+
+def test_fetch_tikwm_media_data_without_proxy_still_uses_both_direct_mirrors():
+    # Регрессия на обратную совместимость: proxy_base_url="" (значение по
+    # умолчанию, как и раньше, когда TIKWM_API_BASE_URL не задан в env) должно
+    # сохранять старое поведение — оба прямых зеркала, без единого изменения.
+    resp = _FakeTikwmApiResponse(status=200, json_body={"code": 0, "data": {"play": "direct"}})
+    session = _FakeTikwmApiSession([resp])
+    result = asyncio.run(bot._fetch_tikwm_media_data(session, "https://www.tiktok.com/@u/video/1", {}))
+    assert result == {"play": "direct"}
+    assert session.requested_urls[0].startswith("https://www.tikwm.com/api/?url=")
+
+
 def test_fetch_tikwm_media_data_logs_ip_block_hint_when_all_attempts_403_with_empty_body(caplog):
     # Регрессия на реальный инцидент (12 августа 2026): корректный URL + корректный
     # троттлинг + ВСЕ попытки (оба зеркала, оба раунда) вернули 403 с пустым телом —
