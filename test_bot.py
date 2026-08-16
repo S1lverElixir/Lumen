@@ -3540,6 +3540,9 @@ def test_fetch_tikwm_media_data_no_ip_block_hint_when_body_not_empty(caplog):
     assert "[tikwm][diag]" not in messages
 
 
+    assert "[tikwm][diag]" not in messages
+
+
 def test_fetch_tikwm_media_data_no_ip_block_hint_on_success(caplog):
     # Успешный ответ (пусть даже после предыдущих неудачных попыток) не должен
     # ошибочно засчитываться как "всё было 403" — счётчик должен сброситься.
@@ -3554,4 +3557,111 @@ def test_fetch_tikwm_media_data_no_ip_block_hint_on_success(caplog):
     assert result == {"play": "ok"}
     messages = "\n".join(r.getMessage() for r in caplog.records)
     assert "[tikwm][diag]" not in messages
+
+
+# ─────────────────── резервные прокси TikWM (TIKWM_API_BASE_URL_FALLBACKS) ───────────────────
+# Асимметрия с Telegram-прокси (у которого уже был _TELEGRAM_PROXY_CANDIDATES/
+# _rotate_telegram_proxy) — TikWM зависит от того же самого единственного
+# Deno-прокси, но раньше при его падении не было пути попробовать резервный адрес.
+
+def test_tikwm_proxy_candidates_single_empty_string_when_unset():
+    original = bot.TIKWM_API_BASE_URL
+    bot.TIKWM_API_BASE_URL = ""
+    try:
+        assert bot._tikwm_proxy_candidates() == [""]
+    finally:
+        bot.TIKWM_API_BASE_URL = original
+
+
+def test_tikwm_proxy_candidates_primary_plus_fallbacks_deduped():
+    original_primary = bot.TIKWM_API_BASE_URL
+    original_fallbacks = bot._TIKWM_API_BASE_URL_FALLBACKS
+    bot.TIKWM_API_BASE_URL = "https://primary.example.com/fetch/www.tikwm.com"
+    bot._TIKWM_API_BASE_URL_FALLBACKS = [
+        "https://primary.example.com/fetch/www.tikwm.com",  # дубль основного — должен быть отфильтрован
+        "https://backup.example.com/fetch/www.tikwm.com",
+    ]
+    try:
+        assert bot._tikwm_proxy_candidates() == [
+            "https://primary.example.com/fetch/www.tikwm.com",
+            "https://backup.example.com/fetch/www.tikwm.com",
+        ]
+    finally:
+        bot.TIKWM_API_BASE_URL = original_primary
+        bot._TIKWM_API_BASE_URL_FALLBACKS = original_fallbacks
+
+
+def test_fetch_tikwm_media_data_with_proxy_fallback_uses_backup_when_primary_fails():
+    original_primary = bot.TIKWM_API_BASE_URL
+    original_fallbacks = bot._TIKWM_API_BASE_URL_FALLBACKS
+    bot.TIKWM_API_BASE_URL = "https://primary.example.com/fetch/www.tikwm.com"
+    bot._TIKWM_API_BASE_URL_FALLBACKS = ["https://backup.example.com/fetch/www.tikwm.com"]
+
+    calls = []
+
+    async def fake_fetch(session, resolved_url, headers, *, proxy_base_url=""):
+        calls.append(proxy_base_url)
+        if proxy_base_url == bot.TIKWM_API_BASE_URL:
+            return None  # основной прокси "недоступен"
+        return {"play": "via-backup"}
+
+    original_fetch = bot._fetch_tikwm_media_data
+    bot._fetch_tikwm_media_data = fake_fetch
+    try:
+        result = asyncio.run(bot._fetch_tikwm_media_data_with_proxy_fallback(None, "https://www.tiktok.com/@u/video/1", {}))
+        assert result == {"play": "via-backup"}
+        assert calls == [
+            "https://primary.example.com/fetch/www.tikwm.com",
+            "https://backup.example.com/fetch/www.tikwm.com",
+        ]
+    finally:
+        bot._fetch_tikwm_media_data = original_fetch
+        bot.TIKWM_API_BASE_URL = original_primary
+        bot._TIKWM_API_BASE_URL_FALLBACKS = original_fallbacks
+
+
+def test_fetch_tikwm_media_data_with_proxy_fallback_none_when_all_fail():
+    original_primary = bot.TIKWM_API_BASE_URL
+    original_fallbacks = bot._TIKWM_API_BASE_URL_FALLBACKS
+    bot.TIKWM_API_BASE_URL = "https://primary.example.com/fetch/www.tikwm.com"
+    bot._TIKWM_API_BASE_URL_FALLBACKS = ["https://backup.example.com/fetch/www.tikwm.com"]
+
+    async def fake_fetch(session, resolved_url, headers, *, proxy_base_url=""):
+        return None
+
+    original_fetch = bot._fetch_tikwm_media_data
+    bot._fetch_tikwm_media_data = fake_fetch
+    try:
+        result = asyncio.run(bot._fetch_tikwm_media_data_with_proxy_fallback(None, "https://www.tiktok.com/@u/video/1", {}))
+        assert result is None
+    finally:
+        bot._fetch_tikwm_media_data = original_fetch
+        bot.TIKWM_API_BASE_URL = original_primary
+        bot._TIKWM_API_BASE_URL_FALLBACKS = original_fallbacks
+
+
+def test_fetch_tikwm_media_data_with_proxy_fallback_unchanged_when_unconfigured():
+    # Обратная совместимость: TIKWM_API_BASE_URL не задан — единственный вызов
+    # с proxy_base_url="" (прямой режим, как раньше).
+    original_primary = bot.TIKWM_API_BASE_URL
+    original_fallbacks = bot._TIKWM_API_BASE_URL_FALLBACKS
+    bot.TIKWM_API_BASE_URL = ""
+    bot._TIKWM_API_BASE_URL_FALLBACKS = []
+
+    calls = []
+
+    async def fake_fetch(session, resolved_url, headers, *, proxy_base_url=""):
+        calls.append(proxy_base_url)
+        return {"play": "direct"}
+
+    original_fetch = bot._fetch_tikwm_media_data
+    bot._fetch_tikwm_media_data = fake_fetch
+    try:
+        result = asyncio.run(bot._fetch_tikwm_media_data_with_proxy_fallback(None, "https://www.tiktok.com/@u/video/1", {}))
+        assert result == {"play": "direct"}
+        assert calls == [""]
+    finally:
+        bot._fetch_tikwm_media_data = original_fetch
+        bot.TIKWM_API_BASE_URL = original_primary
+        bot._TIKWM_API_BASE_URL_FALLBACKS = original_fallbacks
 

@@ -192,6 +192,27 @@ _telegram_proxy_idx = 0  # индекс текущего активного пр
 # зеркалам напрямую (сам прокси уже решает, к какому реальному хосту TikWM
 # стучаться — см. proxy.ts).
 TIKWM_API_BASE_URL = os.getenv("TIKWM_API_BASE_URL", "").strip().rstrip("/")
+# Резервные прокси для TikWM (тот же принцип, что и TELEGRAM_API_BASE_URL_FALLBACKS
+# выше по логике — см. _TELEGRAM_PROXY_CANDIDATES) — асимметрии быть не должно:
+# TikWM зависит от того же самого единственного Deno-прокси, что и Telegram, и
+# точка отказа для обоих одна и та же, но раньше только у Telegram был путь
+# переключиться на резервный адрес. Пусто по умолчанию — поведение не меняется
+# для тех, кто не настраивал (см. _tikwm_proxy_candidates ниже).
+_TIKWM_API_BASE_URL_FALLBACKS = [
+    u.strip().rstrip("/") for u in os.getenv("TIKWM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
+]
+
+def _tikwm_proxy_candidates() -> list[str]:
+    """Список прокси-адресов для TikWM в порядке попытки: основной + резервные
+    (без дублей). Пустая строка ("" — TIKWM_API_BASE_URL не задан) означает
+    "без прокси, прямые запросы к обоим зеркалам TikWM" — в этом случае список
+    всегда из одного элемента [""], т.к. у прямого режима нет понятия "резервный
+    прокси" (он и так уже пробует оба зеркала TikWM внутри самого запроса,
+    см. _fetch_tikwm_media_data)."""
+    if not TIKWM_API_BASE_URL:
+        return [""]
+    candidates = [TIKWM_API_BASE_URL] + [u for u in _TIKWM_API_BASE_URL_FALLBACKS if u != TIKWM_API_BASE_URL]
+    return candidates
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
@@ -2480,6 +2501,20 @@ async def handle_tiktok_sound(message: Message, status: Message | None) -> None:
     )
 
 
+async def _fetch_tikwm_media_data_with_proxy_fallback(session: aiohttp.ClientSession, resolved_url: str, headers: dict) -> dict | None:
+    """Пробует прокси-кандидатов TikWM по очереди (см. _tikwm_proxy_candidates) —
+    основной адрес, затем резервные из TIKWM_API_BASE_URL_FALLBACKS, до первого
+    успеха. Без TIKWM_API_BASE_URL (не задан) — единственный "кандидат" — пустая
+    строка, т.е. поведение как раньше (прямые запросы к обоим зеркалам TikWM
+    внутри самой _fetch_tikwm_media_data, без изменений)."""
+    result = None
+    for candidate in _tikwm_proxy_candidates():
+        result = await _fetch_tikwm_media_data(session, resolved_url, headers, proxy_base_url=candidate)
+        if result is not None:
+            return result
+    return result
+
+
 async def handle_tiktok(message: Message, url: str) -> None:
     if is_guest_message(message):
          await _answer_guest_text(message, f"Ссылка на TikTok распознана: {url}")
@@ -2517,7 +2552,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
          # блокировка исходящего IP HF Spaces (см. подробный диагностический комментарий в
          # _fetch_tikwm_media_data). TIKWM_API_BASE_URL — единственное реально работающее
          # решение: запрос уходит через выделенный прокси с другого IP (см. proxy.ts).
-         media_data = await _fetch_tikwm_media_data(session, resolved_url, headers, proxy_base_url=TIKWM_API_BASE_URL)
+         media_data = await _fetch_tikwm_media_data_with_proxy_fallback(session, resolved_url, headers)
 
          if not media_data:
               raise TikTokUserFacingError("Не удалось получить видео по этой ссылке — возможно, оно приватное, удалено, заблокировано по региону или ссылка битая.")
