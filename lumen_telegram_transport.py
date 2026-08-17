@@ -76,7 +76,7 @@ class _TelegramProxyCircuitBreaker:
         иначе лавина одинаковых WARNING на каждый пропущенный вызов из бэклога."""
         if now - self.down_logged_at > self.cooldown_sec:
             self.down_logged_at = now
-            log.warning("[telegram] Прокси всё ещё недоступен, пропускаю вызовы ещё ~%.0fс.", self.down_until - now)
+            log.warning('[telegram] Proxy still unavailable, skipping calls for another ~%.0fs.', self.down_until - now)
 
     def note_success(self) -> None:
         """Сбрасывает счётчик подряд идущих сбоев — вызывается на любой исход,

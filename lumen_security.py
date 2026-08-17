@@ -152,10 +152,10 @@ def _scrub_identity_leak(text: str, *, source: str) -> str:
     только перед показом пользователю, но не перед hist.append/history.append, утечка
     осталась бы в истории и могла бы повлиять на последующие ответы модели."""
     if _detect_identity_leak(text):
-        log.warning("[identity-leak] Обнаружена и заблокирована утечка идентичности (source=%s): %r", source, text[:500])
+        log.warning('[identity-leak] Detected and blocked an identity leak (source=%s): %r', source, text[:500])
         return _IDENTITY_LEAK_FALLBACK
     if _detect_injected_payload_echo(text):
-        log.warning("[injection-echo] Обнаружено и заблокировано вероятное эхо внедрённой инструкции (source=%s): %r", source, text[:500])
+        log.warning('[injection-echo] Detected and blocked a likely injected-instruction echo (source=%s): %r', source, text[:500])
         return _INJECTED_PAYLOAD_ECHO_FALLBACK
     return text
 
