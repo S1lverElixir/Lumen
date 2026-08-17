@@ -375,19 +375,13 @@ async def _fetch_tikwm_media_data(
         if not saw_403 or retry_round == 1:
             break
         log.warning(
-            "[tikwm] Оба зеркала вернули 403 подряд — похоже на срабатывание троттлинга TikWM "
-            "(~1 запрос/сек), а не на реально недоступное видео. Пробую ещё раз через %.1fс.",
+            '[tikwm] Both mirrors returned 403 in a row — looks like TikWM throttling (~1 request/sec) kicking in, not a genuinely unavailable video. Retrying in %.1fs.',
             _TIKWM_RETRY_BACKOFF_SEC,
         )
         await _sleep(_TIKWM_RETRY_BACKOFF_SEC)
     if any_attempt_made and all_attempts_403_empty:
         log.warning(
-            "[tikwm][diag] ВСЕ попытки (оба зеркала, с троттлингом и повторным раундом) вернули "
-            "HTTP 403 с ПУСТЫМ телом — url=%s. URL корректно резолвлен, запросы разнесены по "
-            "времени — это не похоже на обычную временную ошибку. Похоже на блокировку исходящего "
-            "IP этого сервера на уровне прокси/WAF перед TikWM (см. README про аналогичный "
-            "задокументированный случай с YouTube), которую тайминг/URL-правки на нашей стороне "
-            "не могут обойти. Проверить гипотезу: тот же запрос к TikWM с ДРУГОГО IP (не HF Spaces).",
+            "[tikwm][diag] ALL attempts (both mirrors, with throttling and a retry round) returned HTTP 403 with an EMPTY body — url=%s. The URL resolved correctly and requests were spaced out over time — this doesn't look like an ordinary transient error. Looks like this server's outbound IP is being blocked at a proxy/WAF level in front of TikWM (see README for a similar documented case with YouTube), which timing/URL tweaks on our side can't work around. To test the hypothesis: the same request to TikWM from a DIFFERENT IP (not HF Spaces).",
             resolved_url,
         )
     return None
@@ -464,7 +458,7 @@ def _write_mp3_tags(path: str, title: str, artist: str, cover: bytes | None) -> 
             audio.tags["APIC"] = APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover)
         audio.save()
     except Exception as exc:
-        log.warning("[tags] Writer tags failed: %s", exc)
+        log.warning("[tags] Failed to write tags: %s", exc)
 
 
 # ─────────────────── ffmpeg и скачивание бинарных URL ───────────────────
@@ -641,9 +635,7 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
                   # уже НА СТОРОНЕ TikWM, без единой зацепки, что проблема началась
                   # раньше, на этапе резолвинга короткой ссылки.
                   log.warning(
-                       "[tiktok] Резолвинг короткой ссылки %s не дал похожего на пост URL "
-                       "ни через HEAD, ни через GET (итог: %s) — передаю как есть, TikWM "
-                       "может отказать.", url, resolved,
+                       "[tiktok] Resolving short link %s didn't yield anything that looks like a post URL via either HEAD or GET (result: %s) — passing it through as-is, TikWM may reject it.", url, resolved,
                   )
              return resolved
     except Exception as e:

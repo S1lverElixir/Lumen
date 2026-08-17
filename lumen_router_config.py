@@ -139,11 +139,7 @@ def _check_fish_audio_tts_expiry() -> None:
     today = date.today()
     if today > FISH_AUDIO_FREE_TIER_EXPIRY:
         log.warning(
-            "[tts] SYSTEM WARN: заявленный бесплатный доступ к %s истёк %s (сегодня %s) — "
-            "проверьте fish.audio/blog/s2-1-pro-free-api, не продлили ли снова, и обновите "
-            "FISH_AUDIO_FREE_TIER_EXPIRY. Если доступ действительно закрыт, _fish_audio_tts_bytes "
-            "в bot.py и так тихо откатывается на Gemini TTS при любой неудаче — функционально "
-            "ничего не сломается, но лишние неудачные запросы стоит убрать.",
+            '[tts] The advertised free-tier access to %s expired on %s (today is %s) — check fish.audio/blog/s2-1-pro-free-api in case it was extended again, and update FISH_AUDIO_FREE_TIER_EXPIRY. If access is really gone, _fish_audio_tts_bytes in bot.py already falls back to Gemini TTS silently on any failure — nothing breaks functionally, but the wasted failing requests are worth removing.',
             FISH_AUDIO_TTS_MODEL, FISH_AUDIO_FREE_TIER_EXPIRY.isoformat(), today.isoformat(),
         )
 
@@ -158,11 +154,7 @@ def _check_unconfirmed_model_quotas() -> None:
     for mid, conf in GEMINI_MODELS.items():
         if conf.get("quota_unconfirmed"):
             log.warning(
-                "[setup] SYSTEM WARN: реальные RPD-лимиты и доступность search/map grounding "
-                "для модели %s ещё НЕ подтверждены по дашборду AI Studio (модель недавно "
-                "выпущена) — текущие search_grounding/map_grounding в GEMINI_MODELS это "
-                "предположение по аналогии с моделью того же класса. Проверьте дашборд и "
-                "уберите 'quota_unconfirmed' у этой модели в bot.py, поправив конфиг при необходимости.",
+                "[setup] Real RPD limits and search/map grounding availability for model %s are NOT yet confirmed against the AI Studio dashboard (model was recently released) — the current search_grounding/map_grounding values in GEMINI_MODELS are a guess by analogy with a model of the same class. Check the dashboard and remove 'quota_unconfirmed' for this model in bot.py, adjusting the config if needed.",
                 mid,
             )
 
@@ -335,9 +327,7 @@ def _check_temporary_free_models_expiry() -> None:
     for model_id, note in _OR_MODEL_HEALTH.items():
         if note.promo_expiry is not None and today > note.promo_expiry:
             log.warning(
-                "[or] SYSTEM WARN: временный бесплатный доступ к модели %s истёк %s (сегодня %s) — %s "
-                "Роутер её уже не выбирает (_ROUTER_EXCLUDED_OR_MODELS), но проверьте актуальную цену "
-                "на openrouter.ai, если модель когда-нибудь понадобится вернуть в оборот.",
+                '[or] Temporary free access to model %s expired on %s (today is %s) — %s The router no longer selects it (_ROUTER_EXCLUDED_OR_MODELS), but check the current price on openrouter.ai if you ever need to bring it back.',
                 model_id, note.promo_expiry.isoformat(), today.isoformat(), note.reason,
             )
 
