@@ -66,17 +66,22 @@ _LOG_QUEUE_HANDLER = logging.handlers.QueueHandler(_LOG_QUEUE)
 _LOG_LISTENER: logging.handlers.QueueListener | None = None
 
 def _setup_logging() -> logging.Logger:
+    # LOG_LEVEL — раньше был захардкожен INFO везде (root+оба handler'а), из-за
+    # чего оба существующих log.debug(...) в проекте не печатались никогда, ни в
+    # каком окружении — единственный нетюнящийся через env уровень в проекте, где
+    # даже таймауты в 15с настраиваются переменной. DEBUG остаётся дефолтом.
+    level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").strip().upper(), logging.INFO)
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(level)
     for h in list(root.handlers):
         root.removeHandler(h)
 
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(level)
     file_handler = logging.handlers.RotatingFileHandler(
         LOG_FILE_PATH, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8", delay=True,
     )
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(level)
 
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     console_handler.setFormatter(fmt)
@@ -143,7 +148,7 @@ if not BOT_TOKEN:
     BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
 if not BOT_TOKEN:
-    log.warning("[setup] SYSTEM WARN: BOT_TOKEN is empty! Please verify BOT_TOKEN/TELEGRAM_BOT_TOKEN environment variables in settings or .env.")
+    log.warning("[setup] BOT_TOKEN is empty! Please verify BOT_TOKEN/TELEGRAM_BOT_TOKEN environment variables in settings or .env.")
 else:
     log.info("[setup] BOT_TOKEN configured successfully (length: %d)", len(BOT_TOKEN))
 
@@ -160,7 +165,7 @@ def _normalize_telegram_base_url(url: str) -> str:
         # при этом само сообщение об ошибке невнятное (просто битый URL как текст), не
         # указывает на реальную причину. Раз уж опечатка в схеме случилась один раз —
         # молча чинить её тут дешевле, чем снова терять время на диагностику того же самого.
-        log.warning("[setup] SYSTEM WARN: Telegram proxy URL задан без схемы (%r) — добавляю https:// автоматически.", url)
+        log.warning('[setup] Telegram proxy URL given without a scheme (%r) — adding https:// automatically.', url)
         url = "https://" + url
     return url
 
@@ -248,15 +253,26 @@ SHARED_HISTORY_MAX_LEN = 100
 # Тот же принцип опциональности, что и у Upstash выше: SENTRY_DSN не задан —
 # sentry_sdk.init() не вызывается вообще, поведение не меняется для тех, кто
 # его не настроил.
+def _redactable_secrets() -> tuple[str, ...]:
+    """Единый список секретов для /logs и Sentry — раньше оба места вычищали
+    только BOT_TOKEN/GEMINI_API_KEY/OPENROUTER_API_KEY, хотя WEBHOOK_SECRET/
+    ADMIN_PANEL_KEY заявлены проектом как "никогда не логируются в plaintext"
+    наравне с BOT_TOKEN, а UPSTASH_REDIS_REST_TOKEN даёт полный доступ ко всем
+    сохранённым историям чатов. honey: имена читаются по значению на момент
+    вызова — WEBHOOK_SECRET/ADMIN_PANEL_KEY/UPSTASH_REDIS_REST_TOKEN объявлены
+    ниже по файлу, это безопасно для module-level globals в теле функции."""
+    return tuple(s for s in (
+        BOT_TOKEN, GEMINI_API_KEY, OPENROUTER_API_KEY, _ADMIN_SECRET_SEED,
+        WEBHOOK_SECRET, ADMIN_PANEL_KEY, UPSTASH_REDIS_REST_TOKEN,
+    ) if s)
+
 def _sentry_scrub_secrets(event: dict, hint: dict) -> dict | None:
-    """before_send-хук Sentry — вычищает секреты из события ПЕРЕД отправкой,
-    та же логика редактирования токенов, что уже применяется в /logs (см.
-    cmd_logs). Определена БЕЗУСЛОВНО (не только внутри `if SENTRY_DSN`), чтобы
-    её можно было протестировать напрямую без настоящего DSN."""
+    """before_send-хук Sentry — вычищает секреты из события ПЕРЕД отправкой.
+    Определена БЕЗУСЛОВНО (не только внутри `if SENTRY_DSN`), чтобы её можно
+    было протестировать напрямую без настоящего DSN."""
     payload = json.dumps(event, default=str, ensure_ascii=False)
-    for secret in (BOT_TOKEN, GEMINI_API_KEY, OPENROUTER_API_KEY):
-        if secret:
-            payload = payload.replace(secret, "<REDACTED>")
+    for secret in _redactable_secrets():
+        payload = payload.replace(secret, "<REDACTED>")
     return json.loads(payload)
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
@@ -270,7 +286,7 @@ if SENTRY_DSN:
         traces_sample_rate=0.0,
         send_default_pii=False,
     )
-    log.info("[setup] Sentry error tracking включён.")
+    log.info('[setup] Sentry error tracking enabled.')
 
 OWNER_ID: int | None = None
 for env_name in ("OWNER_ID", "BOT_OWNER_ID", "ADMIN_ID", "TELEGRAM_OWNER_ID"):
@@ -366,7 +382,9 @@ PRUNED_CHAT_TARGET = 4500
 MAX_CHAT_HISTORY_LEN = 100
 MAX_MEDIA_RECENT_IDS = 8  # хранится ОТДЕЛЬНО на каждого пользователя чата (см. recent_media_ids: dict[user_id, deque])
 
-# Простой трекер для rate limiting (5 запросов в 30 сек)
+# Простой трекер для rate limiting
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "5"))
+RATE_LIMIT_WINDOW_SEC = float(os.getenv("RATE_LIMIT_WINDOW_SEC", "30"))
 user_rate_limits: dict[int, list[float]] = {}
 
 def _cleanup_rate_limit_dict() -> None:
@@ -431,7 +449,7 @@ async def _rotate_telegram_proxy() -> bool:
     new_url = _TELEGRAM_PROXY_CANDIDATES[_telegram_proxy_idx]
     old_url = TELEGRAM_API_BASE_URL
     TELEGRAM_API_BASE_URL = new_url
-    log.warning("[telegram] Переключаюсь на резервный прокси: %s -> %s", old_url, new_url)
+    log.warning('[telegram] Switching to fallback proxy: %s -> %s', old_url, new_url)
     if bot is not None:
         old_session = bot.session
         bot.session = IPv4AiohttpSession(api=TelegramAPIServer.from_base(new_url))
@@ -521,7 +539,7 @@ async def _handle_proxy_failure(context: str) -> None:
     tripped = _tg_proxy_breaker.note_failure()
     if not tripped:
         log.warning(
-            "[telegram] Прокси недоступен при %s (%d/%d подряд, выключатель ещё не сработал).",
+            '[telegram] Proxy unavailable during %s (%d/%d in a row, circuit breaker not tripped yet).',
             context, _tg_proxy_breaker.consecutive_failures, _tg_proxy_breaker.trip_threshold,
         )
         return
@@ -532,7 +550,7 @@ async def _handle_proxy_failure(context: str) -> None:
         # паузы (см. _rotate_telegram_proxy).
         _tg_proxy_breaker.consecutive_failures = 0
         log.warning(
-            "[telegram] Прокси недоступен при %s %d раз(а) подряд — переключаюсь на резервный адрес %s без паузы.",
+            '[telegram] Proxy unavailable during %s %d time(s) in a row — switching to fallback address %s without a pause.',
             context, _tg_proxy_breaker.trip_threshold, TELEGRAM_API_BASE_URL,
         )
         return
@@ -546,7 +564,7 @@ async def _handle_proxy_failure(context: str) -> None:
     )
     _tg_proxy_breaker.trip()
     log.warning(
-        "[telegram] Прокси недоступен при %s %d раз(а) подряд (порог %d) — включаю паузу на %.0fс. Проверьте доступность %s.",
+        '[telegram] Proxy unavailable during %s %d time(s) in a row (threshold %d) — pausing for %.0fs. Check availability of %s.',
         context, _tg_proxy_breaker.consecutive_failures, _tg_proxy_breaker.trip_threshold, _tg_proxy_breaker.cooldown_sec,
         TELEGRAM_API_BASE_URL,
     )
@@ -1130,7 +1148,7 @@ _STATE_DIR = Path(os.getenv("STATE_DIR", "/app")).resolve()
 try:
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
 except Exception as _state_dir_exc:
-    log.warning("[setup] STATE_DIR %s недоступен для записи (%s), использую временную директорию.", _STATE_DIR, _state_dir_exc)
+    log.warning('[setup] STATE_DIR %s is not writable (%s), using a temp directory instead.', _STATE_DIR, _state_dir_exc)
     _STATE_DIR = Path(tempfile.gettempdir())
 STATE_FILE_PATH = _STATE_DIR / "chat_state.json"
 GLOBAL_QUOTA_FILE = _STATE_DIR / "global_quota.json"
@@ -1154,9 +1172,9 @@ UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip().rstrip(
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
 USE_UPSTASH = bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN)
 if bool(UPSTASH_REDIS_REST_URL) != bool(UPSTASH_REDIS_REST_TOKEN):
-    log.warning("[setup] SYSTEM WARN: задан только один из UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN — оба нужны одновременно, Upstash использоваться не будет.")
+    log.warning('[setup] Only one of UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN is set — both are required together, Upstash will not be used.')
 log.info(
-    "[setup] Персистентное хранилище: %s",
+    '[setup] Persistent storage: %s',
     "Upstash Redis" if USE_UPSTASH else f"локальный файл в {_STATE_DIR} (см. README про эфемерность на HF Spaces)"
 )
 
@@ -1348,7 +1366,7 @@ def _reset_quota_if_new_day() -> None:
                 entry["exhausted_at"] = None
     GLOBAL_QUOTA["quota_day"] = today
     if had_previous:
-        log.info("[quota] Наступили новые сутки (%s) — счётчики used/exhausted_at по всем моделям сброшены.", today)
+        log.info('[quota] New day started (%s) — used/exhausted_at counters reset for all models.', today)
     mark_quota_dirty()
 
 def load_global_quota() -> None:
@@ -1409,7 +1427,7 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
     новую ветку можно будет добавить как `if s.get("schema_version", 0) < N`, а не
     подбирать очередную эвристику по ключам, как приходилось делать для миграций ниже."""
     schema_version = s.get("schema_version", 0)
-    log.debug("[state] Восстанавливаю чат %s (schema_version=%s)", cid, schema_version)
+    log.debug('[state] Restoring chat %s (schema_version=%s)', cid, schema_version)
     # НАЙДЕНО ПРИ /code-review (после ponytail-audit): переименование ключей
     # HF_IMAGE_MODELS (см. _hf_text_to_image — убрана лишняя приставка
     # "pollinations:", единственный провайдер и так один) — не просто
@@ -1545,7 +1563,7 @@ async def _flush_dirty_state_once() -> None:
             if failed_deletes:
                 _pending_chat_deletions.update(failed_deletes)
                 log.warning(
-                    "[state] %d удаление(й) чатов не удалось, повторю в следующем цикле: %s",
+                    '[state] %d chat deletion(s) failed, will retry next cycle: %s',
                     len(failed_deletes), ", ".join(str(c) for c in sorted(failed_deletes)),
                 )
         if _dirty_chat_ids:
@@ -1572,7 +1590,7 @@ async def _flush_dirty_state_once() -> None:
             if failed_ids:
                 _dirty_chat_ids.update(failed_ids)
                 log.warning(
-                    "[state] %d чат(ов) не удалось сохранить в этом цикле, повторю в следующем: %s",
+                    '[state] %d chat(s) failed to save this cycle, will retry next: %s',
                     len(failed_ids), ", ".join(str(c) for c in sorted(failed_ids)),
                 )
         if _index_dirty:
@@ -1582,7 +1600,7 @@ async def _flush_dirty_state_once() -> None:
             _quota_dirty = False
             await asyncio.to_thread(save_global_quota)
     except Exception as exc:
-        log.warning("[state] Периодический сброс состояния упал: %s", exc)
+        log.warning('[state] Periodic state flush failed: %s', exc)
 
 
 async def _flush_dirty_state() -> None:
@@ -1623,7 +1641,7 @@ def load_state_from_disk() -> None:
         try:
             chat_ids = json.loads(index_raw)
         except Exception as exc:
-            log.warning("[state] Не удалось разобрать индекс чатов: %s", exc)
+            log.warning('[state] Failed to parse chat index: %s', exc)
             chat_ids = []
         loaded_count = 0
         for chat_id_raw in chat_ids:
@@ -1634,14 +1652,14 @@ def load_state_from_disk() -> None:
             try:
                 raw = _storage_read_text(_chat_storage_key(cid), _chat_storage_path(cid))
             except Exception as exc:
-                log.warning("[state] Не удалось прочитать чат %s: %s", cid, exc)
+                log.warning('[state] Failed to read chat %s: %s', cid, exc)
                 continue
             if not raw:
                 continue
             try:
                 s = json.loads(raw)
             except Exception as exc:
-                log.warning("[state] Не удалось разобрать состояние чата %s: %s", cid, exc)
+                log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
                 continue
             _restore_single_chat(cid, s)
             loaded_count += 1
@@ -1668,8 +1686,7 @@ def load_state_from_disk() -> None:
                 continue
             _restore_single_chat(cid, s)
         log.info(
-            "[state] Restored states for %d chats (миграция из старого общего формата хранения — "
-            "будут переписаны в новый per-chat формат при следующем флаше).",
+            '[state] Restored states for %d chats (migrated from the old shared storage format — will be rewritten in the new per-chat format on next flush).',
             len(chat_state),
         )
         mark_state_dirty()
@@ -1763,7 +1780,7 @@ async def _is_privileged_in_chat(chat_type: str, chat_id: int, user_id: int | No
         member = await bot.get_chat_member(chat_id, user_id)
         return getattr(member, "status", None) in ("creator", "administrator")
     except Exception as exc:
-        log.warning("[perm] Не удалось проверить статус администратора в чате %s: %s", chat_id, exc)
+        log.warning('[perm] Failed to check admin status in chat %s: %s', chat_id, exc)
         return False
 
 
@@ -1948,7 +1965,7 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
         except Exception as exc:
             last_exc = exc
             if attempt < retries:
-                log.warning("[media] Попытка %d/%d скачать file_id %s не удалась, повтор через 0.5с: %s", attempt + 1, retries + 1, file_id, exc)
+                log.warning('[media] Attempt %d/%d to download file_id %s failed, retrying in 0.5s: %s', attempt + 1, retries + 1, file_id, exc)
                 await asyncio.sleep(0.5)
     exc_str = str(last_exc) or repr(last_exc) or type(last_exc).__name__
     if BOT_TOKEN:
@@ -2175,9 +2192,7 @@ async def _probe_or_model_liveness() -> None:
             kind = _classify_model_error(_error_status(exc, txt), txt)
             if kind in ("unavailable", "forbidden"):
                 log.warning(
-                    "[or][liveness] SYSTEM WARN: голова списка %s (%s) отвечает как снятая с бесплатного "
-                    "тира (%s: %s) — похоже на тот же паттерн, что и уже известные мёртвые модели в "
-                    "_OR_MODEL_HEALTH. Проверьте openrouter.ai и при подтверждении добавьте запись в реестр.",
+                    '[or][liveness] Head-of-list model %s (%s) is responding as if pulled from the free tier (%s: %s) — looks like the same pattern as already-known dead models in _OR_MODEL_HEALTH. Check openrouter.ai and add a registry entry if confirmed.',
                     list_name, model_id, kind, txt[:200],
                 )
 
@@ -2212,7 +2227,7 @@ async def _or_chat_completion_with_fallback(
     tried: list[str] = []
     for model_trial in trial_models:
         if deadline is not None and time.monotonic() > deadline:
-            log.warning("[or] Бюджет времени маршрута исчерпан перед моделью %s. Испробовано: %s", model_trial, ", ".join(tried) or "ничего")
+            log.warning('[or] Route time budget exhausted before model %s. Tried: %s', model_trial, ", ".join(tried) or "ничего")
             raise RouteBudgetExceededError(tried)
         tried.append(model_trial)
         messages[0]["content"] = get_system_prompt(model_trial)
@@ -2226,15 +2241,14 @@ async def _or_chat_completion_with_fallback(
             answer = answer.strip() or "Empty response"
 
             answer = _scrub_identity_leak(answer, source=f"or_chat_completion:{model_trial}")
-            log.info("[or] Успешный ответ от модели %s (primary=%s, испробовано моделей: %d)", model_trial, primary_model_id, len(tried))
+            log.info('[or] Successful response from model %s (primary=%s, models tried: %d)', model_trial, primary_model_id, len(tried))
             return answer, model_trial
         except Exception as exc:
             last_exc = exc
             err_text = str(exc).lower()
             if _is_account_wide_or_rate_limit(err_text):
                 log.warning(
-                    "[or] Обнаружен лимит на весь аккаунт OpenRouter (free-models-per-day) на модели %s — "
-                    "прекращаю перебор оставшихся кандидатов цепочки, дальше они гарантированно откажут тем же самым.",
+                    '[or] Detected an account-wide OpenRouter limit (free-models-per-day) on model %s — stopping the remaining candidates in the chain, they would fail with the same error anyway.',
                     model_trial,
                 )
                 raise
@@ -2565,8 +2579,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
          # виденной структурой (несовпадающая длина live_images и т.п.).
          if images_debug := media_data.get("images"):
               log.info(
-                   "[tikwm][diag] пост со слайдшоу: ключи ответа=%s, images(%d шт.)=%s, live_images=%s, "
-                   "верхнеуровневые play=%s hdplay=%s wmplay=%s",
+                   '[tikwm][diag] slideshow post: response keys=%s, images(%d items)=%s, live_images=%s, top-level play=%s hdplay=%s wmplay=%s',
                    sorted(media_data.keys()), len(images_debug), images_debug, media_data.get("live_images"),
                    media_data.get("play"), media_data.get("hdplay"), media_data.get("wmplay"),
               )
@@ -2607,7 +2620,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
               ))
               video_indices = [idx for idx, b in enumerate(downloaded) if b and _looks_like_video_bytes(b)]
               if video_indices:
-                   log.info("[tiktok] В слайдшоу %d из %d слайдов распознаны как видео (live_images/магические байты).", len(video_indices), len(downloaded))
+                   log.info('[tiktok] In the slideshow, %d of %d slides were recognized as video (live_images/magic bytes).', len(video_indices), len(downloaded))
               # Пробинг длительности/размеров/превью для видео-слайдов — ПАРАЛЛЕЛЬНО
               # для всех сразу (asyncio.gather), а не по очереди: каждый ffprobe/
               # ffmpeg-вызов занимает время, и при нескольких видео-слайдах в одном
@@ -2712,7 +2725,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
                         # вместо честного "видео слишком большое".
                         hit_size_limit = True
                         log.info(
-                             "[tiktok] Пропускаю вариант %s (%s) — известный размер %.1f МБ больше лимита Telegram Bot API.",
+                             '[tiktok] Skipping variant %s (%s) — known size %.1f MB exceeds the Telegram Bot API limit.',
                              candidate["key"], candidate["label"], candidate["size"] / (1024 * 1024),
                         )
                         continue
@@ -2768,7 +2781,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
                         # он не закончится (тогда см. hit_size_limit ниже).
                         hit_size_limit = True
                         log.warning(
-                             "[tiktok] Вариант %s (%s, %d байт) не прошёл лимит Telegram при отправке — пробую следующий по качеству.",
+                             '[tiktok] Variant %s (%s, %d bytes) exceeded the Telegram limit when sending — trying the next quality option.',
                              candidate["key"], candidate["label"], len(video_bytes),
                         )
                         continue
@@ -3007,7 +3020,7 @@ async def ask_gemini(
         if loop_guard > max_loop_guard:
             raise RuntimeError("Превышено допустимое число попыток обращения к Gemini API.")
         if time.monotonic() > deadline:
-            log.warning("[gemini] Бюджет времени маршрута исчерпан. Испробовано: %s", ", ".join(sorted(tried_models)) or "ничего")
+            log.warning('[gemini] Route time budget exhausted. Tried: %s', ", ".join(sorted(tried_models)) or "ничего")
             raise RouteBudgetExceededError(sorted(tried_models))
         tried_models.add(curr_model_id)
         call_contents, gconfig = _build_gemini_call_config(curr_model_id, contents)
@@ -3070,7 +3083,7 @@ async def ask_gemini(
 
     if resp is None:
         raise RuntimeError("No response received from Gemini after retries.")
-    log.info("[gemini] Успешный ответ от модели %s (испробовано моделей: %d)", curr_model_id, len(tried_models))
+    log.info('[gemini] Successful response from model %s (models tried: %d)', curr_model_id, len(tried_models))
 
     ans = ""
     tool_calls: list[str] = []
@@ -3362,9 +3375,7 @@ async def _run_streaming_reply(
                 # на долю секунды, в отличие от проверки уже после финальной правки.
                 tag = "identity-leak" if leak_kind == "identity" else "injection-echo"
                 log.warning(
-                    "[%s] Стрим %s/%s начал раскрывать внутренние детали/повторять "
-                    "внедрённую инструкцию — обрываю поток и показываю нейтральный ответ "
-                    "вместо частично накопленного текста: %r", tag, provider, model_id, full_text[:500],
+                    '[%s] Stream %s/%s started leaking internal details/echoing an injected instruction — aborting the stream and showing a neutral reply instead of the partially accumulated text: %r', tag, provider, model_id, full_text[:500],
                 )
                 aclose = getattr(piece_agen, "aclose", None)
                 if aclose is not None:
@@ -3481,19 +3492,19 @@ async def _run_streaming_reply(
         if not full_text.strip():
             # ВАЖНО: плейсхолдер больше НЕ удаляется здесь (в отличие от старой
             # версии) — см. докстринг функции про переиспользование сообщения.
-            log.warning("[stream] Стрим %s/%s упал до показа контента, откатываюсь на обычный вызов: %s", provider, model_id, exc)
+            log.warning('[stream] Stream %s/%s failed before showing any content, falling back to a regular call: %s', provider, model_id, exc)
             return None, (sent_messages[-1] if sent_messages else None)
-        log.warning("[stream] Стрим %s/%s упал уже после частичного показа ответа, завершаю как есть: %s", provider, model_id, exc)
+        log.warning('[stream] Stream %s/%s failed after partially showing the response, finishing as-is: %s', provider, model_id, exc)
         if _detect_identity_leak(full_text):
             # На практике сюда почти невозможно попасть (см. проверку сразу после
             # каждого куска выше) — оставлено как последняя страховка на случай бага
             # в основной проверке, а не полагаясь только на один рубеж.
-            log.warning("[identity-leak] Утечка обнаружена на резервном рубеже (%s_stream_exception_path): %r", provider, full_text[:500])
+            log.warning('[identity-leak] Leak caught by the fallback guard (%s_stream_exception_path): %r', provider, full_text[:500])
             full_text = _IDENTITY_LEAK_FALLBACK
             with contextlib.suppress(Exception):
                 await _tg_call(sent_messages[-1].edit_text, _IDENTITY_LEAK_FALLBACK, parse_mode=None, call_timeout=15.0)
         elif _detect_injected_payload_echo(full_text):
-            log.warning("[injection-echo] Эхо внедрённой инструкции обнаружено на резервном рубеже (%s_stream_exception_path): %r", provider, full_text[:500])
+            log.warning('[injection-echo] Injected-instruction echo caught by the fallback guard (%s_stream_exception_path): %r', provider, full_text[:500])
             full_text = _INJECTED_PAYLOAD_ECHO_FALLBACK
             with contextlib.suppress(Exception):
                 await _tg_call(sent_messages[-1].edit_text, _INJECTED_PAYLOAD_ECHO_FALLBACK, parse_mode=None, call_timeout=15.0)
@@ -3844,7 +3855,7 @@ async def inline_tts(message: Message, text: str) -> None:
             _record_quota_usage("openrouter", FISH_AUDIO_TTS_MODEL)
         else:
             pcm_bytes, mime_type, used_tts_model = await _gemini_tts_bytes(text)
-        log.info("[tts] Синтез получен от %s, mime_type=%s, bytes=%d", used_tts_model, mime_type, len(pcm_bytes))
+        log.info('[tts] Synthesis received from %s, mime_type=%s, bytes=%d', used_tts_model, mime_type, len(pcm_bytes))
 
         # определяем формат исходника
         if mime_type.startswith("audio/mp3") or mime_type.startswith("audio/mpeg") or pcm_bytes.startswith(b'ID3') or pcm_bytes.startswith(b'\xff\xfb'):
@@ -3989,13 +4000,9 @@ async def cmd_logs(message: Message) -> None:
             await _tg_call(message.reply, "Лог-файл пуст или ещё не был создан.")
             return
 
-        # вычищаем токены из логов перед отправкой
-        if BOT_TOKEN:
-            log_content = log_content.replace(BOT_TOKEN, "<REDACTED_BOT_TOKEN>")
-        if GEMINI_API_KEY:
-            log_content = log_content.replace(GEMINI_API_KEY, "<REDACTED_GEMINI_API_KEY>")
-        if OPENROUTER_API_KEY:
-            log_content = log_content.replace(OPENROUTER_API_KEY, "<REDACTED_OPENROUTER_API_KEY>")
+        # вычищаем токены из логов перед отправкой — единый список, см. _redactable_secrets
+        for secret in _redactable_secrets():
+            log_content = log_content.replace(secret, "<REDACTED>")
 
         # пишем во временный файл, чтобы не ловить блокировку на живом логе
         tmp_dir = tempfile.gettempdir()
@@ -4191,14 +4198,14 @@ async def _run_route(
         if first_provider == "gemini" and GEMINI_MODELS.get(head_model, {}).get("stream", True):
             streamed, placeholder = await _try_gemini_streaming(chat_id, ai_prompt, message, head_model)
             if streamed is not None:
-                log.info("[router] chat=%s ответ получен стримингом (gemini:%s)", chat_id, head_model)
+                log.info('[router] chat=%s response received via streaming (gemini:%s)', chat_id, head_model)
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "gemini"
             reusable_placeholder = placeholder
         elif first_provider == "openrouter":
             streamed, placeholder = await _try_openrouter_streaming(chat_id, ai_prompt, message, head_model)
             if streamed is not None:
-                log.info("[router] chat=%s ответ получен стримингом (openrouter:%s)", chat_id, head_model)
+                log.info('[router] chat=%s response received via streaming (openrouter:%s)', chat_id, head_model)
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "openrouter"
             reusable_placeholder = placeholder
@@ -4216,7 +4223,7 @@ async def _run_route(
             # в эту сторону невозможен, пропускаем без попытки.
             continue
         if time.monotonic() > deadline:
-            log.warning("[router] Бюджет времени маршрута исчерпан до попытки провайдера %s.", provider)
+            log.warning('[router] Route time budget exhausted before trying provider %s.', provider)
             break
         try:
             if provider == "gemini":
@@ -4241,7 +4248,7 @@ async def _run_route(
             return ans, False
         except Exception as exc:
             last_exc = exc
-            log.warning("[router] Провайдер %s полностью не ответил (%s), пробую следующего по маршруту, если есть.", provider, exc)
+            log.warning('[router] Provider %s failed completely (%s), trying the next one on the route, if any.', provider, exc)
 
     if reusable_placeholder is not None:
         # Плейсхолдер стрима так и остался невостребованным — весь оставшийся
@@ -4266,6 +4273,8 @@ async def _process_media_group_buffers(mgid: str) -> None:
     main_msg = messages[0]
     extra_media: list[tuple[bytes, str]] = []
     MAX_ALBUM_EXTRA = 9  # первое уходит как основное, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу)
+    album_state = get_state(main_msg.chat.id)
+    album_user_id = main_msg.from_user.id if main_msg.from_user else None
     for m in messages[1:1 + MAX_ALBUM_EXTRA]:
         src = _msg_media_source(m)
         if not src:
@@ -4276,6 +4285,10 @@ async def _process_media_group_buffers(mgid: str) -> None:
         fetched = await _fetch_media(fid, mime)
         if fetched:
             extra_media.append(fetched)
+            # РЕГРЕССИЯ: раньше эти файлы качались ТОЛЬКО для текущего ответа
+            # (extra_media ниже) и никогда не попадали в recent_media_ids —
+            # "а что было на втором фото" не находило файл, хотя бот его видел.
+            _save_media_to_history(src, album_state, album_user_id)
     await _handle_message_core(main_msg, extra_media=extra_media or None)
 
 def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
@@ -4312,9 +4325,9 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
         return False
     now = time.time()
     timestamps = user_rate_limits.setdefault(user_id, [])
-    while timestamps and now - timestamps[0] > 30.0:
+    while timestamps and now - timestamps[0] > RATE_LIMIT_WINDOW_SEC:
         timestamps.pop(0)
-    if len(timestamps) >= 5:
+    if len(timestamps) >= RATE_LIMIT_MAX_REQUESTS:
         return True
     timestamps.append(now)
     return False
@@ -4435,7 +4448,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         # к LLM вообще (см. _INJECTION_PROBE_RE выше). Логируем для последующего
         # разбора через /logs, чтобы со временем пополнять список паттернов реальными
         # случаями, а не только теми, что придуманы заранее.
-        log.warning("[injection-probe] Заблокирована попытка промт-инъекции в чате %s: %r", message.chat.id, clean_prompt[:300])
+        log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s: %r', message.chat.id, clean_prompt[:300])
         await _safe_reply(message, _INJECTION_PROBE_REPLY)
         return
 
@@ -4500,7 +4513,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
     )
     log.info(
-        "[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s маршрут=%s",
+        '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s route=%s',
         message.chat.id, is_heavy, needs_freshness, needs_youtube, needs_website, media_mime,
         [f"{p}:{m}" for p, m in route],
     )
@@ -4521,7 +4534,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             await _safe_reply(message, ans)
         mark_state_dirty(message.chat.id)
     except Exception as exc:
-        log.exception("Chat AI processing failed: ")
+        log.exception("Chat AI processing failed:")
         head_model = route[0][1] if route else DEFAULT_GEMINI_MODEL
         if isinstance(exc, GeminiAllModelsExhaustedError):
             await _maybe_alert_gemini_exhausted()
@@ -4533,7 +4546,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
 
 @dp.errors()
 async def global_error_handler(event: Any) -> bool:
-    log.error("Global error handler caught exception: %s", event.exception, exc_info=event.exception)
+    log.error("Global error handler caught exception", exc_info=event.exception)
     return True
 
 @dp.message()
@@ -4622,10 +4635,9 @@ async def _webhook_startup() -> None:
     # Authorization (гейтится самим BOT_TOKEN — ИСПРАВЛЕНО при повторном код-ревью:
     # раньше токен передавался как ?bot_token=... в URL, что попадало в access-логи
     # прокси/историю браузера; см. _check_bot_token_auth).
-    log.info("[webhook] WEBHOOK_SECRET (отпечаток): %s", _redact_secret(WEBHOOK_SECRET))
+    log.info('[webhook] WEBHOOK_SECRET (fingerprint): %s', _redact_secret(WEBHOOK_SECRET))
     log.info(
-        "[admin] Полные ключи (WEBHOOK_SECRET/ADMIN_PANEL_KEY): "
-        "curl -H \"Authorization: Bearer <ваш BOT_TOKEN>\" https://%s/admin_keys",
+        '[admin] Full keys (WEBHOOK_SECRET/ADMIN_PANEL_KEY): curl -H "Authorization: Bearer <your BOT_TOKEN>" https://%s/admin_keys',
         space_host,
     )
 
@@ -4681,10 +4693,7 @@ async def _webhook_startup() -> None:
             # при необходимости получить через curl -H "Authorization: Bearer <BOT_TOKEN>"
             # .../admin_keys (см. _check_bot_token_auth).
             log.warning(
-                "[webhook] setWebhook failed — зарегистрируйте вручную через: "
-                "curl -H \"Authorization: Bearer <ADMIN_PANEL_KEY>\" https://.../webhook_url "
-                "(ADMIN_PANEL_KEY — через curl -H \"Authorization: Bearer <BOT_TOKEN>\" "
-                ".../admin_keys, если ключ ещё не под рукой): %s",
+                '[webhook] setWebhook failed — register it manually via: curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://.../webhook_url (get ADMIN_PANEL_KEY via curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys if you don\'t have it handy): %s',
                 exc,
             )
 
