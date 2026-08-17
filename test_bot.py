@@ -853,6 +853,22 @@ def test_sentry_scrub_secrets_redacts_known_tokens():
         bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY = original_bot_token, original_gemini_key, original_or_key
 
 
+def test_sentry_scrub_secrets_redacts_webhook_admin_and_upstash_tokens():
+    # РЕГРЕССИЯ: раньше _redactable_secrets (тогда — инлайн-кортеж) вычищал
+    # только BOT_TOKEN/GEMINI_API_KEY/OPENROUTER_API_KEY — WEBHOOK_SECRET/
+    # ADMIN_PANEL_KEY/UPSTASH_REDIS_REST_TOKEN утекли бы в Sentry как есть.
+    original_upstash = bot.UPSTASH_REDIS_REST_TOKEN
+    bot.UPSTASH_REDIS_REST_TOKEN = "secret-upstash-token-xyz"
+    try:
+        event = {"message": f"leak {bot.WEBHOOK_SECRET} {bot.ADMIN_PANEL_KEY} secret-upstash-token-xyz"}
+        payload = json.dumps(bot._sentry_scrub_secrets(event, {}))
+        assert bot.WEBHOOK_SECRET not in payload
+        assert bot.ADMIN_PANEL_KEY not in payload
+        assert "secret-upstash-token-xyz" not in payload
+    finally:
+        bot.UPSTASH_REDIS_REST_TOKEN = original_upstash
+
+
 def test_sentry_scrub_secrets_passthrough_when_no_secrets_configured():
     original_bot_token, original_gemini_key, original_or_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY
     bot.BOT_TOKEN = bot.GEMINI_API_KEY = bot.OPENROUTER_API_KEY = ""
@@ -869,6 +885,65 @@ def test_sentry_not_initialized_without_dsn_in_test_env():
     # вызваться при импорте bot.py, значит нет активного Sentry-клиента.
     assert bot.SENTRY_DSN == ""
     assert sentry_sdk.is_initialized() is False
+
+
+def test_setup_logging_respects_log_level_env(monkeypatch):
+    # РЕГРЕССИЯ: раньше уровень был захардкожен INFO везде (root + оба handler'а) —
+    # log.debug(...) не печатался ни при каком окружении. LOG_LEVEL теперь читается
+    # так же, как и любой другой тюнинг в проекте.
+    import logging as _logging
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    try:
+        bot._setup_logging()
+        assert _logging.getLogger().level == _logging.DEBUG
+    finally:
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+        bot._setup_logging()  # восстановить дефолт INFO для остальных тестов
+
+
+def test_setup_logging_defaults_to_info_when_unset(monkeypatch):
+    import logging as _logging
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    bot._setup_logging()
+    assert _logging.getLogger().level == _logging.INFO
+
+
+# ─────────────────── альбомы: доп. фото тоже попадают в recent_media_ids ───────────────────
+
+def test_process_media_group_buffers_records_extra_photos_to_recent_media():
+    chat_id = 999960
+    user = SimpleNamespace(id=777)
+
+    def _photo_msg(file_id):
+        photo = SimpleNamespace(file_id=file_id, mime_type=None, file_name=None)
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE), from_user=user,
+            media_group_id="mg1", text=None, caption=None, reply_to_message=None,
+            photo=[photo], video=None, animation=None, video_note=None,
+            voice=None, audio=None, document=None, sticker=None,
+        )
+
+    msg_main, msg_extra = _photo_msg("file_A"), _photo_msg("file_B")
+
+    async def fake_fetch_media(file_id, mime):
+        return (b"bytes", "image/jpeg")
+
+    async def fake_handle_core(message, extra_media=None):
+        pass  # основное фото (index 0) сохраняет _resolve_incoming_media — не в фокусе этого теста
+
+    original_fetch, original_core = bot._fetch_media, bot._handle_message_core
+    bot._fetch_media = fake_fetch_media
+    bot._handle_message_core = fake_handle_core
+    bot._mg_buffers["mg1"] = [msg_main, msg_extra]
+    try:
+        asyncio.run(bot._process_media_group_buffers("mg1"))
+        recent = bot.chat_state[chat_id]["recent_media_ids"].get(str(user.id), [])
+        file_ids = [fid for fid, _ in recent]
+        assert "file_B" in file_ids
+    finally:
+        bot._fetch_media = original_fetch
+        bot._handle_message_core = original_core
+        bot.chat_state.pop(chat_id, None)
 
 
 # ─────────────────────────── /admin_keys — авторизация через заголовок, а не query-параметр ───────────────────────────
@@ -3537,9 +3612,6 @@ def test_fetch_tikwm_media_data_no_ip_block_hint_when_body_not_empty(caplog):
         result = asyncio.run(bot._fetch_tikwm_media_data(session, "https://www.tiktok.com/@u/video/9", {}))
     assert result is None
     messages = "\n".join(r.getMessage() for r in caplog.records)
-    assert "[tikwm][diag]" not in messages
-
-
     assert "[tikwm][diag]" not in messages
 
 
