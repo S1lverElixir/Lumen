@@ -117,12 +117,12 @@ async def _fish_audio_tts_bytes(
         log.warning("[tts] Fish Audio request failed, falling back to Gemini TTS: %s", exc)
         return None
     if not chunks_b64:
-        log.warning("[tts] Fish Audio: поток закончился без единого audio-чанка (формат ответа мог измениться) — откатываюсь на Gemini TTS.")
+        log.warning('[tts] Fish Audio: stream ended without a single audio chunk (response format may have changed) — falling back to Gemini TTS.')
         return None
     try:
         return base64.b64decode("".join(chunks_b64))
     except Exception as exc:
-        log.warning("[tts] Fish Audio: не удалось декодировать base64 аудио, откатываюсь на Gemini TTS: %s", exc)
+        log.warning('[tts] Fish Audio: failed to decode base64 audio, falling back to Gemini TTS: %s', exc)
         return None
 
 
