@@ -39,40 +39,56 @@ log = logging.getLogger("bot")
 # и quota_unconfirmed (см. _check_unconfirmed_model_quotas).
 #
 # ── Как дашборд AI Studio считает бесплатную квоту grounding-инструментов ──
-# (подтверждено 24 июля 2026 по реальному дашборду владельца, относится ко ВСЕЙ
+# (подтверждено 24 июля 2026 по реальному дашборду владельца, ПЕРЕПРОВЕРЕНО
+# 17 августа 2026 на актуальном дашборде — картина не изменилась, только
+# добавился Gemini 3.7 Flash в тот же бакет "Gemini 3", относится ко ВСЕЙ
 # линейке ниже — отдельно для каждой модели дальше не повторяется). Search
 # grounding считается не по конкретной модели, а по общему бакету ПОКОЛЕНИЯ:
-# бакет "Gemini 3" (объединяет 3/3.1/3.5/3.6) — 0/0, то есть реальной квоты на
-# поиск нет ни у одной модели линейки Gemini 3.x, сколько бы ни было соблазна
+# бакет "Gemini 3" (объединяет 3/3.1/3.5/3.6/3.7) — 0/0, то есть реальной квоты
+# на поиск нет ни у одной модели линейки Gemini 3.x, сколько бы ни было соблазна
 # предположить "раз lite-класс — значит есть квота" (именно так ошиблись раньше
-# с 3.5/3.1 Flash-Lite, см. историю правок). Бакет "Gemini 2.5" — 21/1500:
-# реальная рабочая квота на поиск есть только у gemini-2.5-flash/-flash-lite
-# (поэтому они первые в GEMINI_SEARCH_CHAIN ниже). Map grounding — наоборот,
+# с 3.5/3.1 Flash-Lite, см. историю правок). Бакет "Gemini 2.5" по дашборду
+# 17 августа 2026 показывает 0/1.5K (используемая часть на момент снимка/
+# доступный лимит) — реальная рабочая квота на поиск по-прежнему только у
+# gemini-2.5-flash/-flash-lite (поэтому они первые в GEMINI_SEARCH_CHAIN ниже).
+# Map grounding — наоборот,
 # считается ПО КОНКРЕТНОЙ модели: у 3.5/3.1 Flash-Lite он реально есть
 # (500/сутки), у остальных моделей линейки 3.x — 0/0.
 GEMINI_MODELS: dict[str, dict[str, Any]] = {
-    # Gemini 3.6 Flash — новый флагман линейки Flash, вышел 21 июля 2026, сменяет
-    # 3.5 Flash: по анонсу Google лучше в коде/агентных сценариях/мультимодальности,
-    # ~17% экономичнее по токенам. Контекст 1 млн токенов, знания по март 2026.
-    # RPD-лимит подтверждён: 20/сутки.
+    # Gemini 3.7 Flash — новый флагман линейки Flash, вышел 13 августа 2026 (GA),
+    # сменяет 3.6 Flash ("наша самая умная рабочая лошадка для разработки и
+    # агентных сценариев" — офиц. анонс Google). Тот же набор инструментов, что
+    # и у 3.6 Flash (см. release notes ai.google.dev/gemini-api/docs/changelog),
+    # контекст 1 млн токенов. RPD-лимит подтверждён по дашборду AI Studio
+    # (аудит моделей, 17 августа 2026) — тот же бакет 5 RPM/250K TPM/20 RPD, что
+    # и у 3.6 Flash, поэтому не помечена quota_unconfirmed.
+    "gemini-3.7-flash": {
+        "stream": True,
+        "search_grounding": False, "map_grounding": False, "url_context": True,
+    },
+    # Gemini 3.6 Flash — прошлый флагман линейки Flash, сохранён в цепочке как
+    # резерв после 3.7 Flash.
     "gemini-3.6-flash": {
         "stream": True,
         "search_grounding": False, "map_grounding": False, "url_context": True,
     },
-    # Gemini 3.5 Flash — прошлый флагман линейки Flash, сохранён в цепочке как
-    # резерв после 3.6 Flash. url_context оставлен включённым — в отличие от
-    # grounding-инструментов, у него нет отдельной дневной квоты в дашборде, он
-    # просто добавляет токены по обычной цене модели.
+    # Gemini 3.5 Flash — ещё более ранний флагман линейки Flash, сохранён в
+    # цепочке как резерв после 3.6 Flash. url_context оставлен включённым — в
+    # отличие от grounding-инструментов, у него нет отдельной дневной квоты в
+    # дашборде, он просто добавляет токены по обычной цене модели.
     "gemini-3.5-flash": {
         "stream": True,
         "search_grounding": False, "map_grounding": False, "url_context": True,
     },
-    # Gemini 3 Flash Preview — предыдущая Preview-версия линейки Flash, сохранена
-    # для тех, кто предпочитает её поведение версии 3.5 (более активное обдумывание).
-    "gemini-3-flash-preview": {
-        "stream": True,
-        "search_grounding": False, "map_grounding": False, "url_context": True,
-    },
+    # УБРАНО (аудит моделей, 17 августа 2026): "gemini-3-flash-preview" был здесь
+    # резервом после 3.5 Flash — подтверждено по официальной документации Google
+    # (ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.5:
+    # "Update model name: gemini-3-flash-preview → gemini-3.5-flash") и
+    # независимо по дате ретирки (retired 15 июля 2026, см. карточку модели на
+    # ollama.com/library/gemini-3-flash-preview) — идентификатор больше не
+    # обслуживается API, вызов гарантированно вернёт ошибку "модель не найдена".
+    # Официальная замена (gemini-3.5-flash) уже есть в цепочке строкой выше —
+    # отдельного резерва вместо убранной модели не требуется.
     # Gemini 3.5 Flash-Lite — новая версия самой быстрой и экономичной модели,
     # вышла 21 июля 2026 вместе с 3.6 Flash; превосходит 3.1 Flash-Lite в агентных
     # задачах и длинном контексте, до 350 токенов/сек.
@@ -119,7 +135,7 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "no_search": True, "stream": True,
     },
 }
-DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 
 # ── TTS-модели (аудит техдолга, август 2026) ──
 # GEMINI_TTS_MODELS раньше был отдельным хардкодом внутри _gemini_tts_bytes в bot.py —
@@ -210,6 +226,13 @@ _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
     "liquid/lfm-2.5-1.2b-instruct:free",
     "liquid/lfm-2.5-1.2b-thinking:free",
     "openrouter/free",
+    # ДОБАВЛЕНО (аудит моделей, 17 августа 2026, по актуальному "Top Weekly free"
+    # каталогу OpenRouter, сверено точными слагами через web-поиск по офиц.
+    # страницам openrouter.ai — см. историю правок): обе модели новые (вышли
+    # первая-вторая неделя августа 2026), ещё ни разу не прогонялись через
+    # калибровочное сравнение с Claude Sonnet.
+    "nvidia/nemotron-3.5-lightning:free",
+    "dots-studio/dots-3-note-preview:free",
 ]
 TEXT_MODEL_ORDER = _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION  # алиас для обратной совместимости
 # ПОПОЛНЕНО (аудит моделей, 2 августа 2026, по реальным логам продакшена + сверке
@@ -369,12 +392,21 @@ def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
 # _OR_MODEL_HEALTH выше): meta-llama/llama-3.3-70b-instruct, qwen/qwen3-next-
 # 80b-a3b-instruct, z-ai/glm-4.5-air, meta-llama/llama-3.2-3b-instruct,
 # liquid/lfm-2.5-1.2b-instruct.
+#
+# nemotron-3.5-lightning ДОБАВЛЕНА (аудит моделей, 17 августа 2026, по
+# актуальному "Top Weekly free" каталогу OpenRouter): 30B MoE (3B активных),
+# NVIDIA прямо позиционирует её для "высокообъёмных, специализированных
+# агентных задач" — та же роль, что и у остальных моделей этого списка.
+# Вышла всего неделю назад (11 августа 2026) — калибровочного сравнения с
+# Claude Sonnet ещё не было ни разу, поэтому поставлена последней перед
+# generic-резервом, а не выше уже проверенных калибровкой моделей.
 _OR_LIGHT_ORDER: list[str] = [
     "nvidia/nemotron-nano-9b-v2:free",
     "inclusionai/ling-3.0-flash:free",
     "nvidia/nemotron-3-nano-30b-a3b:free",
     "openai/gpt-oss-20b:free",
     "liquid/lfm-2.5-1.2b-thinking:free",
+    "nvidia/nemotron-3.5-lightning:free",
     "openrouter/free",
 ]
 
@@ -393,10 +425,21 @@ _OR_LIGHT_ORDER: list[str] = [
 # слаг подтверждённо не обслуживается — полные причины и даты см. в
 # _OR_MODEL_HEALTH выше): qwen/qwen3-next-80b-a3b-instruct, z-ai/glm-4.5-air,
 # nousresearch/hermes-3-llama-3.1-405b.
+#
+# dots-3-note-preview ДОБАВЛЕНА (аудит моделей, 17 августа 2026, по актуальному
+# "Top Weekly free" каталогу OpenRouter): 280B total/16B active MoE от нового
+# для этого проекта провайдера (Dots Studio), позиционируется под рассуждения/
+# код/длинный контекст — подходит по роли для этого списка. Вышла буквально
+# несколько дней назад, статус "Preview" в самом названии и совершенно новый,
+# ранее не встречавшийся в проекте провайдер — поставлена последней перед
+# generic-резервом, ниже уже проверенных калибровкой сильных моделей, пока не
+# накопится собственная история наблюдений (аналогично nemotron-3.5-lightning
+# в _OR_LIGHT_ORDER выше).
 _OR_HEAVY_ORDER: list[str] = [
     "nvidia/nemotron-3-super-120b-a12b:free",
     "openai/gpt-oss-120b:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "dots-studio/dots-3-note-preview:free",
     "openrouter/free",
 ]
 
@@ -416,9 +459,9 @@ _OR_VISION_ORDER: list[str] = [
 # случаев, где ТРЕБУЕТСЯ именно Gemini (YouTube/сайт по ссылке, видео/аудио
 # вложение), но живой поиск не нужен.
 GEMINI_HEAVY_CHAIN: list[str] = [
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
-    "gemini-3-flash-preview",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
@@ -436,9 +479,9 @@ GEMINI_SEARCH_CHAIN: list[str] = [
     "gemini-2.5-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
-    "gemini-3-flash-preview",
 ]
 # Совпадает по составу с прежним quota_fallback_chain — используется как дефолт,
 # если ask_gemini вызвана без явной цепочки (например, напрямую из теста).

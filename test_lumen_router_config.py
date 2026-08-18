@@ -56,7 +56,8 @@ def test_looks_like_freshness_query_false_for_timeless_questions():
 def test_build_route_youtube_link_forces_gemini_only():
     route = lumen_router_config._build_route(needs_youtube=True, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
     assert all(p == "gemini" for p, _ in route)
-    assert route[0] == ("gemini", "gemini-3.6-flash")
+    # ОБНОВЛЕНО (аудит моделей, 17.08.2026): флагман сменился с 3.6 на 3.7 Flash.
+    assert route[0] == ("gemini", "gemini-3.7-flash")
 
 
 def test_build_route_website_link_forces_gemini_only_and_excludes_gemma():
@@ -146,13 +147,47 @@ def test_gemma_models_both_have_no_search_flag():
 
 
 def test_new_gemini_models_present_and_prioritized():
+    # ОБНОВЛЕНО (аудит моделей, 17 августа 2026): Gemini 3.7 Flash (GA 13 августа
+    # 2026) сменил 3.6 Flash в роли флагмана — см. историю правок в
+    # lumen_router_config.py про источники (офиц. release notes Google + дашборд
+    # AI Studio владельца).
+    assert "gemini-3.7-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.6-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.5-flash-lite" in lumen_router_config.GEMINI_MODELS
-    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.6-flash"
-    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.6-flash"
+    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.7-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.7-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[1] == "gemini-3.6-flash"
     # Обновлено (24.07.2026) вместе с реордером GEMINI_SEARCH_CHAIN — см. комментарий
     # там же: реальная квота на search grounding подтверждена только у Gemini 2.5.
     assert lumen_router_config.GEMINI_SEARCH_CHAIN[0] == "gemini-2.5-flash"
+
+
+def test_gemini_3_flash_preview_retired_and_removed():
+    # РЕГРЕССИЯ (аудит моделей, 17 августа 2026): "gemini-3-flash-preview" был
+    # официально ретирнут Google 15 июля 2026 (заменён на gemini-3.5-flash, см.
+    # ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.5:
+    # "Update model name: gemini-3-flash-preview → gemini-3.5-flash") — вызов
+    # этого ID API теперь гарантированно вернёт ошибку. Не должен фигурировать
+    # ни в конфигурации моделей, ни в одной из цепочек фоллбека.
+    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_MODELS
+    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_HEAVY_CHAIN
+    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_SEARCH_CHAIN
+    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_LINK_CHAIN
+    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_LINK_SEARCH_CHAIN
+
+
+def test_gemini_3_7_flash_config_matches_3_6_flash_pattern():
+    # Gemini 3.7 Flash делит тот же бакет квоты search/map grounding ("Gemini 3"),
+    # что и вся линейка 3.x — подтверждено по дашборду AI Studio 17 августа 2026
+    # (0/0 на оба инструмента, тот же паттерн, что уже подтверждён для 3.6 Flash).
+    conf = lumen_router_config.GEMINI_MODELS["gemini-3.7-flash"]
+    assert conf.get("search_grounding") is False
+    assert conf.get("map_grounding") is False
+    assert conf.get("url_context") is True
+    assert conf.get("stream") is True
+    # Числа с дашборда были доступны сразу при добавлении (та же цифра, что и у
+    # уже подтверждённой 3.6 Flash) — не должна попадать под "quota_unconfirmed".
+    assert not conf.get("quota_unconfirmed")
 
 
 def test_check_unconfirmed_model_quotas_no_warnings_once_all_models_confirmed(caplog):
@@ -237,6 +272,37 @@ def test_model_health_note_without_promo_expiry_is_permanent_exclusion():
         "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     ):
         assert lumen_router_config._OR_MODEL_HEALTH[model_id].promo_expiry is None
+
+
+# ─────────────────── новые модели OpenRouter (аудит моделей, 17 августа 2026) ───────────────────
+# Найдены по актуальному "Top Weekly free" каталогу OpenRouter, слаги сверены
+# точными web-поисками по офиц. страницам openrouter.ai (см. историю правок в
+# lumen_router_config.py) — обе вышли буквально за неделю до аудита и ещё не
+# прогонялись через калибровочное сравнение с Claude Sonnet, поэтому добавлены
+# последними кандидатами в своих списках, а не выше уже проверенных моделей.
+
+def test_new_or_models_registered_for_leak_detection():
+    assert "nvidia/nemotron-3.5-lightning:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+    assert "dots-studio/dots-3-note-preview:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+
+
+def test_nemotron_3_5_lightning_added_last_to_light_order():
+    assert lumen_router_config._OR_LIGHT_ORDER[-1] == "openrouter/free"
+    assert lumen_router_config._OR_LIGHT_ORDER[-2] == "nvidia/nemotron-3.5-lightning:free"
+
+
+def test_dots3_note_preview_added_last_to_heavy_order():
+    assert lumen_router_config._OR_HEAVY_ORDER[-1] == "openrouter/free"
+    assert lumen_router_config._OR_HEAVY_ORDER[-2] == "dots-studio/dots-3-note-preview:free"
+
+
+def test_new_or_models_not_accidentally_health_excluded():
+    # Ни одна из двух новых моделей не должна была случайно попасть в реестр
+    # "нездоровых" — обе живые, просто пока некалиброванные.
+    assert "nvidia/nemotron-3.5-lightning:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "dots-studio/dots-3-note-preview:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    route = lumen_router_config._or_route(["nvidia/nemotron-3.5-lightning:free", "dots-studio/dots-3-note-preview:free"])
+    assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free", "dots-studio/dots-3-note-preview:free"]
 
 
 # ─────────────────── TEXT_MODEL_ORDER переименован, алиас сохранён ───────────────────
