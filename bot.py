@@ -4643,6 +4643,7 @@ async def _webhook_startup() -> None:
 
     commands = [
         BotCommand(command="start", description="О боте и список команд"),
+        BotCommand(command="reset", description="Очистить историю диалога"),
         BotCommand(command="draw", description="Нарисовать изображение по описанию"),
         BotCommand(command="tts", description="Озвучить текст"),
         BotCommand(command="imgmodel", description="Выбрать модель для генерации изображений"),

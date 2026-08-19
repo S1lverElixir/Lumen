@@ -232,6 +232,19 @@ def test_or_light_order_no_longer_starts_with_dead_or_worst_offender_models():
     assert lumen_router_config._OR_LIGHT_ORDER[0] not in {"openai/gpt-oss-20b:free", "nvidia/nemotron-3-nano-30b-a3b:free"}
 
 
+def test_nemotron_nano_9b_v2_excluded_after_calibration_run():
+    # РЕГРЕССИЯ (калибровочный прогон против Claude Sonnet 5, 18 августа 2026):
+    # раньше стояла ПЕРВОЙ в _OR_LIGHT_ORDER и реально отвечала на 82% лёгких
+    # текстовых запросов сессии — каждый развёрнутый ответ содержал грубую порчу
+    # текста (случайные фрагменты слов на десятке не относящихся к разговору
+    # языков внутри русских предложений, см. полный разбор в _OR_MODEL_HEALTH).
+    assert "nvidia/nemotron-nano-9b-v2:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "nvidia/nemotron-nano-9b-v2:free" not in lumen_router_config._OR_LIGHT_ORDER
+    assert lumen_router_config._OR_MODEL_HEALTH["nvidia/nemotron-nano-9b-v2:free"].reason
+    route = lumen_router_config._or_route(["nvidia/nemotron-nano-9b-v2:free", "inclusionai/ling-3.0-flash:free"])
+    assert [m for _, m in route] == ["inclusionai/ling-3.0-flash:free"]
+
+
 # ─────────────────── единый реестр "нездоровых" моделей OpenRouter (аудит техдолга) ───────────────────
 # Раньше "эта модель сейчас плохая" отслеживалось тремя независимыми механизмами
 # (_TEMPORARY_FREE_MODELS/_ROUTER_EXCLUDED_OR_MODELS/точечные вычёркивания из

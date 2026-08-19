@@ -256,6 +256,59 @@ def test_md_to_html_full_pipeline_converts_bullet_list_with_bold():
     assert "*" not in result.replace("</b>", "").replace("<b>", "")
 
 
+# ─────────────── markdown-заголовки "#"/"##"/"###" → **жирный текст** ───────────────
+# РЕГРЕССИЯ, найденная на реальных скриншотах Telegram (18 августа 2026):
+# system_prompt.py запрещает markdown-заголовки, но модели (особенно бесплатные
+# модели OpenRouter) регулярно их всё равно пишут — раньше "###" уходило в
+# Telegram буквально, без единой защитной сетки (в отличие от таблиц/списков).
+
+def test_normalize_headers_converts_h3_to_bold():
+    assert lumen_formatting._normalize_headers("### Как она выводится?") == "**Как она выводится?**"
+
+
+def test_normalize_headers_converts_h1_and_h2():
+    assert lumen_formatting._normalize_headers("# Заголовок") == "**Заголовок**"
+    assert lumen_formatting._normalize_headers("## Подзаголовок") == "**Подзаголовок**"
+
+
+def test_normalize_headers_does_not_touch_hash_mid_line():
+    # "C#" / "#tag" не в начале строки — ATX-заголовок ТОЛЬКО в начале строки.
+    text = "Язык C# отличается от C++.\nПодробнее: #tag"
+    assert lumen_formatting._normalize_headers(text) == text
+
+
+def test_normalize_headers_requires_space_after_hashes():
+    # "#без_пробела" — не заголовок по правилам CommonMark ATX, не трогаем.
+    assert lumen_formatting._normalize_headers("#без_пробела текст") == "#без_пробела текст"
+
+
+def test_normalize_headers_bare_hashes_with_no_text_removed():
+    assert lumen_formatting._normalize_headers("### \nследующая строка") == "\nследующая строка"
+
+
+def test_normalize_headers_does_not_double_wrap_already_bold_content():
+    # "### **Важно**" — модель сама уже обернула текст в bold; повторная обёртка
+    # дала бы "****Важно****" и сломала бы парность "**" в Phase 3.
+    assert lumen_formatting._normalize_headers("### **Важно**") == "**Важно**"
+
+
+def test_md_to_html_full_pipeline_strips_stray_header_markers():
+    # Регрессия на реальный найденный баг: пользователь видел буквальные "###" в
+    # сообщении бота вместо жирного текста — полный конвейер должен это исправлять.
+    result = lumen_formatting._md_to_html("### Как она выводится?\nобычный текст")
+    assert "###" not in result
+    assert result.startswith("<b>Как она выводится?</b>")
+
+
+def test_md_to_html_header_hash_inside_code_block_untouched():
+    # "#" внутри блока кода (например, комментарий Python) не должен считаться
+    # заголовком — код уже вынесен плейсхолдером до этой фазы.
+    text = "```python\n# обычный комментарий\nprint(1)\n```"
+    result = lumen_formatting._md_to_html(text)
+    assert "# обычный комментарий" in result
+    assert "<b>" not in result
+
+
 # ─────────────────── spoiler-тег: защитная сетка (тот же принцип, что <u>) ───────────────────
 
 def test_md_to_html_strips_literal_spoiler_tag():
