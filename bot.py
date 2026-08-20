@@ -34,7 +34,7 @@ from urllib.parse import urlparse
 import aiohttp
 import sentry_sdk
 import uvicorn
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramEntityTooLarge
 from aiogram.enums import ChatType, ParseMode
@@ -936,7 +936,6 @@ def get_system_prompt(model_id: str | None = None) -> str:
 # остаётся обычным dict, никакой валидации здесь не добавляется — это только
 # документация формы для статических проверок типов и читаемости.
 class ChatState(TypedDict, total=False):
-    image_model: str
     history: list[dict[str, Any]]
     quota: dict[str, Any]
     ctx: "deque[str]"
@@ -1199,7 +1198,6 @@ from lumen_state_storage import (
     StorageConfig,
     _chat_storage_key,
     _serialize_chat_state,
-    _normalize_legacy_image_model_id,
     _current_quota_day,
     _upstash_request as _lumen_upstash_request,
     _upstash_set as _lumen_upstash_set,
@@ -1396,54 +1394,39 @@ def save_global_quota() -> None:
         log.warning("[quota] Failed to save global quota: %s", exc)
 
 # НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: до сих пор каждый формат-дрейф персистентного
-# снимка чата (слияние gemini_history/or_history в единую history, снятие
-# приставки "pollinations:" с image_model) обнаруживался в _restore_single_chat
-# ad hoc проверками "есть ли такой-то ключ в JSON" — рабочий, но накопительный
-# подход: с каждым новым изменением формата туда добавлялась ещё одна ветка
-# "если ключа нет — значит старая запись". CHAT_STATE_SCHEMA_VERSION (импортирован
-# из lumen_state_storage.py вместе с _serialize_chat_state/_normalize_legacy_
-# image_model_id — см. блок импорта в начале секции "хранение состояния и квот")
-# делает следующую подобную миграцию однозначной: новый код сможет проверять
-# `s.get("schema_version", 0)` одним явным числом вместо повторного гадания по
-# присутствию ключей. Существующие персистентные записи (сделанные до введения
-# этого поля) не имеют "schema_version" вообще — они естественно трактуются как
-# версия 0 и продолжают проходить через уже отлаженные эвристики ниже без
-# каких-либо изменений в их поведении (это поле — задел на будущее, а не
-# ретроактивная миграция уже написанной логики).
+# снимка чата (слияние gemini_history/or_history в единую history) обнаруживался
+# в _restore_single_chat ad hoc проверками "есть ли такой-то ключ в JSON" —
+# рабочий, но накопительный подход: с каждым новым изменением формата туда
+# добавлялась ещё одна ветка "если ключа нет — значит старая запись".
+# CHAT_STATE_SCHEMA_VERSION (импортирован из lumen_state_storage.py вместе с
+# _serialize_chat_state — см. блок импорта в начале секции "хранение состояния и
+# квот") делает следующую подобную миграцию однозначной: новый код сможет
+# проверять `s.get("schema_version", 0)` одним явным числом вместо повторного
+# гадания по присутствию ключей. Существующие персистентные записи (сделанные до
+# введения этого поля) не имеют "schema_version" вообще — они естественно
+# трактуются как версия 0 и продолжают проходить через уже отлаженные эвристики
+# ниже без каких-либо изменений в их поведении (это поле — задел на будущее, а
+# не ретроактивная миграция уже написанной логики).
 
 def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
     """Разворачивает сериализованный снимок одного чата (см. _serialize_chat_state)
     обратно в chat_state[cid] — общая логика между новым per-chat форматом чтения
     и одноразовой миграцией из старого общего блоба (см. load_state_from_disk).
 
-    Поля "gemini_model"/"openrouter_text_model"/"chat_provider" из старых записей
-    (созданных до перехода на автоматический роутер) намеренно нигде ниже не
-    читаются — они устарели и больше ни на что не влияют.
+    Поля "gemini_model"/"openrouter_text_model"/"chat_provider"/"image_model" из
+    старых записей (созданных до перехода на автоматический роутер для текста и,
+    позже, для генерации изображений — см. README, "Автоматический выбор модели")
+    намеренно нигде ниже не читаются — они устарели и больше ни на что не влияют.
 
     schema_version (см. CHAT_STATE_SCHEMA_VERSION выше) в самих записях, читаемых
-    здесь, пока ни на что не влияет — существующие миграции (history/gemini_history,
-    image_model) уже надёжно определяются по присутствию конкретных ключей, и это
-    не нужно менять задним числом. Поле — задел на СЛЕДУЮЩИЙ формат-дрейф: тогда
-    новую ветку можно будет добавить как `if s.get("schema_version", 0) < N`, а не
-    подбирать очередную эвристику по ключам, как приходилось делать для миграций ниже."""
+    здесь, пока ни на что не влияет — существующая миграция (history/gemini_history)
+    уже надёжно определяется по присутствию конкретных ключей, и это не нужно
+    менять задним числом. Поле — задел на СЛЕДУЮЩИЙ формат-дрейф: тогда новую
+    ветку можно будет добавить как `if s.get("schema_version", 0) < N`, а не
+    подбирать очередную эвристику по ключам, как приходилось делать для миграции
+    ниже."""
     schema_version = s.get("schema_version", 0)
     log.debug('[state] Restoring chat %s (schema_version=%s)', cid, schema_version)
-    # НАЙДЕНО ПРИ /code-review (после ponytail-audit): переименование ключей
-    # HF_IMAGE_MODELS (см. _hf_text_to_image — убрана лишняя приставка
-    # "pollinations:", единственный провайдер и так один) — не просто
-    # косметика, если в Upstash/локальном файле УЖЕ лежит персистентное
-    # состояние чата с image_model в старом формате ("pollinations:turbo" и
-    # т.п.). Без миграции ниже такой чат при первой же загрузке молча (без
-    # предупреждения, без лога) терял бы выбранную пользователем модель —
-    # старое значение просто не совпало бы ни с одним новым ключом и
-    # откатилось бы на DEFAULT_HF_IMAGE_MODEL. _normalize_legacy_image_model_id
-    # снимает старую приставку перед проверкой, так что реальный выбор
-    # пользователя переживает этот рефакторинг так же, как переживает и любой
-    # другой формат старых записей (см. миграцию history/gemini_history чуть
-    # ниже — тот же принцип, тот же файл).
-    image_model = _normalize_legacy_image_model_id(s.get("image_model", DEFAULT_HF_IMAGE_MODEL))
-    if image_model not in HF_IMAGE_MODELS:
-        image_model = DEFAULT_HF_IMAGE_MODEL
     raw_media = s.get("recent_media_ids", {})
     if isinstance(raw_media, dict):
         media_buckets = {
@@ -1466,7 +1449,6 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         if len(history) > SHARED_HISTORY_MAX_LEN:
             history = history[-SHARED_HISTORY_MAX_LEN:]
     chat_state[cid] = {
-        "image_model": image_model,
         "history": history,
         "quota": s.get("quota", {}),
         "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
@@ -1696,7 +1678,6 @@ def load_state_from_disk() -> None:
 def get_state(chat_id: int) -> dict[str, Any]:
     if chat_id not in chat_state:
         chat_state[chat_id] = {
-            "image_model": DEFAULT_HF_IMAGE_MODEL,
             "history": [],
             "quota": {},
             "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
@@ -1709,11 +1690,6 @@ def get_state(chat_id: int) -> dict[str, Any]:
         _mark_new_chat_id(chat_id)
     else:
         chat_state[chat_id]["last_activity"] = time.monotonic()
-        normalized = _normalize_legacy_image_model_id(chat_state[chat_id].get("image_model"))
-        if normalized not in HF_IMAGE_MODELS:
-            chat_state[chat_id]["image_model"] = DEFAULT_HF_IMAGE_MODEL
-        elif normalized != chat_state[chat_id].get("image_model"):
-            chat_state[chat_id]["image_model"] = normalized
     if len(chat_state) > MAX_CHAT_LIMIT:
          _prune_old_chats()
     return chat_state[chat_id]
@@ -1787,29 +1763,29 @@ async def _is_privileged_in_chat(chat_type: str, chat_id: int, user_id: int | No
 # генерация изображений (pollinations)
 #
 # НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА (разбиение bot.py на модули): вся эта секция (каталог
-# моделей Pollinations, клавиатура /imgmodel, сам вызов Pollinations.ai) вынесена в
-# lumen_images.py — не пишет в chat_state/GLOBAL_QUOTA, не зовёт Telegram API и не
-# зависит от глобальных bot/client, самый изолированный кандидат из пяти намеченных.
-# Единственное отличие от прежнего кода: _pollinations_generate/_hf_text_to_image
-# теперь принимают уже готовую aiohttp-сессию параметром (см. докстринг модуля) —
-# раньше сессия получалась неявно через _get_http_session() внутри самой функции,
-# что означало бы либо тянуть этот геттер в новый модуль, либо заводить там свой
-# отдельный источник сессий; вызывающий код (inline_draw ниже) теперь сам получает
-# сессию и передаёт её. Публичные имена и остальное поведение не изменились.
+# моделей Pollinations, автоматический выбор модели по промпту, сам вызов
+# Pollinations.ai) вынесена в lumen_images.py — не пишет в chat_state/GLOBAL_QUOTA,
+# не зовёт Telegram API и не зависит от глобальных bot/client, самый изолированный
+# кандидат из пяти намеченных. Единственное отличие от прежнего кода:
+# _pollinations_generate/_hf_text_to_image теперь принимают уже готовую aiohttp-сессию
+# параметром (см. докстринг модуля) — раньше сессия получалась неявно через
+# _get_http_session() внутри самой функции, что означало бы либо тянуть этот геттер
+# в новый модуль, либо заводить там свой отдельный источник сессий; вызывающий код
+# (inline_draw ниже) теперь сам получает сессию и передаёт её. Публичные имена и
+# остальное поведение не изменились.
 from lumen_images import (
     DEFAULT_HF_IMAGE_MODEL,
     HF_IMAGE_MODELS,
-    _hf_model_catalog,
-    _imgmodel_keyboard,
+    _pick_image_model,
     _hf_text_to_image,
     _image_model_label,
 )
 
-# _hf_model_catalog не вызывается напрямую нигде в остальном коде bot.py (используется
-# только внутри самой _imgmodel_keyboard в lumen_images.py) — но остаётся нужна как
-# `bot._hf_model_catalog(...)` для существующих тестов. См. пояснение про __all__ у
-# первого блока (lumen_formatting) в начале файла.
-__all__ += ["_hf_model_catalog"]
+# DEFAULT_HF_IMAGE_MODEL больше не читается напрямую нигде в остальном коде bot.py
+# (используется только внутри самой _pick_image_model в lumen_images.py) — но
+# остаётся нужен как `bot.DEFAULT_HF_IMAGE_MODEL` для существующих тестов. См.
+# пояснение про __all__ у первого блока (lumen_formatting) в начале файла.
+__all__ += ["DEFAULT_HF_IMAGE_MODEL"]
 
 # метаданные и скачивание медиа
 
@@ -3673,8 +3649,7 @@ async def cmd_start(message: Message) -> None:
         "Я отвечаю на вопросы с поиском в реальном времени, разбираю фото, видео, аудио и документы, рисую изображения по описанию и озвучиваю текст голосом.\n\n"
         "<b>Команды</b>\n"
         "/draw [описание] — нарисовать изображение\n"
-        "/tts [текст] — озвучить текст голосом\n"
-        "/imgmodel — модель для генерации изображений\n\n"
+        "/tts [текст] — озвучить текст голосом\n\n"
         "Рисовать и озвучивать можно и просто словами, без команд — например «нарисуй кота» или «озвучь это».\n\n"
         "<b>TikTok</b>\n"
         "Просто пришлите ссылку — скачаю видео или фото без водяных знаков.\n\n"
@@ -3686,13 +3661,14 @@ async def inline_draw(message: Message, prompt: str) -> None:
     status = await _tg_call(message.reply, "Генерирую изображение")
     try:
         session = await _get_http_session()
-        state = get_state(message.chat.id)
-        primary_model = state.get("image_model") or DEFAULT_HF_IMAGE_MODEL
-        if primary_model not in HF_IMAGE_MODELS:
-            primary_model = DEFAULT_HF_IMAGE_MODEL
-            state["image_model"] = primary_model
+        # УБРАНО (аудит техдолга, 19 августа 2026): раньше основная модель бралась
+        # из ручного выбора пользователя (/imgmodel, команда удалена — см. README,
+        # "Автоматический выбор модели"). Теперь _pick_image_model сама подбирает
+        # модель по содержимому промпта на каждый вызов, без какого-либо состояния
+        # чата — тот же принцип, что уже применяется к тексту (_build_route).
+        primary_model = _pick_image_model(prompt)
 
-        # Фолбэк-цепочка: пробуем сначала выбранную модель,
+        # Фолбэк-цепочка: пробуем сначала подобранную модель,
         # при ошибке переключаемся на следующие по порядку из HF_IMAGE_MODELS
         all_model_ids = list(HF_IMAGE_MODELS.keys())
         fallback_chain = [primary_model] + [m for m in all_model_ids if m != primary_model]
@@ -3748,61 +3724,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
         else:
             # Сырой текст ошибки провайдера пользователю не показываем (см. log.exception
             # выше) — та же логика, что и в остальных обработчиках ошибок бота.
-            user_err = "Ошибка генерации изображения. Попробуйте другую модель через /imgmodel."
+            user_err = "Ошибка генерации изображения. Попробуйте ещё раз или переформулируйте описание."
         await _edit_message_quietly(status, user_err)
-
-
-@dp.message(Command("imgmodel"))
-async def cmd_imgmodel(message: Message) -> None:
-    state = get_state(message.chat.id)
-    model_id = state.get("image_model") or DEFAULT_HF_IMAGE_MODEL
-    if model_id not in HF_IMAGE_MODELS:
-        model_id = DEFAULT_HF_IMAGE_MODEL
-        state["image_model"] = model_id
-    meta = HF_IMAGE_MODELS.get(model_id, {})
-    await _tg_call(
-        message.reply,
-        f"<b>Текущая модель:</b> {_html_mod.escape(meta.get('name', model_id))}\n"
-        f"{_html_mod.escape(meta.get('desc', ''))}\n\n"
-        f"Выберите другую модель ниже:",
-        reply_markup=_imgmodel_keyboard(model_id),
-        parse_mode=ParseMode.HTML,
-    )
-
-
-@dp.callback_query(F.data.startswith("imgmodel:"))
-async def cb_imgmodel(cb: CallbackQuery) -> None:
-    if cb.message is None:
-        await _safe_callback_answer(cb, "Ошибка: сообщение не найдено.", show_alert=True)
-        return
-    parts = cb.data.split(":", 2)
-    if len(parts) < 3 or parts[1] != "set":
-        await _safe_callback_answer(cb, "Некорректный формат запроса.", show_alert=True)
-        return
-    state = get_state(cb.message.chat.id)
-    model_id = parts[2]
-    # Раньше здесь ещё проверялось членство в HF_IMAGE_MODEL_CACHE — избыточно:
-    # каталог для клавиатуры и так всегда строится 1:1 из HF_IMAGE_MODELS (см.
-    # _hf_model_catalog выше), отдельной проверки по кэшу не требовалось никогда.
-    if not model_id or model_id not in HF_IMAGE_MODELS:
-        await _safe_callback_answer(cb, "Модель больше недоступна.", show_alert=True)
-        return
-    requester_id = cb.from_user.id if cb.from_user else None
-    if not await _is_privileged_in_chat(cb.message.chat.type, cb.message.chat.id, requester_id):
-        await _safe_callback_answer(cb, "В группе менять модель может только администратор чата.", show_alert=True)
-        return
-    state["image_model"] = model_id
-    mark_state_dirty(cb.message.chat.id)
-    meta = HF_IMAGE_MODELS.get(model_id, {})
-    await _safe_callback_answer(cb, f"Выбрана модель {_image_model_label(model_id)}")
-    await _tg_call(
-        cb.message.edit_text,
-        f"<b>Текущая модель:</b> {_html_mod.escape(meta.get('name', model_id))}\n"
-        f"{_html_mod.escape(meta.get('desc', ''))}\n\n"
-        f"Выберите другую модель ниже:",
-        reply_markup=_imgmodel_keyboard(model_id),
-        parse_mode=ParseMode.HTML,
-    )
 
 
 @dp.message(Command("draw"))
@@ -4662,7 +4585,6 @@ async def _webhook_startup() -> None:
         BotCommand(command="reset", description="Очистить историю диалога"),
         BotCommand(command="draw", description="Нарисовать изображение по описанию"),
         BotCommand(command="tts", description="Озвучить текст"),
-        BotCommand(command="imgmodel", description="Выбрать модель для генерации изображений"),
     ]
 
     async def try_setup():

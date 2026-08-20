@@ -673,63 +673,6 @@ def test_upstash_get_parses_result_field():
         bot.UPSTASH_REDIS_REST_TOKEN = ""
 
 
-# ─────────────── миграция image_model со старого формата "pollinations:X" ───────────────
-# РЕГРЕССИЯ, найденная при /code-review: ponytail-audit убрал приставку "pollinations:"
-# из ключей HF_IMAGE_MODELS (единственный провайдер и так один). Без миграции это молча
-# сбрасывало бы image_model существующих персистентных чатов на DEFAULT_HF_IMAGE_MODEL —
-# реальный выбор пользователя (например "pollinations:turbo") терялся бы без предупреждения,
-# просто потому что старое значение больше не совпадает ни с одним ключом HF_IMAGE_MODELS.
-
-def test_normalize_legacy_image_model_id_strips_old_prefix():
-    assert bot._normalize_legacy_image_model_id("pollinations:turbo") == "turbo"
-    assert bot._normalize_legacy_image_model_id("pollinations:flux-anime") == "flux-anime"
-
-
-def test_normalize_legacy_image_model_id_passthrough_for_current_format():
-    assert bot._normalize_legacy_image_model_id("turbo") == "turbo"
-    assert bot._normalize_legacy_image_model_id("flux") == "flux"
-
-
-def test_normalize_legacy_image_model_id_passthrough_for_non_string():
-    # Защита от неожиданных типов в персистентных данных — не должно падать.
-    assert bot._normalize_legacy_image_model_id(None) is None
-    assert bot._normalize_legacy_image_model_id(123) == 123
-
-
-def test_restore_single_chat_migrates_legacy_pollinations_image_model():
-    cid = 999901
-    try:
-        bot._restore_single_chat(cid, {"image_model": "pollinations:turbo", "history": []})
-        assert bot.chat_state[cid]["image_model"] == "turbo"
-    finally:
-        bot.chat_state.pop(cid, None)
-
-
-def test_restore_single_chat_falls_back_to_default_for_truly_unknown_image_model():
-    cid = 999902
-    try:
-        bot._restore_single_chat(cid, {"image_model": "some-removed-model-nobody-heard-of", "history": []})
-        assert bot.chat_state[cid]["image_model"] == bot.DEFAULT_HF_IMAGE_MODEL
-    finally:
-        bot.chat_state.pop(cid, None)
-
-
-def test_get_state_migrates_legacy_pollinations_image_model_in_memory():
-    # Защита в глубину (см. get_state) — на случай, если в chat_state окажется
-    # старое значение уже ПОСЛЕ восстановления (например, вручную отредактированные
-    # персистентные данные), а не только на пути через _restore_single_chat.
-    cid = 999903
-    try:
-        bot.chat_state[cid] = {
-            "image_model": "pollinations:flux-realism", "history": [], "quota": {},
-            "recent_media_ids": {}, "last_activity": 0.0,
-        }
-        state = bot.get_state(cid)
-        assert state["image_model"] == "flux-realism"
-    finally:
-        bot.chat_state.pop(cid, None)
-
-
 # ─────────────────────────── _save_chat_to_storage/_delete_chat_storage возвращают bool ───────────────────────────
 
 def test_save_chat_to_storage_returns_true_on_success(tmp_path):
@@ -2370,31 +2313,81 @@ def test_reset_quota_if_new_day_throttles_repeated_calls():
         bot._last_quota_check_monotonic = original_throttle
 
 
-# ─────────────────── каталог моделей генерации изображений (аудит техдолга) ───────────────────
-# Раньше был отдельный HF_IMAGE_MODEL_CACHE + async _hf_fetch_model_catalog(),
-# оба вестигиальные (динамический фетч из HF API убран, каталог всегда 1:1 из
-# HF_IMAGE_MODELS) — заменены на синхронный _hf_model_catalog(). Тестов на этот
-# слой раньше не было вообще; добавлены вместе с упрощением, чтобы не убрать
-# индирекцию "молча".
+# ─────────────────── авто-роутинг генерации изображений (аудит техдолга, 19 августа 2026) ───────────────────
+# Команда /imgmodel и ручной выбор модели убраны целиком — тот же переход, что уже
+# был сделан для текстового провайдера/модели (см. README, "Автоматический выбор
+# модели"). _pick_image_model заменяет собой ручной выбор: подбирает модель по
+# содержимому промпта на каждый вызов, без персистентного состояния чата.
 
-def test_hf_model_catalog_matches_hf_image_models_exactly():
-    catalog = bot._hf_model_catalog()
-    assert [m["id"] for m in catalog] == list(bot.HF_IMAGE_MODELS.keys())
-    for m in catalog:
-        assert m["name"] == bot.HF_IMAGE_MODELS[m["id"]]["name"]
+def test_pick_image_model_detects_anime():
+    assert bot._pick_image_model("нарисуй девушку в стиле аниме") == "flux-anime"
+    assert bot._pick_image_model("draw a chibi character") == "flux-anime"
 
 
-def test_imgmodel_keyboard_marks_current_model_no_pagination():
-    # Пагинация убрана (ponytail-audit) — каталог из 5 моделей всегда умещается
-    # на одном экране, поэтому клавиатура больше не принимает `page` и никогда
-    # не рисует "< Назад"/"Дальше >".
-    kb = bot._imgmodel_keyboard(bot.DEFAULT_HF_IMAGE_MODEL)
-    all_buttons = [btn for row in kb.inline_keyboard for btn in row]
-    current_buttons = [b for b in all_buttons if b.text.startswith("• ")]
-    assert len(current_buttons) == 1
-    assert bot.HF_IMAGE_MODELS[bot.DEFAULT_HF_IMAGE_MODEL]["name"] in current_buttons[0].text
-    assert not any("Назад" in b.text or "Дальше" in b.text for b in all_buttons)
-    assert all(b.callback_data.startswith("imgmodel:set:") for b in all_buttons)
+def test_pick_image_model_detects_fantasy():
+    assert bot._pick_image_model("нарисуй дракона в фэнтезийном замке") == "dreamshaper"
+    assert bot._pick_image_model("concept art of an elf wizard") == "dreamshaper"
+
+
+def test_pick_image_model_detects_realism():
+    assert bot._pick_image_model("сделай фотореалистичный портрет кота") == "flux-realism"
+    assert bot._pick_image_model("realistic photo of a mountain") == "flux-realism"
+
+
+def test_pick_image_model_detects_quick_draft():
+    assert bot._pick_image_model("быстрый набросок логотипа") == "turbo"
+
+
+def test_pick_image_model_falls_back_to_default_for_generic_prompt():
+    assert bot._pick_image_model("космическая станция на орбите Земли") == bot.DEFAULT_HF_IMAGE_MODEL
+    assert bot._pick_image_model("") == bot.DEFAULT_HF_IMAGE_MODEL
+
+
+def test_pick_image_model_style_keyword_wins_over_quick_keyword():
+    # Стилевой сигнал важнее просьбы "побыстрее", если оба есть в одном промпте —
+    # см. докстринг _pick_image_model про порядок проверок.
+    assert bot._pick_image_model("быстро нарисуй аниме-девушку") == "flux-anime"
+
+
+def test_imgmodel_command_and_callback_removed():
+    # Регрессия на сам факт удаления команды — не должно остаться ни обработчика,
+    # ни клавиатуры, ни каталога, которые её обслуживали.
+    assert not hasattr(bot, "cmd_imgmodel")
+    assert not hasattr(bot, "cb_imgmodel")
+    assert not hasattr(bot, "_imgmodel_keyboard")
+    assert not hasattr(bot, "_hf_model_catalog")
+
+
+def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
+    chat_id = 999430
+    captured_model = []
+
+    async def fake_hf_text_to_image(session, model_id, prompt):
+        captured_model.append(model_id)
+        return b"\x89PNG fake bytes"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    original_hf = bot._hf_text_to_image
+    original_bot_obj = bot.bot
+    bot._hf_text_to_image = fake_hf_text_to_image
+    bot.bot = _FakePhotoBot()
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй девушку в стиле аниме на пляже"))
+        assert captured_model == ["flux-anime"]
+        # get_state не должен был получить ключ image_model — авто-роутинг не
+        # завязан на состояние чата вообще.
+        assert "image_model" not in bot.get_state(chat_id)
+    finally:
+        bot._hf_text_to_image = original_hf
+        bot.bot = original_bot_obj
+        bot.chat_state.pop(chat_id, None)
+
 
 # ─────────────────── schema_version персистентного снимка чата (аудит техдолга) ───────────────────
 

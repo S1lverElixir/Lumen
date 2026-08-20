@@ -42,8 +42,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from lumen_images import DEFAULT_HF_IMAGE_MODEL
-
 log = logging.getLogger("bot")
 
 CHAT_STATE_SCHEMA_VERSION = 1
@@ -146,31 +144,21 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
     "openrouter_text_model"/"chat_provider" здесь БОЛЬШЕ НЕ хранятся — раньше это
     был явный выбор пользователя через /model и /provider, теперь провайдер и
     модель подбираются заново на каждое сообщение, хранить их per-chat незачем.
-    Старые персистентные записи, где эти поля ещё есть (созданные до этого
-    изменения), просто тихо игнорируются при чтении — см. _restore_single_chat в
+    "image_model" по той же причине убран отсюда 19 августа 2026 — генерация
+    изображений (см. README, "Автоматический выбор модели") тоже перешла на
+    подбор модели заново на каждый вызов (`_pick_image_model` в lumen_images.py)
+    вместо персистентного выбора через удалённую команду /imgmodel. Старые
+    персистентные записи, где эти поля ещё есть (созданные до соответствующих
+    изменений), просто тихо игнорируются при чтении — см. _restore_single_chat в
     bot.py, там нет ни одной попытки их прочитать."""
     return {
         "schema_version": CHAT_STATE_SCHEMA_VERSION,
-        "image_model": state.get("image_model", DEFAULT_HF_IMAGE_MODEL),
         "history": list(state.get("history", [])),
         "quota": state.get("quota", {}),
         "recent_media_ids": {
             uid: list(dq) for uid, dq in state.get("recent_media_ids", {}).items()
         },
     }
-
-
-def _normalize_legacy_image_model_id(image_model: Any) -> Any:
-    """Снимает старую приставку "pollinations:" с персистентного image_model, если
-    она там осталась от записи, сделанной до её удаления из HF_IMAGE_MODELS (см.
-    ponytail-audit) — единственный провайдер генерации изображений и так один,
-    приставка была лишней, но существующие персистентные записи чатов её ещё
-    содержат. Без этой миграции такой чат откатился бы на DEFAULT_HF_IMAGE_MODEL,
-    молча потеряв выбор пользователя (см. вызовы в _restore_single_chat/get_state
-    в bot.py)."""
-    if isinstance(image_model, str) and image_model.startswith("pollinations:"):
-        return image_model.split(":", 1)[1]
-    return image_model
 
 
 # ─────────────────── дата для сброса дневной квоты ───────────────────

@@ -19,16 +19,23 @@ HTTP-соединениями было бы речь не о разделени�
 Публичные имена и поведение не изменились относительно прежнего кода внутри bot.py — кроме
 добавленного параметра `session`, который раньше был получен неявно через `_get_http_session()`
 внутри самой `_pollinations_generate`.
+
+УБРАНО (аудит техдолга, 19 августа 2026): команда `/imgmodel` и ручной выбор модели через
+inline-клавиатуру — тот же класс изменения, что уже был сделан для текстового провайдера/
+модели (см. "Автоматический выбор модели" в README): пользователь никогда явно не выбирает
+модель, роутер выбирает сам на каждый запрос (`_pick_image_model` ниже). `_hf_model_catalog`/
+`_imgmodel_keyboard` были нужны ТОЛЬКО для этой клавиатуры — убраны вместе с ней как мёртвый
+код, а не оставлены "на будущее".
 """
 
 from __future__ import annotations
 
 import os
+import re
 import urllib.parse
 from typing import Any
 
 import aiohttp
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 DEFAULT_HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "flux").strip()
 
@@ -55,44 +62,49 @@ HF_IMAGE_MODELS: dict[str, dict[str, Any]] = {
     },
 }
 
+# ── Автоматический выбор модели генерации по содержимому промпта ──
+# Тот же принцип, что и у текстового роутера (_looks_like_heavy_query/
+# _looks_like_freshness_query в lumen_router_config.py): грубая эвристика по
+# ключевым словам без обращения к LLM — отдельный классифицирующий вызов модели
+# стоил бы дороже, чем просто попробовать разумный дефолт и дать сработать
+# существующей fallback-цепочке (см. inline_draw в bot.py) при неудаче/плохом
+# результате. Порядок проверки — от самых специфичных категорий к общей: аниме/
+# фэнтези/реализм/черновик — явные сигналы жанра, при их отсутствии остаётся
+# DEFAULT_HF_IMAGE_MODEL (универсальный FLUX Pro).
+_ANIME_RE = re.compile(r"аниме|манг[аи]|манхв\w*|вебтун\w*|чиби|ваифу|anime|manga|waifu|chibi", re.IGNORECASE)
+_FANTASY_RE = re.compile(
+    r"фэнтези|фентези|фентезийн\w*|концепт-?арт\w*|дракон\w*|эльф\w*|волшебн\w*|магическ\w*|"
+    r"орк\w*|фея|фей\b|замок\w*|рыцар\w*|fantasy|concept\s?art|dragon|wizard|elf|elves",
+    re.IGNORECASE,
+)
+_REALISM_RE = re.compile(
+    r"фотореалистичн\w*|гиперреалистичн\w*|реалистичн\w*|как\s+(на\s+)?фото|фотограф\w*|"
+    r"portrait|realistic|photorealistic|hyperrealistic",
+    re.IGNORECASE,
+)
+_QUICK_RE = re.compile(r"побыстрее|быстро|набросок|черновик|скетч|эскиз|draft|sketch|quick", re.IGNORECASE)
 
-def _hf_model_catalog() -> list[dict[str, Any]]:
-    """Список моделей генерации изображений для клавиатуры /imgmodel — прямо из
-    HF_IMAGE_MODELS (единственный источник правды, статический список).
 
-    НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: раньше здесь был отдельный `HF_IMAGE_MODEL_CACHE`
-    dict и `async def _hf_fetch_model_catalog()` — вестигиальные остатки более
-    раннего дизайна, когда каталог реально динамически подтягивался из HF API.
-    Тот динамический фетч убран (см. историю — он добавлял неизвестные модели в
-    меню), и функция давно не делает ни одного `await` внутри, а просто
-    пересобирает список из того же самого статического HF_IMAGE_MODELS — то есть
-    кэшировать было уже нечего: HF_IMAGE_MODELS и так уже лежит в памяти целиком,
-    а пересборка списка из 5 элементов не стоит отдельного кэш-слоя с ручной
-    инвалидацией на каждом сайте вызова. Убрано вместе с самим кэшем."""
-    return [{"id": mid, **meta} for mid, meta in HF_IMAGE_MODELS.items()]
-
-
-def _imgmodel_keyboard(current: str) -> InlineKeyboardMarkup:
-    """Клавиатура выбора модели генерации изображений, два столбца.
-
-    ПОНИЖЕНО (ponytail-audit): раньше здесь была постраничная навигация
-    (HF_IMAGE_MODEL_PAGE_SIZE=8, кнопки "< Назад"/"Дальше >") — при каталоге
-    из 5 моделей она всегда давала ровно одну страницу и ни разу не могла
-    сработать: nav-кнопки никогда не появлялись. Убрано вместе с параметром
-    `page`; если каталог когда-нибудь вырастет за пределы одного экрана —
-    пагинацию стоит вернуть тогда, а не держать её мёртвым кодом сейчас."""
-    all_models = _hf_model_catalog()
-    rows: list[list[InlineKeyboardButton]] = []
-    for i in range(0, len(all_models), 2):
-        row = [
-            InlineKeyboardButton(
-                text=f"{'• ' if item['id'] == current else ''}{item['name']}",
-                callback_data=f"imgmodel:set:{item['id']}",
-            )
-            for item in all_models[i:i + 2]
-        ]
-        rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def _pick_image_model(prompt: str) -> str:
+    """Заменяет ручной выбор через убранную команду /imgmodel — см. докстринг модуля
+    и README, раздел "Автоматический выбор модели". Проверки НЕ взаимоисключающие по
+    смыслу (промпт может упоминать и аниме, и дракона), поэтому порядок фиксирован:
+    аниме/манга — самый визуально узнаваемый и однозначный стиль, проверяется первым;
+    фэнтези/концепт-арт — вторая по специфичности категория; фотореализм — просьба
+    "как фото" достаточно однозначна сама по себе; черновик/скетч — про скорость, а
+    не стиль, поэтому последний перед дефолтом (стилевые сигналы важнее просьбы
+    "побыстрее", если оба есть в одном промпте)."""
+    if not prompt:
+        return DEFAULT_HF_IMAGE_MODEL
+    if _ANIME_RE.search(prompt):
+        return "flux-anime"
+    if _FANTASY_RE.search(prompt):
+        return "dreamshaper"
+    if _REALISM_RE.search(prompt):
+        return "flux-realism"
+    if _QUICK_RE.search(prompt):
+        return "turbo"
+    return DEFAULT_HF_IMAGE_MODEL
 
 
 async def _pollinations_generate(session: aiohttp.ClientSession, model_name: str, prompt: str) -> bytes:
