@@ -2874,6 +2874,22 @@ def _build_gemini_call_config(model_id: str, contents: list[types.Content]) -> t
                 pass  # SDK version doesn't support url_context
     if tools_list:
         kwargs["tools"] = tools_list
+    # Эффорт мышления (thinking_level/thinking_budget, google-genai) — низкий ТОЛЬКО
+    # для не-heavy запросов: калибровка 18 августа 2026 поймала gemini-3.7-flash на
+    # 17 таймаутах (22с) из 18 попыток за сессию — снижение эффорта на нетяжёлых
+    # запросах (в т.ч. когда Gemini — просто fallback после отказа OpenRouter) режет
+    # именно этот риск. Heavy-запросы намеренно НЕ трогаем: там таймаут и так более
+    # вероятен, а собственный (medium/dynamic) дефолт модели уже балансирует
+    # скорость/глубину лучше, чем наша угадайка. Gemini 3.x — thinking_level,
+    # Gemini 2.5.x — thinking_budget (в токенах, 0 = выкл); Gemma эффорта не имеет
+    # (no_system уже исключает её выше).
+    if not conf.get("no_system"):
+        last_text = next((p.text for p in reversed(contents[-1].parts) if getattr(p, "text", None)), "") if contents else ""
+        if not _looks_like_heavy_query(last_text):
+            if model_id.startswith("gemini-3"):
+                kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="low")
+            elif model_id.startswith("gemini-2.5"):
+                kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
     gconfig = types.GenerateContentConfig(**kwargs) if kwargs else None
 
     # Для моделей без system instruction (Gemma) инжектируем ключевые инструкции

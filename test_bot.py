@@ -2252,6 +2252,36 @@ def test_build_gemini_call_config_with_system_instruction_model_unaffected():
     assert "БЛАГОПОЛУЧИЕ И ЗДОРОВЬЕ ПОЛЬЗОВАТЕЛЯ" in gconfig.system_instruction
 
 
+# ─────────────── thinking_level/thinking_budget (калибровка 18 августа 2026) ───────────────
+# gemini-3.7-flash поймана на 17 таймаутах (22с) из 18 попыток за сессию — низкий
+# эффорт мышления на НЕ-heavy запросах снижает риск таймаута, не трогая heavy-запросы
+# (там таймаут и так вероятнее, а собственный дефолт модели уже балансирует лучше).
+
+def test_build_gemini_call_config_sets_low_thinking_level_for_gemini_3_on_light_query():
+    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет, как дела?")])]
+    _, gconfig = bot._build_gemini_call_config("gemini-3.7-flash", contents)
+    assert gconfig.thinking_config.thinking_level == bot.types.ThinkingLevel.LOW
+
+
+def test_build_gemini_call_config_sets_zero_thinking_budget_for_gemini_2_5_on_light_query():
+    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="столица франции?")])]
+    _, gconfig = bot._build_gemini_call_config("gemini-2.5-flash", contents)
+    assert gconfig.thinking_config.thinking_budget == 0
+
+
+def test_build_gemini_call_config_does_not_override_thinking_on_heavy_query():
+    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="напиши функцию для сортировки списка")])]
+    _, gconfig = bot._build_gemini_call_config("gemini-3.7-flash", contents)
+    assert gconfig.thinking_config is None
+
+
+def test_build_gemini_call_config_skips_thinking_override_for_gemma():
+    # Gemma не поддерживает thinking_config вообще — no_system уже исключает её.
+    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
+    _, gconfig = bot._build_gemini_call_config("gemma-4-26b-a4b-it", contents)
+    assert gconfig is None or gconfig.thinking_config is None
+
+
 # ─────────────────── дневной сброс счётчиков квоты (/stats не должен копить вечно) ───────────────────
 
 def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
