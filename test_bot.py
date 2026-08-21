@@ -2358,6 +2358,28 @@ def test_imgmodel_command_and_callback_removed():
     assert not hasattr(bot, "_hf_model_catalog")
 
 
+# ─────────────────── /start: не должен расходиться с реальным списком команд ───────────────────
+# Регрессия на класс бага, найденный при удалении /imgmodel (19 августа 2026):
+# команда убрана из BotCommand-списка в _webhook_startup, но /start какое-то
+# время всё ещё могла бы её упоминать — рассинхрон между "что реально работает"
+# и "что бот сам о себе рассказывает" был бы виден только при ручной проверке.
+
+def test_cmd_start_mentions_every_current_command_and_not_removed_ones():
+    captured = {}
+
+    class _FakeStartMessage:
+        async def reply(self, text, **kwargs):
+            captured["text"] = text
+            return SimpleNamespace()
+
+    asyncio.run(bot.cmd_start(_FakeStartMessage()))
+    text = captured["text"]
+    assert "/draw" in text
+    assert "/tts" in text
+    assert "/reset" in text
+    assert "/imgmodel" not in text
+
+
 def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
     chat_id = 999430
     captured_model = []
