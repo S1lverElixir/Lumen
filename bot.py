@@ -1878,6 +1878,13 @@ def _media_file_id_and_mime(source: Any) -> tuple[str, str, str]:
         if class_name == "PhotoSize":
             mime = "image/jpeg"
         elif class_name == "Sticker":
+            # Синтетическое значение для ВСЕХ стикеров (статичных webp, анимированных
+            # TGS/Lottie и видео-webm) — не настоящий Content-Type, а маркер категории
+            # "это стикер" для _mime_matches_media_category в _resolve_incoming_media.
+            # Различать три реальных формата здесь не нужно: ни один них downstream-код
+            # не декодирует как картинку напрямую (см. приоритеты медиа в
+            # _resolve_incoming_media — стикеры участвуют только в поиске по категории,
+            # не в реальной отправке байтов в Gemini/OpenRouter как "image/webp").
             mime = "image/webp"
         elif class_name == "Voice":
             mime = "audio/ogg"

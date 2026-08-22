@@ -2469,6 +2469,48 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_inline_draw_falls_back_when_auto_picked_model_fails():
+    # Закрывает пробел, найденный при код-ревью: _pick_image_model выбирает модель
+    # по содержимому промпта, но до сих пор не было теста на то, что именно ЭТА
+    # (авто-подобранная, не дефолтная) модель корректно участвует в существующей
+    # fallback-цепочке при сбое — а не только счастливый путь без единой ошибки.
+    chat_id = 999431
+    attempts = []
+
+    async def fake_hf_text_to_image(session, model_id, prompt):
+        attempts.append(model_id)
+        if model_id == "flux-anime":
+            raise RuntimeError("503 Service Unavailable")
+        return b"\x89PNG fallback bytes"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    captured_photo = {}
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            captured_photo.update(kwargs)
+            return SimpleNamespace()
+
+    original_hf = bot._hf_text_to_image
+    original_bot_obj = bot.bot
+    bot._hf_text_to_image = fake_hf_text_to_image
+    bot.bot = _FakePhotoBot()
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй девушку в стиле аниме на пляже"))
+        # Авто-подобранная модель (flux-anime) пробуется ПЕРВОЙ, несмотря на сбой.
+        assert attempts[0] == "flux-anime"
+        # Реально отправленное изображение — от следующей модели по порядку
+        # HF_IMAGE_MODELS, а не от auto-pick, провалившегося с ошибкой.
+        assert len(attempts) >= 2
+        assert captured_photo["photo"].data == b"\x89PNG fallback bytes"
+        assert "основная модель недоступна" in captured_photo["caption"]
+    finally:
+        bot._hf_text_to_image = original_hf
+        bot.bot = original_bot_obj
+        bot.chat_state.pop(chat_id, None)
+
+
 # ─────────────────── schema_version персистентного снимка чата (аудит техдолга) ───────────────────
 
 def test_serialize_chat_state_stamps_current_schema_version():
