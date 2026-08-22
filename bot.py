@@ -3610,17 +3610,71 @@ def _match_trigger_prefix(text_lower: str, prefixes: list[str]) -> str | None:
 # воспоминания о медиа, которых пользователь не имел в виду. Теперь — только явные
 # существительные-названия типа медиа; общие указательные местоимения и глаголы
 # намеренно убраны.
+#
+# РЕГРЕССИЯ #2 (найдена на реальном трафике, калибровка 18 августа 2026): "покажи
+# стикер" (стикер никогда не отправлялся) доставал из recent_media_ids последнее
+# медиа пользователя БЕЗ ПРОВЕРКИ ТИПА — и бот подробно описывал случайный
+# скриншот вместо честного "не нахожу стикер в истории". Регэксп теперь строится
+# из именованных групп (одна группа на категорию), чтобы дальше можно было
+# сначала понять, КАКОЙ тип медиа спросили, а не только сам факт "спросили про
+# медиа" — см. _media_reference_category/_mime_matches_media_category ниже.
 _MEDIA_REFERENCE_RE = re.compile(
-    r"\b(фото\w*|снимок\w*|изображени\w*|скрин\w*|скриншот\w*|картинк\w*|"
-    r"видео\w*|видос\w*|ролик\w*|клип\w*|gif\w*|гиф\w*|стикер\w*|"
-    r"аудио\w*|голосов\w*|войс\w*)\b",
+    r"\b(?:"
+    r"(?P<sticker>стикер\w*)|"
+    r"(?P<video>видео\w*|видос\w*|ролик\w*|клип\w*|gif\w*|гиф\w*)|"
+    r"(?P<audio>аудио\w*|голосов\w*|войс\w*)|"
+    r"(?P<photo>фото\w*|снимок\w*|изображени\w*|скрин\w*|скриншот\w*|картинк\w*)"
+    r")\b",
     re.IGNORECASE,
 )
+
+def _media_reference_category(text: str) -> str | None:
+    """Какой ТИП медиа упомянут в тексте ("фото"/"видео"/"аудио"/"стикер"), если
+    вообще упомянут — None, если явного упоминания нет (см. _MEDIA_REFERENCE_RE).
+    Используется в _resolve_incoming_media (приоритет №3), чтобы искать в
+    recent_media_ids медиа ИМЕННО запрошенного типа, а не слепо последний файл
+    независимо от того, что реально спросили."""
+    if not text:
+        return None
+    m = _MEDIA_REFERENCE_RE.search(text)
+    if not m:
+        return None
+    return next(name for name, val in m.groupdict().items() if val is not None)
 
 def _looks_like_media_reference(text: str) -> bool:
     """Требует явного упоминания конкретного типа медиа (фото/видео/аудио/стикер и
     т.п.) — иначе см. регрессию выше. Тестируется отдельно от _handle_message_core."""
-    return bool(text) and bool(_MEDIA_REFERENCE_RE.search(text))
+    return _media_reference_category(text) is not None
+
+def _mime_matches_media_category(mime: str, category: str) -> bool:
+    """Проверяет, соответствует ли сохранённый mime запрошенной категории медиа.
+    "sticker" — ИСКЛЮЧИТЕЛЬНО image/webp: Telegram-стикеры (не анимированные)
+    всегда приходят в этом формате, а обычное фото Telegram всегда пережимает в
+    JPEG — этого одного признака достаточно, чтобы надёжно отличить стикер от
+    фото без обращения к самому объекту Sticker (который к этому моменту уже не
+    хранится, в recent_media_ids лежит только (file_id, mime))."""
+    low = (mime or "").lower()
+    if category == "sticker":
+        return low == "image/webp"
+    if category == "photo":
+        return low.startswith("image/") and low != "image/webp"
+    if category in ("video", "audio"):
+        return low.startswith(f"{category}/")
+    return False
+
+def _find_recent_media_by_category(bucket: Any, category: str) -> tuple[str, str] | None:
+    """Ищет в бакете недавних медиа (см. recent_media_ids) последний элемент,
+    ТИП которого совпадает с запрошенной категорией — идя от новых к старым, а
+    не просто беря последний элемент бакета вслепую (см. регрессию выше:
+    "покажи стикер" при бакете [фото, ...] не должен находить фото). Если в
+    бакете нет ни одного элемента подходящего типа — честно None, а не
+    ближайший неподходящий по типу элемент."""
+    if not bucket:
+        return None
+    for fid, mime in reversed(bucket):
+        if _mime_matches_media_category(mime, category):
+            return fid, mime
+    return None
 
 # Защита от промт-инъекций (входной префильтр) вынесена в lumen_security.py вместе
 # с защитой от утечки идентичности (см. импорт рядом с _detect_identity_leak выше) —
@@ -3646,14 +3700,14 @@ async def cmd_start(message: Message) -> None:
     await _tg_call(
         message.reply,
         "<b>Lumen</b>\n\n"
-        "Я отвечаю на вопросы (с поиском в интернете, когда это нужно), читаю сайты и YouTube-видео по ссылке, разбираю фото, видео, аудио и документы, рисую изображения по описанию и озвучиваю текст.\n\n"
+        "Отвечаю на вопросы (с поиском в интернете, когда это нужно), читаю сайты и YouTube-видео по ссылке, разбираю фото, видео, аудио и документы, рисую изображения по описанию и озвучиваю текст.\n\n"
         "<b>Команды</b>\n"
         "/draw [описание] — нарисовать изображение\n"
         "/tts [текст] — озвучить текст\n"
         "/reset — очистить историю диалога\n\n"
         "Рисовать и озвучивать можно и просто словами, без команд — например «нарисуй кота» или «озвучь это».\n\n"
         "<b>TikTok</b>\n"
-        "Просто пришлите ссылку — скачаю видео или фото без водяных знаков.\n\n"
+        "Пришлите ссылку — скачаю видео или фото без водяных знаков.\n\n"
         "Спрашивайте что угодно — я слушаю.",
         parse_mode=ParseMode.HTML,
     )
@@ -4317,21 +4371,27 @@ async def _resolve_incoming_media(
     # Приоритет №3: словесная отсылка к "тому самому" файлу без реплая.
     # Ищем СНАЧАЛА среди недавних медиа именно этого пользователя (не всего чата —
     # в группе разные люди шлют разные файлы, и общий "последний в чате" элемент
-    # почти всегда окажется чужим и не тем, о чём спрашивают).
+    # почти всегда окажется чужим и не тем, о чём спрашивают). НАЙДЕНО ПРИ КАЛИБРОВКЕ
+    # (18 августа 2026): раньше здесь брался last элемент БЕЗ проверки типа — "покажи
+    # стикер", когда стикер не отправлялся вообще, доставал последнее фото/скриншот
+    # и подробно ЕГО описывал. Теперь ищем именно элемент запрошенной категории
+    # (см. _find_recent_media_by_category) — если такого нет, честно None, а не
+    # ближайший неподходящий по типу файл.
     if media_tuple is None and state.get("recent_media_ids"):
-        should_fetch = _looks_like_media_reference(clean_prompt)
-        if should_fetch:
+        category = _media_reference_category(clean_prompt)
+        if category:
             buckets: dict[str, Any] = state["recent_media_ids"]
             own_bucket = buckets.get(str(asking_user_id)) if asking_user_id is not None else None
             fid_mime = None
             if own_bucket:
-                fid_mime = own_bucket[-1]
+                fid_mime = _find_recent_media_by_category(own_bucket, category)
             elif is_private:
                 # В личке с ботом собеседник ровно один — не так критично,
-                # можно взять последний известный файл из чата вообще.
+                # можно поискать по всем известным бакетам чата вообще.
                 for bucket in buckets.values():
-                    if bucket:
-                        fid_mime = bucket[-1]
+                    fid_mime = _find_recent_media_by_category(bucket, category)
+                    if fid_mime:
+                        break
             if fid_mime:
                 fid, mime = fid_mime
                 fetched = await _fetch_media(fid, mime)
@@ -4583,9 +4643,9 @@ async def _webhook_startup() -> None:
 
     commands = [
         BotCommand(command="start", description="О боте и список команд"),
+        BotCommand(command="reset", description="Очистить историю диалога"),
         BotCommand(command="draw", description="Нарисовать изображение по описанию"),
         BotCommand(command="tts", description="Озвучить текст"),
-        BotCommand(command="reset", description="Очистить историю диалога"),
     ]
 
     async def try_setup():

@@ -1109,6 +1109,64 @@ def test_looks_like_media_reference_no_false_positive_on_common_words():
     assert bot._looks_like_media_reference("до этого мы говорили про политику") is False
 
 
+# ─────────────── _media_reference_category / _mime_matches_media_category (тип медиа) ───────────────
+# КАЛИБРОВКА 18 августа 2026, реальный найденный баг: "Покажи стикер" (стикер не
+# отправлялся, но недавно был скриншот) заставляло бота описывать скриншот как
+# будто это и есть запрошенный стикер — приоритет №3 брал просто последнее медиа
+# пользователя без проверки типа. Тесты ниже проверяют категоризацию отдельно от
+# полного _resolve_incoming_media (тот протестирован ниже, в его собственной секции).
+
+def test_media_reference_category_detects_each_type():
+    assert bot._media_reference_category("покажи стикер") == "sticker"
+    assert bot._media_reference_category("что на видео") == "video"
+    assert bot._media_reference_category("расскажи про тот гиф") == "video"
+    assert bot._media_reference_category("что было в голосовом") == "audio"
+    assert bot._media_reference_category("что на фото") == "photo"
+    assert bot._media_reference_category("опиши тот скриншот") == "photo"
+
+
+def test_media_reference_category_none_when_no_media_word():
+    assert bot._media_reference_category("расскажи про эту компанию") is None
+    assert bot._media_reference_category("") is None
+
+
+def test_mime_matches_media_category_sticker_is_exclusively_webp():
+    assert bot._mime_matches_media_category("image/webp", "sticker") is True
+    # Обычное фото Telegram всегда пережимает в JPEG — не webp, поэтому "image/webp"
+    # надёжно отличает стикер от фото без обращения к самому объекту Sticker.
+    assert bot._mime_matches_media_category("image/jpeg", "sticker") is False
+
+
+def test_mime_matches_media_category_photo_excludes_webp():
+    assert bot._mime_matches_media_category("image/jpeg", "photo") is True
+    assert bot._mime_matches_media_category("image/png", "photo") is True
+    assert bot._mime_matches_media_category("image/webp", "photo") is False
+
+
+def test_mime_matches_media_category_video_and_audio_by_prefix():
+    assert bot._mime_matches_media_category("video/mp4", "video") is True
+    assert bot._mime_matches_media_category("audio/ogg", "audio") is True
+    assert bot._mime_matches_media_category("video/mp4", "audio") is False
+
+
+def test_find_recent_media_by_category_skips_type_mismatch():
+    # Реальный сценарий бага: бакет содержит фото (новее) и стикер (старше) —
+    # запрос "стикер" обязан найти именно стикер, а не просто последний элемент.
+    bucket = [("sticker_id", "image/webp"), ("photo_id", "image/jpeg")]
+    assert bot._find_recent_media_by_category(bucket, "sticker") == ("sticker_id", "image/webp")
+    assert bot._find_recent_media_by_category(bucket, "photo") == ("photo_id", "image/jpeg")
+
+
+def test_find_recent_media_by_category_none_when_no_type_match():
+    bucket = [("photo_id", "image/jpeg")]
+    assert bot._find_recent_media_by_category(bucket, "sticker") is None
+
+
+def test_find_recent_media_by_category_none_for_empty_bucket():
+    assert bot._find_recent_media_by_category([], "photo") is None
+    assert bot._find_recent_media_by_category(None, "photo") is None
+
+
 # ─────────────────────────── ask_gemini (с мокнутым client, без реального API) ───────────────────────────
 
 class _FakeCandidate:
@@ -2871,6 +2929,71 @@ def test_resolve_incoming_media_priority_3_only_with_explicit_media_reference_wo
             )
             assert media_tuple is None
             assert called == []
+        finally:
+            bot._fetch_media = original_fetch
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+# ─────────── приоритет №3 учитывает ТИП запрошенного медиа (регрессия, 18 августа 2026) ───────────
+# Реальный найденный баг: "Покажи стикер", когда стикер никогда не отправлялся, но
+# недавно был отправлен скриншот — бот описывал скриншот как будто это и есть
+# запрошенный стикер. Тесты ниже проверяют исправление на уровне полного
+# _resolve_incoming_media (не только изолированных _media_reference_category/
+# _find_recent_media_by_category выше).
+
+def test_resolve_incoming_media_sticker_request_ignores_unrelated_recent_photo():
+    chat_id = 999954
+    state = bot.get_state(chat_id)
+    # Только фото в истории, стикера не было вообще — точно как в реальном инциденте.
+    state["recent_media_ids"] = {"555": [("photo_id", "image/jpeg")]}
+    try:
+        msg = _FakeIncomingMessage(chat_id)
+        msg.from_user = SimpleNamespace(id=555)
+        msg.reply_to_message = None
+
+        called = []
+
+        async def fake_fetch_media(file_id, mime):
+            called.append(file_id)
+            return (b"bytes", mime)
+
+        original_fetch = bot._fetch_media
+        bot._fetch_media = fake_fetch_media
+        try:
+            _, _, _, media_tuple = asyncio.run(
+                bot._resolve_incoming_media(msg, state, "покажи стикер", is_private=True)
+            )
+            # Честное "не нахожу" — а не описание случайного фото под видом стикера.
+            assert media_tuple is None
+            assert called == []
+        finally:
+            bot._fetch_media = original_fetch
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_resolve_incoming_media_sticker_request_finds_older_sticker_past_newer_photo():
+    chat_id = 999955
+    state = bot.get_state(chat_id)
+    # Стикер был отправлен РАНЬШЕ фото — наивное "просто последний элемент" взяло
+    # бы фото; правильное поведение — найти именно стикер, невзирая на порядок.
+    state["recent_media_ids"] = {"555": [("sticker_id", "image/webp"), ("photo_id", "image/jpeg")]}
+    try:
+        msg = _FakeIncomingMessage(chat_id)
+        msg.from_user = SimpleNamespace(id=555)
+        msg.reply_to_message = None
+
+        async def fake_fetch_media(file_id, mime):
+            return (b"bytes-for-" + file_id.encode(), mime)
+
+        original_fetch = bot._fetch_media
+        bot._fetch_media = fake_fetch_media
+        try:
+            _, _, _, media_tuple = asyncio.run(
+                bot._resolve_incoming_media(msg, state, "покажи стикер", is_private=True)
+            )
+            assert media_tuple == (b"bytes-for-sticker_id", "image/webp")
         finally:
             bot._fetch_media = original_fetch
     finally:
