@@ -162,30 +162,35 @@ def test_new_gemini_models_present_and_prioritized():
     assert lumen_router_config.GEMINI_SEARCH_CHAIN[0] == "gemini-2.5-flash"
 
 
-def test_gemini_3_flash_preview_retired_and_removed():
-    # РЕГРЕССИЯ (аудит моделей, 17 августа 2026, ПЕРЕПРОВЕРЕНО 22 августа 2026 по
-    # прямому запросу владельца вернуть модель — см. историю правок): владелец
-    # прислал скриншот дашборда AI Studio с нулевой (0/5, 0/250K, 0/20) строкой
-    # "Gemini 3 Flash" как аргумент "она всё ещё в списках и отлично работает".
-    # Перепроверено веб-поиском по независимым источникам ПОСЛЕ первого удаления:
-    # docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-flash
-    # прямым текстом "gemini-3-flash-preview is deprecated. Migrate... to newer
-    # Flash models, such as gemini-3.5-flash", и НЕЗАВИСИМО github.blog/changelog/
-    # 2026-07-31 — "Gemini 3 Flash" в числе моделей, отключённых GitHub Copilot
-    # 31 июля 2026. Официальная страница моделей (ai.google.dev/gemini-api/docs/
-    # models) в текущей линейке Flash называет только 3.1/3.5/3.6/3.7 — отдельной
-    # GA-модели без суффикса "-preview" не существует. Нулевая квота в дашборде —
-    # не доказательство рабочего вызова (0 использований, а не 0 из-за успеха) —
-    # НЕ восстановлена. Этот вызов этого ID API гарантированно вернёт ошибку.
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_MODELS
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_HEAVY_CHAIN
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_SEARCH_CHAIN
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_LINK_CHAIN
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_LINK_SEARCH_CHAIN
-    # Также без суффикса "-preview" — независимая GA-модель "gemini-3-flash" по
-    # действующей официальной линейке (3.1/3.5/3.6/3.7) тоже не существует, не
-    # выдумываем и её.
-    assert "gemini-3-flash" not in lumen_router_config.GEMINI_MODELS
+def test_gemini_3_flash_preview_restored_after_official_docs_confirmation():
+    # ИСТОРИЯ: удалена 17.08.2026 (ошибочный вывод — источники были Vertex AI
+    # Enterprise Agent Platform и сторонний GitHub Copilot changelog, ни один не
+    # офиц. страница модели самого Gemini API). ВОССТАНОВЛЕНА 22.08.2026: владелец
+    # прислал скриншот ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview —
+    # "Last updated 2026-08-18 UTC", живая таблица возможностей, Model code
+    # gemini-3-flash-preview. Первоисточник перевешивает прежний (неверный) вывод.
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_MODELS
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_HEAVY_CHAIN
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_SEARCH_CHAIN
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_LINK_CHAIN
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_LINK_SEARCH_CHAIN
+    # Позиция — после 3.5 Flash по номеру версии (3, 3.1, 3.5, 3.6, 3.7), перед
+    # lite-вариантами.
+    chain = lumen_router_config.GEMINI_HEAVY_CHAIN
+    assert chain.index("gemini-3.5-flash") < chain.index("gemini-3-flash-preview") < chain.index("gemini-3.5-flash-lite")
+
+
+def test_gemini_3_flash_preview_quota_config_matches_dashboard():
+    # Страница модели говорит "Search grounding: Supported"/"Grounding with Google
+    # Maps: Supported" — модель технически умеет. Но реальная бесплатная КВОТА на
+    # оба (что и кодируют эти два флага) по дашборду AI Studio — 0/0, тот же паттерн,
+    # что и у всей остальной линейки 3.x (см. заметку про бакеты в начале GEMINI_MODELS).
+    conf = lumen_router_config.GEMINI_MODELS["gemini-3-flash-preview"]
+    assert conf.get("search_grounding") is False
+    assert conf.get("map_grounding") is False
+    assert conf.get("url_context") is True
+    assert conf.get("stream") is True
+    assert not conf.get("no_system")
 
 
 def test_gemini_3_7_flash_config_matches_3_6_flash_pattern():

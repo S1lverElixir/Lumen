@@ -80,30 +80,30 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "stream": True,
         "search_grounding": False, "map_grounding": False, "url_context": True,
     },
-    # УБРАНО (аудит моделей, 17 августа 2026): "gemini-3-flash-preview" был здесь
-    # резервом после 3.5 Flash — подтверждено по официальной документации Google
-    # (ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.5:
-    # "Update model name: gemini-3-flash-preview → gemini-3.5-flash") и
-    # независимо по дате ретирки (retired 15 июля 2026, см. карточку модели на
-    # ollama.com/library/gemini-3-flash-preview) — идентификатор больше не
-    # обслуживается API, вызов гарантированно вернёт ошибку "модель не найдена".
-    # Официальная замена (gemini-3.5-flash) уже есть в цепочке строкой выше —
-    # отдельного резерва вместо убранной модели не требуется.
-    # ПЕРЕПРОВЕРЕНО (22 августа 2026, владелец попросил вернуть — см. историю
-    # правок): НЕ восстановлено. Independently подтверждено сразу двумя источниками
-    # уже ПОСЛЕ первого удаления — docs.cloud.google.com/gemini-enterprise-agent-
-    # platform/models/gemini/3-flash прямым текстом: "gemini-3-flash-preview is
-    # deprecated. Migrate any workflows to newer Flash models, such as
-    # gemini-3.5-flash", и независимо github.blog/changelog/2026-07-31 (GitHub
-    # Copilot) — "Gemini 3 Flash" в числе моделей, отключённых 31 июля 2026 во
-    # всех Copilot-поверхностях. Официальная страница моделей Gemini API (см.
-    # ai.google.dev/gemini-api/docs/models, состояние на 22 августа 2026) в
-    # перечне текущей линейки Flash называет только 3.1/3.5/3.6/3.7 — отдельной
-    # GA-модели "gemini-3-flash" без суффикса "-preview" не существует. Нулевые
-    # RPM/TPM/RPD в дашборде AI Studio (0/5, 0/250K, 0/20 — идентично профилю
-    # 3.5/3.6/3.7 Flash) сами по себе НЕ доказывают, что вызов реально проходит —
-    # это просто неиспользованная квота показанного (возможно, устаревшего)
-    # ряда дашборда, а не подтверждённый успешный ответ API.
+    # УБРАНО (17 августа 2026), ВОССТАНОВЛЕНО (22 августа 2026) — см. ниже.
+    # ВОССТАНОВЛЕНО: владелец прислал прямой скриншот официальной страницы модели
+    # ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview — "Last updated
+    # 2026-08-18 UTC" (4 дня назад от сегодня), с полной живой таблицей возможностей
+    # (Model code: gemini-3-flash-preview, вход Text/Image/Video/Audio/PDF, 1,048,576
+    # вход/65,536 выход токенов, Search grounding/Grounding with Google Maps/URL
+    # context — все "Supported"). Это прямой первоисточник от самого Google,
+    # актуальный на 4 дня назад — перевешивает более ранний вывод (17 августа) о
+    # ретирке, который опирался на страницу Vertex AI Enterprise Agent Platform
+    # (другой продукт, не сам Gemini API) и сторонний changelog GitHub Copilot —
+    # ни один из них не есть офиц. страница модели самого Gemini API. Ошибочно
+    # интерпретированный вывод 17 августа отменён.
+    # search_grounding/map_grounding здесь всё равно False — страница модели говорит
+    # "Supported" (модель технически умеет), но реальная бесплатная КВОТА на эти
+    # инструменты (что и определяют эти два флага, см. заметку про бакеты выше) по
+    # дашборду AI Studio — 0/0 что для "Gemini 3 Flash" (RPM/TPM/RPD 0/5, 0/250K,
+    # 0/20 — тот же профиль, что у остальной линейки 3.x), что для общего бакета
+    # поиска "Gemini 3" — тот же паттерн "0 квоты", что уже задокументирован для
+    # всей линейки 3.x в заметке про бакеты в начале этого словаря.
+    "gemini-3-flash-preview": {
+        "stream": True,
+        "search_grounding": False, "map_grounding": False, "url_context": True,
+    },
+
     # Gemini 3.5 Flash-Lite — новая версия самой быстрой и экономичной модели,
     # вышла 21 июля 2026 вместе с 3.6 Flash; превосходит 3.1 Flash-Lite в агентных
     # задачах и длинном контексте, до 350 токенов/сек.
@@ -430,7 +430,12 @@ def _check_scheduled_removals_due() -> None:
     (_SCHEDULED_OR_REMOVALS) уже наступила — сигнал перепроверить логи и, если
     модель реально начала отдавать 404/'no endpoints', завести ей запись в
     _OR_MODEL_HEALTH (см. докстринг реестра выше). Само по себе наступление даты
-    ничего не исключает из роутинга — только напоминает проверить."""
+    ничего не исключает из роутинга — только напоминает проверить.
+
+    Сравнение ">=", а не ">" (в отличие от _check_temporary_free_models_expiry
+    выше) — намеренно: там дата — уже прошедший факт истечения промо, здесь дата —
+    анонс "уйдёт В этот день", и предупреждение должно сработать СРАЗУ в день
+    анонса, а не только на следующий."""
     today = date.today()
     for model_id, removal_date in _SCHEDULED_OR_REMOVALS.items():
         if today >= removal_date and model_id not in _ROUTER_EXCLUDED_OR_MODELS:
@@ -547,6 +552,7 @@ GEMINI_HEAVY_CHAIN: list[str] = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
+    "gemini-3-flash-preview",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
@@ -567,6 +573,7 @@ GEMINI_SEARCH_CHAIN: list[str] = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
+    "gemini-3-flash-preview",
 ]
 # Совпадает по составу с прежним quota_fallback_chain — используется как дефолт,
 # если ask_gemini вызвана без явной цепочки (например, напрямую из теста).
