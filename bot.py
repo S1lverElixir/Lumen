@@ -299,9 +299,7 @@ async def _close_sessions() -> None:
     if bot is not None and hasattr(bot, "session") and bot.session:
         await bot.session.close()
 
-from lumen_formatting import _scrub_latex, _normalize_bullet_markers, _md_to_html
-
-__all__ = ["_scrub_latex", "_normalize_bullet_markers"]
+from lumen_formatting import _md_to_html
 
 _PRUNE_SENTINEL = object()
 
@@ -589,30 +587,19 @@ from lumen_router_config import (
     GEMINI_MODELS,
     DEFAULT_GEMINI_MODEL,
     _check_unconfirmed_model_quotas,
-    _OR_MODEL_HEALTH,
-    _ROUTER_EXCLUDED_OR_MODELS,
     _check_temporary_free_models_expiry,
     _check_scheduled_removals_due,
-    _or_route,
     _OR_LIGHT_ORDER,
     _OR_HEAVY_ORDER,
     _OR_VISION_ORDER,
-    GEMINI_HEAVY_CHAIN,
-    GEMINI_SEARCH_CHAIN,
     GEMINI_DEFAULT_CHAIN,
     GEMINI_TTS_MODELS,
     FISH_AUDIO_TTS_MODEL,
-    FISH_AUDIO_FREE_TIER_EXPIRY,
     _check_fish_audio_tts_expiry,
     _looks_like_heavy_query,
     _looks_like_freshness_query,
     _build_route,
-    TEXT_MODEL_ORDER,
-    _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION,
 )
-
-__all__ += ["_OR_MODEL_HEALTH", "_ROUTER_EXCLUDED_OR_MODELS", "_or_route", "GEMINI_HEAVY_CHAIN", "GEMINI_SEARCH_CHAIN"]
-__all__ += ["TEXT_MODEL_ORDER", "_KNOWN_MODEL_IDS_FOR_LEAK_DETECTION", "FISH_AUDIO_FREE_TIER_EXPIRY"]
 
 
 def get_system_prompt(model_id: str | None = None) -> str:
@@ -800,7 +787,7 @@ def _storage_config() -> StorageConfig:
         upstash_token=UPSTASH_REDIS_REST_TOKEN, chats_dir=_CHATS_DIR,
     )
 
-__all__ += ["_urllib_request", "CHAT_STATE_SCHEMA_VERSION"]
+__all__ = ["_urllib_request", "CHAT_STATE_SCHEMA_VERSION"]
 
 def _upstash_request(command_path: str, *, method: str = "GET", body: bytes | None = None) -> Any:
     return _lumen_upstash_request(UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, command_path, method=method, body=body)
@@ -1387,7 +1374,6 @@ def _record_quota_usage(provider: str, model_id: str) -> None:
     mark_quota_dirty()
 
 from lumen_security import (
-    _LEAK_SCAN_TAIL_CHARS,
     _leak_scan_window,
     _IDENTITY_LEAK_FALLBACK,
     _INJECTED_PAYLOAD_ECHO_FALLBACK,
@@ -1397,8 +1383,6 @@ from lumen_security import (
     _INJECTION_PROBE_REPLY,
     _looks_like_injection_probe,
 )
-
-__all__ += ["_LEAK_SCAN_TAIL_CHARS"]
 
 
 class OpenRouterAPIError(RuntimeError):
