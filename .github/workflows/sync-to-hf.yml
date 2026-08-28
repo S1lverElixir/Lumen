@@ -1,15 +1,26 @@
 name: Sync to HF Space
 
+# ГЕЙТ НА CI (аудит техдолга, 26 августа 2026): раньше триггерился на push: [main]
+# НЕЗАВИСИМО от ci.yml — оба воркфлоу стартовали параллельно на один и тот же пуш,
+# и красный pytest/pyflakes/pip-audit никак не мешал задеплоить код на прод HF Space.
+# Теперь ждём завершения воркфлоу "CI" и деплоим, только если он реально прошёл.
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
 
 jobs:
   sync:
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
+          # Явно берём тот коммит, что проверялся CI (workflow_run сам по себе
+          # не чекаутит его) — иначе можно было бы задеплоить более поздний,
+          # ещё не проверенный коммит с той же ветки.
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - name: Push to Hugging Face Space
