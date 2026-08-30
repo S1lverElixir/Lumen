@@ -2469,6 +2469,38 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
+    # Регрессия на находку код-ревью (28 августа 2026): раньше у /draw не было
+    # общего бюджета времени на всю фолбэк-цепочку — при недоступности сервиса
+    # генерации бот перебирал бы все 5 моделей HF_IMAGE_MODELS, тратя реальное
+    # время пользователя без единого предупреждения. Патчим DRAW_TOTAL_BUDGET_SEC
+    # на крошечное значение и делаем первую попытку заведомо дольше него —
+    # вторая попытка не должна была вообще начаться.
+    chat_id = 999432
+    attempts = []
+
+    async def fake_hf_text_to_image(session, model_id, prompt):
+        attempts.append(model_id)
+        await asyncio.sleep(0.05)  # дольше урезанного DRAW_TOTAL_BUDGET_SEC ниже
+        raise RuntimeError("503 Service Unavailable")
+
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+
+    original_hf = bot._hf_text_to_image
+    original_budget = bot.DRAW_TOTAL_BUDGET_SEC
+    bot._hf_text_to_image = fake_hf_text_to_image
+    bot.DRAW_TOTAL_BUDGET_SEC = 0.01
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        # Ровно ОДНА попытка — бюджет исчерпался до второй, а не перебор всех 5 моделей.
+        assert len(attempts) == 1
+        assert "времени" in incoming.sent[0].edits[-1][0].lower()
+    finally:
+        bot._hf_text_to_image = original_hf
+        bot.DRAW_TOTAL_BUDGET_SEC = original_budget
+
+
 def test_inline_draw_falls_back_when_auto_picked_model_fails():
     # Закрывает пробел, найденный при код-ревью: _pick_image_model выбирает модель
     # по содержимому промпта, но до сих пор не было теста на то, что именно ЭТА
@@ -3566,6 +3598,75 @@ def test_handle_tiktok_single_video_happy_path():
         bot._download_url_bin = original_download
         bot._probe_video_dimensions = original_probe
         bot._generate_video_thumbnail = original_thumb
+        bot.bot = original_bot
+
+
+def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
+    # Регрессия на находку код-ревью (28 августа 2026): пробинг видео-слайдов
+    # слайдшоу (реальные ffprobe/ffmpeg-подпроцессы на каждый) раньше не имел
+    # ограничения конкурентности — слайдшоу с несколькими видео-слайдами могло бы
+    # дать неконтролируемый всплеск подпроцессов на контейнере с ограниченными
+    # ресурсами. Больше video-слайдов, чем TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY —
+    # проверяем, что реально одновременно работающих проб никогда не больше лимита.
+    n_video_slides = bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY + 3
+    video_bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"  # проходит _looks_like_video_bytes
+    tikwm_json = {
+        "code": 0,
+        "data": {
+            "images": [f"https://tikwm.com/slide{i}.jpg" for i in range(n_video_slides)],
+            "author": {"nickname": "TestAuthor"},
+        },
+    }
+
+    incoming = _FakeIncomingMessage(999433)
+    incoming.message_id = 1
+    fake_bot = _FakeTikTokBot()
+
+    current_concurrent = 0
+    max_concurrent_seen = 0
+    lock = asyncio.Lock()
+
+    async def fake_get_http_session():
+        return _FakeTikTokSession(tikwm_json)
+
+    async def fake_resolve(session, url):
+        return url
+
+    async def fake_download_url_bin(session, url, headers=None):
+        return video_bytes
+
+    async def fake_probe_and_thumbnail(item_bytes):
+        nonlocal current_concurrent, max_concurrent_seen
+        async with lock:
+            current_concurrent += 1
+            max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
+        await asyncio.sleep(0.05)  # достаточно, чтобы вызовы реально пересеклись во времени
+        async with lock:
+            current_concurrent -= 1
+        return 0, 0, 0, None
+
+    original_get_session = bot._get_http_session
+    original_resolve = bot._resolve_tiktok_short
+    original_download = bot._download_url_bin
+    original_probe_and_thumb = bot._probe_and_thumbnail_from_bytes
+    original_bot = bot.bot
+
+    bot._get_http_session = fake_get_http_session
+    bot._resolve_tiktok_short = fake_resolve
+    bot._download_url_bin = fake_download_url_bin
+    bot._probe_and_thumbnail_from_bytes = fake_probe_and_thumbnail
+    bot.bot = fake_bot
+    try:
+        asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/456"))
+        assert max_concurrent_seen <= bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY
+        # Реально были параллельны хотя бы несколько — не выродилось в строго
+        # последовательный перебор без всякой пользы от asyncio.gather.
+        assert max_concurrent_seen > 1
+    finally:
+        bot._get_http_session = original_get_session
+        bot._resolve_tiktok_short = original_resolve
+        bot._download_url_bin = original_download
+        bot._probe_and_thumbnail_from_bytes = original_probe_and_thumb
         bot.bot = original_bot
 
 

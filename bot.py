@@ -362,6 +362,17 @@ ROUTE_MODEL_TIMEOUT_SEC = float(os.getenv("ROUTE_MODEL_TIMEOUT_SEC", "22"))
 # попытки прекращаются и пользователь получает честное "сейчас всё перегружено"
 # вместо тихого зависания.
 ROUTE_TOTAL_BUDGET_SEC = float(os.getenv("ROUTE_TOTAL_BUDGET_SEC", "40"))
+# DRAW_TOTAL_BUDGET_SEC — тот же принцип, что и ROUTE_TOTAL_BUDGET_SEC выше, но для
+# фолбэк-цепочки генерации изображений (см. inline_draw). НАЙДЕНО ПРИ КОД-РЕВЬЮ
+# (28 августа 2026): в отличие от текстового роутинга, у /draw не было ВООБЩЕ
+# никакого общего бюджета времени — каждый вызов _hf_text_to_image ждёт до 90с
+# (см. aiohttp.ClientTimeout в _pollinations_generate, lumen_images.py), а моделей
+# в HF_IMAGE_MODELS пять. Если Pollinations.ai лежит целиком, пользователь мог
+# ждать до ~7.5 минут, прежде чем увидеть любую ошибку — статусное сообщение
+# "Генерирую изображение" всё это время просто висело. 120с — достаточно на одну
+# полную попытку (90с) плюс запас на вторую, но ограничивает худший случай вдвое
+# от одного медленного таймаута, а не в разы от их числа.
+DRAW_TOTAL_BUDGET_SEC = float(os.getenv("DRAW_TOTAL_BUDGET_SEC", "120"))
 TG_MAX_LEN = 4096
 # Telegram Bot API ограничивает загрузку файлов, отправляемых ботом (upload, а не
 # по file_id/URL), 50 МБ — используется в _tiktok_video_candidates/handle_tiktok
@@ -376,6 +387,16 @@ TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 # последовательными вызовами sendMediaGroup — см. handle_tiktok.
 TIKTOK_SLIDESHOW_MAX_ITEMS = 35
 TELEGRAM_MEDIA_GROUP_CHUNK = 10
+# TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY — НАЙДЕНО ПРИ КОД-РЕВЬЮ (28 августа 2026):
+# в отличие от скачивания слайдов (см. комментарий у asyncio.gather в handle_tiktok —
+# то уже покрыто connector limit=40 в _get_http_session), пробинг видео-слайдов
+# запускает НАСТОЯЩИЕ os-подпроцессы (ffprobe + ffmpeg на каждый видео-слайд) без
+# единого ограничения — слайдшоу с несколькими видео-слайдами могло бы дать
+# заметный всплеск CPU-нагрузки одновременно на контейнере HF Spaces с
+# ограниченными ресурсами. Лимит небольшой (не 35, как для сетевых скачиваний) —
+# это реальные CPU-тяжёлые процессы, а не ожидание сетевого I/O.
+TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = int(os.getenv("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", "4"))
+_tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
 
 MAX_CHAT_LIMIT = 5000
 PRUNED_CHAT_TARGET = 4500
@@ -896,6 +917,16 @@ from lumen_router_config import (
 
 
 def get_system_prompt(model_id: str | None = None) -> str:
+    # НАЙДЕНО ПРИ КОД-РЕВЬЮ (28 августа 2026): `model_id` нигде в теле функции не
+    # читается — все вызывающие места (ask_gemini, _build_gemini_call_config,
+    # ask_openrouter_text/multimodal) получают ОДНУ И ТУ ЖЕ строку независимо от
+    # переданной модели, и это осознанно (см. комментарий у _build_gemini_call_config
+    # про единый источник правды для system_instruction и фейкового identity-обмена
+    # Gemma — расхождение промпта между моделями было бы источником трудноуловимых
+    # багов). Параметр оставлен в сигнатуре как заранее готовая точка расширения на
+    # случай, если когда-нибудь понадобится реальная per-model кастомизация — но
+    # прямо сейчас это не мёртвый код по ошибке, а сознательное решение "одна и та
+    # же строка для всех".
     now_str = datetime.now().strftime("%d %B %Y года (текущее время: %H:%M)")
     now_year = datetime.now().year
     dynamic_header = (
@@ -2583,7 +2614,10 @@ async def handle_tiktok(message: Message, url: str) -> None:
               # ответа без необходимости — эти вызовы независимы друг от друга.
               probe_results: dict[int, tuple[int, int, int, bytes | None]] = {}
               if video_indices:
-                   probed = await asyncio.gather(*(_probe_and_thumbnail_from_bytes(downloaded[i]) for i in video_indices))
+                   async def _probe_bounded(item_bytes: bytes) -> tuple[int, int, int, bytes | None]:
+                        async with _tiktok_probe_semaphore:
+                             return await _probe_and_thumbnail_from_bytes(item_bytes)
+                   probed = await asyncio.gather(*(_probe_bounded(downloaded[i]) for i in video_indices))
                    probe_results = dict(zip(video_indices, probed))
               media_items: list[Any] = []
               for idx, item_bytes in enumerate(downloaded):
@@ -3710,8 +3744,17 @@ async def inline_draw(message: Message, prompt: str) -> None:
         image_bytes = None
         used_model = primary_model
         last_error = None
+        budget_exceeded = False
+        deadline = time.monotonic() + DRAW_TOTAL_BUDGET_SEC
 
         for attempt_model in fallback_chain:
+            if time.monotonic() > deadline:
+                budget_exceeded = True
+                log.warning(
+                    '[draw] Overall time budget (%.0fs) exhausted before trying %s — stopping the fallback chain instead of trying the remaining models.',
+                    DRAW_TOTAL_BUDGET_SEC, attempt_model,
+                )
+                break
             try:
                 if attempt_model != primary_model:
                     await _edit_message_quietly(
@@ -3746,6 +3789,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 reply_to_message_id=message.message_id,
             )
         else:
+            if budget_exceeded:
+                raise RuntimeError("Превышен общий бюджет времени на генерацию изображения") from last_error
             raise last_error or RuntimeError("Все модели генерации недоступны")
 
     except Exception as exc:
@@ -3755,6 +3800,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
             user_err = "Сервис генерации изображений временно недоступен. Попробуйте позже."
         elif "все модели" in txt.lower():
             user_err = "Все модели генерации изображений сейчас недоступны. Попробуйте позже."
+        elif "бюджет времени" in txt.lower():
+            user_err = "Генерация изображения сейчас занимает слишком много времени. Попробуйте, пожалуйста, ещё раз через минуту."
         else:
             # Сырой текст ошибки провайдера пользователю не показываем (см. log.exception
             # выше) — та же логика, что и в остальных обработчиках ошибок бота.
