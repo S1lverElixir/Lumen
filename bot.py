@@ -19,6 +19,7 @@ import logging.handlers
 import os
 import queue
 import re
+import secrets
 import socket
 import sys
 import tempfile
@@ -969,7 +970,16 @@ app = FastAPI()
 # из неё, а не из BOT_TOKEN, и можно сменить только её, не трогая токен бота. Если не
 # задана — тихий откат на прежнее поведение (соль = BOT_TOKEN), никаких изменений для
 # тех, кто её не настраивал.
-_ADMIN_SECRET_SEED = os.getenv("ADMIN_SECRET_SEED", "").strip() or BOT_TOKEN or "default"
+# НАЙДЕНО ПРИ СЕКЬЮРИТИ-РЕВЬЮ: последний запасной вариант раньше был литеральной строкой
+# "default" — этот репозиторий публичный, поэтому в сценарии "ADMIN_SECRET_SEED не задан
+# И BOT_TOKEN пуст" (например, ошибка конфигурации) WEBHOOK_SECRET/ADMIN_PANEL_KEY стали
+# бы ЗАРАНЕЕ ИЗВЕСТНЫМИ КОНСТАНТАМИ, вычислимыми любым, кто читает этот исходник — секрет,
+# который не секрет. На практике без валидного BOT_TOKEN сам процесс всё равно не поднимется
+# (main() падает на Bot(token=BOT_TOKEN, ...) ещё до старта uvicorn.serve(), см. main() ниже) —
+# поэтому этот путь маловероятен в реальном продакшене, но это защита по глубине "на всякий
+# случай": secrets.token_hex(32) даёт непредсказуемый секрет на время жизни процесса вместо
+# захардкоженной в открытом коде строки.
+_ADMIN_SECRET_SEED = os.getenv("ADMIN_SECRET_SEED", "").strip() or BOT_TOKEN or secrets.token_hex(32)
 WEBHOOK_SECRET = hashlib.sha256(_ADMIN_SECRET_SEED.encode()).hexdigest()[:32]
 ADMIN_PANEL_KEY = hashlib.sha256(_ADMIN_SECRET_SEED.encode() + b"admin_panel").hexdigest()[:24]
 
@@ -2117,6 +2127,15 @@ async def _or_request(path: str, method: str = "GET", *, json_body: dict | None 
         # детали) — тогда используем repr/имя класса, чтобы в логах вообще было
         # видно, что произошло, а не пустая строка.
         exc_str = str(exc) or repr(exc) or exc.__class__.__name__
+        # НАЙДЕНО ПРИ СЕКЬЮРИТИ-РЕВЬЮ: telegram_api_call/_download_telegram_file_bytes
+        # уже вычищают BOT_TOKEN из текста сетевых исключений (см. эти функции выше) —
+        # здесь та же защита ранее отсутствовала для OPENROUTER_API_KEY. На практике ключ
+        # передаётся только в заголовке Authorization, а не в URL, поэтому обычные
+        # исключения aiohttp его не содержат — но это защита по глубине (defense-in-depth)
+        # на случай нестандартного сообщения об ошибке (например, от прокси/мидлвари),
+        # которое могло бы процитировать заголовки запроса целиком.
+        if OPENROUTER_API_KEY:
+            exc_str = exc_str.replace(OPENROUTER_API_KEY, "<KEY>")
         raise OpenRouterAPIError(f"Сетевая ошибка OpenRouter: {exc_str}") from exc
 
 def _or_extract_text(data: Any) -> str:
@@ -4336,11 +4355,31 @@ def _should_only_record_passively(message: Message, t: str, *, is_private: bool,
     return not url or not is_tiktok(url)
 
 
+def _rate_limit_key_for_message(message: Message) -> int:
+    """Возвращает идентификатор для скользящего окна rate limit по сообщению.
+
+    НАЙДЕНО ПРИ СЕКЬЮРИТИ-РЕВЬЮ: Telegram не всегда прикладывает from_user к сообщению —
+    например, сообщение отправлено "от имени канала" в привязанной группе (Telegram
+    официально это разрешает любому админу канала), либо иной сценарий без обычного
+    пользователя. Раньше _handle_message_core в этом случае передавал в
+    _check_and_register_rate_limit буквальный None, а тот безусловно возвращает False
+    ("не лимитирован") для любого falsy ключа — то есть отправитель без from_user мог
+    слать запросы к платным AI-провайдерам вообще без ограничения скорости (реальный,
+    а не гипотетический обход rate limit). Используем sender_chat.id (если есть) или
+    сам chat.id как запасной идентификатор — тогда такой отправитель (или весь чат)
+    всё равно попадает под скользящее окно, а не обходит его полностью."""
+    if message.from_user:
+        return message.from_user.id
+    sender_chat = getattr(message, "sender_chat", None)
+    return sender_chat.id if sender_chat else message.chat.id
+
+
 def _check_and_register_rate_limit(user_id: int | None) -> bool:
-    """Скользящее окно 5 запросов/30 сек на пользователя. Возвращает True, если
-    лимит уже исчерпан (вызывающий код должен ответить и прекратить обработку) —
-    в этом случае, в отличие от успешного случая, TIMESTAMP НЕ добавляется, чтобы
-    не продлевать наказание бесконечно на каждое следующее сообщение сверху лимита."""
+    """Скользящее окно 5 запросов/30 сек на пользователя (или запасной ключ — см.
+    _rate_limit_key_for_message выше). Возвращает True, если лимит уже исчерпан
+    (вызывающий код должен ответить и прекратить обработку) — в этом случае, в
+    отличие от успешного случая, TIMESTAMP НЕ добавляется, чтобы не продлевать
+    наказание бесконечно на каждое следующее сообщение сверху лимита."""
     if not user_id:
         return False
     now = time.time()
@@ -4439,8 +4478,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         return
 
     # Начинаем обработку активного запроса с проверкой rate limit
-    user_id = message.from_user.id if message.from_user else None
-    if _check_and_register_rate_limit(user_id):
+    if _check_and_register_rate_limit(_rate_limit_key_for_message(message)):
         await _tg_call(message.reply, "Вы отправляете слишком много запросов. Подождите немного.")
         return
 

@@ -2910,6 +2910,48 @@ def test_check_and_register_rate_limit_noop_for_missing_user_id():
     assert bot._check_and_register_rate_limit(0) is False
 
 
+# ─────────────── _rate_limit_key_for_message (секьюрити-ревью: обход rate limit) ───────────────
+# РЕГРЕССИЯ на реальную уязвимость: сообщения без from_user (например, отправленные "от
+# имени канала" в привязанной группе) раньше давали user_id=None в _handle_message_core,
+# а _check_and_register_rate_limit(None) безусловно возвращает False — то есть такой
+# отправитель мог слать запросы без ограничения скорости вообще. Теперь для таких
+# сообщений используется sender_chat.id/chat.id как запасной ключ.
+
+def test_rate_limit_key_for_message_uses_from_user_when_present():
+    msg = SimpleNamespace(
+        from_user=SimpleNamespace(id=555), sender_chat=None,
+        chat=SimpleNamespace(id=-100999),
+    )
+    assert bot._rate_limit_key_for_message(msg) == 555
+
+
+def test_rate_limit_key_for_message_falls_back_to_sender_chat_without_from_user():
+    # Сообщение "от имени канала" — from_user отсутствует, но есть sender_chat.
+    msg = SimpleNamespace(
+        from_user=None, sender_chat=SimpleNamespace(id=-100777),
+        chat=SimpleNamespace(id=-100999),
+    )
+    assert bot._rate_limit_key_for_message(msg) == -100777
+
+
+def test_rate_limit_key_for_message_falls_back_to_chat_id_as_last_resort():
+    # Ни from_user, ни sender_chat — берём сам chat.id, лишь бы не None (регрессия
+    # на сам факт обхода: раньше это давало полностью нелимитированного отправителя).
+    msg = SimpleNamespace(from_user=None, sender_chat=None, chat=SimpleNamespace(id=-100999))
+    assert bot._rate_limit_key_for_message(msg) == -100999
+
+
+def test_rate_limit_key_for_message_never_falls_through_to_none():
+    # Ни один разумный вход не должен давать falsy ключ — иначе
+    # _check_and_register_rate_limit молча пропустит проверку (см. её докстринг).
+    for msg in (
+        SimpleNamespace(from_user=None, sender_chat=None, chat=SimpleNamespace(id=123)),
+        SimpleNamespace(from_user=SimpleNamespace(id=1), sender_chat=None, chat=SimpleNamespace(id=123)),
+    ):
+        key = bot._rate_limit_key_for_message(msg)
+        assert key is not None and key != 0
+
+
 def test_should_only_record_passively_true_for_unmentioned_group_text():
     msg = _FakeIncomingMessage(1)
     assert bot._should_only_record_passively(msg, "привет всем", is_private=False, is_guest=False, mentioned=False) is True
@@ -3401,6 +3443,36 @@ def test_maybe_alert_gemini_exhausted_throttled():
     finally:
         bot._last_gemini_exhausted_alert_monotonic = original_last
         bot.OWNER_ID, bot.bot = original_owner, original_bot
+
+
+# ─────────────────── _or_request: вычищает OPENROUTER_API_KEY из сетевых исключений ───────────────────
+# РЕГРЕССИЯ (секьюрити-ревью): telegram_api_call/_download_telegram_file_bytes уже вычищали
+# BOT_TOKEN из текста сетевых исключений до того, как обернуть их в свою собственную ошибку —
+# _or_request не делал того же для OPENROUTER_API_KEY. На практике ключ передаётся только в
+# заголовке Authorization, поэтому обычные исключения aiohttp его не содержат — это защита по
+# глубине на случай нестандартного сообщения об ошибке (например от прокси), которое могло бы
+# процитировать заголовки запроса целиком.
+
+def test_or_request_scrubs_api_key_from_network_exception_message():
+    class _FakeSessionRaisingWithKeyInMessage:
+        def request(self, *args, **kwargs):
+            raise RuntimeError("connection failed, headers were: Authorization: Bearer fake-secret-or-key-123")
+
+    async def fake_get_http_session():
+        return _FakeSessionRaisingWithKeyInMessage()
+
+    original_get_session = bot._get_http_session
+    original_key = bot.OPENROUTER_API_KEY
+    bot._get_http_session = fake_get_http_session
+    bot.OPENROUTER_API_KEY = "fake-secret-or-key-123"
+    try:
+        with pytest.raises(bot.OpenRouterAPIError) as exc_info:
+            asyncio.run(bot._or_request("chat/completions", "POST", json_body={"model": "x"}))
+        assert "fake-secret-or-key-123" not in str(exc_info.value)
+        assert "<KEY>" in str(exc_info.value)
+    finally:
+        bot._get_http_session = original_get_session
+        bot.OPENROUTER_API_KEY = original_key
 
 
 # ─────────────────── _probe_or_model_liveness (проактивная проверка живости) ───────────────────
