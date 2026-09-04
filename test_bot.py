@@ -35,6 +35,7 @@ import pytest
 import sentry_sdk
 
 import bot
+import lumen_tiktok
 
 
 
@@ -3742,6 +3743,69 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
         bot.bot = original_bot
 
 
+def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
+    # РЕГРЕССИЯ (аудит TikTok-функций, 4 сентября 2026): скачивание слайдов
+    # слайдшоу шло через asyncio.gather без единого ограничения конкурентности —
+    # тот же класс проблемы, что уже был найден и исправлен для CPU-тяжёлого
+    # пробинга видео-слайдов (см. test_handle_tiktok_slideshow_video_probing_
+    # respects_concurrency_cap выше), только здесь риск не CPU, а исчерпание
+    # общего пула соединений _get_http_session (connector limit=40, шарится со
+    # ВСЕМ остальным трафиком бота — Gemini/OpenRouter/Pollinations и т.д.).
+    n_slides = bot.TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY + 3
+    tikwm_json = {
+        "code": 0,
+        "data": {
+            "images": [f"https://tikwm.com/slide{i}.jpg" for i in range(n_slides)],
+            "author": {"nickname": "TestAuthor"},
+        },
+    }
+
+    incoming = _FakeIncomingMessage(999434)
+    incoming.message_id = 1
+    fake_bot = _FakeTikTokBot()
+
+    current_concurrent = 0
+    max_concurrent_seen = 0
+    lock = asyncio.Lock()
+
+    async def fake_get_http_session():
+        return _FakeTikTokSession(tikwm_json)
+
+    async def fake_resolve(session, url):
+        return url
+
+    async def fake_download_url_bin(session, url, headers=None):
+        nonlocal current_concurrent, max_concurrent_seen
+        async with lock:
+            current_concurrent += 1
+            max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
+        await asyncio.sleep(0.05)  # достаточно, чтобы вызовы реально пересеклись во времени
+        async with lock:
+            current_concurrent -= 1
+        return b"\xff\xd8\xff\xe0fake jpeg bytes"  # не ftyp -> обычное фото, не видео-слайд
+
+    original_get_session = bot._get_http_session
+    original_resolve = bot._resolve_tiktok_short
+    original_download = bot._download_url_bin
+    original_bot = bot.bot
+
+    bot._get_http_session = fake_get_http_session
+    bot._resolve_tiktok_short = fake_resolve
+    bot._download_url_bin = fake_download_url_bin
+    bot.bot = fake_bot
+    try:
+        asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/789"))
+        assert max_concurrent_seen <= bot.TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY
+        # Реально были параллельны хотя бы несколько — не выродилось в строго
+        # последовательный перебор без всякой пользы от asyncio.gather.
+        assert max_concurrent_seen > 1
+    finally:
+        bot._get_http_session = original_get_session
+        bot._resolve_tiktok_short = original_resolve
+        bot._download_url_bin = original_download
+        bot.bot = original_bot
+
+
 def test_handle_tiktok_no_media_found_gives_user_facing_error():
     tikwm_json = {"code": 0, "data": {"author": {"nickname": "TestAuthor"}}}  # нет ни play, ни images
 
@@ -4120,3 +4184,110 @@ def test_fetch_tikwm_media_data_with_proxy_fallback_unchanged_when_unconfigured(
         bot.TIKWM_API_BASE_URL = original_primary
         bot._TIKWM_API_BASE_URL_FALLBACKS = original_fallbacks
 
+
+
+# ─────────────────── _download_url_bin: верхняя граница на размер скачиваемого файла ───────────────────
+# РЕГРЕССИЯ (аудит TikTok-функций, 4 сентября 2026): ни _download_url_bin, ни
+# что-либо выше по цепочке (handle_tiktok) не ограничивало размер скачиваемого
+# файла — TikWM отдаёт URL медиа с CDN TikTok, содержимым которых бот не
+# управляет; один аномально большой файл (или скомпрометированный/подменённый
+# ответ прокси/зеркала) скачивался бы целиком в память процесса без ограничения,
+# причём для слайдшоу — до 35 таких скачиваний ПАРАЛЛЕЛЬНО. TIKTOK_DOWNLOAD_MAX_
+# BYTES в lumen_tiktok.py закрывает этот пробел — тесты ниже бьют напрямую по
+# реальной реализации _download_url_bin (не мокают её саму, в отличие от
+# большинства других тестов TikTok в этом файле), т.к. именно её внутреннее
+# поведение здесь и проверяется.
+
+class _FakeDownloadContent:
+    """Мокает resp.content.iter_chunked(n) — асинхронный генератор чанков байт,
+    как у настоящего aiohttp.StreamReader."""
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = list(chunks)
+
+    def iter_chunked(self, n: int):
+        chunks = self._chunks
+
+        async def _gen():
+            for c in chunks:
+                yield c
+        return _gen()
+
+
+class _FakeDownloadResponse:
+    def __init__(self, chunks: list[bytes], *, status: int = 200, content_length: str | None = None):
+        self.status = status
+        self.headers = {"Content-Length": content_length} if content_length is not None else {}
+        self.content = _FakeDownloadContent(chunks)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FakeDownloadSession:
+    def __init__(self, resp):
+        self._resp = resp
+
+    def get(self, url, *args, **kwargs):
+        return self._resp
+
+
+def test_download_url_bin_returns_bytes_under_the_cap():
+    resp = _FakeDownloadResponse([b"abc", b"def"])
+    session = _FakeDownloadSession(resp)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/x.jpg"))
+    assert result == b"abcdef"
+
+
+def test_download_url_bin_rejects_upfront_via_content_length_header():
+    # Content-Length превышает лимит — отказываем ДО чтения тела вообще (быстрый
+    # путь, экономит трафик и время, см. докстринг _download_url_bin).
+    resp = _FakeDownloadResponse([b"should not be read"], content_length=str(lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES + 1))
+    session = _FakeDownloadSession(resp)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/huge.mp4"))
+    assert result is None
+
+
+def test_download_url_bin_aborts_mid_stream_when_no_content_length_but_body_too_big():
+    # Сервер НЕ прислал Content-Length (обычное дело для chunked-ответов) — тело
+    # всё равно не должно скачаться целиком в память, если суммарно превышает
+    # лимит; проверка идёт потоково по факту реально пришедших байт.
+    original_cap = lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES
+    lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES = 10
+    try:
+        resp = _FakeDownloadResponse([b"12345", b"67890", b"11111"])  # 15 байт суммарно > лимита 10
+        session = _FakeDownloadSession(resp)
+        result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/huge.mp4"))
+        assert result is None
+    finally:
+        lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES = original_cap
+
+
+def test_download_url_bin_exactly_at_cap_still_succeeds():
+    original_cap = lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES
+    lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES = 10
+    try:
+        resp = _FakeDownloadResponse([b"1234567890"])  # ровно 10 байт == лимиту, не больше
+        session = _FakeDownloadSession(resp)
+        result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/exact.jpg"))
+        assert result == b"1234567890"
+    finally:
+        lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES = original_cap
+
+
+def test_download_url_bin_ignores_malformed_content_length_header():
+    # Не-числовой Content-Length не должен ронять функцию исключением — просто
+    # пропускаем быстрый путь и полагаемся на потоковую проверку ниже.
+    resp = _FakeDownloadResponse([b"ok"], content_length="not-a-number")
+    session = _FakeDownloadSession(resp)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/x.jpg"))
+    assert result == b"ok"
+
+
+def test_download_url_bin_returns_none_on_non_200_status():
+    resp = _FakeDownloadResponse([b"error page"], status=404)
+    session = _FakeDownloadSession(resp)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/missing.jpg"))
+    assert result is None

@@ -398,6 +398,20 @@ TELEGRAM_MEDIA_GROUP_CHUNK = 10
 # это реальные CPU-тяжёлые процессы, а не ожидание сетевого I/O.
 TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = int(os.getenv("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", "4"))
 _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
+# TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY — НАЙДЕНО ПРИ АУДИТЕ TikTok-функций (4 сентября
+# 2026): слайды слайдшоу (до TIKTOK_SLIDESHOW_MAX_ITEMS=35) скачиваются через
+# asyncio.gather БЕЗ единого ограничения конкурентности — тот же класс проблемы,
+# что уже был найден и исправлен для CPU-тяжёлого пробинга (см. комментарий у
+# TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY выше), только здесь это не CPU, а
+# соединения общей aiohttp-сессии (_get_http_session, connector limit=40 — ОБЩИЙ
+# на весь процесс, а не только на TikTok). Один слайдшоу-пост из 35 слайдов мог
+# бы разом занять почти весь пул соединений и создать head-of-line blocking для
+# несвязанных запросов из других чатов (Gemini/OpenRouter/Pollinations/другие
+# TikTok-ссылки тоже используют этот же session). Небольшой лимит (не 35) —
+# оставляет запас пула для остального трафика бота, при этом всё ещё заметно
+# быстрее полностью последовательного скачивания.
+TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = int(os.getenv("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", "8"))
+_tiktok_slide_download_semaphore = asyncio.Semaphore(TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
 
 MAX_CHAT_LIMIT = 5000
 PRUNED_CHAT_TARGET = 4500
@@ -2610,9 +2624,16 @@ async def handle_tiktok(message: Message, url: str) -> None:
               # последовательно одно за другим — реальный выигрыш в скорости для
               # слайдшоу из нескольких фото: раньше каждое следующее скачивание
               # ждало полного завершения предыдущего, хотя это независимые запросы
-              # к разным URL и ничего не мешает вести их одновременно. Общий лимит
-              # соединений в сессии (см. _get_http_session, connector limit=40)
-              # с запасом покрывает полный слайдшоу из 35 элементов здесь.
+              # к разным URL и ничего не мешает вести их одновременно.
+              # НАЙДЕНО ПРИ ПОВТОРНОМ АУДИТЕ (4 сентября 2026): комментарий "общий
+              # лимит соединений в сессии (limit=40) с запасом покрывает слайдшоу"
+              # был верен только для самого факта TCP-соединений, но не защищал
+              # ОСТАЛЬНОЙ трафик бота (Gemini/OpenRouter/Pollinations и другие
+              # TikTok-запросы делят тот же _get_http_session) от того, что один
+              # слайдшоу из 35 слайдов занимает почти весь пул разом — см.
+              # _tiktok_slide_download_semaphore выше. Ограничиваем конкурентность
+              # именно здесь, а не через сам connector — так лимит применяется
+              # только к TikTok-слайдам, не сужая пул для всего остального.
               # НАЙДЕНО ПРИ ПОВТОРНОЙ РЕВИЗИИ (см. _slideshow_slide_urls): для
               # каждого слайда предпочитаем `live_images[i]`, если TikWM его
               # отдаёт — по логам подтверждено, что `images[i]` для этого поста
@@ -2620,8 +2641,13 @@ async def handle_tiktok(message: Message, url: str) -> None:
               # (прежняя, ОШИБОЧНАЯ эвристика) указывают на аудиодорожку, а не
               # на видео — убраны из рассмотрения полностью.
               fetch_urls = _slideshow_slide_urls(media_data, images_to_fetch)
+
+              async def _download_slide_bounded(slide_url: str) -> bytes | None:
+                   async with _tiktok_slide_download_semaphore:
+                        return await _download_url_bin(session, slide_url, headers=headers)
+
               downloaded = list(await asyncio.gather(
-                   *(_download_url_bin(session, u, headers=headers) for u in fetch_urls)
+                   *(_download_slide_bounded(u) for u in fetch_urls)
               ))
               video_indices = [idx for idx, b in enumerate(downloaded) if b and _looks_like_video_bytes(b)]
               if video_indices:

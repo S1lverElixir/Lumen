@@ -462,6 +462,27 @@ def _write_mp3_tags(path: str, title: str, artist: str, cover: bytes | None) -> 
 
 
 # ─────────────────── ffmpeg и скачивание бинарных URL ───────────────────
+# НАЙДЕНО ПРИ АУДИТЕ TikTok-функций (4 сентября 2026): ни здесь, ни где-либо выше
+# по цепочке (handle_tiktok в bot.py) не было верхней границы на размер СКАЧИВАЕМОГО
+# файла — единственная существующая проверка размера (_tiktok_video_candidates,
+# TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES) применяется только к цельному видео и только
+# когда TikWM вообще прислал поле size/hd_size/wm_size в ответе (не гарантировано,
+# см. комментарий там же), да и то ПОСЛЕ полного скачивания в память — реальной
+# защиты от самого скачивания она не даёт. Для слайдов слайдшоу (фото/live-видео)
+# такой проверки не было вообще ни в каком виде. TikWM — доверенный третьей
+# стороной сервис, но отдаёт URL медиа с CDN TikTok, содержимым которых бот не
+# управляет; один аномально большой файл (или скомпрометированный/подменённый
+# ответ прокси/зеркала) скачивался бы целиком в память процесса без ограничения —
+# при слайдшоу до 35 таких скачиваний идёт ПАРАЛЛЕЛЬНО (см. handle_tiktok), то
+# есть один запрос пользователя мог бы кратно увеличить пиковое потребление
+# памяти контейнера HF Spaces с ограниченными ресурсами. Читаем тело потоково и
+# обрываем скачивание, как только оно превышает лимит — тело реального TikTok-
+# видео/фото никогда не подходит близко к этому потолку (сравните с
+# TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 МБ в bot.py — оба видео-эндпоинта в
+# любом случае бесполезны для отправки, если превышают его), поэтому легитимные
+# файлы это никак не заденет.
+TIKTOK_DOWNLOAD_MAX_BYTES = int(os.getenv("TIKTOK_DOWNLOAD_MAX_BYTES", str(75 * 1024 * 1024)))
+
 
 async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: dict | None = None) -> bytes | None:
     if headers is None:
@@ -472,8 +493,30 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
         }
     try:
         async with session.get(url, headers=headers, timeout=60) as resp:
-            if resp.status == 200:
-                return await resp.read()
+            if resp.status != 200:
+                return None
+            # Content-Length — быстрый (но не обязательный: сервер может его не
+            # прислать, особенно на chunked-ответах) путь отказаться ДО скачивания
+            # хотя бы одного байта тела. Не единственная линия защиты — сервер
+            # может соврать про длину или не прислать её вовсе, поэтому ниже
+            # дублируем ту же проверку потоково, по факту реально пришедших байт.
+            content_length = resp.headers.get("Content-Length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > TIKTOK_DOWNLOAD_MAX_BYTES:
+                        log.warning("[download] Refusing to download %s: Content-Length %s exceeds the %d byte cap.", url, content_length, TIKTOK_DOWNLOAD_MAX_BYTES)
+                        return None
+                except ValueError:
+                    pass
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.content.iter_chunked(65536):
+                total += len(chunk)
+                if total > TIKTOK_DOWNLOAD_MAX_BYTES:
+                    log.warning("[download] Aborting download of %s: exceeded the %d byte cap mid-stream.", url, TIKTOK_DOWNLOAD_MAX_BYTES)
+                    return None
+                chunks.append(chunk)
+            return b"".join(chunks)
     except Exception as e:
         log.warning("[download] Failed to download URL: %s", e)
     return None
