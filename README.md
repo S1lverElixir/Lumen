@@ -257,6 +257,7 @@ HF Spaces не имеет прямого исходящего доступа к 
 | `test_lumen_security.py` | `lumen_security.py` — `_detect_identity_leak`/`_scrub_identity_leak`, `_looks_like_injection_probe`, `_leak_scan_window`. |
 | `test_lumen_router_config.py` | `lumen_router_config.py` — `GEMINI_MODELS`, `_OR_MODEL_HEALTH`/`_ROUTER_EXCLUDED_OR_MODELS`, `_looks_like_heavy_query`/`_looks_like_freshness_query`, `_build_route`/`_or_route`, проверки истечения промо-доступа и неподтверждённых квот. |
 | `test_lumen_typing_pace.py` | `lumen_typing_pace.py` — самокалибрующаяся оценка скорости "живой печати" при стриминге: `get_typing_speed`/`record_observed_speed` (EMA), `catchup_reveal_steps`. |
+| `test_lumen_images.py` | `lumen_images.py` — автоматический выбор модели генерации изображений по содержимому промпта (`_pick_image_model`). |
 | `test_bot.py` | Всё, что реально определено в `bot.py`: Telegram-транспорт и circuit breaker, персистентность состояния, `ask_gemini`/`ask_openrouter_*`/`_run_route`, стриминг, TikTok-загрузчик, TTS-пайплайн, генерация изображений, webhook/admin-эндпоинты. |
 
 Тест на функцию всегда лежит в файле того модуля, где эта функция реально определена — например, тесты на `_build_route` лежат в `test_lumen_router_config.py`, даже несмотря на то, что `_build_route` тематически про роутинг сообщений бота, потому что сама функция определена в `lumen_router_config.py`; а тесты на `ask_gemini` остаются в `test_bot.py`, даже несмотря на то, что она использует `GEMINI_MODELS` из `lumen_router_config.py`, потому что сама `ask_gemini` определена в `bot.py`.
@@ -269,4 +270,4 @@ pytest test_lumen_formatting.py -v     # только один модуль
 
 `conftest.py` в этой же папке подставляет безопасные заглушки `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` перед импортом `bot.py`, так что реальные секреты и доступ к `/app` для тестов не нужны — актуально для всех четырёх файлов, т.к. общая (autouse) фикстура `_bot_global_state_guard` в `conftest.py` импортирует `bot.py` независимо от того, тестирует ли конкретный файл сам `bot.py` напрямую.
 
-Проект пока не подключён ни к какому git-хостингу — тесты гоняются только вручную (см. команду выше), автоматического CI-прогона на push/PR сейчас нет.
+CI подключён (см. `.github/workflows/ci.yml`) — pytest/pyflakes/pip-audit гоняются автоматически на каждый push/PR, плюс еженедельно по расписанию (см. комментарий в самом workflow-файле). Команда выше нужна для локального прогона при разработке, а не потому что CI отсутствует.
