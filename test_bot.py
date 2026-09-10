@@ -852,6 +852,58 @@ def test_setup_logging_defaults_to_info_when_unset(monkeypatch):
     assert _logging.getLogger().level == _logging.INFO
 
 
+def test_cmd_logs_flushes_the_listeners_real_handlers_not_root():
+    # РЕГРЕССИЯ (аудит логирования): cmd_logs раньше флашил
+    # logging.getLogger().handlers — после перехода на QueueHandler/QueueListener
+    # там остаётся только сам QueueHandler (его flush() — no-op), реальные
+    # file_handler/console_handler живут внутри _LOG_LISTENER. Проверяем, что
+    # flush() реально доходит до обработчиков, зарегистрированных в _LOG_LISTENER.
+    original_owner = bot.OWNER_ID
+    original_listener = bot._LOG_LISTENER
+    bot.OWNER_ID = 555001
+
+    class _FakeHandler:
+        def __init__(self):
+            self.flushed = False
+        def flush(self):
+            self.flushed = True
+
+    fake_handler = _FakeHandler()
+
+    class _FakeListener:
+        handlers = (fake_handler,)
+
+    bot._LOG_LISTENER = _FakeListener()
+
+    incoming = _FakeIncomingMessage(555001)
+    incoming.from_user = SimpleNamespace(id=555001)
+
+    async def fake_reply(text, **kwargs):
+        return SimpleNamespace()
+    incoming.reply = fake_reply
+
+    try:
+        asyncio.run(bot.cmd_logs(incoming))
+        assert fake_handler.flushed is True
+    finally:
+        bot.OWNER_ID = original_owner
+        bot._LOG_LISTENER = original_listener
+
+
+def test_setup_logging_uses_bot_logger_name_not_dunder_main():
+    # РЕГРЕССИЯ (аудит логирования): _setup_logging() раньше возвращал
+    # logging.getLogger(__name__) — "bot" при import bot (как в тестах), но
+    # "__main__" в реальном проде (python -u bot.py, см. Dockerfile CMD),
+    # рассинхрон с lumen_*.py, где везде явно logging.getLogger("bot").
+    # Подтверждено реальным событием в Sentry с тегом logger=__main__. Тест не
+    # видит __name__ != "bot" (в тестах он и так "bot"), поэтому проверяет сам
+    # факт, что _setup_logging() возвращает логгер по явному имени "bot", а не
+    # по __name__ — тогда расхождение в проде физически невозможно.
+    result_logger = bot._setup_logging()
+    assert result_logger.name == "bot"
+    assert bot.log.name == "bot"
+
+
 # ─────────────────── альбомы: доп. фото тоже попадают в recent_media_ids ───────────────────
 
 def test_process_media_group_buffers_records_extra_photos_to_recent_media():
@@ -2972,6 +3024,40 @@ def test_should_only_record_passively_false_for_tiktok_link_without_mention():
     assert bot._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=False) is False
 
 
+def test_handle_message_core_known_route_outcome_logs_as_warning_not_exception(caplog):
+    # РЕГРЕССИЯ (аудит логирования): GeminiAllModelsExhaustedError/
+    # RouteBudgetExceededError — известные, уже обрабатываемые исходы (реальный
+    # суточный лимит квоты / бюджет времени маршрута), для которых пользователь и
+    # так получает понятный текст, а владелец (для квоты) отдельно уведомляется.
+    # Раньше log.exception (ERROR) заводил issue в Sentry на КАЖДЫЙ такой случай —
+    # см. LUMEN-3: 8 событий за месяц оказались этим классом. Теперь — log.warning.
+    import logging
+    chat_id = 555010
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.text = "привет"
+    incoming.caption = None
+    incoming.from_user = SimpleNamespace(id=chat_id, username="tester", language_code="ru")
+
+    async def failing_run_route(*args, **kwargs):
+        raise bot.GeminiAllModelsExhaustedError(["gemini-3.7-flash"])
+
+    original_run_route = bot._run_route
+    original_owner = bot.OWNER_ID
+    bot._run_route = failing_run_route
+    bot.OWNER_ID = None  # без owner-алерта, не в фокусе этого теста
+    bot.user_rate_limits.pop(chat_id, None)
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot"):
+            asyncio.run(bot._handle_message_core(incoming))
+        levels = [r.levelname for r in caplog.records if "Chat AI processing" in r.getMessage()]
+        assert levels == ["WARNING"]
+    finally:
+        bot._run_route = original_run_route
+        bot.OWNER_ID = original_owner
+        bot.user_rate_limits.pop(chat_id, None)
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_route_error_reply_text_youtube_takes_priority_over_exception_type():
     exc = bot.OpenRouterAPIError("boom", status_code=500)
     text = bot._route_error_reply_text(exc, "gemini-3.6-flash", youtube_url_to_analyze="https://youtu.be/x")
@@ -3124,6 +3210,102 @@ def test_or_chat_completion_with_fallback_no_longer_accepts_attempts_per_model()
     import inspect
     sig = inspect.signature(bot._or_chat_completion_with_fallback)
     assert "attempts_per_model" not in sig.parameters
+
+
+# ─────────────────── graceful shutdown fire-and-forget тасков (LUMEN-2 в Sentry) ───────────────────
+# Регрессия на реальный инцидент: "Task was destroyed but it is pending!" — задачи
+# обработки апдейтов (webhook/медиа-группы) нигде не собирались, main() при
+# остановке их не ждал и не отменял. _inflight_tasks/_track_inflight_task/
+# _drain_inflight_tasks закрывают этот пробел.
+
+def test_track_inflight_task_registers_and_self_removes_on_completion():
+    bot._inflight_tasks.clear()
+
+    async def quick():
+        return "done"
+
+    async def _run():
+        task = bot._track_inflight_task(asyncio.create_task(quick()))
+        assert task in bot._inflight_tasks
+        await task
+        # done_callback снимает таску из набора сама, без ручной чистки.
+        assert task not in bot._inflight_tasks
+
+    asyncio.run(_run())
+
+
+def test_drain_inflight_tasks_waits_for_quick_task_to_finish_on_its_own():
+    bot._inflight_tasks.clear()
+    finished = []
+
+    async def quick():
+        await asyncio.sleep(0)
+        finished.append(1)
+
+    async def _run():
+        bot._track_inflight_task(asyncio.create_task(quick()))
+        await bot._drain_inflight_tasks()
+
+    asyncio.run(_run())
+    assert finished == [1]
+    assert not bot._inflight_tasks
+
+
+def test_drain_inflight_tasks_cancels_tasks_that_time_out():
+    bot._inflight_tasks.clear()
+    original_timeout = bot.INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC
+    bot.INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = 0.01
+    cancelled = []
+
+    async def slow():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled.append(1)
+            raise
+
+    async def _run():
+        bot._track_inflight_task(asyncio.create_task(slow()))
+        await bot._drain_inflight_tasks()
+
+    try:
+        asyncio.run(_run())
+        assert cancelled == [1]
+    finally:
+        bot.INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = original_timeout
+
+
+def test_drain_inflight_tasks_noop_when_nothing_pending():
+    bot._inflight_tasks.clear()
+    asyncio.run(bot._drain_inflight_tasks())  # не должно бросить исключение
+
+
+def test_webhook_handler_tracks_dispatched_task_for_shutdown():
+    original_secret = bot.WEBHOOK_SECRET
+    original_bot_obj = bot.bot
+    original_process = bot._process_raw_update
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    bot.bot = object()
+    bot._inflight_tasks.clear()
+
+    async def fake_process(raw_update):
+        await asyncio.sleep(0)
+
+    bot._process_raw_update = fake_process
+    try:
+        req = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 1},
+        )
+        asyncio.run(_run_webhook_handler(req))
+        # _run_webhook_handler уже дожидается одного тика планировщика — к этому
+        # моменту короткая fake_process должна была завершиться и самоудалиться
+        # из набора (см. test_track_inflight_task_registers_and_self_removes_on_completion).
+        assert not bot._inflight_tasks
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        bot.bot = original_bot_obj
+        bot._process_raw_update = original_process
 
 
 # ─────────────────── healthcheck отражает реальное состояние ───────────────────
@@ -3826,6 +4008,39 @@ def test_handle_tiktok_no_media_found_gives_user_facing_error():
         # handle_tiktok сам ловит исключение и редактирует статусное сообщение —
         # не поднимает наружу; проверяем, что оно не падает необработанным.
         asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/456"))
+    finally:
+        bot._get_http_session = original_get_session
+        bot._resolve_tiktok_short = original_resolve
+
+
+def test_handle_tiktok_known_user_facing_error_logs_as_warning_not_exception(caplog):
+    # РЕГРЕССИЯ (аудит логирования): TikTokUserFacingError — известный, уже
+    # обработанный исход (видео недоступно и т.п.), для которого пользователь
+    # получает понятный текст. Раньше здесь был безусловный log.exception (ERROR)
+    # на КАЖДОЕ исключение — заводило issue в Sentry даже на рутинные случаи (см.
+    # LUMEN-1: 24 события за месяц оказались этим классом). Теперь — log.warning
+    # без трейсбека, log.exception остаётся только для реально неожиданных ошибок.
+    import logging
+    tikwm_json = {"code": 0, "data": {"author": {"nickname": "TestAuthor"}}}  # нет ни play, ни images
+
+    incoming = _FakeIncomingMessage(999422)
+    incoming.message_id = 3
+
+    async def fake_get_http_session():
+        return _FakeTikTokSession(tikwm_json)
+
+    async def fake_resolve(session, url):
+        return url
+
+    original_get_session = bot._get_http_session
+    original_resolve = bot._resolve_tiktok_short
+    bot._get_http_session = fake_get_http_session
+    bot._resolve_tiktok_short = fake_resolve
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot"):
+            asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/789"))
+        levels = [r.levelname for r in caplog.records if "TikTok download" in r.getMessage()]
+        assert levels == ["WARNING"]
     finally:
         bot._get_http_session = original_get_session
         bot._resolve_tiktok_short = original_resolve

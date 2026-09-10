@@ -119,7 +119,12 @@ def _setup_logging() -> logging.Logger:
     logging.captureWarnings(True)
     for name in ("httpx", "google_genai", "aiohttp", "uvicorn.access"):
         logging.getLogger(name).setLevel(logging.WARNING)
-    return logging.getLogger(__name__)
+    # Единый логгер "bot" для всего проекта — logging.getLogger(__name__) здесь
+    # давал "__main__" в проде (python -u bot.py), но "bot" при импорте тестами
+    # (import bot) — рассинхрон с lumen_*.py, которые везде явно берут
+    # logging.getLogger("bot") именно ради единого пространства имён логов.
+    # Подтверждено реальным событием в Sentry с тегом logger=__main__.
+    return logging.getLogger("bot")
 
 logger = _setup_logging()
 log = logger
@@ -397,6 +402,13 @@ ROUTE_TOTAL_BUDGET_SEC = float(os.getenv("ROUTE_TOTAL_BUDGET_SEC", "40"))
 # полную попытку (90с) плюс запас на вторую, но ограничивает худший случай вдвое
 # от одного медленного таймаута, а не в разы от их числа.
 DRAW_TOTAL_BUDGET_SEC = float(os.getenv("DRAW_TOTAL_BUDGET_SEC", "120"))
+# INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
+# завершения fire-and-forget задач обработки апдейтов (см. _inflight_tasks/
+# _drain_inflight_tasks) перед тем, как отменить оставшиеся. Найдено по реальному
+# инциденту в Sentry (LUMEN-2, "Task was destroyed but it is pending!") — без
+# этого такие задачи могли быть уничтожены event loop'ом прямо посреди сетевого
+# вызова (например bot.send_message(...)) при SIGTERM/редеплое.
+INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = float(os.getenv("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", "10"))
 TG_MAX_LEN = 4096
 # Telegram Bot API ограничивает загрузку файлов, отправляемых ботом (upload, а не
 # по file_id/URL), 50 МБ — используется в _tiktok_video_candidates/handle_tiktok
@@ -988,6 +1000,26 @@ chat_state: dict[int, ChatState] = {}
 _mg_buffers: dict[str, list[Message]] = {}
 _mg_tasks: dict[str, asyncio.Task] = {}
 
+# НАЙДЕНО ПРИ АУДИТЕ ЛОГИРОВАНИЯ (Sentry LUMEN-2: "Task was destroyed but it is
+# pending!", logger=asyncio): fire-and-forget таски обработки входящих апдейтов
+# (webhook_handler -> _process_raw_update, буферы медиа-групп -> _mg_tasks) нигде
+# не собирались в единый набор — main() при остановке отменял только startup_task/
+# flush_task, а эти задачи (внутри которых реальные bot.send_message(...) и т.п.)
+# могли быть уничтожены event loop'ом прямо посреди сетевого вызова при SIGTERM/
+# редеплое, без единого шанса штатно завершиться или хотя бы залогировать себя.
+# _inflight_tasks — общий набор таких задач, done_callback снимает таску из набора
+# сама (без отдельной периодической чистки); используется _drain_inflight_tasks
+# в main() при остановке (см. там же).
+_inflight_tasks: set[asyncio.Task] = set()
+
+def _track_inflight_task(task: asyncio.Task) -> asyncio.Task:
+    """Регистрирует fire-and-forget таску для graceful shutdown — см. комментарий
+    у _inflight_tasks выше. Возвращает ту же таску, чтобы вызов можно было
+    обернуть прямо вокруг asyncio.create_task(...) без лишней временной переменной."""
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return task
+
 app = FastAPI()
 
 # ИСПРАВЛЕНО (аудит техдолга, август 2026): раньше WEBHOOK_SECRET/ADMIN_PANEL_KEY
@@ -1103,7 +1135,7 @@ async def webhook_handler(request: Request) -> dict[str, bool]:
     try:
         body = await request.json()
         if bot is not None:
-            asyncio.create_task(_process_raw_update(body))
+            _track_inflight_task(asyncio.create_task(_process_raw_update(body)))
         else:
             log.warning("[webhook] Bot not initialized yet, dropping update")
     except Exception as exc:
@@ -2886,7 +2918,20 @@ async def handle_tiktok(message: Message, url: str) -> None:
               return
          await _send_tiktok_single_video(session, media_data, message, status, author, headers)
     except Exception as exc:
-         log.exception("TikTok download fail:")
+         if isinstance(exc, (TelegramEntityTooLarge, TikTokUserFacingError)):
+              # Известные, уже обработанные исходы (видео приватное/удалено/слишком
+              # большое) — не баг, а обычный ответ TikTok/Telegram, для которого
+              # пользователь и так получает понятный текст ниже. log.exception (ERROR)
+              # безусловно на КАЖДОЕ исключение здесь заводило issue в Sentry даже на
+              # эти рутинные случаи — см. LUMEN-1 (аудит логирования): 24 события за
+              # месяц оказались сплошь этим классом, что маскирует реальные новые баги
+              # среди ожидаемого шума. log.warning без трейсбека — достаточно, чтобы
+              # видеть частоту в bot.log, не засоряя Sentry.
+              log.warning("TikTok download failed with a known, already-handled outcome: %s", exc)
+         else:
+              # Действительно неожиданное исключение (сетевое/библиотечное и т.п.) —
+              # остаётся log.exception с полным трейсбеком, попадает в Sentry как и раньше.
+              log.exception("TikTok download fail:")
          if isinstance(exc, TelegramEntityTooLarge):
               err_text = "Видео слишком большое для отправки через бота — Telegram Bot API ограничивает загрузку файлов 50 МБ. Попробуйте скачать это видео другим способом."
          elif isinstance(exc, TikTokUserFacingError):
@@ -4117,10 +4162,15 @@ async def cmd_logs(message: Message) -> None:
         await _tg_call(message.reply, "Эта команда показывает технические логи — доступна только в личных сообщениях с ботом, не в группах.")
         return
 
-    # сбрасываем буфер логов на диск
+    # сбрасываем буфер логов на диск — НАЙДЕНО ПРИ АУДИТЕ ЛОГИРОВАНИЯ: после
+    # перехода на QueueHandler/QueueListener у root-логгера остался только сам
+    # QueueHandler (его flush() — no-op), реальные file_handler/console_handler
+    # живут внутри _LOG_LISTENER, а не на root — цикл по logging.getLogger().handlers
+    # ничего не флашил уже с момента этой миграции.
     try:
-        for handler in logging.getLogger().handlers:
-            handler.flush()
+        if _LOG_LISTENER is not None:
+            for handler in _LOG_LISTENER.handlers:
+                handler.flush()
     except Exception:
         pass
 
@@ -4693,7 +4743,17 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             await _safe_reply(message, ans)
         mark_state_dirty(message.chat.id)
     except Exception as exc:
-        log.exception("Chat AI processing failed:")
+        if isinstance(exc, (GeminiAllModelsExhaustedError, RouteBudgetExceededError)):
+            # Известный, уже обрабатываемый исход (реальный суточный лимит квоты /
+            # общий бюджет времени маршрута исчерпан) — не баг, а штатная деградация,
+            # для которой пользователь и так получает понятный текст ниже, а владелец
+            # (в случае квоты) отдельно уведомляется через _maybe_alert_gemini_exhausted.
+            # log.exception на КАЖДЫЙ такой случай безусловно заводил issue в Sentry —
+            # см. LUMEN-3 (аудит логирования): 8 событий за месяц оказались этим
+            # классом, маскируя реальные новые баги среди ожидаемого шума.
+            log.warning("Chat AI processing hit a known, already-handled outcome: %s", exc)
+        else:
+            log.exception("Chat AI processing failed:")
         head_model = route[0][1] if route else DEFAULT_GEMINI_MODEL
         if isinstance(exc, GeminiAllModelsExhaustedError):
             await _maybe_alert_gemini_exhausted()
@@ -4714,7 +4774,7 @@ async def handle_message(message: Message) -> None:
         mgid = message.media_group_id
         _mg_buffers.setdefault(mgid, []).append(message)
         if mgid not in _mg_tasks or _mg_tasks[mgid].done():
-             _mg_tasks[mgid] = asyncio.create_task(_process_media_group_buffers(mgid))
+             _mg_tasks[mgid] = _track_inflight_task(asyncio.create_task(_process_media_group_buffers(mgid)))
         return
 
     chat_id = message.chat.id if message.chat else 0
@@ -4895,6 +4955,26 @@ async def _webhook_startup() -> None:
             _check_scheduled_removals_due()
             await _probe_or_model_liveness()
 
+async def _drain_inflight_tasks() -> None:
+    """Даёт fire-and-forget задачам обработки апдейтов (см. _inflight_tasks/
+    _track_inflight_task) шанс завершиться штатно, вместо того чтобы быть
+    уничтоженными event loop'ом на середине (см. LUMEN-2 в Sentry: "Task was
+    destroyed but it is pending!", реальная асинхронная задача внутри держала
+    вызов bot.send_message). Ждёт до INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC секунд;
+    то, что не успело — явно отменяет и ДОЖИДАЕТСЯ самой отмены (а не просто
+    вызывает cancel() и уходит — иначе получили бы то же самое предупреждение
+    асинхронно, просто чуть позже, когда GC доберётся до объекта таски)."""
+    pending = [t for t in _inflight_tasks if not t.done()]
+    if not pending:
+        return
+    log.info('[shutdown] Waiting up to %.0fs for %d in-flight update task(s) to finish.', INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC, len(pending))
+    _done, still_pending = await asyncio.wait(pending, timeout=INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC)
+    if still_pending:
+        log.warning('[shutdown] %d in-flight task(s) did not finish in time, cancelling.', len(still_pending))
+        for t in still_pending:
+            t.cancel()
+        await asyncio.gather(*still_pending, return_exceptions=True)
+
 async def main() -> None:
     global bot, client
 
@@ -4922,6 +5002,11 @@ async def main() -> None:
              await startup_task
         with contextlib.suppress(asyncio.CancelledError):
              await flush_task
+        # Даём незавершённым апдейтам (webhook/медиа-группы) шанс закончиться
+        # штатно ДО финального сброса состояния и закрытия сессий — иначе их
+        # правки chat_state рисковали не попасть в _flush_state_now ниже, а сами
+        # сетевые вызовы внутри них — быть оборваны на середине (см. LUMEN-2).
+        await _drain_inflight_tasks()
         # Финальный синхронный сброс — не ждём следующего тика периодического
         # флаша (раз в FLUSH_INTERVAL_SEC), иначе последние изменения между
         # последним тиком и остановкой процесса терялись бы при рестарте.
