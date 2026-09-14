@@ -12,7 +12,7 @@ This document goes one level deeper than the main [README](../README.md) into ho
 
 ## Automatic model routing
 
-There is no `/model` or `/provider` command. The router builds a fresh candidate list for every message:
+Routing is fully automatic: the router builds a fresh candidate list for every message:
 
 - **A YouTube or website link** → Gemini only. It's the only provider that can read page content (`url_context`) or analyze a video by URL.
 - **A video or audio attachment** → Gemini only. OpenRouter's multimodal models only accept images as base64.
