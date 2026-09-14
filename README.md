@@ -7,9 +7,11 @@ app_port: 7860
 pinned: false
 ---
 
-# Lumen
+<p align="center">
+  <img src="assets/lumen-banner.svg" alt="Lumen: Intelligence. Clarity." width="480">
+</p>
 
-A Telegram bot built to match Claude's tone and capabilities as closely as possible. Lumen routes every message automatically between Google Gemini and free OpenRouter models, generates images, downloads TikTok videos without watermarks, and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
+A Telegram bot styled after Claude's tone and personality (direct, warm, light on hedging), running on Google Gemini and free OpenRouter models with automatic per-message routing between them. Lumen also generates images, downloads TikTok videos without watermarks, and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
 
 **Stack:** Python 3.13 · aiogram · FastAPI · google-genai · Docker
 
@@ -17,7 +19,7 @@ A Telegram bot built to match Claude's tone and capabilities as closely as possi
 
 ## Features
 
-- **Automatic model routing.** No `/model` command: every message goes to whichever provider actually has what it needs. Web search and link reading always go to Gemini; everything else defaults to free OpenRouter models, protecting Gemini's tight daily quota.
+- **Automatic model routing.** Every message goes to whichever provider actually has what it needs: web search and link reading go to Gemini, everything else defaults to free OpenRouter models, protecting Gemini's tight daily quota.
 - **Streaming replies** with a self-calibrating typing-speed pacer, so answers type themselves in instead of landing in a few large chunks.
 - **Defenses against prompt injection and identity leaks.** A deterministic input filter plus output scrubbers keep the bot from revealing which model or provider actually answered.
 - **TikTok downloads** without watermarks: video, slideshows (including "live" photo slides), and original sound.
@@ -81,15 +83,21 @@ All three endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/a
 
 ## Commands
 
-`/start`, `/reset`, `/draw`, and `/tts` show up in Telegram's command menu. A few more exist but stay out of the menu on purpose:
+`/start`, `/reset`, `/draw`, and `/tts` show up in Telegram's command menu:
 
 | Command | Access | Purpose |
 |---|---|---|
+| `/start` | anyone | Shows a short intro and the command list. |
 | `/reset` | anyone in DMs; group admins/owner in groups | Clears the chat's conversation history. |
+| `/draw [description]` | anyone | Generates an image (see [Features](#features)). |
+| `/tts [text]` | anyone | Reads text out loud. |
+
+Two more owner-only commands stay out of the menu on purpose, since they surface internal details that shouldn't be visible in a group chat:
+
+| Command | Access | Purpose |
+|---|---|---|
 | `/stats` | bot owner, DMs only | Active chat count, process uptime, per-model quota usage. |
 | `/logs` | bot owner, DMs only | Sends `bot.log` with secrets redacted. |
-
-`/model`, `/provider`, and `/imgmodel` don't exist. The router and the image-model picker choose automatically on every request; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for why.
 
 ## Testing
 
