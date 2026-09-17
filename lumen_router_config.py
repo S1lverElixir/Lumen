@@ -44,7 +44,7 @@ log = logging.getLogger("bot")
 # добавился Gemini 3.7 Flash в тот же бакет "Gemini 3", относится ко ВСЕЙ
 # линейке ниже — отдельно для каждой модели дальше не повторяется). Search
 # grounding считается не по конкретной модели, а по общему бакету ПОКОЛЕНИЯ:
-# бакет "Gemini 3" (объединяет 3/3.1/3.5/3.6/3.7) — 0/0, то есть реальной квоты
+# бакет "Gemini 3" (объединяет 3/3.1/3.5/3.6/3.7/3.8) — 0/0, то есть реальной квоты
 # на поиск нет ни у одной модели линейки Gemini 3.x, сколько бы ни было соблазна
 # предположить "раз lite-класс — значит есть квота" (именно так ошиблись раньше
 # с 3.5/3.1 Flash-Lite, см. историю правок). Бакет "Gemini 2.5" по дашборду
@@ -55,13 +55,17 @@ log = logging.getLogger("bot")
 # считается ПО КОНКРЕТНОЙ модели: у 3.5/3.1 Flash-Lite он реально есть
 # (500/сутки), у остальных моделей линейки 3.x — 0/0.
 GEMINI_MODELS: dict[str, dict[str, Any]] = {
-    # Gemini 3.7 Flash — новый флагман линейки Flash, вышел 13 августа 2026 (GA),
-    # сменяет 3.6 Flash ("наша самая умная рабочая лошадка для разработки и
-    # агентных сценариев" — офиц. анонс Google). Тот же набор инструментов, что
-    # и у 3.6 Flash (см. release notes ai.google.dev/gemini-api/docs/changelog),
-    # контекст 1 млн токенов. RPD-лимит подтверждён по дашборду AI Studio
-    # (аудит моделей, 17 августа 2026) — тот же бакет 5 RPM/250K TPM/20 RPD, что
-    # и у 3.6 Flash, поэтому не помечена quota_unconfirmed.
+    # Gemini 3.8 Flash — новый флагман линейки Flash (аудит моделей, 17 сентября
+    # 2026, по дашборду AI Studio владельца за 28 дней: бакет 5 RPM/250K TPM/
+    # 20 RPD, 0/0 на search и map grounding — ровно тот же профиль, что у 3.7/
+    # 3.6/3.5 Flash, поэтому без quota_unconfirmed). search_grounding/
+    # map_grounding False — бакет "Gemini 3" по-прежнему 0/0 на оба инструмента.
+    "gemini-3.8-flash": {
+        "stream": True,
+        "search_grounding": False, "map_grounding": False, "url_context": True,
+    },
+    # Gemini 3.7 Flash — прошлый флагман линейки Flash (GA 13 августа 2026),
+    # сохранён в цепочке как резерв после 3.8 Flash.
     "gemini-3.7-flash": {
         "stream": True,
         "search_grounding": False, "map_grounding": False, "url_context": True,
@@ -150,7 +154,7 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "no_search": True, "stream": True,
     },
 }
-DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 
 # ── TTS-модели (аудит техдолга, август 2026) ──
 # GEMINI_TTS_MODELS раньше был отдельным хардкодом внутри _gemini_tts_bytes в bot.py —
@@ -165,6 +169,15 @@ GEMINI_TTS_MODELS: list[str] = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flas
 # а не заранее. Проверяется тем же ежесуточным циклом, что и _check_temporary_free_models_expiry.
 FISH_AUDIO_TTS_MODEL = "fish-audio/s2.1-pro-free:free"
 FISH_AUDIO_FREE_TIER_EXPIRY = date(2026, 8, 31)
+# ОТКЛЮЧЕНО (аудит моделей, 17 сентября 2026): зеркала fish-audio/s2.1-pro-free:free
+# больше нет в живом каталоге OpenRouter (публичный /models API — ни одного
+# fish-слага среди 24 бесплатных), а блог fish.audio/blog/s2-1-pro-free-api так и
+# не объявил продления после 31.08.2026. Пока флаг False, inline_tts идёт сразу на
+# Gemini TTS без заведомо мёртвой первой попытки (та стоила бы лишний сетевой
+# запрос — и до ROUTE_MODEL_TIMEOUT_SEC ожидания в худшем случае — на каждую
+# озвучку). Сама функция _fish_audio_tts_bytes и этот флаг оставлены (не удалены):
+# если Fish снова откроют free-доступ — достаточно вернуть True одной строкой.
+FISH_AUDIO_ENABLED = False
 
 def _check_fish_audio_tts_expiry() -> None:
     today = date.today()
@@ -252,6 +265,18 @@ _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
     # "Top Weekly free" — см. историю правок): новая крупная reasoning-модель
     # z-ai/glm-5.2:free, добавлена в _OR_HEAVY_ORDER этим же аудитом.
     "z-ai/glm-5.2:free",
+    # ДОБАВЛЕНО (аудит моделей, 17 сентября 2026, живой каталог OpenRouter через
+    # публичный /models API): все новички этого захода + gemini-3.8-flash. Старые
+    # ID не удаляются никогда (мёртвые модели тоже нельзя допускать в ответ).
+    "thinkingmachines/inkling-small:free",
+    "thinkingmachines/inkling:free",
+    "nex-agi/nex-n2.5-mini:free",
+    "nex-agi/nex-n2.5-pro:free",
+    "inclusionai/ling-3.0-flash-sante:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "inclusionai/ling-3.0-flash-vl:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "gemini-3.8-flash",
 ]
 TEXT_MODEL_ORDER = _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION  # алиас для обратной совместимости
 # ПОПОЛНЕНО (аудит моделей, 2 августа 2026, по реальным логам продакшена + сверке
@@ -335,12 +360,11 @@ _OR_MODEL_HEALTH: dict[str, _ModelHealthNote] = {
                "OpenRouter (сверено отдельно от логов)."
     ),
     "liquid/lfm-2.5-1.2b-thinking:free": _ModelHealthNote(
-        reason="Не поймана напрямую в логах (соседняя liquid/lfm-2.5-1.2b-instruct:free — поймана, "
-               "см. выше), но тоже отсутствует в текущем живом каталоге бесплатных моделей OpenRouter — "
-               "похоже, LiquidAI сняли оба lfm-2.5-1.2b слага с бесплатного тира одновременно. Более "
-               "низкая уверенность, чем у остальных записей в этом реестре — если у владельца будет "
-               "прямое подтверждение (успешный вызов или другая ошибка, не 'no endpoints') — эту запись "
-               "стоит убрать."
+        reason="ПОДТВЕРЖДЕНО ОКОНЧАТЕЛЬНО (аудит моделей, 17 сентября 2026, живой каталог "
+                "OpenRouter через публичный /models API): слага нет среди бесплатных, а LiquidAI "
+                "выпустили замену — liquid/lfm-2.5-2.6b:free (добавлена в _OR_LIGHT_ORDER). "
+                "Изначально внесена 02.08.2026 по отсутствию в каталоге (соседний instruct-слаг "
+                "пойман в логах напрямую, см. выше) — сентябрьский аудит закрыл вопрос."
     ),
     "nousresearch/hermes-3-llama-3.1-405b:free": _ModelHealthNote(
         reason="Внешне подтверждено (не поймано напрямую в логах владельца — heavy-маршрут в этом "
@@ -379,12 +403,41 @@ _OR_MODEL_HEALTH: dict[str, _ModelHealthNote] = {
     # ── Найдено по реальным логам прода (22 августа 2026, HF Spaces bot.log) ──
     "inclusionai/ling-3.0-flash:free": _ModelHealthNote(
         reason="ПОДТВЕРЖДЕНО ПО РЕАЛЬНЫМ ЛОГАМ ПРОДА (22 августа 2026, 2 попытки подряд, идентичная "
-               "ошибка каждый раз): HTTP 404 'This model is unavailable for free. The paid version is "
-               "available now - use this slug instead: inclusionai/ling-3.0-flash' — тот же самый "
-               "провайдерский паттерн снятия с бесплатного тира, что и у z-ai/glm-4.5-air/meta-llama/"
-               "llama-3.2-3b выше. Стояла головой _OR_LIGHT_ORDER (самый частый маршрут бота) — "
-               "каждое обычное текстовое сообщение сначала било в эту мёртвую модель и только потом "
-               "переключалось на следующую по цепочке, теряя время впустую на каждом сообщении."
+                "ошибка каждый раз): HTTP 404 'This model is unavailable for free. The paid version is "
+                "available now - use this slug instead: inclusionai/ling-3.0-flash' — тот же самый "
+                "провайдерский паттерн снятия с бесплатного тира, что и у z-ai/glm-4.5-air/meta-llama/"
+                "llama-3.2-3b выше. Стояла головой _OR_LIGHT_ORDER (самый частый маршрут бота) — "
+                "каждое обычное текстовое сообщение сначала било в эту мёртвую модель и только потом "
+                "переключалось на следующую по цепочке, теряя время впустую на каждом сообщении."
+    ),
+    # ── Найдено при аудите моделей 17 сентября 2026 (живой каталог OpenRouter —
+    # публичный /models API, разобран скриптом, а не глазами: 444 модели всего,
+    # 24 бесплатных) ──
+    "nvidia/nemotron-3-nano-30b-a3b:free": _ModelHealthNote(
+        reason="ПОДТВЕРЖДЕНО: анонсированная дата снятия 24 августа 2026 наступила (см. "
+                "_SCHEDULED_OR_REMOVALS, откуда запись этим же аудитом удалена), а слаг "
+                "отсутствует в живом каталоге бесплатных моделей OpenRouter (API, 17 сентября "
+                "2026) — тот же исход, что и у остальных подтверждённых снятий выше. Раньше "
+                "стояла в _OR_LIGHT_ORDER — каждое обычное сообщение теряло попытку впустую."
+    ),
+    "openai/gpt-oss-20b:free": _ModelHealthNote(
+        reason="Отсутствует в живом каталоге бесплатных моделей OpenRouter (API, 17 сентября "
+                "2026) — похоже, OpenAI сняла оба gpt-oss слага с бесплатного тира. Более низкая "
+                "уверенность, чем у остальных записей (не поймана напрямую в логах владельца — "
+                "см. тот же оговор у lfm-2.5-1.2b-thinking ниже): если владелец увидит успешный "
+                "вызов или другую ошибку, а не отсутствие в каталоге — запись стоит убрать. "
+                "Раньше стояла второй в _OR_LIGHT_ORDER."
+    ),
+    "openai/gpt-oss-120b:free": _ModelHealthNote(
+        reason="Отсутствует в живом каталоге бесплатных моделей OpenRouter (API, 17 сентября "
+                "2026) — см. оговор про уверенность у gpt-oss-20b выше, та же ситуация. Раньше "
+                "стояла второй в _OR_HEAVY_ORDER."
+    ),
+    "nvidia/nemotron-nano-12b-v2-vl:free": _ModelHealthNote(
+        reason="Отсутствует в живом каталоге бесплатных моделей OpenRouter (API, 17 сентября "
+                "2026). Стояла головой _OR_VISION_ORDER — каждое сообщение с картинкой сначала "
+                "било в мёртвую модель. Заменена головой на google/gemma-4-31b-it:free этим же "
+                "аудитом."
     ),
 }
 
@@ -421,7 +474,6 @@ def _check_temporary_free_models_expiry() -> None:
 # при этом остаётся в _OR_*_ORDER до первого реального подтверждения (404/no
 # endpoints) в логах, ровно так же, как остальной проект уже поступает.
 _SCHEDULED_OR_REMOVALS: dict[str, date] = {
-    "nvidia/nemotron-3-nano-30b-a3b:free": date(2026, 8, 24),
     "dots-studio/dots-3-note-preview:free": date(2026, 9, 30),
 }
 
@@ -474,11 +526,22 @@ def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
 #   последней только потому, что была самой свежей на момент прошлого аудита
 #   (17 августа), спустя 5 дней без единого негативного сигнала это уже не
 #   повод держать её в хвосте.
+# ПЕРЕСМОТРЕНО ЦЕЛИКОМ (аудит моделей, 17 сентября 2026, живой каталог
+# OpenRouter через публичный /models API — 24 бесплатные модели): из цепочки
+# убраны gpt-oss-20b, lfm-2.5-1.2b-thinking и nemotron-3-nano-30b-a3b (все три
+# пропали из бесплатного каталога, см. _OR_MODEL_HEALTH выше). Новые модели
+# (inkling-small, nex-mini, ling-sante/fin, lfm-2.6b) добавлены ПОСЛЕ проверенной
+# головы (lightning — единственный кандидат, только что отработавший реальный
+# прод-трафик 17.09.2026 без единого негативного сигнала), но ПЕРЕД
+# generic-резервом: ни одна ещё не калибровалась на «кашу» (см. _OR_MODEL_HEALTH
+# у nano-9b — тот же риск), поэтому выше проверенной головы им не место.
 _OR_LIGHT_ORDER: list[str] = [
     "nvidia/nemotron-3.5-lightning:free",
-    "openai/gpt-oss-20b:free",
-    "liquid/lfm-2.5-1.2b-thinking:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "thinkingmachines/inkling-small:free",
+    "nex-agi/nex-n2.5-mini:free",
+    "inclusionai/ling-3.0-flash-sante:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "liquid/lfm-2.5-2.6b:free",
     "openrouter/free",
 ]
 
@@ -521,14 +584,20 @@ _OR_LIGHT_ORDER: list[str] = [
 #   footprint (низкая задержка) — та же ситуация, был в списке утечек, не в роутинге.
 # - poolside/laguna-xs-2.1:free — 33B/3B active, самый компактный из троицы
 #   Laguna/coding-моделей этого захода.
+# ОБНОВЛЕНО (аудит моделей, 17 сентября 2026, живой каталог OpenRouter):
+# gpt-oss-120b убран (пропал из бесплатного каталога, см. _OR_MODEL_HEALTH).
+# Новые inkling и nex-n2.5-pro добавлены после проверенных калибровкой моделей,
+# но перед dots-3-note-preview (та ближе к снятию — 30.09.2026, см.
+# _SCHEDULED_OR_REMOVALS — остаётся последней перед generic-резервом).
 _OR_HEAVY_ORDER: list[str] = [
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "openai/gpt-oss-120b:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "z-ai/glm-5.2:free",
     "poolside/laguna-s-2.1:free",
     "cohere/north-mini-code:free",
     "poolside/laguna-xs-2.1:free",
+    "thinkingmachines/inkling:free",
+    "nex-agi/nex-n2.5-pro:free",
     "dots-studio/dots-3-note-preview:free",
     "openrouter/free",
 ]
@@ -537,18 +606,27 @@ _OR_HEAVY_ORDER: list[str] = [
 # достаточно бесплатных vision-моделей, чтобы не трогать Gemini. OpenRouter
 # физически принимает только изображения (base64 data URL) — для видео/аудио
 # этот список не используется вообще, см. _build_route/_run_route ниже.
+# ОБНОВЛЕНО (аудит моделей, 17 сентября 2026, живой каталог OpenRouter):
+# nemotron-nano-12b-v2-vl убран с позиции головы (пропал из бесплатного
+# каталога, см. _OR_MODEL_HEALTH). Головой стала gemma-4-31b (уже была второй,
+# квота подтверждена дашбордом AI Studio: 30 RPM/16K TPM/14.4K RPD).
+# ling-3.0-flash-vl — новая vision-модель из каталога, некалиброванная,
+# поэтому в хвосте перед Gemini-резервом (см. _build_route).
 _OR_VISION_ORDER: list[str] = [
-    "nvidia/nemotron-nano-12b-v2-vl:free",
     "google/gemma-4-31b-it:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
+    "inclusionai/ling-3.0-flash-vl:free",
 ]
 
 # ── Цепочки Gemini. GEMINI_HEAVY_CHAIN — от сильной модели к слабой (тот же
 # состав/порядок, что был у прежнего единственного quota_fallback_chain), для
 # случаев, где ТРЕБУЕТСЯ именно Gemini (YouTube/сайт по ссылке, видео/аудио
 # вложение), но живой поиск не нужен.
+# ОБНОВЛЕНО (аудит моделей, 17 сентября 2026, дашборд AI Studio владельца):
+# головой стал gemini-3.8-flash (новейший флагман, тот же бакет 5/250K/20).
 GEMINI_HEAVY_CHAIN: list[str] = [
+    "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
@@ -570,6 +648,7 @@ GEMINI_SEARCH_CHAIN: list[str] = [
     "gemini-2.5-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
@@ -590,8 +669,10 @@ GEMINI_LINK_SEARCH_CHAIN: list[str] = [m for m in GEMINI_SEARCH_CHAIN if not GEM
 # срабатывания недороги: худший случай — используется чуть более мощная
 # модель, чем реально нужно, а не отказ в ответе.
 _HEAVY_QUERY_RE = re.compile(
-    r"напиши\s+(код|функци\w*|скрипт|программ\w*|класс\w*|запрос\s+sql|regex|регуляр\w*)"
+    r"напиши\s+(код|функци\w*|скрипт|программ\w*|класс\w*|запрос\s+sql|regex|регуляр\w*|тест\w*|парсер\w*|бот\w*|сайт\w*|приложени\w*)"
     r"|сгенерируй\s+код|исправь\s+(код|баг|ошибк\w*)|отрефактор\w*|рефактор\w*|оптимизируй"
+    r"|разбер(и|ём|ись)\s+(этот\s+|подробно\s+)?(код|ошибк\w*|баг\w*|текст\w*|документ\w*|подробно)"
+    r"|найди\s+(ошибк\w*|баг\w*)|объясни\s+(код|ошибк\w*)"
     r"|напиши\s+(эссе|статью|доклад|реферат|сочинение|резюме|cv)\b"
     r"|проанализируй\w*|разбер(и|ём)\s+подробно|объясни\s+подробно"
     r"|сравни\s+.{0,40}(и|с)\s+|докажи\b|доказательство"
@@ -619,7 +700,8 @@ def _looks_like_heavy_query(text: str) -> bool:
 # модели там, где поиск был не нужен, но модель сама решает, вызывать ли его.
 _FRESHNESS_QUERY_RE = re.compile(
     r"сейчас|сегодня|текущ\w*|последн\w*|актуальн\w*|свеж\w*|недавно|на\s+данный\s+момент"
-    r"|новост\w*|курс\s+(валют|доллара|евро|рубл\w*)|погод\w*"
+    r"|новост\w*|курс\s+(валют|доллара|евро|рубл\w*)|погод\w*|прогноз\w*"
+    r"|расписани\w*|афиш\w*"
     r"|цена\w*|стоимост\w*|сколько\s+стоит"
     r"|кто\s+(сейчас|является|президент|премьер|глава|ceo|мэр)"
     r"|результат\w*\s+(матч\w*|игр\w*|выбор\w*)"

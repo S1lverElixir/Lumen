@@ -398,3 +398,35 @@ def _md_to_html(text: str) -> str:
 
     return text
 
+
+def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
+    """Разбивает длинный текст на части не длиннее max_len, стараясь резать по
+    границам абзацев/строк/предложений, а не посреди слова. Раньше сообщения
+    длиннее лимита Telegram (4096 симв.) просто не отправлялись — пользователь
+    не видел вообще ничего.
+
+    Вынесено из bot.py (срез монолита, сентябрь 2026): чистая функция над
+    строками без единой зависимости от Telegram/рантайма — тот же класс, что и
+    _md_to_html выше. Дефолт 4096 дублирует TG_MAX_LEN из bot.py буквально
+    (импортировать константу оттуда нельзя — циклический импорт): оба места
+    про лимит Telegram, меняются только вместе с ним."""
+    if len(text) <= max_len:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > max_len:
+        window = remaining[:max_len]
+        cut = -1
+        for sep in ("\n\n", "\n", ". ", " "):
+            idx = window.rfind(sep)
+            if idx > max_len * 0.5:
+                cut = idx + len(sep)
+                break
+        if cut <= 0:
+            cut = max_len
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+

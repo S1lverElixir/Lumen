@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 
 from lumen_router_config import GEMINI_MODELS, GEMINI_TTS_MODELS, _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
 
@@ -146,6 +147,63 @@ def _detect_identity_leak(text: str) -> bool:
             return True
     return bool(_IDENTITY_LEAK_RE.search(text))
 
+# Слой Г — детектор "каши" (порчи текста многоскриптовыми вкраплениями).
+# Реальный найденный в проде паттерн (nemotron-nano-9b-v2, см. _OR_MODEL_HEALTH):
+# фрагменты слов из не относящихся к разговору языков, вклиненные прямо ВНУТРЬ
+# слов и предложений (испанское 'modelo' внутри русского слова, арабское слово
+# внутри русского предложения и т.п.). Сигнал — смешение письменностей ВНУТРИ
+# одного токена: в легитимном тексте такое почти не встречается (переводы,
+# цитаты и код идут отдельными токенами/блоками), а у бредящей модели — массово.
+# НАМЕРЕННО только лог-сигнал [mush-suspect], без подмены ответа: порог (3+
+# смешанных токена на текст от 100 символов) эвристический, а принцип проекта —
+# не наказывать по спекуляции. Подтверждённые случаи разбираются человеком и
+# уходят в _OR_MODEL_HEALTH как у nano-9b. Из проверки исключены код-блоки/
+# инлайн-код (там смешанные идентификаторы вида getДанные — норма) и URL.
+_SCRIPT_KEYWORDS = (
+    "LATIN", "CYRILLIC", "GREEK", "ARMENIAN", "HEBREW", "ARABIC",
+    "DEVANAGARI", "BENGALI", "TAMIL", "TELUGU", "KANNADA", "MALAYALAM",
+    "GUJARATI", "GURMUKHI", "ORIYA", "SINHALA", "THAI", "LAO", "MYANMAR",
+    "KHMER", "GEORGIAN", "THAANA", "HIRAGANA", "KATAKANA", "HANGUL", "CJK",
+)
+_MUSH_MIN_TEXT_LEN = 100
+_MUSH_MIN_MIXED_TOKENS = 3
+
+
+def _token_scripts(token: str) -> set[str]:
+    scripts: set[str] = set()
+    for ch in token:
+        if not ch.isalpha():
+            continue
+        try:
+            name = unicodedata.name(ch)
+        except ValueError:
+            continue
+        for keyword in _SCRIPT_KEYWORDS:
+            if keyword in name:
+                scripts.add(keyword)
+                break
+    return scripts
+
+
+def _detect_garbled_mix(text: str) -> bool:
+    """Чистая функция — True, если в тексте 3+ токена со смешанными
+    письменностями внутри (см. комментарий у _SCRIPT_KEYWORDS). Короткие тексты
+    (< 100 символов) не проверяются — там "каша" по определению неразвёрнутая,
+    а шум от ложных срабатываний выше."""
+    if not text or len(text) < _MUSH_MIN_TEXT_LEN:
+        return False
+    stripped = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    stripped = re.sub(r"`[^`\n]+`", " ", stripped)
+    stripped = re.sub(r"https?://\S+", " ", stripped)
+    mixed = 0
+    for token in re.findall(r"[^\W_]+", stripped, flags=re.UNICODE):
+        if len(_token_scripts(token)) >= 2:
+            mixed += 1
+            if mixed >= _MUSH_MIN_MIXED_TOKENS:
+                return True
+    return False
+
+
 def _scrub_identity_leak(text: str, *, source: str) -> str:
     """Точка применения фильтра для НЕстримингового пути (ask_gemini, ask_openrouter_*).
     Вызывается непосредственно перед записью ответа в историю чата — если вызвать её
@@ -157,6 +215,8 @@ def _scrub_identity_leak(text: str, *, source: str) -> str:
     if _detect_injected_payload_echo(text):
         log.warning('[injection-echo] Detected and blocked a likely injected-instruction echo (source=%s): %r', source, text[:500])
         return _INJECTED_PAYLOAD_ECHO_FALLBACK
+    if _detect_garbled_mix(text):
+        log.warning('[mush-suspect] Reply looks garbled by multilingual fragments (source=%s): %r', source, text[:500])
     return text
 
 # ─────────────────── защита от промт-инъекций (входной префильтр) ───────────────────

@@ -107,6 +107,13 @@ def test_split_text_chunks_preserves_all_words():
     assert " ".join(chunks).split() == text.split()
 
 
+def test_split_text_chunks_lives_in_formatting_module():
+    # Срез монолита (сентябрь 2026): реализация — в lumen_formatting, bot.py
+    # только ре-экспортирует имя, чтобы bot._split_text_chunks работал как раньше.
+    import lumen_formatting
+    assert bot._split_text_chunks is lumen_formatting._split_text_chunks
+
+
 # ─────────────────────────── _sanitize_mime_type ───────────────────────────
 
 def test_sanitize_mime_type_guesses_from_extension():
@@ -1111,6 +1118,37 @@ def test_inline_tts_marks_quota_exhausted_on_rate_limit():
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash-preview-tts", None)
 
 
+def test_inline_tts_skips_fish_audio_when_disabled(monkeypatch):
+    # FISH_AUDIO_ENABLED=False (аудит моделей, 17.09.2026 — зеркало снято с
+    # бесплатного каталога): inline_tts не должен вообще трогать _fish_audio_tts_bytes.
+    async def _fail_if_called(text):
+        raise AssertionError("fish attempt must be skipped while disabled")
+
+    monkeypatch.setattr(bot, "_fish_audio_tts_bytes", _fail_if_called)
+
+    fake_wav_bytes = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 64
+
+    def fake_generate_content(*, model, contents, config=None):
+        return _fake_tts_response(fake_wav_bytes)
+
+    fake_client = MagicMock()
+    fake_client.models.generate_content.side_effect = fake_generate_content
+
+    incoming = _FakeIncomingMessage(999803)
+    incoming.message_id = 12347
+
+    original_client = bot.client
+    original_bot = bot.bot
+    bot.client = fake_client
+    bot.bot = _FakeVoiceBot()
+    try:
+        asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+        assert bot.bot.sent_voice is not None
+    finally:
+        bot.client = original_client
+        bot.bot = original_bot
+
+
 # ─────────────────────────── _match_trigger_prefix (словесные триггеры draw/tts) ───────────────────────────
 
 def test_match_trigger_prefix_finds_draw_trigger():
@@ -1142,6 +1180,65 @@ def test_match_trigger_prefix_ambiguous_phrases_deliberately_excluded():
     # "хочу картинку тебе показать" или правкой уже присланного фото.
     assert bot._match_trigger_prefix("хочу картинку показать тебе", bot.DRAW_TRIGGER_PREFIXES) is None
     assert bot._match_trigger_prefix("сделай картинку ярче", bot.DRAW_TRIGGER_PREFIXES) is None
+
+
+def test_match_trigger_prefix_new_voice_and_draw_synonyms():
+    # Расширение синонимов (сентябрь 2026) — разговорные варианты тех же просьб.
+    assert bot._match_trigger_prefix("зачитай этот абзац", bot.TTS_TRIGGER_PREFIXES) == "зачитай"
+    assert bot._match_trigger_prefix("зачитай текст договора", bot.TTS_TRIGGER_PREFIXES) == "зачитай текст"
+    assert bot._match_trigger_prefix("прочти вслух мою историю", bot.TTS_TRIGGER_PREFIXES) == "прочти вслух"
+    assert bot._match_trigger_prefix("сгенерируй мне изображение замка", bot.DRAW_TRIGGER_PREFIXES) == "сгенерируй мне изображение"
+    assert bot._match_trigger_prefix("создай мне картинку с котом", bot.DRAW_TRIGGER_PREFIXES) == "создай мне картинку"
+
+
+def test_match_trigger_prefix_long_phrase_wins_over_short_prefix():
+    # Порядок в списке: "прочти вслух" стоит раньше "прочти" — иначе короткий
+    # префикс съест начало ("прочти" вместо "прочти вслух").
+    assert bot._match_trigger_prefix("озвучь этот текст пожалуйста", bot.TTS_TRIGGER_PREFIXES) == "озвучь"
+    assert bot._match_trigger_prefix("прочти вслух", bot.TTS_TRIGGER_PREFIXES) == "прочти вслух"
+
+
+def test_strip_reply_marker_treats_demonstratives_as_empty():
+    # "это"/"это сообщение" после триггера — указание на реплай, а не буквальный
+    # текст. Хвост после пустышки — уже содержание, идёт в работу как есть.
+    assert bot._strip_reply_marker("это") == ""
+    assert bot._strip_reply_marker("это сообщение") == ""
+    assert bot._strip_reply_marker("этот текст пожалуйста") == "этот текст пожалуйста"
+    assert bot._strip_reply_marker("кота на пляже") == "кота на пляже"
+    # Хвостовая пунктуация маркеру не помеха (найдено код-ревью): "озвучь это."
+    # обязано вести себя как "озвучь это", а не как буквальный текст "это.".
+    assert bot._strip_reply_marker("это.") == ""
+    assert bot._strip_reply_marker("это!") == ""
+    assert bot._strip_reply_marker("этот текст, пожалуйста") == "этот текст, пожалуйста"
+
+
+def test_match_trigger_prefix_requires_word_boundary_and_polite_forms():
+    # Найдено код-ревью: чистый startswith без границы слова давал мусор —
+    # "прочтите" начиналось с "прочти" (остаток "те..."), "нарисуйка" — с
+    # "нарисуй". Теперь после префикса нужны конец строки/пробел/пунктуация.
+    assert bot._match_trigger_prefix("нарисуйка", bot.DRAW_TRIGGER_PREFIXES) is None
+    assert bot._match_trigger_prefix("прочтите этот текст", bot.TTS_TRIGGER_PREFIXES) == "прочтите"
+    assert bot._match_trigger_prefix("прочтите вслух сказку", bot.TTS_TRIGGER_PREFIXES) == "прочтите вслух"
+    assert bot._match_trigger_prefix("озвучьте текст", bot.TTS_TRIGGER_PREFIXES) == "озвучьте"
+    assert bot._match_trigger_prefix("нарисуйте кота", bot.DRAW_TRIGGER_PREFIXES) == "нарисуйте"
+
+
+def test_tts_trigger_this_with_reply_voices_replied_message(rate_guard_setup):
+    # Регрессия (сентябрь 2026): "озвучь это" в ответ на сообщение озвучивало
+    # само слово "это" — остаток после триггера считался содержанием.
+    message = rate_guard_setup()
+    message.text = "озвучь это"
+    message.reply_to_message = SimpleNamespace(text="текст из реплая", caption=None)
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_tts.assert_awaited_once_with(message, "текст из реплая")
+
+
+def test_draw_trigger_this_with_reply_draws_replied_message(rate_guard_setup):
+    message = rate_guard_setup()
+    message.text = "нарисуй это"
+    message.reply_to_message = SimpleNamespace(text="закат над морем", caption=None)
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once_with(message, "закат над морем")
 
 
 # ─────────────────────────── _looks_like_media_reference (память о медиа) ───────────────────────────
@@ -1184,6 +1281,25 @@ def test_media_reference_category_detects_each_type():
 def test_media_reference_category_none_when_no_media_word():
     assert bot._media_reference_category("расскажи про эту компанию") is None
     assert bot._media_reference_category("") is None
+
+
+def test_media_reference_category_detects_documents_and_circles():
+    # Категория document (сентябрь 2026): "что в документе/pdf" раньше вообще не
+    # распознавалось — файл подтягивался только явным реплаем. "текст" сюда
+    # намеренно НЕ входит (слишком общее слово — см. комментарий у регэкспа).
+    assert bot._media_reference_category("что в этом документе") == "document"
+    assert bot._media_reference_category("прочитай pdf") == "document"
+    assert bot._media_reference_category("открой файл") == "document"
+    assert bot._media_reference_category("глянь кружок") == "video"
+    assert bot._media_reference_category("переведи этот текст") is None
+
+
+def test_mime_matches_media_category_document():
+    assert bot._mime_matches_media_category("application/pdf", "document") is True
+    assert bot._mime_matches_media_category("text/plain", "document") is True
+    assert bot._mime_matches_media_category("application/octet-stream", "document") is True
+    assert bot._mime_matches_media_category("image/jpeg", "document") is False
+    assert bot._mime_matches_media_category("application/pdf", "photo") is False
 
 
 def test_mime_matches_media_category_sticker_is_exclusively_webp():
@@ -2003,6 +2119,104 @@ def test_try_openrouter_streaming_happy_path_accumulates_and_finalizes():
     finally:
         bot._openrouter_stream_pieces = original_gen
         bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
+    # Зависший первый кусок (бэкенд молчит) — обёртка бросает TimeoutError по
+    # FIRST_CHUNK_TIMEOUT_SEC, _run_streaming_reply отдаёт плейсхолдер дальше
+    # по цепочке вместо бесконечного ожидания. РАНЬШЕ внешнего предела вообще
+    # не было — такой стрим держал лок чата до STREAM_CHUNK_TIMEOUT_SEC внутри
+    # генератора (30с) или навсегда при фейковом висящем генераторе.
+    chat_id = 999301
+
+    async def hanging_pieces():
+        await asyncio.sleep(3600)
+        yield "never arrives"
+
+    monkeypatch.setattr(bot, "_model_first_chunk_limit", lambda key, floor: 0.05)
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        started = time.monotonic()
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="x:free",
+            piece_agen=hanging_pieces(),
+        ))
+        elapsed = time.monotonic() - started
+        assert answer is None
+        assert placeholder is incoming.sent[0]
+        assert elapsed < 30
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
+    # Юнит-тест самого тикера: первый кадр только после _DOTS_START_AFTER_SEC,
+    # дальше по кадру каждые _DOTS_TICK_SEC; отмена — штатная остановка.
+    calls = []
+
+    async def fake_sleep(delay):
+        calls.append(delay)
+        if len(calls) > 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(bot, "_dots_sleep", fake_sleep)
+    placeholder = _FakeSentMessage()
+
+    async def run():
+        with pytest.raises(asyncio.CancelledError):
+            await bot._tick_waiting_dots(placeholder)
+
+    asyncio.run(run())
+    assert calls[0] == bot._DOTS_START_AFTER_SEC
+    assert calls[1:] == [bot._DOTS_TICK_SEC] * 3
+    assert [text for text, _ in placeholder.edits] == list(bot._DOTS_FRAMES[:3])
+
+
+def test_streaming_fast_path_shows_no_dots_frames():
+    # Мгновенно ответившая модель: тикер гасится до первого кадра (2.5с тишины
+    # не наступает) — в правках только контент, никаких "." / "..".
+    chat_id = 999302
+
+    async def instant_pieces():
+        yield "Привет"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
+            piece_agen=instant_pieces(),
+        ))
+        assert answer == "Привет"
+        for text, _ in incoming.sent[0].edits:
+            assert text not in bot._DOTS_FRAMES
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_run_route_reorders_slow_head_down(monkeypatch):
+    # Интеграция reorder в _run_route: модель с измеренными 100с уходит вниз,
+    # ask вызывается уже с переупорядоченной цепочкой.
+    import lumen_model_speed
+
+    seen = []
+
+    async def fake_ask(chat_id, prompt, model_chain, *, deadline=None):
+        seen.append(list(model_chain))
+        return "ok"
+
+    monkeypatch.setattr(bot, "ask_openrouter_text", fake_ask)
+    lumen_model_speed._latency_ema.clear()
+    lumen_model_speed.record_response(
+        lumen_model_speed.speed_key("openrouter", "slow:free"), total_sec=100.0)
+    incoming = _FakeIncomingMessage(999303)
+    try:
+        ans, sent = asyncio.run(bot._run_route(
+            999303, "Привет", [("openrouter", "slow:free"), ("openrouter", "fast:free")], incoming))
+        assert (ans, sent) == ("ok", False)
+        assert seen[0][0] == "fast:free"
+    finally:
+        bot.chat_state.pop(999303, None)
+        lumen_model_speed._latency_ema.clear()
 
 
 def test_try_openrouter_streaming_returns_none_on_early_failure():

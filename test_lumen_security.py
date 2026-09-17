@@ -93,6 +93,49 @@ def test_looks_like_injection_probe_no_false_positive_on_unrelated_word_reuse():
     assert lumen_security._looks_like_injection_probe("нарисуй кота") is False
 
 
+def test_detect_garbled_mix_catches_nano_9b_style_corruption():
+    # Паттерн из _OR_MODEL_HEALTH (nemotron-nano-9b-v2, 18.08.2026): фрагменты
+    # чужих письменностей, вклиненные внутрь русских слов и предложений.
+    mush = (
+        "Это была отличная модmodeloель для своего времени, она прекрасно справлялась "
+        "с расчزراعةчётами любой сложности и давала ответы про европейские события "
+        "без единой ошибки, что делает её лучшим выбором для каждого пользо종료вателя."
+    )
+    assert lumen_security._detect_garbled_mix(mush) is True
+
+
+def test_detect_garbled_mix_ignores_code_blocks_urls_and_short_texts():
+    code = "```python\ndef getДанные():\n    return fetchРезультат()\n```\n" + "Обычный русский текст про функцию и её результат. " * 4
+    assert lumen_security._detect_garbled_mix(code) is False
+    assert lumen_security._detect_garbled_mix("Смотри https://example.com/модmodeloель-زراعة здесь") is False
+    assert lumen_security._detect_garbled_mix("короткая модmodeloель расчزراعةчёт") is False
+
+
+def test_detect_garbled_mix_no_false_positive_on_normal_multilingual_text():
+    normal = (
+        "Перевод слова модель: по-испански modelo, по-французски modèle, по-немецки Modell. "
+        "В японском это モデル, в китайском 模型, в корейском 모델. Каждое слово идёт "
+        "отдельным токеном, внутри слов письменности не смешиваются."
+    )
+    assert lumen_security._detect_garbled_mix(normal) is False
+    plain_ru = " ".join(["Обычный русский ответ про погоду, котиков и смысл жизни."] * 6)
+    assert lumen_security._detect_garbled_mix(plain_ru) is False
+
+
+def test_scrub_identity_leak_logs_mush_suspect_without_blocking(caplog):
+    import logging
+    mush = (
+        "Это была отличная модmodeloель для своего времени, она прекрасно справлялась "
+        "с расчزراعةчётами любой сложности и давала ответы про европейские события "
+        "без единой ошибки, что делает её лучшим выбором для каждого пользо종료вателя."
+    )
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        result = lumen_security._scrub_identity_leak(mush, source="test-mush")
+    assert result == mush
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "[mush-suspect]" in messages
+
+
 def test_leak_scan_window_catches_leak_after_long_safe_padding():
     # Найдено при код-ревью (performance): инкрементальная проверка в стриминге
     # была оптимизирована с "весь накопленный текст" на "хвост в _LEAK_SCAN_TAIL_

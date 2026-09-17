@@ -41,6 +41,19 @@ def test_looks_like_heavy_query_false_for_simple_messages():
     assert lumen_router_config._looks_like_heavy_query("") is False
 
 
+def test_looks_like_heavy_query_detects_tests_bots_and_debug_requests():
+    # Расширение эвристики (сентябрь 2026): юнит-тесты, боты/сайты, разбор кода
+    # и поиск багов — тоже тяжёлые задачи, раньше уходили в лёгкую цепочку.
+    assert lumen_router_config._looks_like_heavy_query("напиши тест для функции сортировки") is True
+    assert lumen_router_config._looks_like_heavy_query("напиши бота для телеграмма") is True
+    assert lumen_router_config._looks_like_heavy_query("разбери этот код построчно") is True
+    assert lumen_router_config._looks_like_heavy_query("найди баг в скрипте") is True
+    assert lumen_router_config._looks_like_heavy_query("объясни код выше") is True
+    assert lumen_router_config._looks_like_heavy_query("напиши эссе про осень") is True
+    assert lumen_router_config._looks_like_heavy_query("какая погода") is False
+    assert lumen_router_config._looks_like_heavy_query("расскажи анекдот") is False
+
+
 def test_looks_like_freshness_query_detects_current_info_needs():
     assert lumen_router_config._looks_like_freshness_query("кто сейчас президент Франции") is True
     assert lumen_router_config._looks_like_freshness_query("какая сегодня погода в Москве") is True
@@ -53,11 +66,20 @@ def test_looks_like_freshness_query_false_for_timeless_questions():
     assert lumen_router_config._looks_like_freshness_query("объясни теорию относительности") is False
 
 
+def test_looks_like_freshness_query_detects_schedule_and_forecast():
+    # Расширение эвристики (сентябрь 2026): расписание/афиша/прогноз без слова
+    # "погода" раньше не считались нуждой в свежей информации.
+    assert lumen_router_config._looks_like_freshness_query("расписание электричек") is True
+    assert lumen_router_config._looks_like_freshness_query("дай прогноз на выходные") is True
+    assert lumen_router_config._looks_like_freshness_query("афиша кино на неделю") is True
+    assert lumen_router_config._looks_like_freshness_query("любимый цвет") is False
+
+
 def test_build_route_youtube_link_forces_gemini_only():
     route = lumen_router_config._build_route(needs_youtube=True, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
     assert all(p == "gemini" for p, _ in route)
-    # ОБНОВЛЕНО (аудит моделей, 17.08.2026): флагман сменился с 3.6 на 3.7 Flash.
-    assert route[0] == ("gemini", "gemini-3.7-flash")
+    # ОБНОВЛЕНО (аудит моделей, 17.09.2026): флагман сменился с 3.7 на 3.8 Flash.
+    assert route[0] == ("gemini", "gemini-3.8-flash")
 
 
 def test_build_route_website_link_forces_gemini_only_and_excludes_gemma():
@@ -96,7 +118,9 @@ def test_build_route_heavy_plain_text_uses_strong_openrouter_models_first():
 
 def test_build_route_image_without_freshness_prefers_openrouter_vision():
     route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime="image/jpeg", is_heavy=False, needs_freshness=False)
-    assert route[0] == ("openrouter", "nvidia/nemotron-nano-12b-v2-vl:free")
+    # ОБНОВЛЕНО (аудит моделей, 17.09.2026): nano-12b-v2-vl пропал из бесплатного
+    # каталога — головой стала gemma-4-31b-it.
+    assert route[0] == ("openrouter", "google/gemma-4-31b-it:free")
 
 
 def test_build_route_video_attachment_forces_gemini_even_without_freshness():
@@ -154,9 +178,9 @@ def test_new_gemini_models_present_and_prioritized():
     assert "gemini-3.7-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.6-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.5-flash-lite" in lumen_router_config.GEMINI_MODELS
-    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.7-flash"
-    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.7-flash"
-    assert lumen_router_config.GEMINI_HEAVY_CHAIN[1] == "gemini-3.6-flash"
+    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.8-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[1] == "gemini-3.7-flash"
     # Обновлено (24.07.2026) вместе с реордером GEMINI_SEARCH_CHAIN — см. комментарий
     # там же: реальная квота на search grounding подтверждена только у Gemini 2.5.
     assert lumen_router_config.GEMINI_SEARCH_CHAIN[0] == "gemini-2.5-flash"
@@ -318,8 +342,8 @@ def test_ling_3_0_flash_excluded_after_paid_tier_cutover():
     assert "inclusionai/ling-3.0-flash:free" in lumen_router_config._OR_MODEL_HEALTH
     assert "inclusionai/ling-3.0-flash:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
     assert "inclusionai/ling-3.0-flash:free" not in lumen_router_config._OR_LIGHT_ORDER
-    route = lumen_router_config._or_route(["inclusionai/ling-3.0-flash:free", "openai/gpt-oss-20b:free"])
-    assert [m for _, m in route] == ["openai/gpt-oss-20b:free"]
+    route = lumen_router_config._or_route(["inclusionai/ling-3.0-flash:free", "nvidia/nemotron-3.5-lightning:free"])
+    assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free"]
 
 
 def test_ling_3_0_flash_still_flagged_for_leak_detection():
@@ -342,12 +366,14 @@ def test_nemotron_3_5_lightning_promoted_to_light_order_head():
     assert lumen_router_config._OR_LIGHT_ORDER[0] == "nvidia/nemotron-3.5-lightning:free"
 
 
-def test_nemotron_3_nano_30b_a3b_demoted_but_not_excluded():
-    # Ещё не подтверждена мёртвой (см. принцип "не удаляй по спекуляции,
-    # только по подтверждённым логам") — остаётся в маршруте, но не головой.
-    assert "nvidia/nemotron-3-nano-30b-a3b:free" in lumen_router_config._OR_LIGHT_ORDER
-    assert lumen_router_config._OR_LIGHT_ORDER[0] != "nvidia/nemotron-3-nano-30b-a3b:free"
-    assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+def test_nemotron_3_nano_30b_a3b_excluded_after_removal_date_passed():
+    # ОБНОВЛЕНО (аудит моделей, 17 сентября 2026): анонсированная дата снятия
+    # (24.08.2026) прошла, слаг пропал из живого каталога OpenRouter — подтверждение
+    # состоялось, модель переехала из _SCHEDULED_OR_REMOVALS в _OR_MODEL_HEALTH.
+    assert "nvidia/nemotron-3-nano-30b-a3b:free" in lumen_router_config._OR_MODEL_HEALTH
+    assert "nvidia/nemotron-3-nano-30b-a3b:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._OR_LIGHT_ORDER
+    assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._SCHEDULED_OR_REMOVALS
 
 
 def test_or_light_order_ends_with_generic_reserve():
@@ -415,8 +441,7 @@ def test_or_heavy_order_still_headed_by_calibrated_flagships():
     # Уже проверенные калибровкой сильные модели остаются головой — новые
     # некалиброванные модели добавлены строго после них, не выше.
     assert lumen_router_config._OR_HEAVY_ORDER[0] == "nvidia/nemotron-3-super-120b-a12b:free"
-    assert lumen_router_config._OR_HEAVY_ORDER[1] == "openai/gpt-oss-120b:free"
-    assert lumen_router_config._OR_HEAVY_ORDER[2] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert lumen_router_config._OR_HEAVY_ORDER[1] == "nvidia/nemotron-3-ultra-550b-a55b:free"
 
 
 # ─────────────────── анонсированные ("Going away <дата>") даты снятия моделей ───────────────────
@@ -426,8 +451,11 @@ def test_or_heavy_order_still_headed_by_calibrated_flagships():
 # игнорировать анонс нельзя (см. tencent/hy3 — истечение промо было замечено
 # только постфактум). _check_scheduled_removals_due закрывает этот пробел.
 
-def test_scheduled_removals_registered_for_nano_30b_and_dots3_preview():
-    assert lumen_router_config._SCHEDULED_OR_REMOVALS["nvidia/nemotron-3-nano-30b-a3b:free"].isoformat() == "2026-08-24"
+def test_scheduled_removals_registered_for_dots3_preview_only():
+    # ОБНОВЛЕНО (аудит моделей, 17 сентября 2026): nano-30b-a3b подтверждённо умер
+    # (дата прошла + пропал из каталога) и переехал в _OR_MODEL_HEALTH — в реестре
+    # будущих снятий остался только dots-3-note-preview (30.09.2026).
+    assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._SCHEDULED_OR_REMOVALS
     assert lumen_router_config._SCHEDULED_OR_REMOVALS["dots-studio/dots-3-note-preview:free"].isoformat() == "2026-09-30"
 
 
@@ -517,3 +545,83 @@ def test_check_fish_audio_tts_expiry_silent_before_expiry_date(caplog):
         assert caplog.records == []
     finally:
         lumen_router_config.FISH_AUDIO_FREE_TIER_EXPIRY = original_expiry
+
+
+# ─────────────────── аудит моделей, 17 сентября 2026 ───────────────────
+# Живой каталог OpenRouter через публичный /models API (24 бесплатные модели):
+# 5 слагов пропали из бесплатных (gpt-oss-20b/120b, lfm-2.5-1.2b-thinking,
+# nano-30b-a3b, nano-12b-v2-vl), 8 новых добавлены в хвосты цепочек
+# (некалиброванные — см. комментарий в lumen_router_config.py), Gemini 3.8 Flash
+# добавлен головой по дашборду AI Studio владельца.
+
+_DEAD_SEPT_2026 = (
+    "openai/gpt-oss-20b:free",
+    "openai/gpt-oss-120b:free",
+    "liquid/lfm-2.5-1.2b-thinking:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+)
+
+_NEW_SEPT_2026 = (
+    "thinkingmachines/inkling-small:free",
+    "thinkingmachines/inkling:free",
+    "nex-agi/nex-n2.5-mini:free",
+    "nex-agi/nex-n2.5-pro:free",
+    "inclusionai/ling-3.0-flash-sante:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "inclusionai/ling-3.0-flash-vl:free",
+    "liquid/lfm-2.5-2.6b:free",
+)
+
+
+def test_sept_2026_dead_models_excluded_but_kept_for_leak_detection():
+    for model_id in _DEAD_SEPT_2026:
+        assert model_id in lumen_router_config._OR_MODEL_HEALTH
+        assert model_id in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+        assert model_id not in lumen_router_config._OR_LIGHT_ORDER
+        assert model_id not in lumen_router_config._OR_HEAVY_ORDER
+        assert model_id not in lumen_router_config._OR_VISION_ORDER
+        assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+
+
+def test_sept_2026_new_light_models_after_proven_head_before_reserve():
+    order = lumen_router_config._OR_LIGHT_ORDER
+    assert order[0] == "nvidia/nemotron-3.5-lightning:free"
+    assert order[-1] == "openrouter/free"
+    for model_id in (
+        "thinkingmachines/inkling-small:free", "nex-agi/nex-n2.5-mini:free",
+        "inclusionai/ling-3.0-flash-sante:free", "inclusionai/ling-3.0-flash-fin:free",
+        "liquid/lfm-2.5-2.6b:free",
+    ):
+        assert model_id in order
+        assert model_id not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+        assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+
+
+def test_sept_2026_new_heavy_and_vision_models_placed():
+    heavy = lumen_router_config._OR_HEAVY_ORDER
+    assert "thinkingmachines/inkling:free" in heavy
+    assert "nex-agi/nex-n2.5-pro:free" in heavy
+    assert heavy.index("thinkingmachines/inkling:free") < heavy.index("dots-studio/dots-3-note-preview:free")
+    vision = lumen_router_config._OR_VISION_ORDER
+    assert vision[0] == "google/gemma-4-31b-it:free"
+    assert "inclusionai/ling-3.0-flash-vl:free" in vision
+
+
+def test_gemini_3_8_flash_heads_heavy_chain_and_default():
+    assert "gemini-3.8-flash" in lumen_router_config.GEMINI_MODELS
+    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.8-flash"
+    assert "gemini-3.8-flash" in lumen_router_config.GEMINI_SEARCH_CHAIN
+    assert "gemini-3.8-flash" in lumen_router_config.GEMINI_LINK_CHAIN
+    conf = lumen_router_config.GEMINI_MODELS["gemini-3.8-flash"]
+    assert conf.get("search_grounding") is False
+    assert conf.get("map_grounding") is False
+    assert conf.get("url_context") is True
+    assert not conf.get("quota_unconfirmed")
+
+
+def test_fish_audio_disabled_after_free_tier_gone():
+    # Зеркало снято с бесплатного каталога OpenRouter — первая попытка в inline_tts
+    # пропускается флагом, сама функция оставлена для тестов/возврата.
+    assert lumen_router_config.FISH_AUDIO_ENABLED is False

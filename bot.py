@@ -391,6 +391,23 @@ STREAM_CHUNK_TIMEOUT_SEC = float(os.getenv("STREAM_CHUNK_TIMEOUT_SEC", "30"))
 STREAM_EDIT_MIN_INTERVAL_SEC = float(os.getenv("STREAM_EDIT_MIN_INTERVAL_SEC", "1.2"))
 STREAM_TYPING_TICK_SEC = float(os.getenv("STREAM_TYPING_TICK_SEC", "0.5"))
 STREAM_TYPING_MAX_CATCHUP_TICKS = int(os.getenv("STREAM_TYPING_MAX_CATCHUP_TICKS", "6"))
+# FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска стрима (см.
+# lumen_model_speed.first_chunk_limit_sec): обычно-быстрая модель, зависшая
+# разово, бросается рано (12–25с вместо полных 30). Честная оговорка: предел
+# только УКОРАЧИВАЕТ ожидание, но не удлиняет — внутри генераторов кусков уже
+# стоит STREAM_CHUNK_TIMEOUT_SEC на каждый кусок, включая первый, и для
+# обычно-медленной модели первым сработает именно он. Итоговый предел первого
+# куска — всегда минимум из двух.
+FIRST_CHUNK_TIMEOUT_SEC = float(os.getenv("FIRST_CHUNK_TIMEOUT_SEC", "12"))
+# Анимация ожидания ("бегущие точки") в плейсхолдере, пока не пришёл первый
+# кусок стрима: первая смена кадра — не раньше _DOTS_START_AFTER_SEC (мгновенно
+# ответившая модель анимации вообще не покажет), дальше — кадр каждые
+# _DOTS_TICK_SEC. Интервалы подобраны под лимит Telegram (не чаще правки в
+# секунду) с запасом; правки идут только показывать нечего (до первого куска),
+# поэтому с показом текста не конфликтуют.
+_DOTS_START_AFTER_SEC = 2.5
+_DOTS_TICK_SEC = 1.2
+_DOTS_FRAMES = (".", "..", "…")
 # Лимит длины текста для /tts — без него пользователь мог отправить огромный
 # текст, что вызывало бы очень долгий прогон Gemini TTS + ffmpeg на один запрос.
 TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "800"))
@@ -604,7 +621,7 @@ async def _close_sessions() -> None:
 # именно ради старых тестов на `bot.X`, но с переездом тестов на прямой импорт
 # модуля этот ре-экспорт стал мёртвым (см. аудит техдолга, 26 августа 2026) и
 # убран вместе с соответствующим `__all__`.
-from lumen_formatting import _md_to_html
+from lumen_formatting import _md_to_html, _split_text_chunks
 
 _PRUNE_SENTINEL = object()
 
@@ -764,31 +781,6 @@ async def _answer_guest_text(message: Message, text: str) -> None:
         }, request_timeout=10)
     except Exception as exc:
         log.warning("[guest] Failed answering guest: %s", exc)
-
-def _split_text_chunks(text: str, max_len: int = TG_MAX_LEN) -> list[str]:
-    """Разбивает длинный текст на части не длиннее max_len, стараясь резать по
-    границам абзацев/строк/предложений, а не посреди слова. Раньше сообщения
-    длиннее лимита Telegram (4096 симв.) просто не отправлялись — пользователь
-    не видел вообще ничего."""
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > max_len:
-        window = remaining[:max_len]
-        cut = -1
-        for sep in ("\n\n", "\n", ". ", " "):
-            idx = window.rfind(sep)
-            if idx > max_len * 0.5:
-                cut = idx + len(sep)
-                break
-        if cut <= 0:
-            cut = max_len
-        chunks.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip()
-    if remaining:
-        chunks.append(remaining)
-    return chunks
 
 async def _send_text(message: Message, text: str, parse_html: bool = True, **kwargs: Any) -> None:
     if is_guest_message(message):
@@ -984,6 +976,7 @@ from lumen_router_config import (
     GEMINI_DEFAULT_CHAIN,
     GEMINI_TTS_MODELS,
     FISH_AUDIO_TTS_MODEL,
+    FISH_AUDIO_ENABLED,
     _check_fish_audio_tts_expiry,
     _looks_like_heavy_query,
     _looks_like_freshness_query,
@@ -2330,6 +2323,7 @@ async def _or_chat_completion_with_fallback(
             raise RouteBudgetExceededError(tried)
         tried.append(model_trial)
         messages[0]["content"] = get_system_prompt(model_trial)
+        attempt_start = time.monotonic()
         try:
             payload = {"model": model_trial, "messages": messages, "stream": False}
             resp = await _or_request("chat/completions", "POST", json_body=payload)
@@ -2341,6 +2335,7 @@ async def _or_chat_completion_with_fallback(
 
             answer = _scrub_identity_leak(answer, source=f"or_chat_completion:{model_trial}")
             log.info('[or] Successful response from model %s (primary=%s, models tried: %d)', model_trial, primary_model_id, len(tried))
+            _record_model_latency(_model_speed_key("openrouter", model_trial), total_sec=time.monotonic() - attempt_start)
             return answer, model_trial
         except Exception as exc:
             last_exc = exc
@@ -3274,6 +3269,7 @@ async def ask_gemini(
         tried_models.add(curr_model_id)
         call_contents, gconfig = _build_gemini_call_config(curr_model_id, contents)
 
+        attempt_start = time.monotonic()
         try:
             fut = asyncio.to_thread(client.models.generate_content, model=curr_model_id, contents=call_contents, config=gconfig)
             resp = await asyncio.wait_for(fut, timeout=ROUTE_MODEL_TIMEOUT_SEC)
@@ -3333,6 +3329,7 @@ async def ask_gemini(
     if resp is None:
         raise RuntimeError("No response received from Gemini after retries.")
     log.info('[gemini] Successful response from model %s (models tried: %d)', curr_model_id, len(tried_models))
+    _record_model_latency(_model_speed_key("gemini", curr_model_id), total_sec=time.monotonic() - attempt_start)
 
     ans = await _extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig)
     ans = ans.strip() or "Empty response"
@@ -3402,12 +3399,76 @@ from lumen_typing_pace import (
     catchup_reveal_steps as _typing_catchup_steps,
 )
 
+# Самокалибрующаяся оценка задержек моделей — см. докстринг lumen_model_speed.py:
+# переупорядочивание маршрута по измеренной скорости (_run_route) и адаптивный
+# предел ожидания первого куска стрима вместо одного жёсткого таймаута на всех.
+from lumen_model_speed import (
+    speed_key as _model_speed_key,
+    record_response as _record_model_latency,
+    reorder_route as _reorder_route_by_speed,
+    first_chunk_limit_sec as _model_first_chunk_limit,
+)
+
 # Точка подмены для тестов (тот же приём, что и у bot._get_http_session/bot.
 # _openrouter_stream_pieces и т.п. в этом файле) — реальный await asyncio.sleep()
 # в фазе "довывода" (см. _run_streaming_reply) не нужен ни в одном тесте и заметно
 # замедлил бы весь сьют без единой пользы; conftest.py безусловно патчит эту
 # ссылку на no-op для каждого теста.
 _typing_sleep = asyncio.sleep
+
+# Отдельная точка подмены для анимации точек (см. _tick_waiting_dots ниже) —
+# НАМЕРЕННО не покрыта autouse-фикстурой conftest.py: если бы она была no-op,
+# тикер в каждом стриминг-тесте успевал бы наставить лишних правок до прихода
+# мгновенного фейкового куска и сломал бы все проверки последовательностей
+# правок. В проде — обычный asyncio.sleep; в тестах анимации патчится явно.
+_dots_sleep = asyncio.sleep
+
+
+async def _tick_waiting_dots(placeholder: Message) -> None:
+    """Бегущие точки в плейсхолдере, пока стрим не прислал первый кусок.
+    Первый кадр — только после _DOTS_START_AFTER_SEC тишины (быстрые модели
+    анимации не видят вообще), дальше — кадр каждые _DOTS_TICK_SEC. Правки идут
+    через _tg_call (ошибки глотаются — плейсхолдер могли удалить/переиспользовать
+    параллельно), отмена задачи — штатный путь остановки после первого куска."""
+    try:
+        await _dots_sleep(_DOTS_START_AFTER_SEC)
+        frame_idx = 0
+        while True:
+            with contextlib.suppress(Exception):
+                await _tg_call(placeholder.edit_text, _DOTS_FRAMES[frame_idx % len(_DOTS_FRAMES)], parse_mode=None, call_timeout=15.0)
+            frame_idx += 1
+            await _dots_sleep(_DOTS_TICK_SEC)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, first_chunk_limit: float):
+    """Оборачивает генератор кусков стрима двумя вещами сразу (обе касаются
+    только ОЖИДАНИЯ ПЕРВОГО куска — дальше генератор пробрасывается как есть):
+    1. Адаптивный предел (см. lumen_model_speed.first_chunk_limit_sec): зависшая
+       попытка бросается TimeoutError — вызывающий код (_run_streaming_reply)
+       уже умеет отдавать плейсхолдер следующей модели по цепочке.
+    2. Анимация точек (_tick_waiting_dots): гасится строго до yield первого
+       куска, поэтому с показом текста не пересекается ни одним кадром.
+    Пустой стрим (StopAsyncIteration сразу) — просто конец без кусков."""
+    dots_task = asyncio.create_task(_tick_waiting_dots(placeholder))
+    try:
+        try:
+            first = await asyncio.wait_for(piece_agen.__anext__(), timeout=first_chunk_limit)
+        except StopAsyncIteration:
+            return
+        finally:
+            dots_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await dots_task
+        yield first
+        async for piece in piece_agen:
+            yield piece
+    finally:
+        aclose = getattr(piece_agen, "aclose", None)
+        if aclose is not None:
+            with contextlib.suppress(Exception):
+                await aclose()
 
 async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig):
     """Асинхронный генератор кусков текста от Gemini — тонкая обёртка над
@@ -3537,6 +3598,7 @@ async def _run_streaming_reply(
     full_text = ""
     last_edit_ts = 0.0
     last_edited_plain = ""
+    first_piece_ts: float | None = None
     # pace_key/overall_start_ts/current_chunk_start_ts — см. lumen_typing_pace.py.
     # overall_start_ts фиксируется ОДИН раз (для замера реальной скорости бэкенда
     # целиком, даже если ответ займёт несколько сообщений), current_chunk_start_ts
@@ -3552,9 +3614,19 @@ async def _run_streaming_reply(
             return None, None
         sent_messages.append(placeholder)
 
+        # Обёртка ожидания первого куска: адаптивный предел + бегущие точки
+        # (см. _pieces_with_waiting_feedback). Дальше цикл не отличим от чтения
+        # исходного генератора напрямую — все существующие проверки кусков,
+        # утечек и троттлинга ниже работают без изменений.
+        piece_agen = _pieces_with_waiting_feedback(
+            piece_agen, placeholder,
+            first_chunk_limit=_model_first_chunk_limit(_model_speed_key(provider, model_id), FIRST_CHUNK_TIMEOUT_SEC),
+        )
         async for piece in piece_agen:
             if not piece:
                 continue
+            if first_piece_ts is None:
+                first_piece_ts = time.monotonic()
             full_text += piece
 
             leak_kind = None
@@ -3655,6 +3727,16 @@ async def _run_streaming_reply(
         # иначе самим же добавленная пауза исказила бы будущую оценку скорости
         # этой модели (см. докстринг record_observed_speed в lumen_typing_pace.py).
         _record_typing_speed(pace_key, time.monotonic() - overall_start_ts, len(full_text))
+        # Замер задержки модели для умного роутера (см. lumen_model_speed.py) —
+        # рядом с замером скорости печати, из тех же меток времени. first_piece_ts
+        # здесь уже точно установлен (успех означает ≥1 кусок). Catch-up паузы
+        # сознательно ВКЛЮЧЕНЫ в total: для решения "кого ставить первым" важна
+        # задержка, видимая пользователем, а не только время бэкенда.
+        _record_model_latency(
+            _model_speed_key(provider, model_id),
+            total_sec=time.monotonic() - overall_start_ts,
+            ttf_sec=(first_piece_ts - overall_start_ts) if first_piece_ts is not None else None,
+        )
 
         # "Довывод" остатка последнего сообщения, который стрим уже прислал
         # целиком, но пейсинг выше ещё не успел показать (частый случай для
@@ -3782,31 +3864,69 @@ def clean_mention(text: str) -> str:
 # начале сообщения, поэтому не сработает.
 DRAW_TRIGGER_PREFIXES = [
     "сгенерируй картинку", "сгенерируй мне картинку", "сгенерируй изображение",
-    "создай картинку", "создай изображение", "нарисуй картинку", "нарисуй изображение",
-    "нарисуй мне", "нарисуй", "изобрази картинку", "изобрази", "нарисуй-ка",
+    "сгенерируй мне изображение", "создай картинку", "создай мне картинку",
+    "создай изображение", "создай мне изображение", "нарисуй картинку", "нарисуй изображение",
+    "нарисуй мне", "нарисуй", "нарисуйте", "изобрази картинку", "изобрази", "нарисуй-ка",
     "сгенери картинку", "сгенери изображение", "можешь нарисовать", "можешь нарисовать мне",
 ]
 # "хочу картинку"/"сделай картинку" сюда намеренно НЕ включены — слишком легко
 # спутать с "хочу картинку тебе показать" или просьбой отредактировать уже
 # присланное фото (бот не умеет редактировать изображения).
+# ВАЖНО про порядок: _match_trigger_prefix возвращает ПЕРВОЕ совпадение по
+# списку, поэтому более длинные фразы ("прочти вслух", "зачитай текст") стоят
+# раньше своих коротких префиксов ("прочти", "зачитай").
 TTS_TRIGGER_PREFIXES = [
-    "озвучь текст", "озвучь мне", "озвуч текст", "озвучь", "озвуч",
+    "озвучьте", "озвучь текст", "озвучь мне", "озвуч текст", "озвучь", "озвуч",
     "переведи текст в голос", "переведи слова в голос", "переведи в голос",
     "переведи в аудио", "произнеси текст", "произнеси", "проговори",
     "скажи голосом", "переведи текст в аудио", "переведи слова в аудио",
     "преврати в аудио", "преврати текст в аудио", "преврати это в аудио",
     "конвертируй в аудио", "переведи в звук", "начитай текст", "начитай",
-    "прочитай вслух", "сделай аудио", "сделай голосовое", "запиши голосовое",
+    "зачитай текст", "зачитай", "зачитайте текст", "зачитайте",
+    "прочитай вслух", "прочти вслух", "прочтите вслух", "прочтите", "прочти",
+    "сделай аудио", "сделай голосовое", "запиши голосовое",
 ]
 
 def _match_trigger_prefix(text_lower: str, prefixes: list[str]) -> str | None:
     """Возвращает первую подходящую фразу-триггер, с которой НАЧИНАЕТСЯ text_lower,
     либо None. Вынесено в отдельную функцию (вместо инлайнового цикла) — тестируется
-    без необходимости гонять весь _handle_message_core."""
+    без необходимости гонять весь _handle_message_core.
+
+    Требуется граница слова после префикса (конец строки, пробел или пунктуация):
+    иначе "прочтите" начиналось бы с "прочти" с мусором "те..." в остатке, а
+    "нарисуйка" — с "нарисуй" (найдено код-ревью). Без границы такие вводы
+    уходят в обычный диалог вместо битой генерации."""
     for prefix in prefixes:
-        if text_lower.startswith(prefix):
-            return prefix
+        if not text_lower.startswith(prefix):
+            continue
+        rest = text_lower[len(prefix):]
+        if rest and rest[0].isalpha():
+            continue
+        return prefix
     return None
+
+# Указательные "пустышки" ("это", "этот текст", "это сообщение"): пользователь
+# показывает на реплай, а не диктует буквальный текст для генерации/озвучки.
+# НАЙДЕНО (сентябрь 2026): "нарисуй это"/"озвучь это" в ответ на сообщение
+# рисовали/озвучивали само слово "это" — остаток после срезания триггера
+# считался содержанием, а ветка реплая требовала строго пустого остатка.
+# Хвост после пустышки ("этот текст, пожалуйста") — уже НЕ пустышка: там есть
+# буквальное содержание, оно идёт в работу как есть.
+_REPLY_MARKER_RE = re.compile(
+    r"^(это|этот|эта|эту|эти|этого|этому|этим|этих)"
+    r"(\s+(текст|сообщение|пост|файл|картинк\w*|изображени\w*|видео|фото))?$",
+    re.IGNORECASE,
+)
+
+def _strip_reply_marker(content: str) -> str:
+    """Убирает указательную пустышку из остатка после триггера: если кроме неё
+    ничего нет — имелся в виду реплай (возвращает ""). Иначе возвращает остаток
+    как есть для буквального использования. Хвостовая пунктуация ("это.",
+    "это!") перед проверкой срезается — иначе "озвучь это." чинился бы только
+    без точки (найдено код-ревью)."""
+    if _REPLY_MARKER_RE.match(content.strip().rstrip(".,!?:;—-").strip()):
+        return ""
+    return content
 
 # Регэксп для "словесной отсылки к ранее присланному медиа" (см. _looks_like_media_
 # reference ниже). РЕГРЕССИЯ на реальный найденный баг: раньше здесь искались общие
@@ -3825,19 +3945,26 @@ def _match_trigger_prefix(text_lower: str, prefixes: list[str]) -> str | None:
 # из именованных групп (одна группа на категорию), чтобы дальше можно было
 # сначала понять, КАКОЙ тип медиа спросили, а не только сам факт "спросили про
 # медиа" — см. _media_reference_category/_mime_matches_media_category ниже.
+# Группа document (сентябрь 2026): "что в этом документе/pdf" раньше не
+# распознавалось вообще — приходилось отвечать реплаем, иначе бот брал текст
+# без файла. "текст" сюда намеренно НЕ включён — слишком общее слово (дало бы
+# ложные подтягивания файла на "переведи этот текст" и т.п., см. регрессию
+# выше про общие слова). "кружок" — разговорное название видео-кружка.
 _MEDIA_REFERENCE_RE = re.compile(
     r"\b(?:"
     r"(?P<sticker>стикер\w*)|"
-    r"(?P<video>видео\w*|видос\w*|ролик\w*|клип\w*|gif\w*|гиф\w*)|"
+    r"(?P<video>видео\w*|видос\w*|ролик\w*|клип\w*|кружок\w*|gif\w*|гиф\w*)|"
     r"(?P<audio>аудио\w*|голосов\w*|войс\w*)|"
-    r"(?P<photo>фото\w*|снимок\w*|изображени\w*|скрин\w*|скриншот\w*|картинк\w*)"
+    r"(?P<photo>фото\w*|снимок\w*|изображени\w*|скрин\w*|скриншот\w*|картинк\w*)|"
+    r"(?P<document>документ\w*|pdf|пдф|файл\w*)"
     r")\b",
     re.IGNORECASE,
 )
 
 def _media_reference_category(text: str) -> str | None:
-    """Какой ТИП медиа упомянут в тексте ("фото"/"видео"/"аудио"/"стикер"), если
-    вообще упомянут — None, если явного упоминания нет (см. _MEDIA_REFERENCE_RE).
+    """Какой ТИП медиа упомянут в тексте ("фото"/"видео"/"аудио"/"стикер"/
+    "документ"), если вообще упомянут — None, если явного упоминания нет
+    (см. _MEDIA_REFERENCE_RE).
     Используется в _resolve_incoming_media (приоритет №3), чтобы искать в
     recent_media_ids медиа ИМЕННО запрошенного типа, а не слепо последний файл
     независимо от того, что реально спросили."""
@@ -3867,6 +3994,11 @@ def _mime_matches_media_category(mime: str, category: str) -> bool:
         return low.startswith("image/") and low != "image/webp"
     if category in ("video", "audio"):
         return low.startswith(f"{category}/")
+    if category == "document":
+        # PDF/текстовые/офисные файлы + octet-stream (неопознанный бинарник —
+        # честная ошибка пользователю всё равно придёт позже из ask_gemini через
+        # _is_gemini_supported_mime, а не молчаливое "не нашёл файл").
+        return low.startswith(("application/", "text/")) or low == "application/octet-stream"
     return False
 
 def _find_recent_media_by_category(bucket: Any, category: str) -> tuple[str, str] | None:
@@ -4065,7 +4197,11 @@ async def inline_tts(message: Message, text: str) -> None:
         return
     status = await _tg_call(message.reply, "Озвучиваю текст")
     try:
-        fish_bytes = await _fish_audio_tts_bytes(text)
+        # FISH_AUDIO_ENABLED=False (аудит моделей, 17.09.2026 — зеркало снято с
+        # бесплатного каталога OpenRouter): пропускаем заведомо мёртвую первую
+        # попытку и идём сразу на Gemini TTS. Ветка fish оставлена, не удалена —
+        # см. комментарий у флага в lumen_router_config.py.
+        fish_bytes = await _fish_audio_tts_bytes(text) if FISH_AUDIO_ENABLED else None
         if fish_bytes is not None:
             pcm_bytes, mime_type, used_tts_model = fish_bytes, "audio/mp3", FISH_AUDIO_TTS_MODEL
             _record_quota_usage("openrouter", FISH_AUDIO_TTS_MODEL)
@@ -4392,6 +4528,10 @@ async def _run_route(
     отправлен в чат стримингом (см. allow_stream) и повторно отправлять не нужно."""
     if not route:
         raise RuntimeError("Пустой маршрут — не из чего выбирать модель.")
+    # Умный порядок по измеренным задержкам (см. lumen_model_speed.py): внутри
+    # каждого провайдера — быстрые вперёд, сами провайдерные блоки и их порядок
+    # не трогаем (защита скудной квоты Gemini — см. _build_route).
+    route = _reorder_route_by_speed(route)
     deadline = time.monotonic() + ROUTE_TOTAL_BUDGET_SEC
 
     groups: dict[str, list[str]] = {"gemini": [], "openrouter": []}
@@ -4715,8 +4855,10 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     if matched_draw_trigger:
         prompt_content = clean_prompt[len(matched_draw_trigger):].strip()
         prompt_content = re.sub(r'^[:\s\-\,]+', '', prompt_content).strip()
-        # Триггер сказан без содержания ("нарисуй" в ответ на сообщение с описанием) —
-        # берём текст из reply вместо того, чтобы просто промолчать/уйти в обычный диалог.
+        # Триггер сказан без содержания ("нарисуй" / "нарисуй это" в ответ на
+        # сообщение с описанием) — берём текст из reply вместо того, чтобы
+        # просто промолчать/уйти в обычный диалог.
+        prompt_content = _strip_reply_marker(prompt_content)
         if not prompt_content and message.reply_to_message is not None:
             reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
             if reply_text:
@@ -4728,8 +4870,9 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     if matched_tts_trigger:
         tts_content = clean_prompt[len(matched_tts_trigger):].strip()
         tts_content = re.sub(r'^[:\s\-\,]+', '', tts_content).strip()
-        # То же самое для озвучки — реплай "озвучь"/"преврати в аудио" без текста
+        # То же самое для озвучки — реплай "озвучь"/"озвучь это" без текста
         # означает "озвучь ТО сообщение, на которое я отвечаю".
+        tts_content = _strip_reply_marker(tts_content)
         if not tts_content and message.reply_to_message is not None:
             reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
             if reply_text:
