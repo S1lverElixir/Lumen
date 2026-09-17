@@ -65,6 +65,29 @@ _LOG_QUEUE: queue.SimpleQueue[logging.LogRecord] = queue.SimpleQueue()
 _LOG_QUEUE_HANDLER = logging.handlers.QueueHandler(_LOG_QUEUE)
 _LOG_LISTENER: logging.handlers.QueueListener | None = None
 
+_SECRET_NAMES = (
+    "BOT_TOKEN", "TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY", "OPENROUTER_KEY", "ADMIN_SECRET_SEED",
+    "_ADMIN_SECRET_SEED", "WEBHOOK_SECRET", "ADMIN_PANEL_KEY",
+    "UPSTASH_REDIS_REST_TOKEN", "LUMEN_PROXY_SECRET",
+)
+
+
+def _current_log_secrets() -> tuple[str, ...]:
+    values = [value for name in _SECRET_NAMES
+              for value in (globals().get(name), os.getenv(name, ""))
+              if isinstance(value, str) and value]
+    return tuple(sorted(set(values), key=len, reverse=True))
+
+
+class _SecretLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        for secret in _current_log_secrets():
+            text = text.replace(secret, "<REDACTED>")
+        return text
+
+
 def _setup_logging() -> logging.Logger:
     # LOG_LEVEL — раньше был захардкожен INFO везде (root+оба handler'а), из-за
     # чего оба существующих log.debug(...) в проекте не печатались никогда, ни в
@@ -86,6 +109,8 @@ def _setup_logging() -> logging.Logger:
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     console_handler.setFormatter(fmt)
     file_handler.setFormatter(fmt)
+
+    _LOG_QUEUE_HANDLER.setFormatter(_SecretLogFormatter())
 
     global _LOG_LISTENER
     # НАЙДЕНО ПРИ АУДИТЕ (4 сентября 2026, реальный воспроизведённый инцидент — см.
@@ -198,6 +223,7 @@ def _normalize_telegram_base_url(url: str) -> str:
         url = "https://" + url
     return url
 
+LUMEN_PROXY_SECRET = os.getenv("LUMEN_PROXY_SECRET", "")
 TELEGRAM_API_BASE_URL = _normalize_telegram_base_url(os.getenv("TELEGRAM_API_BASE_URL", "https://api.telegram.org"))
 log.info("[setup] Using Telegram API Base URL: %s", TELEGRAM_API_BASE_URL)
 
@@ -290,10 +316,7 @@ def _redactable_secrets() -> tuple[str, ...]:
     сохранённым историям чатов. honey: имена читаются по значению на момент
     вызова — WEBHOOK_SECRET/ADMIN_PANEL_KEY/UPSTASH_REDIS_REST_TOKEN объявлены
     ниже по файлу, это безопасно для module-level globals в теле функции."""
-    return tuple(s for s in (
-        BOT_TOKEN, GEMINI_API_KEY, OPENROUTER_API_KEY, _ADMIN_SECRET_SEED,
-        WEBHOOK_SECRET, ADMIN_PANEL_KEY, UPSTASH_REDIS_REST_TOKEN,
-    ) if s)
+    return _current_log_secrets()
 
 def _sentry_scrub_secrets(event: dict, hint: dict) -> dict | None:
     """before_send-хук Sentry — вычищает секреты из события ПЕРЕД отправкой.
@@ -489,6 +512,7 @@ from lumen_telegram_transport import (
     _TelegramProxyCircuitBreaker,
     _looks_like_proxy_garbage,
     IPv4AiohttpSession,
+    proxy_auth_middlewares,
     get_telegram_session as _lumen_get_telegram_session,
     close_telegram_session as _lumen_close_telegram_session,
 )
@@ -497,7 +521,10 @@ TG_PROXY_TRIP_THRESHOLD = int(os.getenv("TG_PROXY_TRIP_THRESHOLD", "3"))
 _tg_proxy_breaker = _TelegramProxyCircuitBreaker(cooldown_sec=TG_PROXY_COOLDOWN_SEC, trip_threshold=TG_PROXY_TRIP_THRESHOLD)
 
 async def _get_telegram_session() -> aiohttp.ClientSession:
-    return await _lumen_get_telegram_session(TELEGRAM_REQUEST_TIMEOUT)
+    return await _lumen_get_telegram_session(
+        TELEGRAM_REQUEST_TIMEOUT,
+        proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
+    )
 
 async def _rotate_telegram_proxy() -> bool:
     """Переключается на следующий кандидат из _TELEGRAM_PROXY_CANDIDATES по кругу —
@@ -523,7 +550,10 @@ async def _rotate_telegram_proxy() -> bool:
     log.warning('[telegram] Switching to fallback proxy: %s -> %s', old_url, new_url)
     if bot is not None:
         old_session = bot.session
-        bot.session = IPv4AiohttpSession(api=TelegramAPIServer.from_base(new_url))
+        bot.session = IPv4AiohttpSession(
+            api=TelegramAPIServer.from_base(new_url),
+            proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
+        )
         with contextlib.suppress(Exception):
             await old_session.close()
     return _telegram_proxy_idx != 0
@@ -542,6 +572,10 @@ async def _get_http_session() -> aiohttp.ClientSession:
             # используют на порядок меньше одновременных соединений, так что
             # повышение лимита их не затрагивает.
             connector=aiohttp.TCPConnector(family=socket.AF_INET, limit=40, ttl_dns_cache=300),
+            middlewares=proxy_auth_middlewares(
+                proxy_secret=LUMEN_PROXY_SECRET,
+                proxy_base_urls=(*_TELEGRAM_PROXY_CANDIDATES, *_tikwm_proxy_candidates()),
+            ),
         )
     return _http_session
 
@@ -2421,6 +2455,7 @@ from lumen_tiktok import (
     _download_url_bin,
     _probe_video_dimensions,
     _generate_video_thumbnail,
+    _communicate_process,
     _probe_and_thumbnail_from_bytes,
     _resolve_tiktok_short,
     _fetch_tikwm_media_data,
@@ -3974,6 +4009,8 @@ async def cmd_draw(message: Message) -> None:
     if not prompt:
         await _safe_reply(message, "Укажите текст после команды /draw. Пример: /draw космическая станция")
         return
+    if await _reject_rate_limited_message(message):
+        return
     await inline_draw(message, prompt)
 
 # ─────────────────── TTS-пайплайн (Fish Audio + Gemini TTS) ───────────────────
@@ -4066,7 +4103,7 @@ async def inline_tts(message: Message, text: str) -> None:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-                await asyncio.wait_for(proc.communicate(), timeout=30)
+                await _communicate_process(proc, timeout=30)
                 if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
                     with open(dst_path, "rb") as fh:
                         final_audio = fh.read()
@@ -4080,7 +4117,7 @@ async def inline_tts(message: Message, text: str) -> None:
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.DEVNULL,
                         )
-                        probe_out, _ = await asyncio.wait_for(probe.communicate(), timeout=10)
+                        probe_out, _ = await _communicate_process(probe, timeout=10)
                         raw_dur = probe_out.decode().strip()
                         voice_duration = max(1, round(float(raw_dur))) if raw_dur else 0
                     except Exception as probe_exc:
@@ -4118,6 +4155,8 @@ async def cmd_tts(message: Message) -> None:
     text = message.text.partition(" ")[2].strip() if message.text else ""
     if not text:
         await _safe_reply(message, "Укажите текст после команды /tts. Пример: /tts Добрый день")
+        return
+    if await _reject_rate_limited_message(message):
         return
     await inline_tts(message, text)
 
@@ -4537,6 +4576,13 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
     return False
 
 
+async def _reject_rate_limited_message(message: Message) -> bool:
+    if not _check_and_register_rate_limit(_rate_limit_key_for_message(message)):
+        return False
+    await _tg_call(message.reply, "Вы отправляете слишком много запросов. Подождите немного.")
+    return True
+
+
 async def _resolve_incoming_media(
     message: Message, state: dict[str, Any], clean_prompt: str, *, is_private: bool,
 ) -> tuple[str | None, str, str, tuple[bytes, str] | None]:
@@ -4623,8 +4669,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         return
 
     # Начинаем обработку активного запроса с проверкой rate limit
-    if _check_and_register_rate_limit(_rate_limit_key_for_message(message)):
-        await _tg_call(message.reply, "Вы отправляете слишком много запросов. Подождите немного.")
+    if await _reject_rate_limited_message(message):
         return
 
     # Проверка на ссылки загрузки (TikTok — сразу всегда, даже в группах без упоминания)
@@ -4981,9 +5026,14 @@ async def main() -> None:
     # Мы настраиваем Bot сессию с принудительным IPv4 и таймаутами для hg space
     if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
         api_server = TelegramAPIServer.from_base(TELEGRAM_API_BASE_URL)
-        sess = IPv4AiohttpSession(api=api_server)
+        sess = IPv4AiohttpSession(
+            api=api_server,
+            proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
+        )
     else:
-        sess = IPv4AiohttpSession()
+        sess = IPv4AiohttpSession(
+            proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
+        )
     bot = Bot(token=BOT_TOKEN, session=sess)
     client = genai.Client(api_key=GEMINI_API_KEY)
 

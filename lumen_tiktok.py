@@ -522,6 +522,32 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
     return None
 
 
+async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: float):
+    async def finish():
+        try:
+            return await proc.communicate()
+        finally:
+            await proc.wait()
+
+    completion = asyncio.create_task(finish())
+    try:
+        return await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        while not completion.done():
+            try:
+                await asyncio.shield(completion)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            completion.result()
+        raise
+
+
 async def _probe_video_dimensions(path: str) -> tuple[int, int, int]:
     """Возвращает (duration_seconds, width, height). Без этих полей Telegram иногда
     не может сам распознать видео и показывает его как "сырой файл" с 0:00 вместо
@@ -536,7 +562,7 @@ async def _probe_video_dimensions(path: str) -> tuple[int, int, int]:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        stdout, _ = await _communicate_process(proc, timeout=15)
         width = height = 0
         duration = 0
         for line in stdout.decode(errors="replace").splitlines():
@@ -567,7 +593,7 @@ async def _generate_video_thumbnail(path: str, duration: int) -> bytes | None:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await asyncio.wait_for(proc.wait(), timeout=15)
+            await _communicate_process(proc, timeout=15)
             if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
                 with open(thumb_path, "rb") as f:
                     return f.read()

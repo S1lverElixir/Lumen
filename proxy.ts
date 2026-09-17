@@ -41,6 +41,8 @@
  * изменений в Python-коде для смены адреса прокси не требуется.
  */
 
+export const PROXY_AUTH_HEADER = "X-Lumen-Proxy-Secret";
+
 export const ALLOWED_HOSTS = new Set([
   "api.telegram.org",
   "www.tikwm.com",
@@ -94,6 +96,7 @@ export function resolveTarget(pathname: string, search: string): TargetResolutio
 export function buildForwardHeaders(reqHeaders: Headers): Headers {
   const headers = new Headers(reqHeaders);
   for (const name of HOP_BY_HOP_REQUEST_HEADERS) headers.delete(name);
+  headers.delete(PROXY_AUTH_HEADER);
   return headers;
 }
 
@@ -105,7 +108,30 @@ export function buildResponseHeaders(upstreamHeaders: Headers): Headers {
 
 // fetchImpl — точка подмены для тестов (тот же приём, что bot._get_http_session
 // и т.п. в Python-части проекта) — реальная сеть не нужна ни одному юнит-тесту.
-export async function handleRequest(req: Request, fetchImpl: typeof fetch = fetch): Promise<Response> {
+export async function handleRequest(
+  req: Request,
+  fetchImpl: typeof fetch = fetch,
+  proxySecret: string | undefined = undefined,
+): Promise<Response> {
+  if (!proxySecret || !/^[\x21-\x7e]+$/.test(proxySecret)) {
+    return new Response("Proxy authentication unavailable", { status: 503 });
+  }
+  const suppliedSecret = req.headers.get(PROXY_AUTH_HEADER) ?? "";
+  const encoder = new TextEncoder();
+  const [expected, supplied] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(proxySecret)),
+    crypto.subtle.digest("SHA-256", encoder.encode(suppliedSecret)),
+  ]);
+  const expectedBytes = new Uint8Array(expected);
+  const suppliedBytes = new Uint8Array(supplied);
+  let difference = 0;
+  for (let i = 0; i < expectedBytes.length; i++) {
+    difference |= expectedBytes[i] ^ suppliedBytes[i];
+  }
+  if (!suppliedSecret || difference !== 0) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
   const url = new URL(req.url);
   const target = resolveTarget(url.pathname, url.search);
   if (!target.ok) {
@@ -118,6 +144,7 @@ export async function handleRequest(req: Request, fetchImpl: typeof fetch = fetc
     upstreamResp = await fetchImpl(target.url, {
       method: req.method,
       headers: forwardHeaders,
+      redirect: "error",
       // GET/HEAD не могут иметь тело запроса (fetch бросит исключение, если
       // передать body для них) — для остальных методов пробрасываем тело
       // напрямую как поток, не буферизуя целиком в памяти (важно для
@@ -127,8 +154,8 @@ export async function handleRequest(req: Request, fetchImpl: typeof fetch = fetc
       // (часть стандарта WHATWG fetch для body типа ReadableStream).
       duplex: "half",
     });
-  } catch (e) {
-    return new Response(`Upstream fetch failed: ${e}`, { status: 502 });
+  } catch {
+    return new Response("Upstream fetch failed", { status: 502 });
   }
 
   const respHeaders = buildResponseHeaders(upstreamResp.headers);
@@ -141,5 +168,6 @@ export async function handleRequest(req: Request, fetchImpl: typeof fetch = fetc
 // Реальный сервер стартует только при прямом запуске файла (deno run/deploy),
 // не при импорте из proxy_test.ts — иначе тесты пытались бы забиндить порт.
 if (import.meta.main) {
-  Deno.serve((req) => handleRequest(req));
+  const proxySecret = Deno.env.get("LUMEN_PROXY_SECRET");
+  Deno.serve((req) => handleRequest(req, fetch, proxySecret));
 }

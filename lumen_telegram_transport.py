@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 import socket
 import time
+from collections.abc import Sequence
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -160,32 +162,112 @@ def _build_telegram_connector(limit: int) -> aiohttp.TCPConnector:
     )
 
 
+PROXY_AUTH_HEADER = "X-Lumen-Proxy-Secret"
+
+
+def proxy_auth_middlewares(
+    *, proxy_secret: str = "", proxy_base_urls: Sequence[str] = (),
+) -> tuple:
+    scopes = []
+    for base_url in proxy_base_urls:
+        if not base_url:
+            continue
+        try:
+            parsed = urlsplit(base_url)
+            port = parsed.port or 443
+        except ValueError:
+            raise ValueError("Invalid proxy base URL") from None
+        if (
+            parsed.scheme != "https" or not parsed.hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.query or parsed.fragment
+        ):
+            raise ValueError("Proxy base URL must use HTTPS without credentials, query or fragment")
+        if parsed.hostname in {"api.telegram.org", "www.tikwm.com", "tikwm.com"}:
+            continue
+        scopes.append((parsed.hostname, port, parsed.path.rstrip("/")))
+    if scopes and (not proxy_secret or any(not 33 <= ord(c) <= 126 for c in proxy_secret)):
+        raise ValueError("LUMEN_PROXY_SECRET is required for configured proxies and must be printable ASCII without spaces")
+
+    async def authenticate(request: aiohttp.ClientRequest, handler):
+        request.headers.popall(PROXY_AUTH_HEADER, None)
+        url = request.url
+        authenticated = url.scheme == "https" and any(
+            url.host == host and url.port == port
+            and (url.path == path or url.path.startswith(path + "/"))
+            for host, port, path in scopes
+        )
+        if authenticated:
+            request.headers[PROXY_AUTH_HEADER] = proxy_secret
+        try:
+            response = await handler(request)
+        except Exception:
+            if authenticated:
+                raise RuntimeError("Authenticated proxy request failed") from None
+            raise
+        finally:
+            request.headers.popall(PROXY_AUTH_HEADER, None)
+        if authenticated:
+            safe_headers = response.request_info.headers.copy()
+            safe_headers.popall(PROXY_AUTH_HEADER, None)
+            response._request_info = aiohttp.RequestInfo(
+                url=response.request_info.url, method=response.request_info.method,
+                headers=safe_headers, real_url=response.request_info.real_url,
+            )
+        if authenticated and 300 <= response.status < 400:
+            response.close()
+            raise RuntimeError("Authenticated proxy redirects are disabled")
+        return response
+
+    return (authenticate,)
+
+
 class IPv4AiohttpSession(AiohttpSession):
+    def __init__(
+        self, *, proxy_secret: str = "", proxy_base_urls: Sequence[str] = (), **kwargs,
+    ) -> None:
+        self._proxy_middlewares = proxy_auth_middlewares(
+            proxy_secret=proxy_secret, proxy_base_urls=proxy_base_urls,
+        )
+        super().__init__(**kwargs)
+
     async def create_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 connector=_build_telegram_connector(limit=30),
                 timeout=aiohttp.ClientTimeout(total=30.0, connect=10.0, sock_read=20.0),
                 json_serialize=self.json_dumps,
+                middlewares=self._proxy_middlewares,
             )
         return self._session
 
 
 _telegram_session: aiohttp.ClientSession | None = None
+_telegram_session_auth: tuple[str, tuple[str, ...]] | None = None
 
 
-async def get_telegram_session(request_timeout: float) -> aiohttp.ClientSession:
+async def get_telegram_session(
+    request_timeout: float, *, proxy_secret: str = "", proxy_base_urls: Sequence[str] = (),
+) -> aiohttp.ClientSession:
     """Кэширующий геттер общей aiohttp-сессии для прямых HTTP-вызовов к Telegram Bot
     API (используется telegram_api_call в bot.py). `request_timeout` — значение
     TELEGRAM_REQUEST_TIMEOUT из bot.py, передаётся параметром на каждый вызов (а не
     импортируется статически), т.к. это часть публичной, потенциально настраиваемой
     через env конфигурации bot.py, а не константа этого модуля."""
-    global _telegram_session
+    global _telegram_session, _telegram_session_auth
+    auth = (proxy_secret, tuple(proxy_base_urls))
+    middlewares = proxy_auth_middlewares(
+        proxy_secret=proxy_secret, proxy_base_urls=auth[1],
+    )
+    if _telegram_session is not None and not _telegram_session.closed and _telegram_session_auth != auth:
+        await _telegram_session.close()
     if _telegram_session is None or _telegram_session.closed:
         _telegram_session = aiohttp.ClientSession(
             connector=_build_telegram_connector(limit=10),
             timeout=aiohttp.ClientTimeout(total=request_timeout + 10.0, connect=10.0),
+            middlewares=middlewares,
         )
+        _telegram_session_auth = auth
     return _telegram_session
 
 

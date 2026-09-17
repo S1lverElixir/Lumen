@@ -26,15 +26,18 @@ BOT_LOG_PATH) ДО импорта bot.py, так что реальные сек�
 import asyncio
 import base64
 import json
+import logging
 import os
+import sys
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import sentry_sdk
 
 import bot
+import lumen_telegram_transport
 import lumen_tiktok
 
 
@@ -4501,8 +4504,276 @@ def test_download_url_bin_ignores_malformed_content_length_header():
     assert result == b"ok"
 
 
+@pytest.fixture
+def rate_guard_setup(monkeypatch):
+    def _setup():
+        monkeypatch.setattr(bot, "user_rate_limits", {})
+        monkeypatch.setattr(bot, "RATE_LIMIT_MAX_REQUESTS", 2)
+        monkeypatch.setattr(bot, "get_state", lambda chat_id: {})
+        monkeypatch.setattr(bot, "is_guest_message", lambda message: False)
+        monkeypatch.setattr(bot, "message_mentions_bot", lambda message: False)
+        monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+        monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+        monkeypatch.setattr(bot, "inline_draw", AsyncMock())
+        monkeypatch.setattr(bot, "inline_tts", AsyncMock())
+        return SimpleNamespace(
+            text="", caption=None, chat=SimpleNamespace(id=123, type=bot.ChatType.PRIVATE),
+            from_user=SimpleNamespace(id=456), reply=AsyncMock(), reply_to_message=None,
+        )
+    return _setup
+
+
+def test_draw_command_rejects_exhausted_quota(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "/draw кот"
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda user_id: True)
+
+    asyncio.run(bot.cmd_draw(message))
+
+    bot.inline_draw.assert_not_awaited()
+    bot._tg_call.assert_awaited_once()
+
+
+def test_mixed_commands_share_rate_quota_and_reject_before_work(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    media = AsyncMock()
+    monkeypatch.setattr(bot, "_resolve_incoming_media", media)
+
+    async def run():
+        message.text = "/draw кот"
+        await bot.cmd_draw(message)
+        message.text = "/tts привет"
+        await bot.cmd_tts(message)
+        await bot.cmd_tts(message)
+        message.text = "/draw собака"
+        await bot.cmd_draw(message)
+        message.text = "обычный вопрос"
+        await bot._handle_message_core(message)
+
+    asyncio.run(run())
+    bot.inline_draw.assert_awaited_once_with(message, "кот")
+    bot.inline_tts.assert_awaited_once_with(message, "привет")
+    media.assert_not_awaited()
+    assert bot._tg_call.await_count == 3
+    assert len(bot.user_rate_limits[456]) == 2
+
+
+@pytest.mark.parametrize("command", ["draw", "tts"])
+def test_blank_commands_do_not_consume_quota(rate_guard_setup, command):
+    message = rate_guard_setup()
+    message.text = f"/{command}   "
+    asyncio.run(getattr(bot, f"cmd_{command}")(message))
+    assert bot.user_rate_limits == {}
+    bot._safe_reply.assert_awaited_once()
+    bot.inline_draw.assert_not_awaited()
+    bot.inline_tts.assert_not_awaited()
+
+
+@pytest.mark.parametrize("text, handler, content", [
+    ("нарисуй кота", "inline_draw", "кота"),
+    ("озвучь привет", "inline_tts", "привет"),
+])
+def test_natural_language_trigger_consumes_one_slot(rate_guard_setup, text, handler, content):
+    message = rate_guard_setup()
+    message.text = text
+    asyncio.run(bot._handle_message_core(message))
+    getattr(bot, handler).assert_awaited_once_with(message, content)
+    assert len(bot.user_rate_limits[456]) == 1
+
+
+def test_passive_group_message_does_not_consume_quota(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.chat.type = bot.ChatType.GROUP
+    message.text = "обычный разговор"
+    record = MagicMock()
+    monkeypatch.setattr(bot, "_record_passive_group_context", record)
+    asyncio.run(bot._handle_message_core(message))
+    record.assert_called_once()
+    assert bot.user_rate_limits == {}
+    bot._tg_call.assert_not_awaited()
+
+
 def test_download_url_bin_returns_none_on_non_200_status():
     resp = _FakeDownloadResponse([b"error page"], status=404)
     session = _FakeDownloadSession(resp)
     result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/missing.jpg"))
     assert result is None
+
+
+class _FakeProc:
+    def __init__(self, *, hang: bool = False, fail_communicate: bool = False):
+        self._hang = hang
+        self._fail_communicate = fail_communicate
+        self.killed = False
+        self.kill_count = 0
+        self.wait_count = 0
+        self.returncode = None
+
+    async def communicate(self):
+        if self._fail_communicate:
+            raise RuntimeError("pipe broken")
+        while self._hang and not self.killed:
+            await asyncio.sleep(0.01)
+        return b"out", b"err"
+
+    def kill(self):
+        self.kill_count += 1
+        self.killed = True
+        self.returncode = -9
+        self._hang = False
+
+    async def wait(self):
+        self.wait_count += 1
+        return self.returncode
+
+
+def test_communicate_process_returns_output_on_success():
+    proc = _FakeProc()
+    out, err = asyncio.run(lumen_tiktok._communicate_process(proc, timeout=5))
+    assert (out, err) == (b"out", b"err")
+    assert not proc.killed
+
+
+def test_communicate_process_kills_hung_process_on_timeout():
+    async def run():
+        proc = _FakeProc(hang=True)
+        started = time.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await lumen_tiktok._communicate_process(proc, timeout=0.05)
+        elapsed = time.monotonic() - started
+        assert proc.killed
+        assert proc.wait_count >= 1
+        return elapsed
+
+    elapsed = asyncio.run(run())
+    assert elapsed < 30
+
+
+def test_communicate_process_cleans_up_when_outer_task_cancelled():
+    async def run():
+        proc = _FakeProc(hang=True)
+        task = asyncio.create_task(lumen_tiktok._communicate_process(proc, timeout=5))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(5):
+            if proc.killed and task.done():
+                break
+            await asyncio.sleep(0.01)
+        assert proc.killed
+        assert task.cancelled()
+
+    asyncio.run(run())
+
+
+def test_communicate_process_propagates_communicate_failure():
+    async def run():
+        proc = _FakeProc(fail_communicate=True)
+        with pytest.raises(RuntimeError):
+            await lumen_tiktok._communicate_process(proc, timeout=5)
+        assert proc.wait_count >= 1
+
+    asyncio.run(run())
+
+
+def test_log_queue_handler_masks_secrets_in_args_and_traceback(monkeypatch):
+    monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "fake-proxy-secret-123", raising=False)
+    try:
+        raise RuntimeError("leak fake-proxy-secret-123")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    record = logging.LogRecord(
+        "bot", logging.ERROR, "path", 1,
+        "failed with token %s", ("fake-proxy-secret-123",), exc_info=exc_info,
+    )
+    prepared = bot._LOG_QUEUE_HANDLER.prepare(record)
+    rendered = bot._LOG_QUEUE_HANDLER.format(prepared)
+    assert "fake-proxy-secret-123" not in rendered
+    assert "<REDACTED>" in rendered
+
+
+def test_secret_log_formatter_masks_message_before_queue(monkeypatch):
+    formatter = bot._SecretLogFormatter("%(message)s")
+    monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "fake-formatter-secret-456", raising=False)
+    record = logging.LogRecord(
+        "bot", logging.INFO, "path", 1,
+        "key is %s", ("fake-formatter-secret-456",), None,
+    )
+    assert "fake-formatter-secret-456" not in formatter.format(record)
+    assert "<REDACTED>" in formatter.format(record)
+
+
+def test_current_log_secrets_reads_env_before_module_globals(monkeypatch):
+    monkeypatch.delenv("LUMEN_PROXY_SECRET", raising=False)
+    monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "", raising=False)
+    monkeypatch.setenv("LUMEN_PROXY_SECRET", "fake-env-only-secret-789")
+    secrets = bot._current_log_secrets()
+    assert "fake-env-only-secret-789" in secrets
+    monkeypatch.delenv("LUMEN_PROXY_SECRET", raising=False)
+
+
+def _run_proxy_middleware(url, *, secret="proxy-secret-abc", bases=("https://proxy.example/fetch/api.telegram.org",), headers=None):
+    from multidict import CIMultiDict
+    from yarl import URL
+
+    (authenticate,) = lumen_telegram_transport.proxy_auth_middlewares(
+        proxy_secret=secret, proxy_base_urls=bases,
+    )
+    seen = {}
+
+    class _FakeRequest:
+        def __init__(self):
+            self.url = URL(url)
+            self.headers = CIMultiDict(headers or {})
+
+    async def _handler(request):
+        seen["sent"] = dict(request.headers)
+        info_headers = CIMultiDict(request.headers)
+
+        class _FakeResponse:
+            status = 200
+
+            def __init__(self):
+                self.request_info = SimpleNamespace(
+                    url=request.url, method="GET", headers=info_headers, real_url=request.url,
+                )
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        return _FakeResponse()
+
+    request = _FakeRequest()
+    response = asyncio.run(authenticate(request, _handler))
+    return request, response, seen
+
+
+def test_proxy_middleware_sends_secret_only_to_configured_proxy():
+    _, _, seen = _run_proxy_middleware("https://proxy.example/fetch/api.telegram.org/bot123/sendMessage")
+    assert seen["sent"].get("X-Lumen-Proxy-Secret") == "proxy-secret-abc"
+
+
+def test_proxy_middleware_never_sends_secret_to_direct_or_unrelated_hosts():
+    for url in (
+        "https://api.telegram.org/bot123/sendMessage",
+        "https://www.tikwm.com/api/?url=x",
+        "https://cdn.example.com/file.jpg",
+        "https://proxy.example/other-path",
+        "http://proxy.example/fetch/api.telegram.org/bot123/sendMessage",
+    ):
+        _, _, seen = _run_proxy_middleware(url)
+        assert "X-Lumen-Proxy-Secret" not in seen["sent"], url
+
+
+def test_proxy_middleware_strips_stale_secret_and_requires_secret():
+    _, _, seen = _run_proxy_middleware(
+        "https://api.telegram.org/bot123/sendMessage",
+        headers={"X-Lumen-Proxy-Secret": "stale"},
+    )
+    assert "X-Lumen-Proxy-Secret" not in seen["sent"]
+    with pytest.raises(ValueError):
+        lumen_telegram_transport.proxy_auth_middlewares(
+            proxy_secret="", proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
+        )

@@ -7,11 +7,15 @@
 
 import {
   ALLOWED_HOSTS,
+  PROXY_AUTH_HEADER,
   buildForwardHeaders,
   buildResponseHeaders,
   handleRequest,
   resolveTarget,
 } from "./proxy.ts";
+
+const TEST_SECRET = "isolated-test-secret";
+const AUTH_HEADERS = { [PROXY_AUTH_HEADER]: TEST_SECRET };
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -132,8 +136,8 @@ Deno.test("handleRequest пробрасывает GET без тела и воз�
       headers: { "Content-Type": "application/json" },
     }));
   };
-  const req = new Request("https://proxy.example/fetch/www.tikwm.com/api/?url=x", { method: "GET" });
-  const resp = await handleRequest(req, fakeFetch);
+  const req = new Request("https://proxy.example/fetch/www.tikwm.com/api/?url=x", { method: "GET", headers: AUTH_HEADERS });
+  const resp = await handleRequest(req, fakeFetch, TEST_SECRET);
   assertEquals(resp.status, 200);
   const body = await resp.json();
   assertEquals(body, { code: 0 });
@@ -145,16 +149,16 @@ Deno.test("handleRequest возвращает 403 для неразрешённ�
     fetchCalled = true;
     return Promise.resolve(new Response("не должно случиться"));
   };
-  const req = new Request("https://proxy.example/fetch/evil.example.com/x", { method: "GET" });
-  const resp = await handleRequest(req, fakeFetch);
+  const req = new Request("https://proxy.example/fetch/evil.example.com/x", { method: "GET", headers: AUTH_HEADERS });
+  const resp = await handleRequest(req, fakeFetch, TEST_SECRET);
   assertEquals(resp.status, 403);
   assertEquals(fetchCalled, false, "fetch не должен был вызываться для неразрешённого хоста");
 });
 
 Deno.test("handleRequest возвращает 404 для пути без /fetch/ префикса", async () => {
-  const req = new Request("https://proxy.example/something-else", { method: "GET" });
+  const req = new Request("https://proxy.example/something-else", { method: "GET", headers: AUTH_HEADERS });
   const unusedFetch: typeof fetch = () => Promise.resolve(new Response("unused"));
-  const resp = await handleRequest(req, unusedFetch);
+  const resp = await handleRequest(req, unusedFetch, TEST_SECRET);
   assertEquals(resp.status, 404);
 });
 
@@ -169,9 +173,9 @@ Deno.test("handleRequest пробрасывает метод и тело для 
   const req = new Request("https://proxy.example/fetch/api.telegram.org/bot123/sendMessage", {
     method: "POST",
     body: JSON.stringify({ chat_id: 1, text: "hi" }),
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...AUTH_HEADERS },
   });
-  const resp = await handleRequest(req, fakeFetch);
+  const resp = await handleRequest(req, fakeFetch, TEST_SECRET);
   assertEquals(resp.status, 200);
   assertEquals(capturedMethod, "POST");
   assert(capturedBodyIsStream, "тело POST-запроса должно передаваться апстриму как поток (без буферизации целиком)");
@@ -179,9 +183,72 @@ Deno.test("handleRequest пробрасывает метод и тело для 
 
 Deno.test("handleRequest возвращает 502, если апстрим-fetch упал с исключением", async () => {
   const fakeFetch: typeof fetch = () => {
-    throw new Error("network unreachable");
+    throw new Error(`network unreachable ${TEST_SECRET}`);
   };
-  const req = new Request("https://proxy.example/fetch/api.telegram.org/getMe", { method: "GET" });
-  const resp = await handleRequest(req, fakeFetch);
+  const req = new Request("https://proxy.example/fetch/api.telegram.org/getMe", { method: "GET", headers: AUTH_HEADERS });
+  const resp = await handleRequest(req, fakeFetch, TEST_SECRET);
   assertEquals(resp.status, 502);
+  assertEquals(await resp.text(), "Upstream fetch failed");
+});
+
+for (const suppliedSecret of [undefined, "", "incorrect-test-secret"]) {
+  Deno.test(`handleRequest rejects missing or wrong secret: ${String(suppliedSecret)}`, async () => {
+    let fetchCalled = false;
+    const fakeFetch: typeof fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve(new Response("unexpected"));
+    };
+    const headers = new Headers();
+    if (suppliedSecret !== undefined) headers.set(PROXY_AUTH_HEADER, suppliedSecret);
+    const req = new Request("https://proxy.example/fetch/api.telegram.org/bot123/getMe", { headers });
+    const resp = await handleRequest(req, fakeFetch, TEST_SECRET);
+    assertEquals(resp.status, 401);
+    assertEquals(await resp.text(), "Unauthorized");
+    assertEquals(fetchCalled, false);
+  });
+}
+
+for (const configuredSecret of [undefined, "", "   ", "invalid secret"]) {
+  Deno.test(`handleRequest fails closed for invalid configuration: ${String(configuredSecret)}`, async () => {
+    let fetchCalled = false;
+    const fakeFetch: typeof fetch = () => {
+      fetchCalled = true;
+      return Promise.resolve(new Response("unexpected"));
+    };
+    const req = new Request("https://proxy.example/fetch/www.tikwm.com/api/", { headers: AUTH_HEADERS });
+    const resp = await handleRequest(req, fakeFetch, configuredSecret);
+    assertEquals(resp.status, 503);
+    assertEquals(await resp.text(), "Proxy authentication unavailable");
+    assertEquals(fetchCalled, false);
+  });
+}
+
+Deno.test("correct secret is stripped without changing Telegram authentication", async () => {
+  let fetchCalled = false;
+  const fakeFetch: typeof fetch = (url, init) => {
+    fetchCalled = true;
+    assertEquals(String(url), "https://api.telegram.org/bot123/getMe");
+    const headers = new Headers(init?.headers);
+    assertEquals(headers.has(PROXY_AUTH_HEADER), false);
+    assertEquals(headers.get("authorization"), "Bearer upstream-test-token");
+    assertEquals(init?.redirect, "error");
+    return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
+  };
+  const req = new Request("https://proxy.example/fetch/api.telegram.org/bot123/getMe", {
+    headers: {
+      "x-lumen-proxy-secret": TEST_SECRET,
+      "Authorization": "Bearer upstream-test-token",
+    },
+  });
+  const resp = await handleRequest(req, fakeFetch, TEST_SECRET);
+  assertEquals(resp.status, 200);
+  assertEquals(fetchCalled, true);
+  assertEquals(await resp.json(), { ok: true });
+  assertEquals(req.headers.get(PROXY_AUTH_HEADER), TEST_SECRET);
+});
+
+Deno.test("buildForwardHeaders removes mixed-case proxy secret without mutating input", () => {
+  const original = new Headers({ "X-LuMeN-PrOxY-SeCrEt": TEST_SECRET });
+  assertEquals(buildForwardHeaders(original).has(PROXY_AUTH_HEADER), false);
+  assertEquals(original.get(PROXY_AUTH_HEADER), TEST_SECRET);
 });
