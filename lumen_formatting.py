@@ -399,6 +399,154 @@ def _md_to_html(text: str) -> str:
     return text
 
 
+def _rich_inline(text: str) -> str:
+    """Инлайн-разметка для внутренностей рич-блоков (заголовков, ячеек таблиц):
+    тот же escape + **bold**/*italic*/~~strike~~, что Phase 2–3 в _md_to_html.
+    Плейсхолдеры кода/ссылок (символы \x00) намеренно не трогаются — они
+    восстанавливаются позже общим финалом, как и в _md_to_html."""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", text, flags=re.DOTALL)
+    text = re.sub(r"(\*|_)(.*?)\1", r"<i>\2</i>", text)
+    text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
+    return text
+
+
+def _build_rich_table(header: list[str], rows: list[list[str]]) -> str:
+    """Строит <table bordered> из распарсенных ячеек (см. _split_table_cells).
+    Ячейки идут через _rich_inline — внутри работают **bold**/*italic*/`код`
+    (кодовые плейсхолдеры раскрываются общим финалом позже)."""
+    parts = ["<table bordered>"]
+    parts.append("<tr>" + "".join(f"<th>{_rich_inline(h)}</th>" for h in header) + "</tr>")
+    for row in rows:
+        cells = [row[i] if i < len(row) else "" for i in range(len(header))]
+        parts.append("<tr>" + "".join(f"<td>{_rich_inline(c)}</td>" for c in cells) + "</tr>")
+    parts.append("</table>")
+    return "".join(parts)
+
+
+def _md_to_rich_html(text: str) -> str:
+    """Вариант _md_to_html для Rich Messages (Bot API 10.1+, sendRichMessage):
+    сервер Telegram сам рендерит структурные блоки, поэтому здесь НЕ действуют
+    три запрета обычного пути — markdown-таблицы идут настоящим <table>,
+    #-заголовки — <h2>/<h3>/<h4>, а LaTeX ($...$/$$...$$) — сырым текстом в
+    <tg-math>/<tg-math-block> (НЕ юникод-заменой, как в _md_to_html).
+    Остальное 1:1 как в _md_to_html: тот же Phase 0 (сырой HTML модели),
+    те же плейсхолдеры кода/ссылок, те же цитаты, списки и escape, тот же
+    порядок восстановления (код — последним). Держать в синхроне с _md_to_html
+    при правках escape/Phase 0: расхождение даст разный рендер стрима (HTML)
+    и финала (rich) одного и того же ответа.
+    Обычный (не-rich) путь НЕ тронут: стрим-правки идут через _md_to_html,
+    а sendRichMessage при ошибке API откатывается на него же (см. bot.py)."""
+    if not text:
+        return ""
+
+    text = re.sub(r"</?(?:b|strong|i|em|u|s|code|pre)\s*/>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"**\1**", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"*\1*", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<u>(.*?)</u>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<span\s+class=["\']tg-spoiler["\']>(.*?)</span>', r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<s>(.*?)</s>", r"~~\1~~", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<pre>(.*?)</pre>", lambda m: f"```\n{m.group(1)}\n```", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
+
+    _code: dict[str, str] = {}
+    _links: dict[str, str] = {}
+    _math: dict[str, tuple[str, bool]] = {}
+    _tables: dict[str, tuple[list[str], list[list[str]]]] = {}
+    _heads: dict[str, tuple[int, str]] = {}
+    _counter = [0]
+
+    def _take(store: dict, prefix: str, value) -> str:
+        key = f"\x00{prefix}{_counter[0]}\x00"
+        _counter[0] += 1
+        store[key] = value
+        return key
+
+    text = re.sub(r"```[a-zA-Z0-9]*\n.*?\n```", lambda m: _take(_code, "CB", m.group(0)), text, flags=re.DOTALL)
+    text = re.sub(r"`[^`\n]+`", lambda m: _take(_code, "CB", m.group(0)), text)
+    text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", lambda m: _take(_links, "CB", m.group(0)), text)
+    text = re.sub(r"\$\$([\s\S]+?)\$\$", lambda m: _take(_math, "MM", (m.group(1), True)), text)
+    # Инлайн-форма требует содержимого без пробелов по краям (как в GFM): иначе
+    # цены вида "$50 до $100" превратились бы в "формулу". Одиночные "$80 000"
+    # без закрывающего знака и так не матчатся.
+    text = re.sub(r"(?<!\$)\$(?!\$)([^\s$][^$\n]*?)(?<!\s)\$(?!\$)", lambda m: _take(_math, "MM", (m.group(1), False)), text)
+    # Скобочные формы LaTeX (реальный кейс nemotron — \[ S = \pi r^{2} \]): тот же
+    # смысл, что $/$$ выше, извлекаются раньше них, чтобы $ внутри не разобрали.
+    text = re.sub(r"\\\[([\s\S]+?)\\\]", lambda m: _take(_math, "MM", (m.group(1), True)), text)
+    text = re.sub(r"\\\((.+?)\\\)", lambda m: _take(_math, "MM", (m.group(1), False)), text)
+
+    def _take_heading(m: re.Match) -> str:
+        # Тот же допуск, что у легаси _HEADER_MARKER_RE (ведущие пробелы, до 6
+        # решёток); масштаб под чат: # → h2, ## → h3, остальное → h4.
+        level = len(m.group(1))
+        tag_level = 2 if level == 1 else (3 if level == 2 else 4)
+        return _take(_heads, "HD", (tag_level, m.group(2).strip()))
+
+    text = re.sub(r"^[ \t]*(#{1,6})[ \t]+(.+)$", _take_heading, text, flags=re.MULTILINE)
+
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if "|" in line and i + 1 < n and "-" in lines[i + 1] and _TABLE_SEP_RE.match(lines[i + 1]):
+            header_cells = _split_table_cells(line)
+            if len(header_cells) >= 2:
+                data_rows: list[list[str]] = []
+                j = i + 2
+                while j < n and "|" in lines[j] and lines[j].strip():
+                    data_rows.append(_split_table_cells(lines[j]))
+                    j += 1
+                if data_rows:
+                    out.append(_take(_tables, "TB", (header_cells, data_rows)))
+                    i = j
+                    continue
+        out.append(line)
+        i += 1
+    text = "\n".join(out)
+
+    text = _normalize_bullet_markers(text)
+    text = _convert_blockquotes(text)
+
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", text, flags=re.DOTALL)
+    text = re.sub(r"(\*|_)(.*?)\1", r"<i>\2</i>", text)
+    text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
+
+    text = text.replace(_BLOCKQUOTE_START, "<blockquote>").replace(_BLOCKQUOTE_END, "</blockquote>")
+
+    for key, (tag_level, inner) in _heads.items():
+        text = text.replace(key, f"<h{tag_level}>{_rich_inline(inner)}</h{tag_level}>")
+    for key, (header, rows) in _tables.items():
+        text = text.replace(key, _build_rich_table(header, rows))
+    for key, (latex, block) in _math.items():
+        latex = latex.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        tag = "tg-math-block" if block else "tg-math"
+        text = text.replace(key, f"<{tag}>{latex}</{tag}>")
+    for key, orig in _links.items():
+        m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
+        label, url = m.group(1), m.group(2)
+        label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        url = url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+        text = text.replace(key, f'<a href="{url}">{label}</a>')
+    for key, orig in _code.items():
+        if orig.startswith("```"):
+            m = re.match(r"```([a-zA-Z0-9]*)\n(.*)\n```", orig, re.DOTALL)
+            lang, inner = (m.group(1), m.group(2)) if m else ("", orig[3:-3])
+            inner = inner.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            replacement = f'<pre><code class="language-{lang}">{inner}</code></pre>' if lang else f"<pre>{inner}</pre>"
+        else:
+            inner = orig[1:-1]
+            inner = inner.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            replacement = f"<code>{inner}</code>"
+        text = text.replace(key, replacement)
+
+    return text
+
+
 def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
     """Разбивает длинный текст на части не длиннее max_len, стараясь резать по
     границам абзацев/строк/предложений, а не посреди слова. Раньше сообщения

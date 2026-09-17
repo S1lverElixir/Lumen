@@ -388,3 +388,70 @@ def test_md_to_html_link_url_with_quote_is_escaped():
     result = lumen_formatting._md_to_html('[текст](https://example.com/"injected)')
     assert '&quot;' in result
     assert '"injected' not in result
+
+
+# ─────────────────── _md_to_rich_html (Bot API 10.1+, sendRichMessage) ───────────────────
+# Тот же конвейер, что _md_to_html, но таблицы/заголовки/LaTeX идут настоящими
+# рич-тегами — сервер Telegram рендерит их сам. Тесты фиксируют контракт,
+# от которого зависит rich-отправка в bot.py.
+
+def test_rich_table_renders_bordered_table():
+    result = lumen_formatting._md_to_rich_html("| A | B |\n|---|---|\n| 1 | 2 |")
+    assert result == "<table bordered><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
+
+
+def test_rich_table_cells_support_inline_markup_and_escape():
+    result = lumen_formatting._md_to_rich_html("| H | K |\n|---|---|\n| **b** <x> | 2 |")
+    assert result == "<table bordered><tr><th>H</th><th>K</th></tr><tr><td><b>b</b> &lt;x&gt;</td><td>2</td></tr></table>"
+
+
+def test_rich_non_table_pipes_left_alone():
+    # Одиночные "|" без строки-разделителя — не таблица, текст как есть.
+    assert lumen_formatting._md_to_rich_html("a | b") == "a | b"
+
+
+def test_rich_headings_become_h_tags():
+    assert lumen_formatting._md_to_rich_html("## Заголовок") == "<h3>Заголовок</h3>"
+    assert lumen_formatting._md_to_rich_html("### Подзаголовок") == "<h4>Подзаголовок</h4>"
+
+
+def test_rich_math_preserved_as_tg_math_tags():
+    # В отличие от _md_to_html (юникод-замена), рич-путь отдаёт LaTeX сырым —
+    # рендерит сервер Telegram.
+    assert lumen_formatting._md_to_rich_html("корень $x^2$ тут") == "корень <tg-math>x^2</tg-math> тут"
+    assert lumen_formatting._md_to_rich_html("формула $$E=mc^2$$ конец") == "формула <tg-math-block>E=mc^2</tg-math-block> конец"
+
+
+def test_rich_keeps_bold_links_code_quotes_and_escape():
+    assert lumen_formatting._md_to_rich_html("**b**") == "<b>b</b>"
+    assert lumen_formatting._md_to_rich_html("[t](https://example.com/a_b)") == '<a href="https://example.com/a_b">t</a>'
+    assert lumen_formatting._md_to_rich_html("`<x>`") == "<code>&lt;x&gt;</code>"
+    assert lumen_formatting._md_to_rich_html("5 < 10") == "5 &lt; 10"
+    assert lumen_formatting._md_to_rich_html("> цитата") == "<blockquote>цитата</blockquote>"
+
+
+def test_rich_math_inside_code_stays_code():
+    # LaTeX внутри кода — код, а не формула (порядок экстракции: код раньше математики).
+    assert lumen_formatting._md_to_rich_html("`$x$`") == "<code>$x$</code>"
+
+
+def test_rich_bracket_math_forms():
+    # Скобочные формы LaTeX (реальный кейс nemotron): \[...\] — блочная,
+    # \(...\) — инлайн. Извлекаются раньше $ во избежание конфликтов.
+    assert lumen_formatting._md_to_rich_html("смотри \\[S = \\pi r^{2}\\] конец") == "смотри <tg-math-block>S = \\pi r^{2}</tg-math-block> конец"
+    assert lumen_formatting._md_to_rich_html("значение \\(x\\) тут") == "значение <tg-math>x</tg-math> тут"
+
+
+def test_rich_headings_tolerate_indent_and_deep_levels():
+    # Тот же допуск, что у легаси-нормализации: ведущие пробелы и 1–6 решёток.
+    assert lumen_formatting._md_to_rich_html("   ## Заголовок") == "<h3>Заголовок</h3>"
+    assert lumen_formatting._md_to_rich_html("# Топ") == "<h2>Топ</h2>"
+    assert lumen_formatting._md_to_rich_html("#### Глубокий") == "<h4>Глубокий</h4>"
+
+
+def test_rich_prices_are_not_treated_as_math():
+    # "$50 до $100" — контент с пробелом у границы, не формула. Одиночный знак
+    # без пары — тоже текст.
+    assert lumen_formatting._md_to_rich_html("от $50 до $100") == "от $50 до $100"
+    assert lumen_formatting._md_to_rich_html("всего $80 000") == "всего $80 000"
+    assert lumen_formatting._md_to_rich_html("$x$") == "<tg-math>x</tg-math>"

@@ -1255,6 +1255,56 @@ def test_draw_trigger_this_with_reply_draws_replied_message(rate_guard_setup):
     bot.inline_draw.assert_awaited_once_with(message, "закат над морем")
 
 
+def _run_core_capturing_prompt(message, monkeypatch):
+    captured = {}
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    return captured.get("prompt", "")
+
+
+def test_media_question_without_file_gets_no_file_notice(rate_guard_setup, monkeypatch):
+    # Прод-кейс 17.09.2026: "что на фото?" без файла — модель выдумала описание
+    # несуществующего скриншота. Раз резолвинг ничего не нашёл, этот факт едет
+    # модели явно, а не надеждой на один раздел промпта.
+    message = rate_guard_setup()
+    message.text = "что на фото?"
+    prompt = _run_core_capturing_prompt(message, monkeypatch)
+    assert prompt.startswith("что на фото?")
+    assert "[Служебная пометка" in prompt
+    assert "не выдумывай" in prompt.lower()
+
+
+def test_ordinary_question_gets_no_file_notice(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "столица Венгрии?"
+    prompt = _run_core_capturing_prompt(message, monkeypatch)
+    assert "[Служебная пометка" not in prompt
+
+
+def test_media_question_with_attached_file_gets_no_file_notice(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "что на фото?"
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return None, "", "", (b"fake-bytes", "image/jpeg")
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    prompt = _run_core_capturing_prompt(message, monkeypatch)
+    assert "[Служебная пометка" not in prompt
+
+
+def test_history_user_text_strips_one_shot_service_note():
+    # Пометка "файла нет" — на один ход модели, в историю пишется чистый текст,
+    # иначе старые пометки про чужие сообщения запутают следующие ходы.
+    assert bot._history_user_text("что на фото?" + bot._NO_MEDIA_NOTE) == "что на фото?"
+    assert bot._history_user_text("обычный вопрос") == "обычный вопрос"
+
+
 # ─────────────────────────── _looks_like_media_reference (память о медиа) ───────────────────────────
 
 def test_looks_like_media_reference_true_for_explicit_media_nouns():
@@ -2231,6 +2281,68 @@ def test_run_route_reorders_slow_head_down(monkeypatch):
     finally:
         bot.chat_state.pop(999303, None)
         lumen_model_speed._latency_ema.clear()
+
+
+def test_or_empty_response_falls_through_to_next_model(monkeypatch):
+    # Прод-кейс 17.09.2026: пользователь дважды увидел буквальное "Empty
+    # response" — пустой ответ обязан двигать цепочку дальше, а не идти в чат.
+    calls = []
+
+    async def fake_or_request(path, method="GET", *, json_body=None):
+        model = json_body["model"]
+        calls.append(model)
+        if model == "m1:free":
+            return {"choices": []}
+        return {"choices": [{"message": {"content": "живой ответ"}}]}
+
+    monkeypatch.setattr(bot, "_or_request", fake_or_request)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+    answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["m1:free", "m2:free"], "m1:free"))
+    assert (answer, used) == ("живой ответ", "m2:free")
+    assert calls == ["m1:free", "m2:free"]
+
+
+def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
+    chat_id = 999304
+    extracts = ["", "хороший ответ"]
+
+    async def fake_extract(resp, *, model_id, call_contents, gconfig):
+        return extracts.pop(0)
+
+    fake_client = MagicMock()
+    fake_client.models.generate_content.return_value = MagicMock()
+    monkeypatch.setattr(bot, "_extract_gemini_answer_text", fake_extract)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        answer = asyncio.run(bot.ask_gemini(chat_id, "Привет", model_chain=["m1", "m2"]))
+        assert answer == "хороший ответ"
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_whitespace_only_returns_none_not_empty_response():
+    # Стрим из одних пробелов — тоже "ничего не прислал": плейсхолдер уезжает
+    # дальше по цепочке, а не превращается в "Empty response" для пользователя.
+    chat_id = 999305
+
+    async def whitespace_pieces():
+        yield "   "
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="z:free",
+            piece_agen=whitespace_pieces(),
+        ))
+        assert answer is None
+        assert placeholder is incoming.sent[0]
+    finally:
+        bot.chat_state.pop(chat_id, None)
 
 
 def test_try_openrouter_streaming_returns_none_on_early_failure():
@@ -5034,3 +5146,121 @@ def test_proxy_middleware_strips_stale_secret_and_requires_secret():
         lumen_telegram_transport.proxy_auth_middlewares(
             proxy_secret="", proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
         )
+
+
+# ─────────────────── Rich Messages (Bot API 10.1+, sendRichMessage) ───────────────────
+# Финальные ответы уходят через sendRichMessage/edit+rich_message (таблицы,
+# заголовки, математика), при любом неуспехе — обычный HTML-путь. Стрим-правки
+# всегда legacy. Фейки без send_rich_message/edit_message_text тихо идут
+# legacy-веткой — старые тесты не трогаем.
+
+class _FakeRichMessage:
+    def __init__(self):
+        self.edits = []
+        self.deleted = False
+        self.chat = SimpleNamespace(id=777)
+        self.message_id = 42
+
+    async def edit_text(self, text, **kwargs):
+        self.edits.append((text, kwargs.get("parse_mode")))
+        return self
+
+
+class _FakeRichBot:
+    """Бот с рич-методами: фиксирует rich_message.html и возвращает НАСТОЯЩИЙ
+    aiogram Message (нужен isinstance-гейт в хелперах)."""
+    def __init__(self):
+        from aiogram.types import Chat as TgChat
+        from aiogram.types import Message as TgMessage
+        self.rich_sent = []
+        self.rich_edited = []
+        self._TgMessage = TgMessage
+        self._chat = TgChat(id=777, type="private")
+
+    def _real_message(self, message_id):
+        import datetime
+        return self._TgMessage(message_id=message_id, date=datetime.datetime.now(), chat=self._chat)
+
+    async def send_rich_message(self, **kwargs):
+        self.rich_sent.append(kwargs)
+        return self._real_message(43)
+
+    async def edit_message_text(self, **kwargs):
+        self.rich_edited.append(kwargs)
+        return self._real_message(kwargs.get("message_id", 42))
+
+
+class _FakeRichFailingBot:
+    async def send_rich_message(self, **kwargs):
+        raise RuntimeError("rich not supported here")
+
+    async def edit_message_text(self, **kwargs):
+        raise RuntimeError("rich not supported here")
+
+
+def test_rich_send_used_for_final_answer_with_table():
+    chat_id = 999401
+    incoming = _FakeIncomingMessage(chat_id)
+    original_bot = bot.bot
+    bot.bot = _FakeRichBot()
+    try:
+        asyncio.run(bot._safe_reply(incoming, "| A | B |\n|---|---|\n| 1 | 2 |"))
+        assert len(bot.bot.rich_sent) == 1
+        assert bot.bot.rich_sent[0]["rich_message"].html.startswith("<table bordered>")
+        assert incoming.sent == []
+    finally:
+        bot.bot = original_bot
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_rich_failure_falls_back_to_legacy_html():
+    chat_id = 999402
+    incoming = _FakeIncomingMessage(chat_id)
+    original_bot = bot.bot
+    bot.bot = _FakeRichFailingBot()
+    try:
+        asyncio.run(bot._safe_reply(incoming, "**жирный** текст"))
+        assert len(incoming.sent) == 1
+        assert incoming.sent[0].edits == []
+    finally:
+        bot.bot = original_bot
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_rich_disabled_flag_uses_legacy_path(monkeypatch):
+    chat_id = 999403
+    incoming = _FakeIncomingMessage(chat_id)
+    original_bot = bot.bot
+    bot.bot = _FakeRichBot()
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    try:
+        asyncio.run(bot._safe_reply(incoming, "**жирный** текст"))
+        assert bot.bot.rich_sent == []
+        assert len(incoming.sent) == 1
+    finally:
+        bot.bot = original_bot
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_rich_edit_used_for_final_message_edit():
+    msg = _FakeRichMessage()
+    original_bot = bot.bot
+    bot.bot = _FakeRichBot()
+    try:
+        assert asyncio.run(bot._edit_message_quietly(msg, "## Заголовок")) is True
+        assert len(bot.bot.rich_edited) == 1
+        assert bot.bot.rich_edited[0]["rich_message"].html == "<h3>Заголовок</h3>"
+        assert msg.edits == []
+    finally:
+        bot.bot = original_bot
+
+
+def test_rich_edit_falls_back_to_legacy_on_failure():
+    msg = _FakeRichMessage()
+    original_bot = bot.bot
+    bot.bot = _FakeRichFailingBot()
+    try:
+        assert asyncio.run(bot._edit_message_quietly(msg, "**жирный**")) is True
+        assert msg.edits and msg.edits[0][0] == "<b>жирный</b>"
+    finally:
+        bot.bot = original_bot

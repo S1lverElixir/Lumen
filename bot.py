@@ -46,8 +46,10 @@ from aiogram.types import (
     InlineQueryResultArticle,
     InputMediaPhoto,
     InputMediaVideo,
+    InputRichMessage,
     InputTextMessageContent,
     Message,
+    ReplyParameters,
     Update,
 )
 from fastapi import FastAPI, Request
@@ -407,6 +409,12 @@ FIRST_CHUNK_TIMEOUT_SEC = float(os.getenv("FIRST_CHUNK_TIMEOUT_SEC", "12"))
 _DOTS_START_AFTER_SEC = 2.5
 _DOTS_TICK_SEC = 1.2
 _DOTS_FRAMES = (".", "..", "…")
+# RICH_MESSAGES_ENABLED — отправка финальных ответов через sendRichMessage /
+# editMessageText+rich_message (Bot API 10.1+: таблицы, заголовки, математика).
+# Kill-switch на случай проблем с рендером на старых клиентах: 0 — вернуться
+# на обычный HTML-путь без редеплоя кода (только рестарт). Стрим-правки всегда
+# идут обычным HTML (транзиент), рич применяется только к финальным текстам.
+RICH_MESSAGES_ENABLED = os.getenv("RICH_MESSAGES_ENABLED", "1") == "1"
 # Лимит длины текста для /tts — без него пользователь мог отправить огромный
 # текст, что вызывало бы очень долгий прогон Gemini TTS + ffmpeg на один запрос.
 TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "800"))
@@ -620,7 +628,7 @@ async def _close_sessions() -> None:
 # именно ради старых тестов на `bot.X`, но с переездом тестов на прямой импорт
 # модуля этот ре-экспорт стал мёртвым (см. аудит техдолга, 26 августа 2026) и
 # убран вместе с соответствующим `__all__`.
-from lumen_formatting import _md_to_html, _split_text_chunks
+from lumen_formatting import _md_to_html, _md_to_rich_html, _split_text_chunks
 
 _PRUNE_SENTINEL = object()
 
@@ -781,6 +789,63 @@ async def _answer_guest_text(message: Message, text: str) -> None:
     except Exception as exc:
         log.warning("[guest] Failed answering guest: %s", exc)
 
+def _is_real_telegram_message(res: Any) -> bool:
+    """Настоящий Message от Telegram API, а не тестовая заглушка: у реальных
+    ответов message_id — int. Нужно, чтобы в тестах (фейковые боты без
+    send_rich_message/edit_message_text) рич-путь тихо откатывался на legacy,
+    а не "успешно" ронял ветку через MagicMock."""
+    return isinstance(res, Message)
+
+
+async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bool, **kwargs: Any) -> Any:
+    """Отправка чанка через sendRichMessage (таблицы/заголовки/математика).
+    Возвращает отправленное сообщение или None — тогда вызывающий код идёт
+    обычным HTML-путём. Флаг RICH_MESSAGES_ENABLED — рубильник на случай
+    проблем с рендером (см. комментарий у флага).
+    Reply threading — ТОЛЬКО для первого чанка (is_first_chunk): иначе каждый
+    кусок длинного ответа придёт отдельным ответом с нотификацией, а не
+    продолжением (найдено код-ревью). parse_mode/reply_parameters из kwargs
+    не пробрасываются: у рич-метода их нет (parse_mode) или он строится здесь
+    (reply threading) — чужое значение дало бы TypeError/невалидный запрос,
+    а aiogram сложил бы неизвестные kwargs в тело запроса молча."""
+    if not RICH_MESSAGES_ENABLED:
+        return None
+    sender = getattr(bot, "send_rich_message", None)
+    if sender is None or message is None:
+        return None
+    kwargs.pop("parse_mode", None)
+    reply_parameters = kwargs.pop("reply_parameters", None)
+    if reply_parameters is None and is_first_chunk and isinstance(getattr(message, "message_id", None), int):
+        reply_parameters = ReplyParameters(message_id=message.message_id)
+    call_timeout = kwargs.pop("call_timeout", TELEGRAM_REQUEST_TIMEOUT)
+    res = await _tg_call(
+        sender, chat_id=message.chat.id, rich_message=InputRichMessage(html=rich_html),
+        reply_parameters=reply_parameters, call_timeout=call_timeout, **kwargs,
+    )
+    return res if _is_real_telegram_message(res) else None
+
+
+async def _try_edit_rich(msg: Message | None, rich_html: str, **kwargs: Any) -> bool:
+    """Правка сообщения через editMessageText+rich_message. Возвращает True
+    только при реальном успехе — иначе вызывающий код идёт legacy-правкой.
+    Фейковые сообщения тестов (без int chat.id/message_id) отсекаются гейтом."""
+    if not RICH_MESSAGES_ENABLED or msg is None:
+        return False
+    editor = getattr(bot, "edit_message_text", None)
+    chat = getattr(msg, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    message_id = getattr(msg, "message_id", None)
+    if editor is None or not isinstance(chat_id, int) or not isinstance(message_id, int):
+        return False
+    kwargs.pop("parse_mode", None)
+    call_timeout = kwargs.pop("call_timeout", 15.0)
+    res = await _tg_call(
+        editor, text=None, rich_message=InputRichMessage(html=rich_html),
+        chat_id=chat_id, message_id=message_id, call_timeout=call_timeout, **kwargs,
+    )
+    return _is_real_telegram_message(res)
+
+
 async def _send_text(message: Message, text: str, parse_html: bool = True, **kwargs: Any) -> None:
     if is_guest_message(message):
         await _answer_guest_text(message, text)
@@ -789,6 +854,12 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
     chunks = _split_text_chunks(text, TG_MAX_LEN)
     for i, chunk in enumerate(chunks):
         chunk_kwargs = kwargs if i == len(chunks) - 1 else {k: v for k, v in kwargs.items() if k != "reply_markup"}
+        if parse_html:
+            # Сначала рич (таблицы/заголовки/математика), при любом неуспехе —
+            # обычный HTML-путь ниже. Reply threading — только у первого чанка.
+            rich_res = await _try_send_rich(message, _md_to_rich_html(chunk), is_first_chunk=(i == 0), **chunk_kwargs)
+            if rich_res is not None:
+                continue
         if i == 0:
             res = await _tg_call(
                 message.reply, _md_to_html(chunk) if parse_html else chunk,
@@ -833,6 +904,11 @@ async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -
     if msg is None:
         return False
     try:
+        # Сначала рич-правка (таблицы/заголовки/математика — см. _try_edit_rich),
+        # при любом неуспехе — обычный HTML-путь, затем голый текст. Порядок
+        # важен: таблицы и формулы видны только через рич.
+        if await _try_edit_rich(msg, _md_to_rich_html(text), **kwargs):
+            return True
         kwargs.setdefault("parse_mode", ParseMode.HTML)
         res = await _tg_call(msg.edit_text, _md_to_html(text), **kwargs)
         if res is not None:
@@ -2336,7 +2412,13 @@ async def _or_chat_completion_with_fallback(
             answer = ""
             if choices:
                 answer = _or_extract_text(choices[0].get("message") or "")
-            answer = answer.strip() or "Empty response"
+            answer = answer.strip()
+            if not answer:
+                # Пустой ответ — не ответ пользователю, а повод попробовать
+                # следующую модель (прод-кейс 17.09.2026: пользователь дважды
+                # увидел буквальное "Empty response"). Исключение ловится ниже
+                # общим except — цепочка идёт дальше как при обычной ошибке.
+                raise RuntimeError(f"Model {model_trial} returned an empty response")
 
             answer = _scrub_identity_leak(answer, source=f"or_chat_completion:{model_trial}")
             log.info('[or] Successful response from model %s (primary=%s, models tried: %d)', model_trial, primary_model_id, len(tried))
@@ -3202,7 +3284,10 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                     log.warning("[gemini] Retry without tools after MALFORMED_FUNCTION_CALL also failed: %s", retry_exc)
             if not ans:
                 ans = f"[Ответ заблокирован или пуст. Причина: {', '.join(reasons)}]"
-    return ans.strip() or "Empty response"
+    # Пустая строка (без блокировки) — НЕ "Empty response": вызывающий
+    # ask_gemini распознаёт пустоту и пробует следующую модель. Текст
+    # блокировки выше — настоящий пользовательский текст, идёт как есть.
+    return ans.strip()
 
 async def ask_gemini(
     chat_id: int, user_text: str, media: list[tuple[bytes, str]] | None = None,
@@ -3278,6 +3363,13 @@ async def ask_gemini(
         try:
             fut = asyncio.to_thread(client.models.generate_content, model=curr_model_id, contents=call_contents, config=gconfig)
             resp = await asyncio.wait_for(fut, timeout=ROUTE_MODEL_TIMEOUT_SEC)
+            ans = await _extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig)
+            ans = ans.strip()
+            if not ans:
+                # Пустой ответ — не ответ пользователю (прод-кейс 17.09.2026:
+                # буквальное "Empty response" в чате), а повод попробовать
+                # следующую модель — как при обычной ошибке ниже.
+                raise RuntimeError(f"Model {curr_model_id} returned an empty response")
             break
         except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             if isinstance(exc, asyncio.CancelledError):
@@ -3336,11 +3428,9 @@ async def ask_gemini(
     log.info('[gemini] Successful response from model %s (models tried: %d)', curr_model_id, len(tried_models))
     _record_model_latency(_model_speed_key("gemini", curr_model_id), total_sec=time.monotonic() - attempt_start)
 
-    ans = await _extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig)
-    ans = ans.strip() or "Empty response"
     ans = _scrub_identity_leak(ans, source=f"ask_gemini:{curr_model_id}")
 
-    hist.append({"role": "user", "content": user_text})
+    hist.append({"role": "user", "content": _history_user_text(user_text)})
     hist.append({"role": "assistant", "content": ans})
     if len(hist) > SHARED_HISTORY_MAX_LEN:
          del hist[:-SHARED_HISTORY_MAX_LEN]
@@ -3657,7 +3747,7 @@ async def _run_streaming_reply(
                         await aclose()
                 final_answer = _IDENTITY_LEAK_FALLBACK if leak_kind == "identity" else _INJECTED_PAYLOAD_ECHO_FALLBACK
                 await _tg_call(sent_messages[-1].edit_text, final_answer, parse_mode=None, call_timeout=15.0)
-                hist.append({"role": "user", "content": user_text})
+                hist.append({"role": "user", "content": _history_user_text(user_text)})
                 hist.append({"role": "assistant", "content": final_answer})
                 if len(hist) > SHARED_HISTORY_MAX_LEN:
                     del hist[:-SHARED_HISTORY_MAX_LEN]
@@ -3689,8 +3779,8 @@ async def _run_streaming_reply(
                     note = "\n\n[не удалось отправить продолжение сообщения]"
                     with contextlib.suppress(Exception):
                         await _tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]) + note, parse_mode=ParseMode.HTML, call_timeout=15.0)
-                    final_answer = full_text.strip() or "Empty response"
-                    hist.append({"role": "user", "content": user_text})
+                    final_answer = full_text.strip()
+                    hist.append({"role": "user", "content": _history_user_text(user_text)})
                     hist.append({"role": "assistant", "content": final_answer})
                     if len(hist) > SHARED_HISTORY_MAX_LEN:
                         del hist[:-SHARED_HISTORY_MAX_LEN]
@@ -3806,8 +3896,10 @@ async def _run_streaming_reply(
             with contextlib.suppress(Exception):
                 await aclose()
 
-    final_answer = _scrub_identity_leak(full_text.strip() or "Empty response", source=f"{provider}_stream_final:{model_id}")
-    hist.append({"role": "user", "content": user_text})
+    # Пустой full_text сюда не доходит (проверка выше возвращает None раньше),
+    # поэтому фолбэка "Empty response" больше нет — мёртвый код убран.
+    final_answer = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
+    hist.append({"role": "user", "content": _history_user_text(user_text)})
     hist.append({"role": "assistant", "content": final_answer})
     if len(hist) > SHARED_HISTORY_MAX_LEN:
         del hist[:-SHARED_HISTORY_MAX_LEN]
@@ -3932,6 +4024,27 @@ def _strip_reply_marker(content: str) -> str:
     if _REPLY_MARKER_RE.match(content.strip().rstrip(".,!?:;—-").strip()):
         return ""
     return content
+
+# Одноразовая служебная пометка "файла нет" (см. _handle_message_core): идёт
+# модели ВМЕСТЕ с вопросом на один ход, но в историю попадать НЕ должна —
+# иначе на следующих ходах модель увидит старые пометки про чужие сообщения
+# (найдено код-ревью). Все записи user в историю идут через
+# _history_user_text ниже, который её срезает.
+_NO_MEDIA_NOTE = (
+    "\n\n[Служебная пометка — это не слова пользователя: к сообщению не "
+    "прикреплён файл, и среди недавних файлов чата подходящего нет. Если "
+    "в истории выше нет твоего собственного описания именно этого медиа — "
+    "честно скажи, что не видишь файла, и попроси прислать его. "
+    "Ничего не выдумывай.]"
+)
+
+def _history_user_text(user_text: str) -> str:
+    """Текст user-реплики для записи в историю: срезает одноразовую служебную
+    пометку (см. _NO_MEDIA_NOTE), если она есть в хвосте. Самому текущему
+    запросу к модели пометка уже ушла — здесь остаётся чистый текст."""
+    if user_text.endswith(_NO_MEDIA_NOTE):
+        return user_text[:-len(_NO_MEDIA_NOTE)]
+    return user_text
 
 # Регэксп для "словесной отсылки к ранее присланному медиа" (см. _looks_like_media_
 # reference ниже). РЕГРЕССИЯ на реальный найденный баг: раньше здесь искались общие
@@ -4926,6 +5039,20 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     )
 
     ai_prompt = clean_prompt
+    if (
+        media_tuple is None
+        and not extra_media
+        and youtube_url_to_analyze is None
+        and _media_reference_category(clean_prompt) is not None
+    ):
+        # Прод-кейс 17.09.2026: "что на фото?" без файла — модель выдумала
+        # подробное описание несуществующего скриншота, хотя промпт требует
+        # обратного. Разрешение резолвинга уже позади (приоритеты 1–3 ничего не
+        # нашли), поэтому этот факт сообщаем модели явно: слабым моделям одного
+        # раздела промпта не хватает, а с пометкой перед глазами сочинять
+        # сложнее. Ветка истории ("то фото" с текстовым описанием выше)
+        # сознательно НЕ отрезается — пометка велит проверить её сначала.
+        ai_prompt += _NO_MEDIA_NOTE
     gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
     gemini_media_list = gemini_media_list or None
     # Стриминг ("живой" эффект печати) имеет смысл только для простого
