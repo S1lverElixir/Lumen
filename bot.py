@@ -12,7 +12,6 @@ import base64
 import contextlib
 import hashlib
 import hmac
-import html as _html_mod
 import json
 import logging
 import logging.handlers
@@ -732,7 +731,7 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
 
 async def telegram_api_call(method: str, payload: dict, *, request_timeout: float | None = None) -> Any:
     if _tg_proxy_breaker.is_down(time.monotonic()):
-        raise RuntimeError(f"Telegram API {method}: прокси сейчас помечен недоступным (см. предыдущие [telegram] предупреждения), не дёргаю сеть повторно.")
+        raise RuntimeError(f"Telegram API {method}: proxy is currently marked unavailable (see previous [telegram] warnings), skipping the network call.")
     url = f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/{method}"
     session = await _get_telegram_session()
     pruned = _json_prune_defaults(payload)
@@ -891,13 +890,17 @@ def _classify_model_error(status: int | None, text: str) -> str:
 # убраны целиком — обе команды удалены (см. README, "Автоматический выбор
 # модели"), реального способа переключиться вручную больше нет, и предлагать
 # его пользователю было прямой (и активно вводящей в заблуждение) ошибкой.
+# ВАЖНО для формулировок: Lumen подаётся как единая модель (см. ИДЕНТИЧНОСТЬ
+# в system_prompt.py) — тексты НЕ должны упоминать "модели" во множественном
+# числе или "подбор другой модели": для пользователя есть только Lumen, а
+# переключения внутри — деталь реализации.
 _MODEL_ERROR_MESSAGES: dict[str, str] = {
-    "rate_limit": "Лимит запросов для этой модели сейчас исчерпан. Подождите немного и попробуйте ещё раз — бот сам подберёт другую модель.",
-    "paid": "Эта модель сейчас недоступна. Попробуйте повторить запрос — бот сам подберёт другую модель.",
-    "forbidden": "Временная ошибка доступа к сервису. Попробуйте ещё раз.",
-    "unavailable": "Эта модель сейчас недоступна. Попробуйте повторить запрос — бот сам подберёт другую модель.",
+    "rate_limit": "Лимит запросов сейчас исчерпан. Подожди немного и попробуй ещё раз.",
+    "paid": "Сервис временно недоступен. Попробуй повторить запрос чуть позже.",
+    "forbidden": "Временная ошибка доступа к сервису. Попробуй ещё раз.",
+    "unavailable": "Сервис временно недоступен. Попробуй повторить запрос чуть позже.",
 }
-_MODEL_ERROR_FALLBACK_MSG = "Временная ошибка сервиса. Попробуйте ещё раз через некоторое время."
+_MODEL_ERROR_FALLBACK_MSG = "Временная ошибка сервиса. Попробуй чуть позже."
 
 def _model_error_text(kind: str) -> str:
     return _MODEL_ERROR_MESSAGES.get(kind, _MODEL_ERROR_FALLBACK_MSG)
@@ -931,8 +934,8 @@ def _gemini_error_msg(e: Exception, model_id: str) -> str:
         return str(e)
     if isinstance(e, GeminiAllModelsExhaustedError):
         return (
-            "Лимит бесплатных запросов исчерпан для всех доступных моделей — "
-            "это реальный суточный лимит, а не баг. Попробуйте позже."
+            "Бесплатный лимит запросов исчерпан — это реальный суточный лимит "
+            "сервиса, а не ошибка. Попробуй позже."
         )
     txt = _error_text(e).strip() or e.__class__.__name__
     status = _error_status(e, txt)
@@ -1879,12 +1882,14 @@ async def _is_privileged_in_chat(chat_type: str, chat_id: int, user_id: int | No
 # в новый модуль, либо заводить там свой отдельный источник сессий; вызывающий код
 # (inline_draw ниже) теперь сам получает сессию и передаёт её. Публичные имена и
 # остальное поведение не изменились.
+# _image_model_label здесь больше не импортируется (сентябрь 2026): бот не
+# показывает названия моделей генерации ни в статусе, ни в подписи — см.
+# ИДЕНТИЧНОСТЬ в system_prompt.py. Сама функция живёт в lumen_images.py.
 from lumen_images import (
     DEFAULT_HF_IMAGE_MODEL,
     HF_IMAGE_MODELS,
     _pick_image_model,
     _hf_text_to_image,
-    _image_model_label,
 )
 
 # DEFAULT_HF_IMAGE_MODEL больше не читается напрямую нигде в остальном коде bot.py
@@ -2182,7 +2187,7 @@ class OpenRouterAPIError(RuntimeError):
 
 async def _or_request(path: str, method: str = "GET", *, json_body: dict | None = None) -> Any:
     if not OPENROUTER_API_KEY:
-        raise OpenRouterAPIError("OPENROUTER_API_KEY не задан")
+        raise OpenRouterAPIError("OPENROUTER_API_KEY is not set")
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "HTTP-Referer": OPENROUTER_HTTP_REFERER,
@@ -2223,7 +2228,7 @@ async def _or_request(path: str, method: str = "GET", *, json_body: dict | None 
         # которое могло бы процитировать заголовки запроса целиком.
         if OPENROUTER_API_KEY:
             exc_str = exc_str.replace(OPENROUTER_API_KEY, "<KEY>")
-        raise OpenRouterAPIError(f"Сетевая ошибка OpenRouter: {exc_str}") from exc
+        raise OpenRouterAPIError(f"OpenRouter network error: {exc_str}") from exc
 
 def _or_extract_text(data: Any) -> str:
     if isinstance(data, str):
@@ -2319,7 +2324,7 @@ async def _or_chat_completion_with_fallback(
     tried: list[str] = []
     for model_trial in trial_models:
         if deadline is not None and time.monotonic() > deadline:
-            log.warning('[or] Route time budget exhausted before model %s. Tried: %s', model_trial, ", ".join(tried) or "ничего")
+            log.warning('[or] Route time budget exhausted before model %s. Tried: %s', model_trial, ", ".join(tried) or "none")
             raise RouteBudgetExceededError(tried)
         tried.append(model_trial)
         messages[0]["content"] = get_system_prompt(model_trial)
@@ -2350,7 +2355,7 @@ async def _or_chat_completion_with_fallback(
 
     if last_exc:
         raise last_exc
-    raise RuntimeError("Не удалось получить ответ ни от одной модели-кандидата.")
+    raise RuntimeError("No candidate model returned an answer.")
 
 async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
     state = get_state(chat_id)
@@ -2977,7 +2982,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
               # Сырые сетевые/библиотечные исключения пользователю не показываем
               # (см. log.exception выше) — та же логика, что и в остальных
               # обработчиках ошибок бота.
-              err_text = "Не получилось скачать это видео или слайдшоу из TikTok. Попробуйте другую ссылку или повторите чуть позже."
+              err_text = "Не получилось скачать это видео или слайдшоу из TikTok. Попробуй другую ссылку или повтори чуть позже."
          edited = await _edit_message_quietly(status, err_text)
          if not edited:
               # status уже мог быть удалён раньше (например, перед отправкой видео) —
@@ -3262,9 +3267,9 @@ async def ask_gemini(
     while True:
         loop_guard += 1
         if loop_guard > max_loop_guard:
-            raise RuntimeError("Превышено допустимое число попыток обращения к Gemini API.")
+            raise RuntimeError("Exceeded the allowed number of Gemini API attempts.")
         if time.monotonic() > deadline:
-            log.warning('[gemini] Route time budget exhausted. Tried: %s', ", ".join(sorted(tried_models)) or "ничего")
+            log.warning('[gemini] Route time budget exhausted. Tried: %s', ", ".join(sorted(tried_models)) or "none")
             raise RouteBudgetExceededError(sorted(tried_models))
         tried_models.add(curr_model_id)
         call_contents, gconfig = _build_gemini_call_config(curr_model_id, contents)
@@ -3504,7 +3509,7 @@ async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
     `data: {...}\\n\\n`, с финальной строкой `data: [DONE]`. Таймаут на каждую
     следующую строку — тот же STREAM_CHUNK_TIMEOUT_SEC, что и у Gemini."""
     if not OPENROUTER_API_KEY:
-        raise OpenRouterAPIError("OPENROUTER_API_KEY не задан")
+        raise OpenRouterAPIError("OPENROUTER_API_KEY is not set")
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "HTTP-Referer": OPENROUTER_HTTP_REFERER,
@@ -3551,7 +3556,7 @@ async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
             if err_obj:
                 err_msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
                 err_code = err_obj.get("code") if isinstance(err_obj, dict) else None
-                raise OpenRouterAPIError(err_msg or "OpenRouter вернул ошибку в теле стрима", status_code=err_code)
+                raise OpenRouterAPIError(err_msg or "OpenRouter returned an error in the stream body", status_code=err_code)
             choices = obj.get("choices") or []
             if not choices:
                 continue
@@ -4046,8 +4051,8 @@ async def cmd_start(message: Message) -> None:
         "/reset — очистить историю диалога\n\n"
         "Рисовать и озвучивать можно и просто словами, без команд — например «нарисуй кота» или «озвучь это».\n\n"
         "<b>TikTok</b>\n"
-        "Пришлите ссылку — скачаю видео или фото без водяных знаков.\n\n"
-        "Спрашивайте что угодно — я слушаю.",
+        "Пришли ссылку — скачаю видео или фото без водяных знаков.\n\n"
+        "Спрашивай что угодно — я слушаю.",
         parse_mode=ParseMode.HTML,
     )
 
@@ -4068,9 +4073,9 @@ async def inline_draw(message: Message, prompt: str) -> None:
         fallback_chain = [primary_model] + [m for m in all_model_ids if m != primary_model]
 
         image_bytes = None
-        used_model = primary_model
         last_error = None
         budget_exceeded = False
+        rate_limited = False
         deadline = time.monotonic() + DRAW_TOTAL_BUDGET_SEC
 
         for attempt_model in fallback_chain:
@@ -4082,19 +4087,23 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 )
                 break
             try:
+                # Статус нейтральный, без названий моделей: бот не раскрывает
+                # внутреннюю реализацию (см. ИДЕНТИЧНОСТЬ в system_prompt.py).
+                # На первой попытке статус и так "Генерирую изображение" — не трогаем.
                 if attempt_model != primary_model:
-                    await _edit_message_quietly(
-                        status,
-                        f"Модель {_image_model_label(primary_model)} недоступна, пробую {_image_model_label(attempt_model)}"
-                    )
-                else:
-                    await _edit_message_quietly(status, f"Использую модель {_image_model_label(attempt_model)}")
+                    await _edit_message_quietly(status, "Это займёт немного больше времени…")
                 image_bytes = await _hf_text_to_image(session, attempt_model, prompt)
-                used_model = attempt_model
                 break
             except Exception as exc:
                 last_error = exc
                 txt = _error_text(exc).lower()
+                # 429 — перегрузка ВСЕГО сервиса (см. прод 17.09.2026: все 5 моделей
+                # вернули 429 подряд), а не одной модели — гонять остаток цепочки
+                # бессмысленно, сразу говорим пользователю подождать.
+                if "429" in txt or "rate" in txt or "too many" in txt:
+                    log.warning("[draw] Service rate-limited (429) on model %s — stopping the fallback chain.", attempt_model)
+                    rate_limited = True
+                    break
                 # Пробуем следующую только при сетевых/серверных ошибках
                 if any(kw in txt for kw in ("cannot connect", "ssl:", "no address", "503", "502", "timeout", "host")):
                     log.warning("[draw] Model %s failed (%s), trying next fallback", attempt_model, type(exc).__name__)
@@ -4105,33 +4114,33 @@ async def inline_draw(message: Message, prompt: str) -> None:
 
         if image_bytes:
             await _delete_message_quietly(status)
-            caption = f"Модель: {_html_mod.escape(_image_model_label(used_model), quote=False)}"
-            if used_model != primary_model:
-                caption += "\n(основная модель недоступна)"
             await bot.send_photo(
                 chat_id=message.chat.id,
                 photo=BufferedInputFile(image_bytes, filename="generated.jpg"),
-                caption=caption,
                 reply_to_message_id=message.message_id,
             )
         else:
+            if rate_limited:
+                raise RuntimeError("image generation service overloaded with requests") from last_error
             if budget_exceeded:
-                raise RuntimeError("Превышен общий бюджет времени на генерацию изображения") from last_error
-            raise last_error or RuntimeError("Все модели генерации недоступны")
+                raise RuntimeError("image generation total time budget exceeded") from last_error
+            raise last_error or RuntimeError("all image generation models unavailable")
 
     except Exception as exc:
         log.exception("Hugging Face image generation failed:")
         txt = _error_text(exc).strip()
         if any(kw in txt.lower() for kw in ("cannot connect", "ssl:", "no address", "connection", "timeout", "host")):
-            user_err = "Сервис генерации изображений временно недоступен. Попробуйте позже."
-        elif "все модели" in txt.lower():
-            user_err = "Все модели генерации изображений сейчас недоступны. Попробуйте позже."
-        elif "бюджет времени" in txt.lower():
-            user_err = "Генерация изображения сейчас занимает слишком много времени. Попробуйте, пожалуйста, ещё раз через минуту."
+            user_err = "Сервис генерации изображений временно недоступен. Попробуй позже."
+        elif "overloaded" in txt.lower():
+            user_err = "Сервис генерации изображений сейчас перегружен. Подожди минуту и попробуй ещё раз."
+        elif "all image generation" in txt.lower():
+            user_err = "Сервис генерации изображений сейчас недоступен. Попробуй позже."
+        elif "time budget" in txt.lower():
+            user_err = "Генерация изображения сейчас занимает слишком много времени. Попробуй, пожалуйста, ещё раз через минуту."
         else:
             # Сырой текст ошибки провайдера пользователю не показываем (см. log.exception
             # выше) — та же логика, что и в остальных обработчиках ошибок бота.
-            user_err = "Ошибка генерации изображения. Попробуйте ещё раз или переформулируйте описание."
+            user_err = "Ошибка генерации изображения. Попробуй ещё раз или переформулируй описание."
         await _edit_message_quietly(status, user_err)
 
 
@@ -4139,7 +4148,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
 async def cmd_draw(message: Message) -> None:
     prompt = message.text.partition(" ")[2].strip() if message.text else ""
     if not prompt:
-        await _safe_reply(message, "Укажите текст после команды /draw. Пример: /draw космическая станция")
+        await _safe_reply(message, "Укажи текст после команды /draw. Пример: /draw космическая станция")
         return
     if await _reject_rate_limited_message(message):
         return
@@ -4192,7 +4201,7 @@ async def inline_tts(message: Message, text: str) -> None:
     if len(text) > TTS_MAX_CHARS:
         await _safe_reply(
             message,
-            f"Текст слишком длинный для озвучки (лимит {TTS_MAX_CHARS} символов, сейчас {len(text)}). Сократите текст и попробуйте снова."
+            f"Текст слишком длинный для озвучки (лимит {TTS_MAX_CHARS} символов, сейчас {len(text)}). Сократи текст и попробуй снова."
         )
         return
     status = await _tg_call(message.reply, "Озвучиваю текст")
@@ -4281,16 +4290,16 @@ async def inline_tts(message: Message, text: str) -> None:
         txt = _error_text(exc).strip() or exc.__class__.__name__
         kind = _classify_model_error(_error_status(exc, txt), txt)
         if kind == "rate_limit":
-            user_err = "Лимит запросов на озвучку временно исчерпан. Попробуйте немного позже."
+            user_err = "Лимит запросов на озвучку временно исчерпан. Попробуй немного позже."
         else:
-            user_err = "Не получилось озвучить текст. Попробуйте ещё раз или сократите текст."
+            user_err = "Не получилось озвучить текст. Попробуй ещё раз или сократи текст."
         await _edit_message_quietly(status, user_err)
 
 @dp.message(Command("tts"))
 async def cmd_tts(message: Message) -> None:
     text = message.text.partition(" ")[2].strip() if message.text else ""
     if not text:
-        await _safe_reply(message, "Укажите текст после команды /tts. Пример: /tts Добрый день")
+        await _safe_reply(message, "Укажи текст после команды /tts. Пример: /tts Добрый день")
         return
     if await _reject_rate_limited_message(message):
         return
@@ -4307,7 +4316,7 @@ async def cmd_reset(message: Message) -> None:
     if not await _is_privileged_in_chat(message.chat.type, message.chat.id, requester_id):
         await _tg_call(
             message.reply,
-            "В группе сбросить историю может только администратор или создатель группы (либо владелец бота). В личных сообщениях доступно всем."
+            "В группе историю сбрасывает только администратор, создатель группы или владелец бота. В личных сообщениях — доступно всем."
         )
         return
     state = get_state(message.chat.id)
@@ -4326,7 +4335,7 @@ async def cmd_logs(message: Message) -> None:
     is_owner = _is_owner(message.from_user.id if message.from_user else None)
 
     if not is_owner:
-         await _tg_call(message.reply, "У вас нет доступа к этой команде.")
+         await _tg_call(message.reply, "Нет доступа к этой команде.")
          return
 
     if message.chat.type != ChatType.PRIVATE:
@@ -4386,7 +4395,7 @@ async def cmd_stats(message: Message) -> None:
     показывает данные по всем чатам, а не только текущему."""
     is_owner = _is_owner(message.from_user.id if message.from_user else None)
     if not is_owner:
-        await _tg_call(message.reply, "У вас нет доступа к этой команде.")
+        await _tg_call(message.reply, "Нет доступа к этой команде.")
         return
 
     if message.chat.type != ChatType.PRIVATE:
@@ -4485,12 +4494,12 @@ def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_a
     if youtube_url_to_analyze:
         return (
             "Не получилось открыть это видео (возможно, оно приватное, удалено, слишком длинное "
-            "или недоступно для анализа). Опишите, пожалуйста, о чём оно словами — тогда смогу помочь."
+            "или недоступно для анализа). Опиши, пожалуйста, о чём оно словами — тогда смогу помочь."
         )
     if isinstance(exc, GeminiAllModelsExhaustedError):
         return _gemini_error_msg(exc, head_model)
     if isinstance(exc, RouteBudgetExceededError):
-        return "Сейчас все доступные модели перегружены или недоступны. Попробуйте, пожалуйста, ещё раз через минуту."
+        return "Сервис сейчас перегружен. Попробуй, пожалуйста, ещё раз через минуту."
     if isinstance(exc, OpenRouterAPIError):
         return _or_error_msg(exc, "text")
     return _gemini_error_msg(exc, head_model)
@@ -4503,7 +4512,7 @@ class RouteBudgetExceededError(RuntimeError):
     (именно так раньше выглядели ответы по 2+ минуты)."""
     def __init__(self, tried: list[str]) -> None:
         self.tried = tried
-        super().__init__(f"Бюджет времени на маршрут исчерпан. Испробовано: {', '.join(tried) or '—'}")
+        super().__init__(f"Route time budget exhausted. Tried: {', '.join(tried) or 'none'}")
 
 
 # Конфигурация моделей и логика построения маршрута (GEMINI_MODELS, TEXT_MODEL_ORDER,
@@ -4527,7 +4536,7 @@ async def _run_route(
     Возвращает (ответ, reply_already_sent). Второй элемент True, если ответ уже
     отправлен в чат стримингом (см. allow_stream) и повторно отправлять не нужно."""
     if not route:
-        raise RuntimeError("Пустой маршрут — не из чего выбирать модель.")
+        raise RuntimeError("Empty route — no model to choose from.")
     # Умный порядок по измеренным задержкам (см. lumen_model_speed.py): внутри
     # каждого провайдера — быстрые вперёд, сами провайдерные блоки и их порядок
     # не трогаем (защита скудной квоты Gemini — см. _build_route).
@@ -4619,7 +4628,7 @@ async def _run_route(
         # исключение, иначе он повиснет в чате навсегда.
         await _delete_message_quietly(reusable_placeholder)
 
-    raise last_exc or RuntimeError("Не удалось получить ответ ни от одного кандидата маршрута.")
+    raise last_exc or RuntimeError("No route candidate returned an answer.")
 
 
 # обработка сообщений
@@ -4719,7 +4728,7 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
 async def _reject_rate_limited_message(message: Message) -> bool:
     if not _check_and_register_rate_limit(_rate_limit_key_for_message(message)):
         return False
-    await _tg_call(message.reply, "Вы отправляете слишком много запросов. Подождите немного.")
+    await _tg_call(message.reply, "Ты отправляешь слишком много запросов. Подожди немного.")
     return True
 
 
@@ -4813,6 +4822,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         return
 
     # Проверка на ссылки загрузки (TikTok — сразу всегда, даже в группах без упоминания)
+
     url = extract_url(t)
     needs_youtube = False
     needs_website = False
@@ -4892,7 +4902,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
 
     if not clean_prompt and not media_tuple and not youtube_url_to_analyze:
          if mentioned:
-              await _tg_call(message.reply, "Слушаю вас.")
+              await _tg_call(message.reply, "Слушаю.")
          return
 
     # Отправка typing экшена
@@ -4981,7 +4991,7 @@ async def handle_message(message: Message) -> None:
     except asyncio.TimeoutError:
         log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
         with contextlib.suppress(Exception):
-             await _tg_call(message.reply, "Предыдущий запрос ещё обрабатывается. Подождите или попробуйте позже.")
+             await _tg_call(message.reply, "Предыдущий запрос ещё обрабатывается. Подожди или попробуй позже.")
         return
 
     try:

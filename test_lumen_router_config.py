@@ -113,7 +113,7 @@ def test_build_route_plain_text_prefers_openrouter_to_save_gemini_quota():
 
 def test_build_route_heavy_plain_text_uses_strong_openrouter_models_first():
     route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime=None, is_heavy=True, needs_freshness=False)
-    assert route[0] == ("openrouter", "nvidia/nemotron-3-super-120b-a12b:free")
+    assert route[0] == ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
 
 def test_build_route_image_without_freshness_prefers_openrouter_vision():
@@ -440,8 +440,8 @@ def test_new_heavy_models_ordered_before_expiring_dots3_note_preview():
 def test_or_heavy_order_still_headed_by_calibrated_flagships():
     # Уже проверенные калибровкой сильные модели остаются головой — новые
     # некалиброванные модели добавлены строго после них, не выше.
-    assert lumen_router_config._OR_HEAVY_ORDER[0] == "nvidia/nemotron-3-super-120b-a12b:free"
-    assert lumen_router_config._OR_HEAVY_ORDER[1] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert lumen_router_config._OR_HEAVY_ORDER[0] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert lumen_router_config._OR_HEAVY_ORDER[1] == "nvidia/nemotron-3-super-120b-a12b:free"
 
 
 # ─────────────────── анонсированные ("Going away <дата>") даты снятия моделей ───────────────────
@@ -589,13 +589,32 @@ def test_sept_2026_new_light_models_after_proven_head_before_reserve():
     assert order[0] == "nvidia/nemotron-3.5-lightning:free"
     assert order[-1] == "openrouter/free"
     for model_id in (
-        "thinkingmachines/inkling-small:free", "nex-agi/nex-n2.5-mini:free",
+        "nex-agi/nex-n2.5-mini:free",
         "inclusionai/ling-3.0-flash-sante:free", "inclusionai/ling-3.0-flash-fin:free",
         "liquid/lfm-2.5-2.6b:free",
     ):
         assert model_id in order
         assert model_id not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
         assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+
+
+def test_inkling_small_excluded_after_agentic_harness_refusal():
+    # Вечер 17.09.2026, первый прод-трафик нового кода: inkling-small ответил
+    # отказом "only available on agentic harnesses" — чат-запросы не обслуживает.
+    assert "thinkingmachines/inkling-small:free" in lumen_router_config._OR_MODEL_HEALTH
+    assert "thinkingmachines/inkling-small:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "thinkingmachines/inkling-small:free" not in lumen_router_config._OR_LIGHT_ORDER
+    # nex-mini тем же вечером подтверждён живьём — занял его место вторым.
+    assert lumen_router_config._OR_LIGHT_ORDER[1] == "nex-agi/nex-n2.5-mini:free"
+
+
+def test_nemotron_super_demoted_below_ultra_after_second_mush_incident():
+    # Вечер 17.09.2026: super выдал "кашу" прямо в проде (второй инцидент после
+    # калибровочного) — понижен под ultra без инцидентов, но не исключён.
+    order = lumen_router_config._OR_HEAVY_ORDER
+    assert order[0] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert order[1] == "nvidia/nemotron-3-super-120b-a12b:free"
+    assert "nvidia/nemotron-3-super-120b-a12b:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
 
 
 def test_sept_2026_new_heavy_and_vision_models_placed():

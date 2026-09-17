@@ -617,6 +617,20 @@ def test_model_error_text_shared_between_providers():
     assert bot._gemini_error_msg(gem_exc, "gemini-3.5-flash") == bot._or_error_msg(or_exc, "text")
 
 
+def test_user_facing_error_texts_hide_models_and_stay_informal():
+    # Легенда единого Lumen (сентябрь 2026): пользовательские тексты не должны
+    # упоминать "модели" во множественном числе и обращаться на "вы" — см.
+    # ИДЕНТИЧНОСТЬ и ОБРАЩЕНИЕ в system_prompt.py.
+    for key in ("rate_limit", "paid", "forbidden", "unavailable"):
+        msg = bot._model_error_text(key)
+        assert "модел" not in msg.lower()
+    assert "модел" not in bot._MODEL_ERROR_FALLBACK_MSG.lower()
+    budget_msg = bot._route_error_reply_text(bot.RouteBudgetExceededError([]), "gemini-3.8-flash", youtube_url_to_analyze=None)
+    assert "модел" not in budget_msg.lower()
+    quota_msg = bot._gemini_error_msg(bot.GeminiAllModelsExhaustedError(["gemini-3.8-flash"]), "gemini-3.8-flash")
+    assert "модел" not in quota_msg.lower()
+
+
 # ─────────────────────────── _cleanup_rate_limit_dict ───────────────────────────
 
 def test_cleanup_rate_limit_dict_removes_empty_and_stale_entries():
@@ -2806,10 +2820,39 @@ def test_inline_draw_falls_back_when_auto_picked_model_fails():
         # HF_IMAGE_MODELS, а не от auto-pick, провалившегося с ошибкой.
         assert len(attempts) >= 2
         assert captured_photo["photo"].data == b"\x89PNG fallback bytes"
-        assert "основная модель недоступна" in captured_photo["caption"]
+        # Подпись с названием модели убрана (сентябрь 2026): бот не раскрывает
+        # внутреннюю реализацию — ни названий, ни "основная недоступна".
+        assert "caption" not in captured_photo
     finally:
         bot._hf_text_to_image = original_hf
         bot.bot = original_bot_obj
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_inline_draw_stops_chain_on_service_rate_limit():
+    # Реальный прод-инцидент 17.09.2026: ВСЕ 5 моделей вернули HTTP 429 подряд —
+    # лимит всего сервиса, а не одной модели. Гонять остаток цепочки бессмысленно:
+    # останавливаемся на первой же 429 и честно просим подождать (а не
+    # "переформулируйте описание" — при перегрузке это неверный совет).
+    chat_id = 999432
+    attempts = []
+
+    async def fake_hf_text_to_image_always_429(session, model_id, prompt):
+        attempts.append(model_id)
+        raise RuntimeError("Pollinations.ai HTTP 429")
+
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 2
+
+    original_hf = bot._hf_text_to_image
+    bot._hf_text_to_image = fake_hf_text_to_image_always_429
+    try:
+        asyncio.run(bot.inline_draw(incoming, "дикобраз"))
+        assert attempts == [bot._pick_image_model("дикобраз")]
+        status_texts = [text for text, _ in incoming.sent[0].edits]
+        assert any("перегружен" in text for text in status_texts)
+    finally:
+        bot._hf_text_to_image = original_hf
         bot.chat_state.pop(chat_id, None)
 
 
