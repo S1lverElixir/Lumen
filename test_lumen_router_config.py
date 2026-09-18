@@ -75,6 +75,23 @@ def test_looks_like_freshness_query_detects_schedule_and_forecast():
     assert lumen_router_config._looks_like_freshness_query("любимый цвет") is False
 
 
+def test_looks_like_freshness_query_detects_buying_advice():
+    # Прод-кейс 17.09.2026: "какой проц лучше всего брать под ртх 5060" ушёл
+    # лёгким маршрутом в слабую модель — та ответила протухшими знаниями
+    # (RTX 5060 "ещё не объявлена") вместо поиска. Советы по покупке всегда
+    # про цены/наличие/новинки — им нужен живой поиск.
+    assert lumen_router_config._looks_like_freshness_query("какой проц лучше всего брать под ртх 5060") is True
+    assert lumen_router_config._looks_like_freshness_query("что лучше купить для игр") is True
+    assert lumen_router_config._looks_like_freshness_query("какой телефон лучше взять") is True
+
+
+def test_looks_like_heavy_query_detects_bare_compare():
+    # Прод-кейс 17.09.2026: "сравни конкурентов" без "и/с" между объектами
+    # пролетал мимо тяжёлой ветки — сравнение ехало на слабую модель.
+    assert lumen_router_config._looks_like_heavy_query("сравни конкурентов") is True
+    assert lumen_router_config._looks_like_heavy_query("сравни iphone и samsung") is True
+
+
 def test_build_route_youtube_link_forces_gemini_only():
     route = lumen_router_config._build_route(needs_youtube=True, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
     assert all(p == "gemini" for p, _ in route)

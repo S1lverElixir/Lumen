@@ -291,6 +291,11 @@ def _md_to_html(text: str) -> str:
     # баг). Сначала убираем заведомо битые self-closing варианты (напр. "<b/>"),
     # затем конвертируем корректные парные теги в markdown-эквивалент — дальше
     # они идут по тому же (уже проверенному) конвейеру, что и обычный markdown.
+    # <br> — в сентинел (прод-кейс 17.09.2026: модель пишет "<br>" внутри ячеек
+    # таблиц, без обработки долетает до escape и светится буквально). Сентинел
+    # невидим для escape и раскрывается в "\n" в самом конце (см. финал ниже);
+    # строгий паттерн (<br>, <br/>, <br />) намеренно НЕ ест "<blockquote>".
+    text = re.sub(r"<br\s*/?>", "\x00BR\x00", text, flags=re.IGNORECASE)
     text = re.sub(r"</?(?:b|strong|i|em|u|s|code|pre)\s*/>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"**\1**", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"*\1*", text, flags=re.IGNORECASE | re.DOTALL)
@@ -396,6 +401,12 @@ def _md_to_html(text: str) -> str:
             replacement = f"<code>{inner}</code>"
         text = text.replace(key, replacement)
 
+    # Сентинел <br> (см. Phase 0): в обычном HTML-пути — перенос строки.
+    # Оговорка: <br> ВНУТРИ код-блоков тоже превратится в перенос (Phase 0
+    # идёт до экстракции кода) — тот же класс компромисса, что уже есть у
+    # <b>/<i> в коде выше; код-примеры с буквальным <br> редки.
+    text = text.replace("\x00BR\x00", "\n")
+
     return text
 
 
@@ -440,6 +451,9 @@ def _md_to_rich_html(text: str) -> str:
     if not text:
         return ""
 
+    # Тот же сентинел <br>, что в _md_to_html выше, но раскрывается в <br/>
+    # (валидный рич-тег переноса, в т.ч. внутри ячеек <td>).
+    text = re.sub(r"<br\s*/?>", "\x00BR\x00", text, flags=re.IGNORECASE)
     text = re.sub(r"</?(?:b|strong|i|em|u|s|code|pre)\s*/>", "", text, flags=re.IGNORECASE)
     text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"**\1**", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"*\1*", text, flags=re.IGNORECASE | re.DOTALL)
@@ -544,6 +558,25 @@ def _md_to_rich_html(text: str) -> str:
             replacement = f"<code>{inner}</code>"
         text = text.replace(key, replacement)
 
+    text = text.replace("\x00BR\x00", "<br/>")
+
+    return text
+
+
+def _strip_markdown(text: str) -> str:
+    """Сносит markdown-разметку в голый текст для последнего рубежа отправки
+    (plain-text без parse_mode): иначе при отказе HTML/рич в чат уходят сырые
+    `**`, backtick-и и `[label](url)` (прод-кейс 17.09.2026 — ответ с `**`
+    прилетел как есть). Чистит только синтаксис, слова не трогает."""
+    if not text:
+        return ""
+    text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", r"\1", text)
+    text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text, flags=re.DOTALL)
+    text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)
+    text = re.sub(r"~~(.*?)~~", r"\1", text)
+    text = re.sub(r"`([^`\n]+)`", r"\1", text)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
     return text
 
 

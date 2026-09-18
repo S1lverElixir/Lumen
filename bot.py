@@ -401,12 +401,12 @@ STREAM_TYPING_MAX_CATCHUP_TICKS = int(os.getenv("STREAM_TYPING_MAX_CATCHUP_TICKS
 # куска — всегда минимум из двух.
 FIRST_CHUNK_TIMEOUT_SEC = float(os.getenv("FIRST_CHUNK_TIMEOUT_SEC", "12"))
 # Анимация ожидания ("бегущие точки") в плейсхолдере, пока не пришёл первый
-# кусок стрима: первая смена кадра — не раньше _DOTS_START_AFTER_SEC (мгновенно
-# ответившая модель анимации вообще не покажет), дальше — кадр каждые
-# _DOTS_TICK_SEC. Интервалы подобраны под лимит Telegram (не чаще правки в
-# секунду) с запасом; правки идут только показывать нечего (до первого куска),
-# поэтому с показом текста не конфликтуют.
-_DOTS_START_AFTER_SEC = 2.5
+# кусок стрима: первые полсекунды висит статичное "…" (дешевле, чем дёргать
+# API ради мгновенных ответов — их анимация вообще не касается), дальше —
+# кадр каждые _DOTS_TICK_SEC. Интервалы подобраны под лимит Telegram (не чаще
+# правки в секунду) с запасом; правки идут только показывать нечего (до
+# первого куска), поэтому с показом текста не конфликтуют.
+_DOTS_START_AFTER_SEC = 0.5
 _DOTS_TICK_SEC = 1.2
 _DOTS_FRAMES = (".", "..", "…")
 # RICH_MESSAGES_ENABLED — отправка финальных ответов через sendRichMessage /
@@ -628,7 +628,7 @@ async def _close_sessions() -> None:
 # именно ради старых тестов на `bot.X`, но с переездом тестов на прямой импорт
 # модуля этот ре-экспорт стал мёртвым (см. аудит техдолга, 26 августа 2026) и
 # убран вместе с соответствующим `__all__`.
-from lumen_formatting import _md_to_html, _md_to_rich_html, _split_text_chunks
+from lumen_formatting import _md_to_html, _md_to_rich_html, _split_text_chunks, _strip_markdown
 
 _PRUNE_SENTINEL = object()
 
@@ -869,7 +869,7 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
             )
             if res is None and parse_html:
                 res = await _tg_call(
-                    message.reply, chunk,
+                    message.reply, _strip_markdown(chunk),
                     call_timeout=TELEGRAM_REQUEST_TIMEOUT,
                     parse_mode=None,
                     **chunk_kwargs,
@@ -885,7 +885,7 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
             if res is None and parse_html:
                 await _tg_call(
                     bot.send_message,
-                    chat_id=message.chat.id, text=chunk,
+                    chat_id=message.chat.id, text=_strip_markdown(chunk),
                     call_timeout=TELEGRAM_REQUEST_TIMEOUT,
                     parse_mode=None,
                     **chunk_kwargs,
@@ -914,7 +914,9 @@ async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -
         if res is not None:
             return True
         kwargs["parse_mode"] = None
-        res = await _tg_call(msg.edit_text, text, **kwargs)
+        # Последний рубеж — голый текст БЕЗ markdown-синтаксиса (см.
+        # _strip_markdown): сырые `**` в чате хуже потери жирности.
+        res = await _tg_call(msg.edit_text, _strip_markdown(text), **kwargs)
         return res is not None
     except Exception:
         return False

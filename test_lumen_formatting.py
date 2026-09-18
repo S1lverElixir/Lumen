@@ -449,6 +449,28 @@ def test_rich_headings_tolerate_indent_and_deep_levels():
     assert lumen_formatting._md_to_rich_html("#### Глубокий") == "<h4>Глубокий</h4>"
 
 
+def test_br_tag_becomes_line_break_in_both_paths():
+    # Прод-кейс 17.09.2026: модель пишет "<br>" внутри ячеек таблиц — без
+    # обработки долетает до escape и светится буквально ("...сгор.<br>Pro Max").
+    assert lumen_formatting._md_to_html("a<br>b") == "a\nb"
+    assert lumen_formatting._md_to_html("a<br/>b") == "a\nb"
+    assert lumen_formatting._md_to_rich_html("| H | K |\n|---|---|\n| a<br>b | 2 |") == (
+        "<table bordered><tr><th>H</th><th>K</th></tr><tr><td>a<br/>b</td><td>2</td></tr></table>"
+    )
+    # "<blockquote>" не должен съедаться строгим паттерном <br>.
+    assert "blockquote" in lumen_formatting._md_to_html("<blockquote>ц</blockquote>")
+
+
+def test_strip_markdown_removes_syntax_keeping_words():
+    assert lumen_formatting._strip_markdown("**жирный** и *курсив*") == "жирный и курсив"
+    assert lumen_formatting._strip_markdown("код `x=1` тут") == "код x=1 тут"
+    assert lumen_formatting._strip_markdown("[текст](https://example.com)") == "текст"
+    assert lumen_formatting._strip_markdown("## Заголовок") == "Заголовок"
+    assert lumen_formatting._strip_markdown("~~чист~~") == "чист"
+    assert lumen_formatting._strip_markdown("") == ""
+    assert lumen_formatting._strip_markdown("обычный текст 5 < 10") == "обычный текст 5 < 10"
+
+
 def test_rich_prices_are_not_treated_as_math():
     # "$50 до $100" — контент с пробелом у границы, не формула. Одиночный знак
     # без пары — тоже текст.
