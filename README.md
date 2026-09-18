@@ -33,7 +33,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 Lumen is a single FastAPI + aiogram service. Telegram delivers updates to a webhook. Each message gets routed through a chain of candidate models (Gemini and/or OpenRouter), built on the fly from the message's content: attachments, links, and a couple of lightweight heuristics for "does this need current information" and "is this a heavy request." The first provider that answers wins; the other is tried as a fallback if its whole chain fails.
 
-The codebase is a modular monolith. `bot.py` is the orchestrator; the rest is split into focused modules: `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, and `lumen_typing_pace.py`.
+The codebase is a modular monolith. `bot.py` is the orchestrator; the rest is split into focused modules: `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, and `lumen_typing_pace.py`.
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for a deeper look at routing, streaming, the security layers, and the TikTok downloader.
 
