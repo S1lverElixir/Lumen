@@ -361,9 +361,9 @@ TELEGRAM_GET_FILE_TIMEOUT = float(os.getenv("TELEGRAM_GET_FILE_TIMEOUT", "15"))
 # вызов, а исходящих вызовов в Telegram за секунду может быть десятки (reply, typing-экшен,
 # get_file и т.д. на каждое входящее сообщение) — без выключателя это лавина одинаковых
 # WARNING-строк в логах и бессмысленные повторные попытки в мёртвый прокси. См. _tg_call/
-# telegram_api_call и _looks_like_proxy_garbage ниже. TG_PROXY_COOLDOWN_SEC — на сколько
+# telegram_api_call и _looks_like_proxy_garbage ниже. TELEGRAM_PROXY_COOLDOWN_SEC — на сколько
 # секунд отключаем реальные сетевые попытки после первой пойманной такой ошибки.
-TG_PROXY_COOLDOWN_SEC = float(os.getenv("TG_PROXY_COOLDOWN_SEC", "20"))
+TELEGRAM_PROXY_COOLDOWN_SEC = float(os.getenv("TELEGRAM_PROXY_COOLDOWN_SEC", "20"))
 # В отличие от ask_gemini/ask_openrouter_text (которые ограничены ROUTE_TOTAL_
 # BUDGET_SEC на весь маршрут), у стриминга раньше не было НИКАКОГО таймаута вокруг
 # ожидания следующего куска — генуинно подвисший (не упавший с исключением, а
@@ -541,8 +541,8 @@ from lumen_telegram_transport import (
     close_telegram_session as _lumen_close_telegram_session,
 )
 
-TG_PROXY_TRIP_THRESHOLD = int(os.getenv("TG_PROXY_TRIP_THRESHOLD", "3"))
-_tg_proxy_breaker = _TelegramProxyCircuitBreaker(cooldown_sec=TG_PROXY_COOLDOWN_SEC, trip_threshold=TG_PROXY_TRIP_THRESHOLD)
+TELEGRAM_PROXY_TRIP_THRESHOLD = int(os.getenv("TELEGRAM_PROXY_TRIP_THRESHOLD", "3"))
+_tg_proxy_breaker = _TelegramProxyCircuitBreaker(cooldown_sec=TELEGRAM_PROXY_COOLDOWN_SEC, trip_threshold=TELEGRAM_PROXY_TRIP_THRESHOLD)
 
 async def _get_telegram_session() -> aiohttp.ClientSession:
     return await _lumen_get_telegram_session(
@@ -699,7 +699,7 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
         # Прокси уже недавно помечен недоступным (см. срабатывание ниже) — не бьёмся
         # заново в мёртвый прокси на каждое сообщение из бэклога, тихо возвращаем None,
         # как будто вызов не удался (вызывающий код и так умеет это обрабатывать).
-        # Лог пишем не чаще раза в TG_PROXY_COOLDOWN_SEC (см. log_still_down_if_due),
+        # Лог пишем не чаще раза в TELEGRAM_PROXY_COOLDOWN_SEC (см. log_still_down_if_due),
         # а не на каждый пропущенный вызов — иначе тот же лавинный спам никуда не
         # денется, просто сменит текст.
         _tg_proxy_breaker.log_still_down_if_due(now)

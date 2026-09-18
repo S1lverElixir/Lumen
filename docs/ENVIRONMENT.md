@@ -2,6 +2,12 @@
 
 `BOT_TOKEN` and `GEMINI_API_KEY` are required. Deployments using the authenticated proxy also require `LUMEN_PROXY_SECRET` on both the bot and every proxy instance.
 
+Naming convention (frozen for existing names — renaming a live variable needs a
+simultaneous code + platform change, so existing names stay even when imperfect):
+new variables are `<SUBSYSTEM>_<THING>` (`TELEGRAM_*`, `TIKWM_*`, `UPSTASH_*`,
+`STREAM_*`, `ROUTE_*`). Secrets hold only tokens/keys/passwords; plain numbers,
+URLs and hostnames are Variables.
+
 ## Required
 
 | Variable | Purpose |
@@ -18,8 +24,8 @@ Hugging Face Spaces' outbound IPs are blocked by Telegram's API and rejected (`4
 | `LUMEN_PROXY_SECRET` | — | Required on every Deno proxy and the bot when using proxies. Use the same independently generated random secret (at least 32 random bytes encoded as hex) for primary and fallback instances. Sent only in `X-Lumen-Proxy-Secret`, never in URLs or `Authorization`. |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Base URL for the Telegram Bot API. In production this points at the proxy. |
 | `TELEGRAM_API_BASE_URL_FALLBACKS` | — | Comma-separated backup proxy addresses. On a circuit-breaker trip the bot rotates through these before pausing. |
-| `TG_PROXY_COOLDOWN_SEC` | `20` | Pause (seconds) after the circuit breaker trips, i.e. the proxy is judged unavailable. |
-| `TG_PROXY_TRIP_THRESHOLD` | `3` | Consecutive failures (no successes in between) needed to trip the breaker. |
+| `TELEGRAM_PROXY_COOLDOWN_SEC` | `20` | Pause (seconds) after the circuit breaker trips, i.e. the proxy is judged unavailable. Renamed from `TG_PROXY_COOLDOWN_SEC` (Sept 2026) for a single `TELEGRAM_*` prefix — update the platform entry too, the old name is no longer read. |
+| `TELEGRAM_PROXY_TRIP_THRESHOLD` | `3` | Consecutive failures (no successes in between) needed to trip the breaker. Renamed from `TG_PROXY_TRIP_THRESHOLD` (Sept 2026), same as above. |
 | `TIKWM_API_BASE_URL` | — (direct requests) | Base URL for a TikWM proxy. Empty means the bot talks to both `tikwm.com` mirrors directly. |
 | `TIKWM_API_BASE_URL_FALLBACKS` | — | Comma-separated backup TikWM proxies, tried in order if the primary one fails. |
 
