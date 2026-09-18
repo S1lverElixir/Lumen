@@ -441,9 +441,9 @@ ROUTE_TOTAL_BUDGET_SEC = float(os.getenv("ROUTE_TOTAL_BUDGET_SEC", "40"))
 # DRAW_TOTAL_BUDGET_SEC — тот же принцип, что и ROUTE_TOTAL_BUDGET_SEC выше, но для
 # фолбэк-цепочки генерации изображений (см. inline_draw). НАЙДЕНО ПРИ КОД-РЕВЬЮ
 # (28 августа 2026): в отличие от текстового роутинга, у /draw не было ВООБЩЕ
-# никакого общего бюджета времени — каждый вызов _hf_text_to_image ждёт до 90с
+# никакого общего бюджета времени — каждый вызов _pollinations_text_to_image ждёт до 90с
 # (см. aiohttp.ClientTimeout в _pollinations_generate, lumen_images.py), а моделей
-# в HF_IMAGE_MODELS пять. Если Pollinations.ai лежит целиком, пользователь мог
+# в POLLINATIONS_IMAGE_MODELS пять. Если Pollinations.ai лежит целиком, пользователь мог
 # ждать до ~7.5 минут, прежде чем увидеть любую ошибку — статусное сообщение
 # "Генерирую изображение" всё это время просто висело. 120с — достаточно на одну
 # полную попытку (90с) плюс запас на вторую, но ограничивает худший случай вдвое
@@ -1954,7 +1954,7 @@ async def _is_privileged_in_chat(chat_type: str, chat_id: int, user_id: int | No
 # Pollinations.ai) вынесена в lumen_images.py — не пишет в chat_state/GLOBAL_QUOTA,
 # не зовёт Telegram API и не зависит от глобальных bot/client, самый изолированный
 # кандидат из пяти намеченных. Единственное отличие от прежнего кода:
-# _pollinations_generate/_hf_text_to_image теперь принимают уже готовую aiohttp-сессию
+# _pollinations_generate/_pollinations_text_to_image теперь принимают уже готовую aiohttp-сессию
 # параметром (см. докстринг модуля) — раньше сессия получалась неявно через
 # _get_http_session() внутри самой функции, что означало бы либо тянуть этот геттер
 # в новый модуль, либо заводить там свой отдельный источник сессий; вызывающий код
@@ -1964,17 +1964,17 @@ async def _is_privileged_in_chat(chat_type: str, chat_id: int, user_id: int | No
 # показывает названия моделей генерации ни в статусе, ни в подписи — см.
 # ИДЕНТИЧНОСТЬ в system_prompt.py. Сама функция живёт в lumen_images.py.
 from lumen_images import (
-    DEFAULT_HF_IMAGE_MODEL,
-    HF_IMAGE_MODELS,
+    DEFAULT_POLLINATIONS_IMAGE_MODEL,
+    POLLINATIONS_IMAGE_MODELS,
     _pick_image_model,
-    _hf_text_to_image,
+    _pollinations_text_to_image,
 )
 
-# DEFAULT_HF_IMAGE_MODEL больше не читается напрямую нигде в остальном коде bot.py
+# DEFAULT_POLLINATIONS_IMAGE_MODEL больше не читается напрямую нигде в остальном коде bot.py
 # (используется только внутри самой _pick_image_model в lumen_images.py) — но
-# остаётся нужен как `bot.DEFAULT_HF_IMAGE_MODEL` для существующих тестов. См.
+# остаётся нужен как `bot.DEFAULT_POLLINATIONS_IMAGE_MODEL` для существующих тестов. См.
 # пояснение про __all__ у первого блока (lumen_formatting) в начале файла.
-__all__ += ["DEFAULT_HF_IMAGE_MODEL"]
+__all__ += ["DEFAULT_POLLINATIONS_IMAGE_MODEL"]
 
 # метаданные и скачивание медиа
 
@@ -4183,8 +4183,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
         primary_model = _pick_image_model(prompt)
 
         # Фолбэк-цепочка: пробуем сначала подобранную модель,
-        # при ошибке переключаемся на следующие по порядку из HF_IMAGE_MODELS
-        all_model_ids = list(HF_IMAGE_MODELS.keys())
+        # при ошибке переключаемся на следующие по порядку из POLLINATIONS_IMAGE_MODELS
+        all_model_ids = list(POLLINATIONS_IMAGE_MODELS.keys())
         fallback_chain = [primary_model] + [m for m in all_model_ids if m != primary_model]
 
         image_bytes = None
@@ -4207,7 +4207,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 # На первой попытке статус и так "Генерирую изображение" — не трогаем.
                 if attempt_model != primary_model:
                     await _edit_message_quietly(status, "Это займёт немного больше времени…")
-                image_bytes = await _hf_text_to_image(session, attempt_model, prompt)
+                image_bytes = await _pollinations_text_to_image(session, attempt_model, prompt)
                 break
             except Exception as exc:
                 last_error = exc
@@ -4242,7 +4242,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
             raise last_error or RuntimeError("all image generation models unavailable")
 
     except Exception as exc:
-        log.exception("Hugging Face image generation failed:")
+        log.exception("Pollinations image generation failed:")
         txt = _error_text(exc).strip()
         if any(kw in txt.lower() for kw in ("cannot connect", "ssl:", "no address", "connection", "timeout", "host")):
             user_err = "Сервис генерации изображений временно недоступен. Попробуй позже."

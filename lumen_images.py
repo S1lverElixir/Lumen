@@ -11,7 +11,7 @@ lumen_images.py — генерация изображений через Pollina
 есть один общий httр-session getter (`_get_http_session`), которым пользуются TikTok/
 OpenRouter/эта же генерация картинок — плодить второй, изолированный источник управления
 HTTP-соединениями было бы речь не о разделении ответственности, а о случайном дублировании.
-Поэтому `_pollinations_generate`/`_hf_text_to_image` принимают уже готовую сессию параметром;
+Поэтому `_pollinations_generate`/`_pollinations_text_to_image` принимают уже готовую сессию параметром;
 вызывающий код (см. `inline_draw` в bot.py) сам получает её через `_get_http_session()` и
 передаёт сюда — то же самое соглашение, по которому TikTok-скачивание в bot.py принимает
 сессию параметром в `_download_url_bin`/`_resolve_tiktok_short` и т.п.
@@ -37,9 +37,9 @@ from typing import Any
 
 import aiohttp
 
-DEFAULT_HF_IMAGE_MODEL = os.getenv("HF_IMAGE_MODEL", "flux").strip()
+DEFAULT_POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 
-HF_IMAGE_MODELS: dict[str, dict[str, Any]] = {
+POLLINATIONS_IMAGE_MODELS: dict[str, dict[str, Any]] = {
     "flux": {
         "name": "FLUX Pro",
         "desc": "Высококачественный FLUX. Фотореализм, точное следование промпту, богатая детализация.",
@@ -70,7 +70,7 @@ HF_IMAGE_MODELS: dict[str, dict[str, Any]] = {
 # существующей fallback-цепочке (см. inline_draw в bot.py) при неудаче/плохом
 # результате. Порядок проверки — от самых специфичных категорий к общей: аниме/
 # фэнтези/реализм/черновик — явные сигналы жанра, при их отсутствии остаётся
-# DEFAULT_HF_IMAGE_MODEL (универсальный FLUX Pro).
+# DEFAULT_POLLINATIONS_IMAGE_MODEL (универсальный FLUX Pro).
 _ANIME_RE = re.compile(r"аниме|манг[аи]|манхв\w*|вебтун\w*|чиби|ваифу|anime|manga|waifu|chibi", re.IGNORECASE)
 _FANTASY_RE = re.compile(
     r"фэнтези|фентези|фентезийн\w*|концепт-?арт\w*|дракон\w*|эльф\w*|волшебн\w*|магическ\w*|"
@@ -95,7 +95,7 @@ def _pick_image_model(prompt: str) -> str:
     не стиль, поэтому последний перед дефолтом (стилевые сигналы важнее просьбы
     "побыстрее", если оба есть в одном промпте)."""
     if not prompt:
-        return DEFAULT_HF_IMAGE_MODEL
+        return DEFAULT_POLLINATIONS_IMAGE_MODEL
     if _ANIME_RE.search(prompt):
         return "flux-anime"
     if _FANTASY_RE.search(prompt):
@@ -104,7 +104,7 @@ def _pick_image_model(prompt: str) -> str:
         return "flux-realism"
     if _QUICK_RE.search(prompt):
         return "turbo"
-    return DEFAULT_HF_IMAGE_MODEL
+    return DEFAULT_POLLINATIONS_IMAGE_MODEL
 
 
 async def _pollinations_generate(session: aiohttp.ClientSession, model_name: str, prompt: str) -> bytes:
@@ -126,17 +126,17 @@ async def _pollinations_generate(session: aiohttp.ClientSession, model_name: str
         raise RuntimeError(f"Pollinations.ai HTTP {resp.status}")
 
 
-async def _hf_text_to_image(session: aiohttp.ClientSession, model_id: str, prompt: str) -> bytes:
+async def _pollinations_text_to_image(session: aiohttp.ClientSession, model_id: str, prompt: str) -> bytes:
     # Pollinations.ai — единственный провайдер генерации изображений (HF Inference
     # API-ветка убрана: старые HF-модели регулярно устаревали на стороне провайдера,
     # см. историю: FLUX.1-dev вернул 410 Gone). Раз провайдер всего один, отдельная
-    # "pollinations:" приставка на каждом ключе HF_IMAGE_MODELS была лишней —
+    # "pollinations:" приставка на каждом ключе POLLINATIONS_IMAGE_MODELS была лишней —
     # model_id и есть имя модели Pollinations как есть.
-    if model_id not in HF_IMAGE_MODELS:
+    if model_id not in POLLINATIONS_IMAGE_MODELS:
         raise ValueError(f"Неизвестная модель генерации изображений: {model_id}")
     return await _pollinations_generate(session, model_id, prompt)
 
 
 def _image_model_label(model_id: str) -> str:
-    meta = HF_IMAGE_MODELS.get(model_id, {})
+    meta = POLLINATIONS_IMAGE_MODELS.get(model_id, {})
     return meta.get("name", model_id)

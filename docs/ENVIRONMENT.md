@@ -50,7 +50,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `OPENROUTER_API_KEY` / `OPENROUTER_KEY` | — | OpenRouter API key. Without it, the router sends everything to Gemini, which burns through its much smaller quota fast. |
 | `OPENROUTER_HTTP_REFERER` | `https://t.me/{BOT_USERNAME}` | `HTTP-Referer` header sent with OpenRouter requests. |
 | `OPENROUTER_TITLE` | `BOT_USERNAME` | App title header sent with OpenRouter requests. |
-| `HF_IMAGE_MODEL` | `flux` | Default image-generation model (used only if the prompt doesn't match a more specific style). |
+| `POLLINATIONS_IMAGE_MODEL` | `flux` | Default image-generation model (used only if the prompt doesn't match a more specific style). Renamed from `HF_IMAGE_MODEL` (Sept 2026) — the backend is Pollinations.ai, not Hugging Face; the old name is no longer read. |
 
 ## Timeouts, rate limiting & routing budgets
 

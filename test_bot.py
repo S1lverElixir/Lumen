@@ -705,7 +705,7 @@ def test_save_chat_to_storage_returns_true_on_success(tmp_path):
     # ниже): функция теперь ДОЛЖНА сигнализировать успех/неудачу вызывающему коду,
     # а не просто логировать исключение и возвращать None в обоих случаях.
     chat_id = 999601
-    state = {"history": [{"role": "user", "content": "привет"}], "image_model": bot.DEFAULT_HF_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
+    state = {"history": [{"role": "user", "content": "привет"}], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
     original_chats_dir = bot._CHATS_DIR
     bot._CHATS_DIR = tmp_path
     try:
@@ -716,7 +716,7 @@ def test_save_chat_to_storage_returns_true_on_success(tmp_path):
 
 
 def test_save_chat_to_storage_returns_false_on_failure():
-    state = {"history": [], "image_model": bot.DEFAULT_HF_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
+    state = {"history": [], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
     with patch("bot._storage_write_text", side_effect=RuntimeError("сбой хранилища")):
         assert bot._save_chat_to_storage(999602, state) is False
 
@@ -749,8 +749,8 @@ def test_flush_dirty_state_once_requeues_failed_saves():
     # заново. Теперь чат, для которого сохранение не удалось, должен остаться в
     # _dirty_chat_ids и попасть в следующий цикл.
     ok_chat, fail_chat = 999701, 999702
-    bot.chat_state[ok_chat] = {"history": [{"role": "user", "content": "ok"}], "image_model": bot.DEFAULT_HF_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
-    bot.chat_state[fail_chat] = {"history": [{"role": "user", "content": "fail"}], "image_model": bot.DEFAULT_HF_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
+    bot.chat_state[ok_chat] = {"history": [{"role": "user", "content": "ok"}], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
+    bot.chat_state[fail_chat] = {"history": [{"role": "user", "content": "fail"}], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
     bot._dirty_chat_ids.clear()
     bot._dirty_chat_ids.update({ok_chat, fail_chat})
     bot._index_dirty = False
@@ -2793,8 +2793,8 @@ def test_pick_image_model_detects_quick_draft():
 
 
 def test_pick_image_model_falls_back_to_default_for_generic_prompt():
-    assert bot._pick_image_model("космическая станция на орбите Земли") == bot.DEFAULT_HF_IMAGE_MODEL
-    assert bot._pick_image_model("") == bot.DEFAULT_HF_IMAGE_MODEL
+    assert bot._pick_image_model("космическая станция на орбите Земли") == bot.DEFAULT_POLLINATIONS_IMAGE_MODEL
+    assert bot._pick_image_model("") == bot.DEFAULT_POLLINATIONS_IMAGE_MODEL
 
 
 def test_pick_image_model_style_keyword_wins_over_quick_keyword():
@@ -2838,7 +2838,7 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
     chat_id = 999430
     captured_model = []
 
-    async def fake_hf_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt):
         captured_model.append(model_id)
         return b"\x89PNG fake bytes"
 
@@ -2849,9 +2849,9 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
         async def send_photo(self, **kwargs):
             return SimpleNamespace()
 
-    original_hf = bot._hf_text_to_image
+    original_hf = bot._pollinations_text_to_image
     original_bot_obj = bot.bot
-    bot._hf_text_to_image = fake_hf_text_to_image
+    bot._pollinations_text_to_image = fake_pollinations_text_to_image
     bot.bot = _FakePhotoBot()
     try:
         asyncio.run(bot.inline_draw(incoming, "нарисуй девушку в стиле аниме на пляже"))
@@ -2860,7 +2860,7 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
         # завязан на состояние чата вообще.
         assert "image_model" not in bot.get_state(chat_id)
     finally:
-        bot._hf_text_to_image = original_hf
+        bot._pollinations_text_to_image = original_hf
         bot.bot = original_bot_obj
         bot.chat_state.pop(chat_id, None)
 
@@ -2868,14 +2868,14 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
 def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
     # Регрессия на находку код-ревью (28 августа 2026): раньше у /draw не было
     # общего бюджета времени на всю фолбэк-цепочку — при недоступности сервиса
-    # генерации бот перебирал бы все 5 моделей HF_IMAGE_MODELS, тратя реальное
+    # генерации бот перебирал бы все 5 моделей POLLINATIONS_IMAGE_MODELS, тратя реальное
     # время пользователя без единого предупреждения. Патчим DRAW_TOTAL_BUDGET_SEC
     # на крошечное значение и делаем первую попытку заведомо дольше него —
     # вторая попытка не должна была вообще начаться.
     chat_id = 999432
     attempts = []
 
-    async def fake_hf_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt):
         attempts.append(model_id)
         await asyncio.sleep(0.05)  # дольше урезанного DRAW_TOTAL_BUDGET_SEC ниже
         raise RuntimeError("503 Service Unavailable")
@@ -2883,9 +2883,9 @@ def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
 
-    original_hf = bot._hf_text_to_image
+    original_hf = bot._pollinations_text_to_image
     original_budget = bot.DRAW_TOTAL_BUDGET_SEC
-    bot._hf_text_to_image = fake_hf_text_to_image
+    bot._pollinations_text_to_image = fake_pollinations_text_to_image
     bot.DRAW_TOTAL_BUDGET_SEC = 0.01
     try:
         asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
@@ -2893,7 +2893,7 @@ def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
         assert len(attempts) == 1
         assert "времени" in incoming.sent[0].edits[-1][0].lower()
     finally:
-        bot._hf_text_to_image = original_hf
+        bot._pollinations_text_to_image = original_hf
         bot.DRAW_TOTAL_BUDGET_SEC = original_budget
 
 
@@ -2905,7 +2905,7 @@ def test_inline_draw_falls_back_when_auto_picked_model_fails():
     chat_id = 999431
     attempts = []
 
-    async def fake_hf_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt):
         attempts.append(model_id)
         if model_id == "flux-anime":
             raise RuntimeError("503 Service Unavailable")
@@ -2920,23 +2920,23 @@ def test_inline_draw_falls_back_when_auto_picked_model_fails():
             captured_photo.update(kwargs)
             return SimpleNamespace()
 
-    original_hf = bot._hf_text_to_image
+    original_hf = bot._pollinations_text_to_image
     original_bot_obj = bot.bot
-    bot._hf_text_to_image = fake_hf_text_to_image
+    bot._pollinations_text_to_image = fake_pollinations_text_to_image
     bot.bot = _FakePhotoBot()
     try:
         asyncio.run(bot.inline_draw(incoming, "нарисуй девушку в стиле аниме на пляже"))
         # Авто-подобранная модель (flux-anime) пробуется ПЕРВОЙ, несмотря на сбой.
         assert attempts[0] == "flux-anime"
         # Реально отправленное изображение — от следующей модели по порядку
-        # HF_IMAGE_MODELS, а не от auto-pick, провалившегося с ошибкой.
+        # POLLINATIONS_IMAGE_MODELS, а не от auto-pick, провалившегося с ошибкой.
         assert len(attempts) >= 2
         assert captured_photo["photo"].data == b"\x89PNG fallback bytes"
         # Подпись с названием модели убрана (сентябрь 2026): бот не раскрывает
         # внутреннюю реализацию — ни названий, ни "основная недоступна".
         assert "caption" not in captured_photo
     finally:
-        bot._hf_text_to_image = original_hf
+        bot._pollinations_text_to_image = original_hf
         bot.bot = original_bot_obj
         bot.chat_state.pop(chat_id, None)
 
@@ -2949,29 +2949,29 @@ def test_inline_draw_stops_chain_on_service_rate_limit():
     chat_id = 999432
     attempts = []
 
-    async def fake_hf_text_to_image_always_429(session, model_id, prompt):
+    async def fake_pollinations_text_to_image_always_429(session, model_id, prompt):
         attempts.append(model_id)
         raise RuntimeError("Pollinations.ai HTTP 429")
 
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 2
 
-    original_hf = bot._hf_text_to_image
-    bot._hf_text_to_image = fake_hf_text_to_image_always_429
+    original_hf = bot._pollinations_text_to_image
+    bot._pollinations_text_to_image = fake_pollinations_text_to_image_always_429
     try:
         asyncio.run(bot.inline_draw(incoming, "дикобраз"))
         assert attempts == [bot._pick_image_model("дикобраз")]
         status_texts = [text for text, _ in incoming.sent[0].edits]
         assert any("перегружен" in text for text in status_texts)
     finally:
-        bot._hf_text_to_image = original_hf
+        bot._pollinations_text_to_image = original_hf
         bot.chat_state.pop(chat_id, None)
 
 
 # ─────────────────── schema_version персистентного снимка чата (аудит техдолга) ───────────────────
 
 def test_serialize_chat_state_stamps_current_schema_version():
-    state = {"image_model": bot.DEFAULT_HF_IMAGE_MODEL, "history": [], "quota": {}, "recent_media_ids": {}}
+    state = {"image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [], "quota": {}, "recent_media_ids": {}}
     snapshot = bot._serialize_chat_state(state)
     assert snapshot["schema_version"] == bot.CHAT_STATE_SCHEMA_VERSION
 
@@ -2981,7 +2981,7 @@ def test_restore_single_chat_accepts_legacy_record_without_schema_version():
     # восстановление не должно падать и должно вести себя так же, как раньше.
     cid = 999905
     try:
-        bot._restore_single_chat(cid, {"image_model": bot.DEFAULT_HF_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}]})
+        bot._restore_single_chat(cid, {"image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}]})
         assert bot.chat_state[cid]["history"] == [{"role": "user", "content": "hi"}]
     finally:
         bot.chat_state.pop(cid, None)
@@ -2991,7 +2991,7 @@ def test_restore_single_chat_accepts_current_schema_version_record():
     cid = 999906
     try:
         snapshot = bot._serialize_chat_state({
-            "image_model": bot.DEFAULT_HF_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}],
+            "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}],
             "quota": {}, "recent_media_ids": {},
         })
         bot._restore_single_chat(cid, snapshot)
@@ -3734,7 +3734,7 @@ def test_export_state_returns_chats_and_quota_with_valid_key():
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     chat_id = 999411
     bot.chat_state[chat_id] = {
-        "image_model": bot.DEFAULT_HF_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}],
+        "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}],
         "quota": {}, "recent_media_ids": {}, "last_activity": 0.0,
     }
     try:

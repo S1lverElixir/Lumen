@@ -39,12 +39,12 @@ def test_pick_image_model_quick_draft():
 
 
 def test_pick_image_model_falls_back_to_default_for_generic_prompt():
-    assert lumen_images._pick_image_model("космическая станция на орбите Земли") == lumen_images.DEFAULT_HF_IMAGE_MODEL
-    assert lumen_images._pick_image_model("кот на подоконнике") == lumen_images.DEFAULT_HF_IMAGE_MODEL
+    assert lumen_images._pick_image_model("космическая станция на орбите Земли") == lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL
+    assert lumen_images._pick_image_model("кот на подоконнике") == lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL
 
 
 def test_pick_image_model_empty_prompt_returns_default():
-    assert lumen_images._pick_image_model("") == lumen_images.DEFAULT_HF_IMAGE_MODEL
+    assert lumen_images._pick_image_model("") == lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL
 
 
 def test_pick_image_model_style_keyword_wins_over_quick_keyword():
@@ -59,10 +59,10 @@ def test_pick_image_model_case_insensitive():
 
 def test_pick_image_model_result_always_a_known_model():
     # Регрессия на класс ошибок "эвристика вернула ID, которого нет в каталоге" —
-    # неважно, какой промпт, результат обязан быть валидным ключом HF_IMAGE_MODELS.
+    # неважно, какой промпт, результат обязан быть валидным ключом POLLINATIONS_IMAGE_MODELS.
     prompts = [
         "нарисуй кота", "аниме", "фэнтези дракон", "реалистичное фото гор",
         "быстрый скетч", "", "случайный текст без ключевых слов вообще",
     ]
     for p in prompts:
-        assert lumen_images._pick_image_model(p) in lumen_images.HF_IMAGE_MODELS
+        assert lumen_images._pick_image_model(p) in lumen_images.POLLINATIONS_IMAGE_MODELS
