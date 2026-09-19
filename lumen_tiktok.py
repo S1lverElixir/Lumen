@@ -501,6 +501,12 @@ TIKTOK_DOWNLOAD_MAX_BYTES = int(os.getenv("TIKTOK_DOWNLOAD_MAX_BYTES", str(75 * 
 
 
 async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: dict | None = None) -> bytes | None:
+    # URL приходят из JSON постороннего сервиса (TikWM) — качаем только
+    # http(s), остальное (file://, ftp:// и т.п.) отбрасываем до запроса (AUD-D-003).
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        log.warning("[download] Refusing non-HTTP(S) URL (scheme=%r).", scheme)
+        return None
     if headers is None:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",

@@ -541,7 +541,9 @@ def test_check_fish_audio_tts_expiry_warns_after_expiry_date(caplog):
     import logging
     from datetime import date, timedelta
     original_expiry = lumen_router_config.FISH_AUDIO_FREE_TIER_EXPIRY
+    original_warned = lumen_router_config._FISH_EXPIRY_WARNED
     lumen_router_config.FISH_AUDIO_FREE_TIER_EXPIRY = date.today() - timedelta(days=1)
+    lumen_router_config._FISH_EXPIRY_WARNED = False
     try:
         with caplog.at_level(logging.WARNING, logger="bot"):
             lumen_router_config._check_fish_audio_tts_expiry()
@@ -549,6 +551,25 @@ def test_check_fish_audio_tts_expiry_warns_after_expiry_date(caplog):
         assert lumen_router_config.FISH_AUDIO_TTS_MODEL in messages
     finally:
         lumen_router_config.FISH_AUDIO_FREE_TIER_EXPIRY = original_expiry
+        lumen_router_config._FISH_EXPIRY_WARNED = original_warned
+
+
+def test_check_fish_audio_tts_expiry_warns_only_once(caplog):
+    import logging
+    from datetime import date, timedelta
+    original_expiry = lumen_router_config.FISH_AUDIO_FREE_TIER_EXPIRY
+    original_warned = lumen_router_config._FISH_EXPIRY_WARNED
+    lumen_router_config.FISH_AUDIO_FREE_TIER_EXPIRY = date.today() - timedelta(days=1)
+    lumen_router_config._FISH_EXPIRY_WARNED = False
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot"):
+            lumen_router_config._check_fish_audio_tts_expiry()
+            caplog.clear()
+            lumen_router_config._check_fish_audio_tts_expiry()
+        assert caplog.records == []
+    finally:
+        lumen_router_config.FISH_AUDIO_FREE_TIER_EXPIRY = original_expiry
+        lumen_router_config._FISH_EXPIRY_WARNED = original_warned
 
 
 def test_check_fish_audio_tts_expiry_silent_before_expiry_date(caplog):

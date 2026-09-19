@@ -4035,6 +4035,32 @@ def test_rotate_telegram_proxy_reports_lap_done_after_full_cycle():
         bot.bot = original_bot
 
 
+def test_rotate_telegram_proxy_concurrent_rotations_advance_one_step_each():
+    # Контракт AUD-E-004: индекс и URL мутируют под локом — две concurrent-
+    # ротации дают два шага (0→1→2), а не два прыжка в одну точку.
+    original_candidates = bot._TELEGRAM_PROXY_CANDIDATES
+    original_idx = bot._telegram_proxy_idx
+    original_base_url = bot.TELEGRAM_API_BASE_URL
+    original_bot = bot.bot
+    bot._TELEGRAM_PROXY_CANDIDATES = ["https://one.example.com", "https://two.example.com", "https://three.example.com"]
+    bot._telegram_proxy_idx = 0
+    bot.TELEGRAM_API_BASE_URL = "https://one.example.com"
+    bot.bot = None
+    try:
+        async def _two_rotations():
+            return await asyncio.gather(bot._rotate_telegram_proxy(), bot._rotate_telegram_proxy())
+
+        switched = asyncio.run(_two_rotations())
+        assert switched == [True, True]
+        assert bot._telegram_proxy_idx == 2
+        assert bot.TELEGRAM_API_BASE_URL == "https://three.example.com"
+    finally:
+        bot._TELEGRAM_PROXY_CANDIDATES = original_candidates
+        bot._telegram_proxy_idx = original_idx
+        bot.TELEGRAM_API_BASE_URL = original_base_url
+        bot.bot = original_bot
+
+
 class _FakeOwnerBot:
     def __init__(self):
         self.sent: list[dict] = []
@@ -4976,6 +5002,14 @@ def test_download_url_bin_ignores_malformed_content_length_header():
     session = _FakeDownloadSession(resp)
     result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/x.jpg"))
     assert result == b"ok"
+
+
+def test_download_url_bin_refuses_non_http_scheme_without_fetching():
+    # Регрессия AUD-D-003: URL приходят из JSON постороннего сервиса — не-HTTP
+    # отбрасываем до запроса (фейк вернул бы байты на что угодно, None доказывает гард).
+    session = _FakeDownloadSession(_FakeDownloadResponse([b"should never be fetched"]))
+    assert asyncio.run(lumen_tiktok._download_url_bin(session, "file:///etc/passwd")) is None
+    assert asyncio.run(lumen_tiktok._download_url_bin(session, "ftp://evil.example/x.mp4")) is None
 
 
 @pytest.fixture

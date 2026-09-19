@@ -1,46 +1,43 @@
 # requirements.txt — Lumen Bot
 # Python 3.10+
 #
-# ВАЖНО: версии зафиксированы через == (а не >=), т.к. HF Spaces пересобирает
-# Docker-образ с нуля при каждом деплое, и без верхней границы `pip install`
-# мог бы молча подтянуть новую мажорную версию с ломающими изменениями API —
-# особенно критично для google-genai, чей API (types.GoogleSearch,
-# types.GoogleMaps, types.UrlContext и т.п.) активно используется в bot.py
-# и менялся между мажорными версиями. Обновлять версии здесь — осознанное
-# решение с последующей проверкой /diag и ручным тестом основных команд,
-# а не побочный эффект случайного редеплоя.
+# NOTE: versions are pinned with == (not >=) because HF Spaces rebuilds the
+# Docker image from scratch on every deploy — without an upper bound a fresh
+# `pip install` could silently pull a new major with breaking API changes.
+# This matters most for google-genai, whose API (types.GoogleSearch,
+# types.GoogleMaps, types.UrlContext, etc.) is used heavily in bot.py and
+# has changed between majors. Bumping a version here is a deliberate decision
+# followed by a /diag check plus a manual smoke test of the main commands,
+# never a side effect of a random redeploy.
 #
-# ОБНОВЛЕНО (аудит зависимостей, 16 августа 2026) — все пакеты подняты до
-# актуальных на этот момент версий PyPI, changelog каждого сверен на предмет
-# breaking changes относительно реально используемого в bot.py API (см. историю
-# коммита). aiohttp/mutagen/pytest/pyflakes уже были на последней версии —
-# оставлены без изменений.
-# ОБНОВЛЕНО ПОВТОРНО (аудит техдолга, 7 сентября 2026) — aiogram/google-genai/
-# sentry-sdk/uvicorn отстали на несколько минорных релизов (без известных CVE,
-# см. pip-audit); подняты до актуальных на этот момент стабильных версий.
-# fastapi/aiohttp/mutagen/tzdata уже были на последней версии — не тронуты.
-# Полный прогон тестового сьюта (390 тестов) под новыми версиями прошёл без
-# единого изменения кода — реального взаимодействия с живым API (Gemini/
-# Telegram) это не проверяет (см. README про сетевые ограничения песочницы),
-# перед деплоем всё равно стоит ручной smoke-тест /diag и основных команд.
+# UPDATED (dependency audit, 2026-08-16) — all packages raised to the PyPI
+# versions current at the time, each changelog checked for breaking changes
+# against the API actually used in bot.py (see commit history).
+# aiohttp/mutagen/pytest/pyflakes were already latest — left untouched.
+# UPDATED AGAIN (tech-debt audit, 2026-09-07) — aiogram/google-genai/
+# sentry-sdk/uvicorn had lagged a few minor releases (no known CVEs per
+# pip-audit); raised to the stable versions current at the time.
+# fastapi/aiohttp/mutagen/tzdata were already latest — untouched.
+# Full suite (390 tests) passed under the new versions with zero code changes —
+# that does not cover live API behavior (Gemini/Telegram), so a manual
+# /diag + main-commands smoke test is still due before deploy.
 aiohttp==3.14.3
 aiogram==3.31.0
 fastapi==0.141.1
 google-genai==2.22.0
 mutagen==1.48.1
 uvicorn==0.52.4
-# tzdata — python:3.13-slim (см. Dockerfile) не ставит системную базу часовых
-# поясов через apt, а stdlib-модуль zoneinfo (используется в _current_quota_day
-# для дневного сброса счётчиков квоты по America/Los_Angeles — там у Google
-# полночь для обнуления RPD-лимитов) без нeё падает ZoneInfoNotFoundError. Код
-# и так безопасно откатывается на UTC при отсутствии данных (см. try/except в
-# _current_quota_day), но тогда сброс квоты сдвигается на 7-8 часов от реального
-# обнуления лимита у Google — с этим пакетом сброс происходит в верное время.
-# Чистый pip-пакет с данными IANA tzdb, без компиляции — не раздувает образ.
+# tzdata — python:3.13-slim (see Dockerfile) ships no system timezone database
+# via apt, while stdlib zoneinfo (used in _current_quota_day for the daily
+# quota reset on America/Los_Angeles — Google's midnight for RPD limits)
+# raises ZoneInfoNotFoundError without it. The code already falls back to UTC
+# safely (see try/except in _current_quota_day), but then the quota reset
+# drifts 7-8 hours off Google's real reset — with this package it lands right.
+# Pure-pip IANA tzdb data, no compilation — does not bloat the image.
 tzdata==2026.3
-# sentry-sdk — опциональный (см. SENTRY_DSN в bot.py) персистентный трекинг ошибок:
-# bot.log живёт на эфемерном диске HF Spaces и теряется при каждом редеплое (см.
-# README, "Известные ограничения" — раньше это было единственным незакрытым
-# пунктом там). Без SENTRY_DSN sentry_sdk.init() не вызывается вообще — пакет
-# просто лежит неиспользуемым, поведение не меняется для тех, кто его не настроил.
+# sentry-sdk — optional (see SENTRY_DSN in bot.py) persistent error tracking:
+# bot.log lives on the ephemeral HF Spaces disk and is lost on every redeploy
+# (see README, "Known limitations" — that used to be the only open item there).
+# Without SENTRY_DSN, sentry_sdk.init() is never called — the package just
+# sits unused and changes nothing for whoever did not configure it.
 sentry-sdk==2.68.1

@@ -255,6 +255,9 @@ _TELEGRAM_PROXY_FALLBACKS = [
 ]
 _TELEGRAM_PROXY_CANDIDATES: list[str] = [TELEGRAM_API_BASE_URL] + [u for u in _TELEGRAM_PROXY_FALLBACKS if u != TELEGRAM_API_BASE_URL]
 _telegram_proxy_idx = 0  # индекс текущего активного прокси в _TELEGRAM_PROXY_CANDIDATES
+# Ротация мутирует два глобала сразу — под локом, иначе два concurrent-сбоя
+# уводят индекс на два шага и пропускают кандидата (AUD-E-004).
+_proxy_rotation_lock = asyncio.Lock()
 
 # НАЙДЕНО ПРИ ОТЛАДКЕ (11-12 августа 2026, реальный инцидент): TikWM стабильно
 # отвечает HTTP 403 с ПУСТЫМ телом на запросы с IP HF Spaces (см. историю правок
@@ -581,12 +584,13 @@ async def _rotate_telegram_proxy() -> bool:
     целевой сервер (TelegramAPIServer) "запечён" в сессию при её создании, поэтому
     здесь она пересоздаётся заново, указывая на новый кандидат."""
     global TELEGRAM_API_BASE_URL, _telegram_proxy_idx
-    if len(_TELEGRAM_PROXY_CANDIDATES) < 2:
-        return False
-    _telegram_proxy_idx = (_telegram_proxy_idx + 1) % len(_TELEGRAM_PROXY_CANDIDATES)
-    new_url = _TELEGRAM_PROXY_CANDIDATES[_telegram_proxy_idx]
-    old_url = TELEGRAM_API_BASE_URL
-    TELEGRAM_API_BASE_URL = new_url
+    async with _proxy_rotation_lock:
+        if len(_TELEGRAM_PROXY_CANDIDATES) < 2:
+            return False
+        _telegram_proxy_idx = (_telegram_proxy_idx + 1) % len(_TELEGRAM_PROXY_CANDIDATES)
+        new_url = _TELEGRAM_PROXY_CANDIDATES[_telegram_proxy_idx]
+        old_url = TELEGRAM_API_BASE_URL
+        TELEGRAM_API_BASE_URL = new_url
     log.warning('[telegram] Switching to fallback proxy: %s -> %s', old_url, new_url)
     if bot is not None:
         old_session = bot.session
@@ -1003,15 +1007,8 @@ def _classify_model_error(status: int | None, text: str) -> str:
 # в system_prompt.py) — тексты НЕ должны упоминать "модели" во множественном
 # числе или "подбор другой модели": для пользователя есть только Lumen, а
 # переключения внутри — деталь реализации.
-# Сами тексты живут в lumen_lang.py (ключи model_err_*), здесь — совместимые
-# алиасы и тонкая обёртка с языком (lang="en" — дефолт для вызовов без чата,
-# в тестах в том числе).
-_MODEL_ERROR_MESSAGES: dict[str, str] = {
-    "rate_limit": _lang_t(DEFAULT_LANG, "model_err_rate_limit"),
-    "paid": _lang_t(DEFAULT_LANG, "model_err_paid"),
-    "forbidden": _lang_t(DEFAULT_LANG, "model_err_forbidden"),
-    "unavailable": _lang_t(DEFAULT_LANG, "model_err_unavailable"),
-}
+# Сами тексты живут в lumen_lang.py (ключи model_err_*), здесь — тонкая
+# обёртка с языком (lang="en" — дефолт для вызовов без чата, в тестах в том числе).
 _MODEL_ERROR_FALLBACK_MSG = _lang_t(DEFAULT_LANG, "model_err_fallback")
 
 def _model_error_text(kind: str, lang: str = DEFAULT_LANG) -> str:
@@ -4952,6 +4949,9 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
              needs_youtube = True
              youtube_url_to_analyze = url
         else:
+             # needs_website читает ссылку сама модель через url_context на
+             # стороне Google — наш сервер произвольные URL не скачивает
+             # (свои загрузки — только через _download_url_bin с гардом схемы).
              needs_website = True
 
     clean_prompt = clean_mention(t).strip()

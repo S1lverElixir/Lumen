@@ -179,9 +179,16 @@ FISH_AUDIO_FREE_TIER_EXPIRY = date(2026, 8, 31)
 # если Fish снова откроют free-доступ — достаточно вернуть True одной строкой.
 FISH_AUDIO_ENABLED = False
 
+_FISH_EXPIRY_WARNED = False
+
 def _check_fish_audio_tts_expiry() -> None:
+    # Warn once per process: after 31.08.2026 the condition is true forever.
+    global _FISH_EXPIRY_WARNED
+    if _FISH_EXPIRY_WARNED:
+        return
     today = date.today()
     if today > FISH_AUDIO_FREE_TIER_EXPIRY:
+        _FISH_EXPIRY_WARNED = True
         log.warning(
             '[tts] The advertised free-tier access to %s expired on %s (today is %s) — check fish.audio/blog/s2-1-pro-free-api in case it was extended again, and update FISH_AUDIO_FREE_TIER_EXPIRY. If access is really gone, _fish_audio_tts_bytes in bot.py already falls back to Gemini TTS silently on any failure — nothing breaks functionally, but the wasted failing requests are worth removing.',
             FISH_AUDIO_TTS_MODEL, FISH_AUDIO_FREE_TIER_EXPIRY.isoformat(), today.isoformat(),
