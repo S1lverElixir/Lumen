@@ -241,7 +241,7 @@ def test_original_sound_label_strips_region_subtag():
 
 
 def test_original_sound_label_falls_back_to_english_for_unknown_code():
-    assert bot._original_sound_label("th") == "Original sound"
+    assert bot._original_sound_label("sw") == "Original sound"
     assert bot._original_sound_label("xx-YY") == "Original sound"
 
 
@@ -252,6 +252,16 @@ def test_original_sound_label_falls_back_to_english_when_missing():
 
 def test_original_sound_label_case_insensitive():
     assert bot._original_sound_label("RU") == "Оригинальный звук"
+
+
+def test_original_sound_label_fallback_chain():
+    # Цепочка: язык отправителя → язык чата (/lang) → английский.
+    assert bot._original_sound_label("de", "uk") == "Originalton"
+    assert bot._original_sound_label(None, "uk") == "Оригінальний звук"
+    assert bot._original_sound_label("sw", "kk") == "Түпнұсқа дыбыс"
+    assert bot._original_sound_label("th", "kk") == "เสียงต้นฉบับ"
+    assert bot._original_sound_label("sw", "xx") == "Original sound"
+    assert bot._original_sound_label(None, None) == "Original sound"
 
 
 # ─────────────────── _tiktok_music_page_id (ссылка на страницу звука, не видео) ───────────────────
@@ -5467,11 +5477,12 @@ def test_rich_edit_falls_back_to_legacy_on_failure():
 
 def test_lang_table_covers_all_keys_in_all_languages():
     import lumen_lang
-    assert tuple(lumen_lang.SUPPORTED_LANGS) == ("be", "en", "es", "kk", "ru", "uk")
+    assert tuple(lumen_lang.SUPPORTED_LANGS) == tuple(sorted(lumen_lang.SUPPORTED_LANGS))
     assert set(lumen_lang.LANG_NAMES) == set(lumen_lang.SUPPORTED_LANGS)
     for key, table in lumen_lang.STRINGS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
-            assert table.get(lang), f"missing {key}[{lang}]"
+            covered = bool(lumen_lang.LANG_PACKS.get(lang, {}).get(key)) or bool(table.get(lang))
+            assert covered, f"missing {key}[{lang}]"
     for lang in lumen_lang.SUPPORTED_LANGS:
         for scenario in ("film", "series", "music", "books", "games"):
             q, opts, tpl = lumen_lang.pick_texts(lang, scenario)

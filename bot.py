@@ -2530,15 +2530,16 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          )
          
          if is_original_sound:
-              # в исполнителях — юзернейм без @
-              performer_name = author_uniq_clean if author_uniq_clean else raw_music_author
-              # Вместо генерации/очистки сырого raw_music_title от TikWM сразу подставляем
-              # перевод, локализованный под язык интерфейса Telegram ИМЕННО отправителя
-              # этой конкретной ссылки (см. _original_sound_label выше) — это единственный
-              # способ показать подпись на "его" языке, раз сам TikTok эту связь не даёт:
-              # raw_music_title зависит от языка автора исходного видео, а не от языка
-              # человека, приславшего ссылку в наш бот.
-              cleaned_title = _original_sound_label(sender_language_code)
+               # в исполнителях — юзернейм без @
+               performer_name = author_uniq_clean if author_uniq_clean else raw_music_author
+               # Вместо генерации/очистки сырого raw_music_title от TikWM сразу подставляем
+               # перевод по цепочке: язык интерфейса Telegram ИМЕННО отправителя
+               # этой конкретной ссылки (персонально — даже в группе у каждого свой)
+               # → язык чата из /lang (если у отправителя язык неизвестен) → английский.
+               # Это единственный способ показать подпись на "его" языке, раз сам
+               # TikTok эту связь не даёт: raw_music_title зависит от языка автора
+               # исходного видео, а не от языка человека, приславшего ссылку в наш бот.
+               cleaned_title = _original_sound_label(sender_language_code, _chat_lang(message.chat.id))
          else:
               # Либо обычный именованный трек с автором (раньше он всегда попадал только
               # сюда), либо "оригинальный звук" с собственным названием (см. комментарий

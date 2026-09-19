@@ -68,6 +68,17 @@ _ORIGINAL_SOUND_LABELS: dict[str, str] = {
     # НАША подпись, а не дословная копия чужого UI, приводим её к тому же виду,
     # что и остальные языки, а не оставляем единственным исключением.
     "en": "Original sound",
+    "hi": "ओरिजिनल साउंड",
+    "id": "Suara asli",
+    "ms": "Bunyi asal",
+    "vi": "Âm thanh gốc",
+    "th": "เสียงต้นฉบับ",
+    "fa": "صدای اصلی",
+    "ur": "اصل آواز",
+    "bn": "অরিজিনাল সাউন্ড",
+    "fil": "Orihinal na tunog",
+    "nl": "Origineel geluid",
+    "zu": "Umsindo wokuqala",
     "pl": "Oryginalny dźwięk",
     "de": "Originalton",
     "es": "Sonido original",
@@ -99,15 +110,20 @@ _ORIGINAL_SOUND_LABEL_DEFAULT = _ORIGINAL_SOUND_LABELS["en"]
 _GENERIC_ORIGINAL_SOUND_PHRASES: tuple[str, ...] = tuple(sorted({v.lower() for v in _ORIGINAL_SOUND_LABELS.values()}))
 
 
-def _original_sound_label(language_code: str | None) -> str:
+def _original_sound_label(language_code: str | None, fallback_code: str | None = None) -> str:
     """Возвращает локализованную подпись "оригинальный звук" по IETF-коду языка
     (например, из message.from_user.language_code). Код языка может приходить с
     региональным уточнением (например "en-US", "pt-BR") — берём только первичный
-    подтег до дефиса. Неизвестный/отсутствующий код — тихий откат на английский."""
-    if not language_code:
-        return _ORIGINAL_SOUND_LABEL_DEFAULT
-    primary = language_code.split("-", 1)[0].strip().lower()
-    return _ORIGINAL_SOUND_LABELS.get(primary, _ORIGINAL_SOUND_LABEL_DEFAULT)
+    подтег до дефиса. Неизвестный/отсутствующий код — тихий откат сначала на
+    fallback_code (язык чата из /lang — см. _send_tiktok_music в bot.py), затем
+    на английский."""
+    for code in (language_code, fallback_code):
+        if not code:
+            continue
+        primary = code.split("-", 1)[0].strip().lower()
+        if primary in _ORIGINAL_SOUND_LABELS:
+            return _ORIGINAL_SOUND_LABELS[primary]
+    return _ORIGINAL_SOUND_LABEL_DEFAULT
 
 
 # ─────────────────── разбиение слайдшоу на группы sendMediaGroup ───────────────────

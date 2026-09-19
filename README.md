@@ -27,7 +27,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 - **Text-to-speech** through Gemini TTS.
 - `/draw` and `/tts` also work as plain phrases at the start of a message ("draw a cat," "read this out loud"), no slash required.
 - **Clarifying buttons** for short taste requests without details ("посоветуй фильм" → genre buttons instead of a guess).
-- **Bot language** (`/lang`): system messages in English (default), Russian, Ukrainian, Belarusian, Kazakh or Spanish. AI answers always follow the user's own language.
+- **Bot language** (`/lang`): system messages in 25 languages (English by default). AI answers always follow the user's own language.
 - **Persistent state.** An optional Upstash Redis backend keeps chat history and quota counters alive across redeploys.
 - **Error tracking** through an optional Sentry integration that scrubs secrets before sending anything.
 
@@ -35,7 +35,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 Lumen is a single FastAPI + aiogram service. Telegram delivers updates to a webhook. Each message gets routed through a chain of candidate models (Gemini and/or OpenRouter), built on the fly from the message's content: attachments, links, and a couple of lightweight heuristics for "does this need current information" and "is this a heavy request." The first provider that answers wins; the other is tried as a fallback if its whole chain fails.
 
-The codebase is a modular monolith. `bot.py` is the orchestrator; the rest is split into focused modules: `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, `lumen_typing_pace.py`, `lumen_model_speed.py`, and `lumen_lang.py` (bot language: system messages in 6 languages).
+The codebase is a modular monolith. `bot.py` is the orchestrator; the rest is split into focused modules: `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, `lumen_typing_pace.py`, `lumen_model_speed.py`, and `lumen_lang.py` (bot language: system messages in 25 languages).
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for a deeper look at routing, streaming, the security layers, and the TikTok downloader.
 
