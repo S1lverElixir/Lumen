@@ -518,22 +518,22 @@ PRUNED_CHAT_TARGET = 4500
 MAX_CHAT_HISTORY_LEN = 100
 MAX_MEDIA_RECENT_IDS = 8  # хранится ОТДЕЛЬНО на каждого пользователя чата (см. recent_media_ids: dict[user_id, deque])
 
-# Простой трекер для rate limiting
-RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "5"))
-RATE_LIMIT_WINDOW_SEC = float(os.getenv("RATE_LIMIT_WINDOW_SEC", "30"))
-MAX_RATE_LIMIT_KEYS = int(os.getenv("MAX_RATE_LIMIT_KEYS", "20000"))
-user_rate_limits: dict[int, list[float]] = {}
-
-def _cleanup_rate_limit_dict() -> None:
-    """user_rate_limits раньше никогда не уменьшался — ключи (user_id) оставались
-    в словаре навсегда, даже когда список timestamp'ов у конкретного пользователя
-    полностью очищался скользящим окном в _handle_message_core. За месяцы работы
-    с большим числом разных пользователей это медленная, но реальная утечка
-    памяти. Вызывается раз в час из фонового цикла в _webhook_startup."""
-    now = time.time()
-    stale = [uid for uid, ts in user_rate_limits.items() if not ts or now - ts[-1] > 3600]
-    for uid in stale:
-        user_rate_limits.pop(uid, None)
+# Простой трекер для rate limiting и очередь кнопок-уточнений живут в
+# lumen_limits.py (P2): здесь только реэкспорт имён, чтобы `bot.X` в тестах
+# и вызывающий код не менялись.
+from lumen_limits import (
+    RATE_LIMIT_MAX_REQUESTS,
+    RATE_LIMIT_WINDOW_SEC,
+    MAX_RATE_LIMIT_KEYS,
+    user_rate_limits,
+    _cleanup_rate_limit_dict,
+    _check_and_register_rate_limit,
+    PICK_TTL_SEC,
+    MAX_PENDING_PICKS,
+    _pending_picks,
+    _purge_expired_picks,
+    _enforce_pending_picks_cap,
+)
 
 # ── Инициализация клиентов внутри цикла обработки событий (решает RuntimeError) ──
 bot: Bot = None  
@@ -1469,7 +1469,18 @@ def _storage_config() -> StorageConfig:
 # начале файла). CHAT_STATE_SCHEMA_VERSION аналогично не используется напрямую в
 # коде bot.py (сравнение идёт внутри _serialize_chat_state в lumen_state_storage.py),
 # но нужен как `bot.CHAT_STATE_SCHEMA_VERSION` тестам, сверяющим версию схемы снимка.
-__all__ = ["_urllib_request", "CHAT_STATE_SCHEMA_VERSION"]
+# Имена из lumen_limits.py (RATE_LIMIT_*/user_rate_limits/MAX_PENDING_PICKS) код
+# bot.py сам не читает — они нужны как `bot.X` существующим тестам, поэтому тоже
+# здесь (импорт — вверху файла, рядом с остальными lumen_импортами).
+__all__ = [
+    "_urllib_request",
+    "CHAT_STATE_SCHEMA_VERSION",
+    "RATE_LIMIT_MAX_REQUESTS",
+    "RATE_LIMIT_WINDOW_SEC",
+    "MAX_RATE_LIMIT_KEYS",
+    "user_rate_limits",
+    "MAX_PENDING_PICKS",
+]
 
 def _upstash_request(command_path: str, *, method: str = "GET", body: bytes | None = None) -> Any:
     return _lumen_upstash_request(UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, command_path, method=method, body=body)
@@ -4444,31 +4455,8 @@ async def cmd_stats(message: Message) -> None:
 # вариантов — слабые модели их калечат.
 # Без эмодзи в кнопках — по правилу эмодзи (см. system_prompt.py).
 PICK_BUTTONS_ENABLED = os.getenv("PICK_BUTTONS_ENABLED", "1") == "1"
-PICK_TTL_SEC = float(os.getenv("PICK_TTL_SEC", "300"))
-MAX_PENDING_PICKS = int(os.getenv("MAX_PENDING_PICKS", "500"))
-# token -> {chat_id, user_id, scenario, original, expires}: только в памяти
-# процесса (как _speed_ema в lumen_typing_pace.py) — после рестарта кнопки
-# честно считаются протухшими, это штатный путь, а не баг.
-_pending_picks: dict[str, dict[str, Any]] = {}
-
-
-def _purge_expired_picks(now: float | None = None) -> None:
-    """Сносит протухшие записи ожидания кнопок — вызывается при создании новой
-    (отдельного фонового цикла ради этого заводить не стали)."""
-    now = time.monotonic() if now is None else now
-    for token in [t for t, rec in _pending_picks.items() if rec["expires"] <= now]:
-        del _pending_picks[token]
-
-
-def _enforce_pending_picks_cap() -> None:
-    """Потолок памяти на кнопки-уточнения: сверх лимита сносим самые
-    близкие к протуханию (AUD-G-001)."""
-    overflow = len(_pending_picks) - MAX_PENDING_PICKS
-    if overflow <= 0:
-        return
-    oldest = sorted(_pending_picks, key=lambda t: _pending_picks[t]["expires"])[:overflow]
-    for token in oldest:
-        del _pending_picks[token]
+# PICK_TTL_SEC/MAX_PENDING_PICKS/_pending_picks/_purge/_enforce — в lumen_limits.py,
+# импортированы выше рядом с rate limit (P2), здесь используются напрямую.
 
 
 async def _send_pick_question(message: Message, scenario: str, original_text: str) -> None:
@@ -4809,26 +4797,6 @@ def _rate_limit_key_for_message(message: Message) -> int:
         return message.from_user.id
     sender_chat = getattr(message, "sender_chat", None)
     return sender_chat.id if sender_chat else message.chat.id
-
-
-def _check_and_register_rate_limit(user_id: int | None) -> bool:
-    """Скользящее окно 5 запросов/30 сек на пользователя (или запасной ключ — см.
-    _rate_limit_key_for_message выше). Возвращает True, если лимит уже исчерпан
-    (вызывающий код должен ответить и прекратить обработку) — в этом случае, в
-    отличие от успешного случая, TIMESTAMP НЕ добавляется, чтобы не продлевать
-    наказание бесконечно на каждое следующее сообщение сверху лимита."""
-    if not user_id:
-        return False
-    now = time.time()
-    if user_id not in user_rate_limits and len(user_rate_limits) >= MAX_RATE_LIMIT_KEYS:
-        _cleanup_rate_limit_dict()
-    timestamps = user_rate_limits.setdefault(user_id, [])
-    while timestamps and now - timestamps[0] > RATE_LIMIT_WINDOW_SEC:
-        timestamps.pop(0)
-    if len(timestamps) >= RATE_LIMIT_MAX_REQUESTS:
-        return True
-    timestamps.append(now)
-    return False
 
 
 async def _reject_rate_limited_message(message: Message) -> bool:

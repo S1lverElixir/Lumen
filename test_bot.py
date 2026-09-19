@@ -37,6 +37,7 @@ import pytest
 import sentry_sdk
 
 import bot
+import lumen_limits
 import lumen_telegram_transport
 import lumen_tiktok
 
@@ -664,8 +665,8 @@ def test_cleanup_rate_limit_dict_removes_empty_and_stale_entries():
 
 def test_rate_limit_dict_evicts_stale_keys_when_over_capacity():
     # Регрессия AUD-G-001: при переполнении новый ключ чистит протухшие.
-    original_max = bot.MAX_RATE_LIMIT_KEYS
-    bot.MAX_RATE_LIMIT_KEYS = 2
+    original_max = lumen_limits.MAX_RATE_LIMIT_KEYS
+    lumen_limits.MAX_RATE_LIMIT_KEYS = 2
     bot.user_rate_limits.clear()
     try:
         bot.user_rate_limits[1] = [time.time() - 7200]
@@ -675,7 +676,7 @@ def test_rate_limit_dict_evicts_stale_keys_when_over_capacity():
         assert 2 not in bot.user_rate_limits
         assert 3 in bot.user_rate_limits
     finally:
-        bot.MAX_RATE_LIMIT_KEYS = original_max
+        lumen_limits.MAX_RATE_LIMIT_KEYS = original_max
         bot.user_rate_limits.clear()
 
 
@@ -708,9 +709,9 @@ def test_evict_orphan_chat_locks_keeps_live_and_held_locks():
 
 def test_enforce_pending_picks_cap_evicts_closest_to_expiry():
     # Регрессия AUD-G-001: сверх лимита уходят самые близкие к протуханию.
-    original_max = bot.MAX_PENDING_PICKS
+    original_max = lumen_limits.MAX_PENDING_PICKS
     original_picks = dict(bot._pending_picks)
-    bot.MAX_PENDING_PICKS = 3
+    lumen_limits.MAX_PENDING_PICKS = 3
     bot._pending_picks.clear()
     try:
         now = time.monotonic()
@@ -719,7 +720,7 @@ def test_enforce_pending_picks_cap_evicts_closest_to_expiry():
         bot._enforce_pending_picks_cap()
         assert set(bot._pending_picks) == {"t2", "t3", "t4"}
     finally:
-        bot.MAX_PENDING_PICKS = original_max
+        lumen_limits.MAX_PENDING_PICKS = original_max
         bot._pending_picks.clear()
         bot._pending_picks.update(original_picks)
 
@@ -5015,8 +5016,8 @@ def test_download_url_bin_refuses_non_http_scheme_without_fetching():
 @pytest.fixture
 def rate_guard_setup(monkeypatch):
     def _setup():
-        monkeypatch.setattr(bot, "user_rate_limits", {})
-        monkeypatch.setattr(bot, "RATE_LIMIT_MAX_REQUESTS", 2)
+        monkeypatch.setattr(lumen_limits, "user_rate_limits", {})
+        monkeypatch.setattr(lumen_limits, "RATE_LIMIT_MAX_REQUESTS", 2)
         monkeypatch.setattr(bot, "get_state", lambda chat_id: {})
         monkeypatch.setattr(bot, "is_guest_message", lambda message: False)
         monkeypatch.setattr(bot, "message_mentions_bot", lambda message: False)
@@ -5063,7 +5064,7 @@ def test_mixed_commands_share_rate_quota_and_reject_before_work(rate_guard_setup
     bot.inline_tts.assert_awaited_once_with(message, "привет")
     media.assert_not_awaited()
     assert bot._tg_call.await_count == 3
-    assert len(bot.user_rate_limits[456]) == 2
+    assert len(lumen_limits.user_rate_limits[456]) == 2
 
 
 @pytest.mark.parametrize("command", ["draw", "tts"])
@@ -5071,7 +5072,7 @@ def test_blank_commands_do_not_consume_quota(rate_guard_setup, command):
     message = rate_guard_setup()
     message.text = f"/{command}   "
     asyncio.run(getattr(bot, f"cmd_{command}")(message))
-    assert bot.user_rate_limits == {}
+    assert lumen_limits.user_rate_limits == {}
     bot._safe_reply.assert_awaited_once()
     bot.inline_draw.assert_not_awaited()
     bot.inline_tts.assert_not_awaited()
@@ -5086,7 +5087,7 @@ def test_natural_language_trigger_consumes_one_slot(rate_guard_setup, text, hand
     message.text = text
     asyncio.run(bot._handle_message_core(message))
     getattr(bot, handler).assert_awaited_once_with(message, content)
-    assert len(bot.user_rate_limits[456]) == 1
+    assert len(lumen_limits.user_rate_limits[456]) == 1
 
 
 def test_passive_group_message_does_not_consume_quota(rate_guard_setup, monkeypatch):
@@ -5097,7 +5098,7 @@ def test_passive_group_message_does_not_consume_quota(rate_guard_setup, monkeypa
     monkeypatch.setattr(bot, "_record_passive_group_context", record)
     asyncio.run(bot._handle_message_core(message))
     record.assert_called_once()
-    assert bot.user_rate_limits == {}
+    assert lumen_limits.user_rate_limits == {}
     bot._tg_call.assert_not_awaited()
 
 
