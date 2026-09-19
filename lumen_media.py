@@ -160,12 +160,12 @@ def _ensure_prompt_text(text: str | None, mime: str) -> str:
     if s:
         return s
     m = mime.lower()
+    if m == "image/gif" or "animation" in m:
+        return "Подробно опиши происходящее на этой анимации."
     if m.startswith("image/"):
-         return "Подробно опиши, что изображено на картинке."
+        return "Подробно опиши, что изображено на картинке."
     if m.startswith("video/") or m == "video/quicktime":
          return "Подробно опиши происходящее на этом видео."
     if m.startswith("audio/") or m == "audio/ogg" or m == "audio/mpeg" or m == "audio/mp3" or "voice" in m:
          return "Прослушай и подробно опиши, что на этой аудиозаписи, или кратко перескажи ее содержание."
-    if m == "image/gif" or "animation" in m:
-         return "Подробно опиши происходящее на этой анимации."
     return "Проанализируй и подробно опиши содержимое этого вложения."

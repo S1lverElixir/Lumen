@@ -120,7 +120,7 @@ async def _pollinations_generate(session: aiohttp.ClientSession, model_name: str
         if resp.status == 200:
             ctype = (resp.headers.get("Content-Type") or "").lower()
             body = await resp.read()
-            if body and (ctype.startswith("image/") or body[:4] in (b"\x89PNG", b"\xff\xd8\xff", b"RIFF", b"GIF8")):
+            if body and (ctype.startswith("image/") or body.startswith((b"\x89PNG", b"\xff\xd8\xff", b"RIFF", b"GIF8"))):
                 return body
             raise RuntimeError(f"Pollinations вернул не-изображение: {ctype}")
         raise RuntimeError(f"Pollinations.ai HTTP {resp.status}")

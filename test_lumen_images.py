@@ -10,6 +10,8 @@ lumen_images.py не зависит от Telegram/рантайм-состоян�
 Запуск:
     pytest test_lumen_images.py -v
 """
+import asyncio
+
 import lumen_images
 
 
@@ -66,3 +68,29 @@ def test_pick_image_model_result_always_a_known_model():
     ]
     for p in prompts:
         assert lumen_images._pick_image_model(p) in lumen_images.POLLINATIONS_IMAGE_MODELS
+
+
+# ─────────────────────────── _pollinations_generate ───────────────────────────
+
+def test_pollinations_generate_accepts_jpeg_by_magic_bytes():
+    # Регрессия AUD-E-001: body[:4] никогда не равен 3-байтному b"\xff\xd8\xff",
+    # поэтому JPEG без image/* Content-Type отвергался как "не-изображение".
+    class FakeResp:
+        status = 200
+        headers = {"Content-Type": "application/octet-stream"}
+
+        async def read(self):
+            return b"\xff\xd8\xff\xe0" + b"\x00" * 100
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class FakeSession:
+        def get(self, url, timeout=None):
+            return FakeResp()
+
+    body = asyncio.run(lumen_images._pollinations_generate(FakeSession(), "flux", "кот"))
+    assert body[:3] == b"\xff\xd8\xff"

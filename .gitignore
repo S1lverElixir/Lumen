@@ -19,6 +19,8 @@ chat_state.json
 chat_state.tmp
 global_quota.json
 global_quota.tmp
+# Выгрузка state-backup.yml: полные истории чатов — никогда в коммит (AUD-D-007)
+export_state.json
 
 # ОС/редакторы
 .DS_Store

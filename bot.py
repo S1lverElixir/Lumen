@@ -55,6 +55,7 @@ from aiogram.types import (
     Update,
 )
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from google import genai
 from google.genai import types
 
@@ -1256,7 +1257,7 @@ async def get_webhook_url(request: Request) -> dict[str, str]:
     }
 
 @app.post("/webhook")
-async def webhook_handler(request: Request) -> dict[str, bool]:
+async def webhook_handler(request: Request) -> Any:
     token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     if not hmac.compare_digest(token, WEBHOOK_SECRET):
         log.warning("[webhook] Rejected request with invalid secret token")
@@ -1266,7 +1267,9 @@ async def webhook_handler(request: Request) -> dict[str, bool]:
         if bot is not None:
             _track_inflight_task(asyncio.create_task(_process_raw_update(body)))
         else:
-            log.warning("[webhook] Bot not initialized yet, dropping update")
+            # 503 вместо 200: пусть Telegram повторит апдейт, а не считает дроп успехом (AUD-E-003).
+            log.warning("[webhook] Bot not initialized yet, asking Telegram to retry")
+            return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     except Exception as exc:
         log.warning("[webhook] Failed to process incoming update: %s", exc)
     return {"ok": True}
@@ -1349,7 +1352,9 @@ async def export_state(request: Request) -> dict[str, Any]:
         "global_quota": GLOBAL_QUOTA,
     }
 
-ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "guest_message"]
+# Только настоящие типы Update из Bot API: "guest_message" здесь был бы ошибкой
+# (Telegram ответил бы 400 и бот замолчал бы) — гости идут через answerGuestQuery, а не подписку (AUD-J-001).
+ALLOWED_UPDATES = ["message", "edited_message", "callback_query"]
 
 # хранение состояния и квот
 

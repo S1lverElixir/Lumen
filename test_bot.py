@@ -136,6 +136,12 @@ def test_sanitize_mime_type_audio_ogg_passthrough():
     assert bot._sanitize_mime_type(None, "audio/ogg") == "audio/ogg"
 
 
+def test_ensure_prompt_text_gif_gets_animation_prompt_not_generic_image():
+    assert "анимации" in bot._ensure_prompt_text(None, "image/gif")
+    assert "анимации" in bot._ensure_prompt_text("  ", "image/GIF")
+    assert "картинке" in bot._ensure_prompt_text(None, "image/jpeg")
+
+
 # ─────────────────────────── is_tiktok / is_youtube ───────────────────────────
 
 def test_is_tiktok_true_for_tiktok_url():
@@ -3845,8 +3851,8 @@ def test_webhook_handler_rejects_invalid_or_missing_secret_and_does_not_dispatch
 
 def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
     # Апдейт может прийти раньше, чем main() успеет создать глобальный bot (Bot/
-    # genai.Client создаются уже после старта uvicorn) — должен тихо отбрасываться,
-    # а не падать, и не пытаться диспатчить апдейт в ещё не готового бота.
+    # genai.Client создаются уже после старта uvicorn) — отвечаем 503, чтобы
+    # Telegram повторил апдейт, а не считаем дроп успехом (AUD-E-003).
     original_secret = bot.WEBHOOK_SECRET
     original_bot_obj = bot.bot
     original_process = bot._process_raw_update
@@ -3864,12 +3870,19 @@ def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
             body={"update_id": 1},
         )
         result = asyncio.run(_run_webhook_handler(req))
-        assert result == {"ok": True}
+        assert result.status_code == 503
         assert calls == []
     finally:
         bot.WEBHOOK_SECRET = original_secret
         bot.bot = original_bot_obj
         bot._process_raw_update = original_process
+
+
+def test_allowed_updates_contains_only_real_telegram_types():
+    # Регрессия AUD-J-001: "guest_message" — не тип Update из Bot API, из-за него
+    # setWebhook мог ответить 400 и бот замолчал бы. Гости идут через answerGuestQuery.
+    assert "guest_message" not in bot.ALLOWED_UPDATES
+    assert "message" in bot.ALLOWED_UPDATES
 
 
 # ─────────────────── ADMIN_SECRET_SEED — независимая ротация секретов ───────────────────
