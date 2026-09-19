@@ -19,6 +19,11 @@ os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
 
 import copy
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import bot
+import lumen_limits
 
 
 @pytest.fixture(autouse=True)
@@ -26,7 +31,7 @@ def _bot_global_state_guard():
     """Снимок наиболее часто вручную сохраняемых модульных глобалов bot.py перед
     каждым тестом и восстановление после (аудит техдолга, август 2026).
 
-    Десятки тестов в test_bot_helpers.py вручную сохраняли/восстанавливали
+    Десятки тестов в test_bot_*.py вручную сохраняли/восстанавливали
     bot.chat_state/bot.GLOBAL_QUOTA/bot.client/bot.bot в try/finally — рабочий, но
     повторяющийся бойлерплейт и потенциальный источник тонких утечек между тестами
     при росте сьюта (забытый finally молча "протравливает" состояние в следующие
@@ -96,3 +101,22 @@ def _instant_tikwm_throttle():
     yield
     _tiktok_module._sleep = original_sleep
     _tiktok_module._tikwm_last_request_ts = original_last_ts
+
+
+@pytest.fixture
+def rate_guard_setup(monkeypatch):
+    def _setup():
+        monkeypatch.setattr(lumen_limits, "user_rate_limits", {})
+        monkeypatch.setattr(lumen_limits, "RATE_LIMIT_MAX_REQUESTS", 2)
+        monkeypatch.setattr(bot, "get_state", lambda chat_id: {})
+        monkeypatch.setattr(bot, "is_guest_message", lambda message: False)
+        monkeypatch.setattr(bot, "message_mentions_bot", lambda message: False)
+        monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+        monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+        monkeypatch.setattr(bot, "inline_draw", AsyncMock())
+        monkeypatch.setattr(bot, "inline_tts", AsyncMock())
+        return SimpleNamespace(
+            text="", caption=None, chat=SimpleNamespace(id=123, type=bot.ChatType.PRIVATE),
+            from_user=SimpleNamespace(id=456), reply=AsyncMock(), reply_to_message=None,
+        )
+    return _setup
