@@ -648,7 +648,7 @@ async def _close_sessions() -> None:
 # именно ради старых тестов на `bot.X`, но с переездом тестов на прямой импорт
 # модуля этот ре-экспорт стал мёртвым (см. аудит техдолга, 26 августа 2026) и
 # убран вместе с соответствующим `__all__`.
-from lumen_formatting import _md_to_html, _md_to_rich_html, _split_text_chunks, _strip_markdown
+from lumen_formatting import _md_to_html, _md_to_rich_html, _split_text_chunks, _strip_markdown, _truncate_html_to_fit
 
 _PRUNE_SENTINEL = object()
 
@@ -788,23 +788,6 @@ def is_guest_message(message: Message | dict) -> bool:
     if isinstance(message, dict):
         return bool(message.get("guest_query_id"))
     return bool(getattr(message, "guest_query_id", None))
-
-def _truncate_html_to_fit(md_text: str, limit: int) -> str:
-    """HTML по границе исходника, а не по границе тегов: резать готовый HTML
-    по codepoint можно угодить в середину <b>/ссылки — Telegram ответит
-    "can't parse entities" (AUD-J-002). Бинарным поиском ищем самый длинный
-    префикс исходника, чей HTML влезает в лимит."""
-    full = _md_to_html(md_text)
-    if len(full) <= limit:
-        return full
-    lo, hi = 0, len(md_text)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if len(_md_to_html(md_text[:mid])) <= limit - 1:
-            lo = mid
-        else:
-            hi = mid - 1
-    return _md_to_html(md_text[:lo])[:limit - 1] + "…"
 
 async def _answer_guest_text(message: Message, text: str) -> None:
     qid = getattr(message, "guest_query_id", None)
@@ -2633,9 +2616,12 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          except Exception as tag_err:
               log.warning("[tiktok] failed to write embedded tags to MP3: %s", tag_err)
 
+         # Слэш и управляющие из чужого названия — в "_" (AUD-E-005),
+         # иначе multipart-имя файла битое.
+         safe_title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", cleaned_title[:60]).strip() or "track"
          await bot.send_audio(
-              chat_id=message.chat.id,
-              audio=BufferedInputFile(tagged_music_bytes, filename=f"{cleaned_title[:60]}.mp3"),
+               chat_id=message.chat.id,
+               audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
               title=cleaned_title, 
               performer=performer_name,
               thumbnail=thumbnail_file,

@@ -45,4 +45,9 @@ COPY . /app
 
 EXPOSE 7860
 
+# Дешёвая проба живости — in-memory "/" без сетевых вызовов (см. healthcheck в
+# bot.py). Отдельного curl в образе нет — хватает stdlib-urllib.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=60s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/', timeout=4)"
+
 CMD ["python", "-u", "bot.py"]

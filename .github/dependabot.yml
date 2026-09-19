@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # CI-гейт автодеплоит в прод ("зелёный CI = прод"), а экшены закреплены
+  # мажор-тегами (v6/v7) — Dependabot открывает PR на новые релизы экшенов,
+  # чтобы дрейф версий был видимым решением, а не тихим (AUD-M-001).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"

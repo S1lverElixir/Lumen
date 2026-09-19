@@ -31,5 +31,6 @@ chat_state.json
 chat_state.tmp
 global_quota.json
 global_quota.tmp
+export_state.json
 
 .DS_Store

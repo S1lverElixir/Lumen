@@ -18,6 +18,20 @@ import lumen_formatting
 
 
 
+# ─────────────────────────── _truncate_html_to_fit ───────────────────────────
+
+def test_truncate_html_to_fit_keeps_short_text_and_cuts_at_source_boundary():
+    # Регрессия AUD-J-002: рез готового HTML рвал теги ("can't parse entities").
+    # Переехала из test_bot.py вслед за функцией (TG_MAX_LEN=4096 — лимит Telegram).
+    short = lumen_formatting._truncate_html_to_fit("привет", 4096)
+    assert short == lumen_formatting._md_to_html("привет")
+    long_md = "**" + "x" * 5000 + "**"
+    cut = lumen_formatting._truncate_html_to_fit(long_md, 4096)
+    assert len(cut) <= 4096
+    assert cut.endswith("…")
+    assert cut.count("<b>") == cut.count("</b>")
+
+
 # ─────────────────────────── _md_to_html ───────────────────────────
 
 def test_md_to_html_empty_string():

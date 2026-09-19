@@ -137,6 +137,16 @@ def test_sanitize_mime_type_audio_ogg_passthrough():
     assert bot._sanitize_mime_type(None, "audio/ogg") == "audio/ogg"
 
 
+def test_mime_suffix_maps_audio_video_subtypes_honestly():
+    # Регрессия AUD-E-005: было ".mp3 для любого audio" — расширение врало.
+    assert bot._mime_suffix("audio/ogg", "") == ".ogg"
+    assert bot._mime_suffix("audio/mpeg", "") == ".mp3"
+    assert bot._mime_suffix("audio/wav", "") == ".wav"
+    assert bot._mime_suffix("video/quicktime", "") == ".mov"
+    assert bot._mime_suffix("video/mp4", "") == ".mp4"
+    assert bot._mime_suffix("image/jpeg", "") == ".jpg"
+
+
 def test_ensure_prompt_text_gif_gets_animation_prompt_not_generic_image():
     assert "анимации" in bot._ensure_prompt_text(None, "image/gif")
     assert "анимации" in bot._ensure_prompt_text("  ", "image/GIF")
@@ -1900,6 +1910,34 @@ def _run_send_tiktok_music(media_data: dict, language_code: str | None = "ru"):
     return captured.get("title"), captured.get("artist")
 
 
+def test_send_tiktok_music_filename_sanitizes_slashes_and_control_chars():
+    # Регрессия AUD-E-005: слэш/контролы из чужого названия в multipart-имени.
+    incoming = _FakeIncomingMessage(999602)
+    incoming.message_id = 12345
+    incoming.from_user = SimpleNamespace(language_code="ru")
+    media_data = {
+        "music": "https://example.com/sound.mp3",
+        "music_info": {"title": "a/b\x01c", "author": "X", "cover": ""},
+        "author": {"nickname": "N", "unique_id": "n"},
+    }
+
+    async def fake_download(session, url, headers=None):
+        return b"fake-bytes"
+
+    fake_bot = _FakeAudioBot()
+    original_download, original_bot = bot._download_url_bin, bot.bot
+    bot._download_url_bin = fake_download
+    bot.bot = fake_bot
+    try:
+        asyncio.run(bot._send_tiktok_music(None, media_data, incoming, "N", {}))
+    finally:
+        bot._download_url_bin = original_download
+        bot.bot = original_bot
+    filename = fake_bot.sent_audio["audio"].filename
+    assert "/" not in filename and "\\" not in filename and "\x01" not in filename
+    assert filename.endswith(".mp3")
+
+
 def test_send_tiktok_music_truly_generic_original_sound_uses_localized_label():
     # raw_music_title буквально "original sound" без остатка (TikTok в этом случае
     # обычно добавляет юзернейм автора видео тем же куском — здесь его просто нет
@@ -3213,7 +3251,7 @@ def test_ask_gemini_falls_back_to_next_model_on_timeout():
     def fake_generate_content(*, model, contents, config=None):
         calls.append(model)
         if model == "gemini-3.6-flash":
-            time.sleep(0.2)  # дольше урезанного ROUTE_MODEL_TIMEOUT_SEC ниже
+            time.sleep(0.5)  # 10-кратный запас над ROUTE_MODEL_TIMEOUT_SEC ниже
         return _FakeGeminiResponse(text="Ответ от второй модели")
 
     fake_client = MagicMock()
@@ -3949,17 +3987,6 @@ def test_allowed_updates_contains_only_real_telegram_types():
     assert "message" in bot.ALLOWED_UPDATES
 
 
-def test_truncate_html_to_fit_keeps_short_text_and_cuts_at_source_boundary():
-    # Регрессия AUD-J-002: рез готового HTML рвал теги ("can't parse entities").
-    short = bot._truncate_html_to_fit("привет", bot.TG_MAX_LEN)
-    assert short == bot._md_to_html("привет")
-    long_md = "**" + "x" * 5000 + "**"
-    cut = bot._truncate_html_to_fit(long_md, bot.TG_MAX_LEN)
-    assert len(cut) <= bot.TG_MAX_LEN
-    assert cut.endswith("…")
-    assert cut.count("<b>") == cut.count("</b>")
-
-
 # ─────────────────── ADMIN_SECRET_SEED — независимая ротация секретов ───────────────────
 
 def test_admin_secrets_are_independent_of_bot_token_when_seed_set():
@@ -4384,6 +4411,7 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
     current_concurrent = 0
     max_concurrent_seen = 0
     lock = asyncio.Lock()
+    overlapped = asyncio.Event()
 
     async def fake_get_http_session():
         return _FakeTikTokSession(tikwm_json)
@@ -4399,7 +4427,11 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
         async with lock:
             current_concurrent += 1
             max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
-        await asyncio.sleep(0.05)  # достаточно, чтобы вызовы реально пересеклись во времени
+            if current_concurrent >= 2:
+                overlapped.set()
+        # Детерминированный барьер вместо sleep: дальше идёт только тот, кто
+        # реально пересёкся с соседом; последовательный регресс упрётся в таймаут.
+        await asyncio.wait_for(overlapped.wait(), timeout=2)
         async with lock:
             current_concurrent -= 1
         return 0, 0, 0, None
@@ -4453,6 +4485,7 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
     current_concurrent = 0
     max_concurrent_seen = 0
     lock = asyncio.Lock()
+    overlapped = asyncio.Event()
 
     async def fake_get_http_session():
         return _FakeTikTokSession(tikwm_json)
@@ -4465,7 +4498,10 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
         async with lock:
             current_concurrent += 1
             max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
-        await asyncio.sleep(0.05)  # достаточно, чтобы вызовы реально пересеклись во времени
+            if current_concurrent >= 2:
+                overlapped.set()
+        # Детерминированный барьер вместо sleep (см. комментарий в probe-тесте выше).
+        await asyncio.wait_for(overlapped.wait(), timeout=2)
         async with lock:
             current_concurrent -= 1
         return b"\xff\xd8\xff\xe0fake jpeg bytes"  # не ftyp -> обычное фото, не видео-слайд
@@ -5320,6 +5356,9 @@ def test_match_pick_request_rejects_detailed_or_unrelated():
     assert bot.match_pick_request("") is None
     # Латиница — только по границам слов: "notebook" — не книги.
     assert bot.match_pick_request("recommend a notebook") is None
+    # Кириллица — по началу слова: "тигр" — не игры (AUD-E-006), "игру" — игры.
+    assert bot.match_pick_request("посоветуй тигра") is None
+    assert bot.match_pick_request("придумай игру для компании") == "games"
 
 
 def test_pick_question_sent_instead_of_ai_route(rate_guard_setup, monkeypatch):

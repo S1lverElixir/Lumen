@@ -42,6 +42,10 @@ lumen_model_speed.py — самокалибрующаяся оценка зад�
 
 from __future__ import annotations
 
+# Единый ключ provider:model_id живёт в lumen_typing_pace (там каноническое
+# определение) — здесь реэкспорт, чтобы не плодить два одинаковых форматтера.
+from lumen_typing_pace import speed_key
+
 # Насколько сильно один новый замер сдвигает EMA — тот же компромисс
 # "стабильность против скорости подстройки", что и в lumen_typing_pace.py.
 _EMA_ALPHA = 0.3
@@ -64,12 +68,6 @@ _MAX_TOTAL_SEC = 120.0
 _TTF_ABANDON_MULT = 2.5
 
 _latency_ema: dict[str, tuple[float, float]] = {}
-
-
-def speed_key(provider: str, model_id: str) -> str:
-    """Единый ключ — тот же формат пары (provider, model_id), что в
-    lumen_typing_pace.speed_key и GLOBAL_QUOTA."""
-    return f"{provider}:{model_id}"
 
 
 def expected_ttf_sec(key: str) -> float:

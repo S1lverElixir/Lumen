@@ -139,10 +139,21 @@ def _mime_suffix(mime: str, filename: str = "") -> str:
     if m.startswith("image/"):
         sub = m.split("/", 1)[1]
         return {"jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"}.get(sub, f".{sub}")
+    # Честная карта вместо ".mp3 для любого audio" (AUD-E-005): расширение врёт
+    # редко, но метка временному файлу должна соответствовать содержимому.
     if m.startswith("audio/"):
-        return ".mp3"
+        sub = m.split("/", 1)[1].split(";")[0].strip()
+        return {
+            "mpeg": ".mp3", "mp3": ".mp3", "ogg": ".ogg", "wav": ".wav",
+            "x-wav": ".wav", "webm": ".webm", "mp4": ".m4a", "x-m4a": ".m4a",
+            "aac": ".aac", "flac": ".flac", "opus": ".opus",
+        }.get(sub, f".{sub}")
     if m.startswith("video/"):
-        return ".mp4"
+        sub = m.split("/", 1)[1].split(";")[0].strip()
+        return {
+            "mp4": ".mp4", "quicktime": ".mov", "x-msvideo": ".avi",
+            "x-matroska": ".mkv", "webm": ".webm", "mpeg": ".mpg",
+        }.get(sub, f".{sub}")
     return ".bin"
 
 def _msg_media_source(message: Any) -> Any | None:

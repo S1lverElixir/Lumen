@@ -40,26 +40,11 @@ import aiohttp
 DEFAULT_POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 
 POLLINATIONS_IMAGE_MODELS: dict[str, dict[str, Any]] = {
-    "flux": {
-        "name": "FLUX Pro",
-        "desc": "Высококачественный FLUX. Фотореализм, точное следование промпту, богатая детализация.",
-    },
-    "flux-realism": {
-        "name": "FLUX Realism",
-        "desc": "FLUX с акцентом на гиперреализм — детализированные текстуры, естественное освещение, кинематографичность.",
-    },
-    "flux-anime": {
-        "name": "FLUX Anime",
-        "desc": "FLUX для аниме и иллюстраций — характерные пропорции, яркие цвета, стилизация под японскую графику.",
-    },
-    "turbo": {
-        "name": "Turbo",
-        "desc": "Быстрая дистиллированная модель. Результат за несколько секунд — для черновиков и быстрых итераций.",
-    },
-    "dreamshaper": {
-        "name": "DreamShaper",
-        "desc": "Художественная модель для фэнтези, концепт-арта и стилизованных иллюстраций.",
-    },
+    "flux": {"name": "FLUX Pro"},
+    "flux-realism": {"name": "FLUX Realism"},
+    "flux-anime": {"name": "FLUX Anime"},
+    "turbo": {"name": "Turbo"},
+    "dreamshaper": {"name": "DreamShaper"},
 }
 
 # ── Автоматический выбор модели генерации по содержимому промпта ──
@@ -135,8 +120,3 @@ async def _pollinations_text_to_image(session: aiohttp.ClientSession, model_id: 
     if model_id not in POLLINATIONS_IMAGE_MODELS:
         raise ValueError(f"Неизвестная модель генерации изображений: {model_id}")
     return await _pollinations_generate(session, model_id, prompt)
-
-
-def _image_model_label(model_id: str) -> str:
-    meta = POLLINATIONS_IMAGE_MODELS.get(model_id, {})
-    return meta.get("name", model_id)

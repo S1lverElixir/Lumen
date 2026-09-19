@@ -274,12 +274,13 @@ def match_pick_request(text_lower: str) -> str | None:
         return None
     for topic, scenario in _PICK_TOPICS.items():
         # Латиницу — строго по границам слов ("notebook" — не книги,
-        # "shower" — не сериалы); кириллицу — подстрокой, как раньше
-        # (там префиксные корни вида "музык"/"книг" так и задуманы).
+        # "shower" — не сериалы); кириллицу — по началу слова: корни вида
+        # "музык"/"книг" так и задуманы префиксными, но "тигр" — не игры
+        # (AUD-E-006). \w в Python юникодный, кириллицу покрывает.
         if topic.isascii():
             if re.search(r"\b" + re.escape(topic) + r"\b", text):
                 return scenario
-        elif topic in text:
+        elif re.search(r"(?<!\w)" + re.escape(topic), text):
             return scenario
     return None
 

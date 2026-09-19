@@ -609,3 +609,22 @@ def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
         chunks.append(remaining)
     return chunks
 
+
+def _truncate_html_to_fit(md_text: str, limit: int) -> str:
+    """HTML по границе исходника, а не по границе тегов: резать готовый HTML
+    по codepoint можно угодить в середину <b>/ссылки — Telegram ответит
+    "can't parse entities" (AUD-J-002). Бинарным поиском ищем самый длинный
+    префикс исходника, чей HTML влезает в лимит. Вынесено из bot.py (гостевые
+    ответы — одиночный InlineQueryResultArticle без фолбэка на plain-текст)."""
+    full = _md_to_html(md_text)
+    if len(full) <= limit:
+        return full
+    lo, hi = 0, len(md_text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(_md_to_html(md_text[:mid])) <= limit - 1:
+            lo = mid
+        else:
+            hi = mid - 1
+    return _md_to_html(md_text[:lo])[:limit - 1] + "…"
+
