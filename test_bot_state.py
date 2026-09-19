@@ -10,6 +10,7 @@ import asyncio
 import bot
 import json
 import logging
+import lumen_chat_state
 import lumen_limits
 import sentry_sdk
 import sys
@@ -255,13 +256,13 @@ def test_save_chat_to_storage_returns_true_on_success(tmp_path):
     # а не просто логировать исключение и возвращать None в обоих случаях.
     chat_id = 999601
     state = {"history": [{"role": "user", "content": "привет"}], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
-    original_chats_dir = bot._CHATS_DIR
-    bot._CHATS_DIR = tmp_path
+    original_chats_dir = lumen_chat_state._CHATS_DIR
+    lumen_chat_state._CHATS_DIR = tmp_path
     try:
         assert bot._save_chat_to_storage(chat_id, state) is True
         assert (tmp_path / f"{chat_id}.json").exists()
     finally:
-        bot._CHATS_DIR = original_chats_dir
+        lumen_chat_state._CHATS_DIR = original_chats_dir
 
 
 def test_save_chat_to_storage_returns_false_on_failure():
@@ -272,14 +273,14 @@ def test_save_chat_to_storage_returns_false_on_failure():
 
 def test_delete_chat_storage_returns_true_on_success(tmp_path):
     chat_id = 999603
-    original_chats_dir = bot._CHATS_DIR
-    bot._CHATS_DIR = tmp_path
+    original_chats_dir = lumen_chat_state._CHATS_DIR
+    lumen_chat_state._CHATS_DIR = tmp_path
     try:
         (tmp_path / f"{chat_id}.json").write_text("{}")
         assert bot._delete_chat_storage(chat_id) is True
         assert not (tmp_path / f"{chat_id}.json").exists()
     finally:
-        bot._CHATS_DIR = original_chats_dir
+        lumen_chat_state._CHATS_DIR = original_chats_dir
 
 
 def test_delete_chat_storage_returns_false_on_failure():
@@ -300,8 +301,10 @@ def test_flush_dirty_state_once_requeues_failed_saves():
     bot.chat_state[fail_chat] = {"history": [{"role": "user", "content": "fail"}], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
     bot._dirty_chat_ids.clear()
     bot._dirty_chat_ids.update({ok_chat, fail_chat})
-    bot._index_dirty = False
-    bot._quota_dirty = False
+    # Флаги живут в lumen_chat_state (P2) — ребиндим там же, где их читает
+    # _flush_dirty_state_once, иначе тест и код увидят разные значения.
+    lumen_chat_state._index_dirty = False
+    lumen_chat_state._quota_dirty = False
 
     def fake_save(cid, state):
         return cid != fail_chat  # успех для ok_chat, неудача для fail_chat
@@ -326,8 +329,8 @@ def test_flush_dirty_state_once_requeues_failed_deletes():
     bot._pending_chat_deletions.clear()
     bot._pending_chat_deletions.update({ok_chat, fail_chat})
     bot._dirty_chat_ids.clear()
-    bot._index_dirty = False
-    bot._quota_dirty = False
+    lumen_chat_state._index_dirty = False
+    lumen_chat_state._quota_dirty = False
 
     def fake_delete(cid):
         return cid != fail_chat
@@ -596,7 +599,7 @@ def test_find_recent_media_by_category_none_for_empty_bucket():
 
 
 def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
-    # bot._last_quota_check_monotonic сбрасывается явно: в проде троттлинг (см.
+    # lumen_chat_state._last_quota_check_monotonic сбрасывается явно: в проде троттлинг (см.
     # _QUOTA_CHECK_THROTTLE_SEC) абсолютно безопасен, т.к. между реальными вызовами
     # проходят настоящие секунды — но в тестах десятки вызовов _quota_entry (через
     # ask_gemini/ask_openrouter_* в других тестах этого же файла) укладываются в
@@ -620,12 +623,12 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         "openrouter": dict(bot.GLOBAL_QUOTA.get("openrouter", {})),
         "quota_day": bot.GLOBAL_QUOTA.get("quota_day"),
     }
-    original_throttle = bot._last_quota_check_monotonic
+    original_throttle = lumen_chat_state._last_quota_check_monotonic
     try:
         bot.GLOBAL_QUOTA["gemini"] = {"gemini-2.5-flash": {"used": 106, "remaining": 0, "limit": 1500, "exhausted_at": 12345.0}}
         bot.GLOBAL_QUOTA["openrouter"] = {"some-model:free": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None}}
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"  # заведомо "вчерашний" день
-        bot._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
 
         bot._reset_quota_if_new_day()
 
@@ -637,24 +640,24 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         bot.GLOBAL_QUOTA["gemini"] = original_quota["gemini"]
         bot.GLOBAL_QUOTA["openrouter"] = original_quota["openrouter"]
         bot.GLOBAL_QUOTA["quota_day"] = original_quota["quota_day"]
-        bot._last_quota_check_monotonic = original_throttle
+        lumen_chat_state._last_quota_check_monotonic = original_throttle
 
 
 def test_reset_quota_if_new_day_is_noop_within_same_day():
     original_quota_day = bot.GLOBAL_QUOTA.get("quota_day")
-    original_throttle = bot._last_quota_check_monotonic
+    original_throttle = lumen_chat_state._last_quota_check_monotonic
     try:
         bot.GLOBAL_QUOTA["gemini"]["test-model-999"] = {"used": 7, "remaining": None, "limit": None, "exhausted_at": None}
         bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
         # См. комментарий в test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover
         # выше про то, почему буквальный 0.0 не годится как "точно давно".
-        bot._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._reset_quota_if_new_day()
         assert bot.GLOBAL_QUOTA["gemini"]["test-model-999"]["used"] == 7
     finally:
         bot.GLOBAL_QUOTA["gemini"].pop("test-model-999", None)
         bot.GLOBAL_QUOTA["quota_day"] = original_quota_day
-        bot._last_quota_check_monotonic = original_throttle
+        lumen_chat_state._last_quota_check_monotonic = original_throttle
 
 
 def test_reset_quota_if_new_day_throttles_repeated_calls():
@@ -666,11 +669,11 @@ def test_reset_quota_if_new_day_throttles_repeated_calls():
     #
     # См. комментарий в test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover
     # про то, почему сброс делается относительно time.monotonic(), а не в буквальный 0.0.
-    original_throttle = bot._last_quota_check_monotonic
+    original_throttle = lumen_chat_state._last_quota_check_monotonic
     calls = []
     original_fn = bot._current_quota_day
     try:
-        bot._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._current_quota_day = lambda: (calls.append(1), original_fn())[1]
         bot._reset_quota_if_new_day()
         bot._reset_quota_if_new_day()
@@ -678,7 +681,7 @@ def test_reset_quota_if_new_day_throttles_repeated_calls():
         assert len(calls) == 1
     finally:
         bot._current_quota_day = original_fn
-        bot._last_quota_check_monotonic = original_throttle
+        lumen_chat_state._last_quota_check_monotonic = original_throttle
 
 
 def test_serialize_chat_state_stamps_current_schema_version():
@@ -991,18 +994,18 @@ def test_maybe_alert_gemini_exhausted_throttled():
     # on_day_rollover выше: time.monotonic() не гарантированно "далеко за" какой-то
     # абсолютной точкой (в свежем процессе может быть близко к нулю) — "давно" нужно
     # выражать относительно текущего time.monotonic(), а не буквальным 0.0.
-    original_last = bot._last_gemini_exhausted_alert_monotonic
+    original_last = lumen_chat_state._last_gemini_exhausted_alert_monotonic
     original_owner, original_bot = bot.OWNER_ID, bot.bot
     bot.OWNER_ID = 12345
     fake = _FakeOwnerBot()
     bot.bot = fake
-    bot._last_gemini_exhausted_alert_monotonic = time.monotonic() - bot.GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC - 10.0
+    lumen_chat_state._last_gemini_exhausted_alert_monotonic = time.monotonic() - bot.GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC - 10.0
     try:
         asyncio.run(bot._maybe_alert_gemini_exhausted())
         asyncio.run(bot._maybe_alert_gemini_exhausted())
         assert len(fake.sent) == 1  # второй вызов сразу же — троттлинг не пускает повтор
     finally:
-        bot._last_gemini_exhausted_alert_monotonic = original_last
+        lumen_chat_state._last_gemini_exhausted_alert_monotonic = original_last
         bot.OWNER_ID, bot.bot = original_owner, original_bot
 
 
