@@ -208,6 +208,82 @@ def _mime_matches_media_category(mime: str, category: str) -> bool:
         return low.startswith(("application/", "text/")) or low == "application/octet-stream"
     return False
 
+# ── Кнопки-уточнения (pick-сценарии) ──
+# Детерминированная альтернатива "одному уточняющему вопросу" модели: для
+# вкусовых запросов без деталей ("посоветуй фильм") бот показывает вопрос
+# с кнопками-вариантами вместо гадания. Сами вопросы/варианты/шаблоны живут
+# в lumen_lang.py (PICK_TABLE — на языке чата), здесь только ДАННЫЕ детектора
+# и его русские таблицы (исторически первые; тесты на них завязаны через
+# bot.PICK_* — см. историю: теперь это таблицы по умолчанию).
+# Детектор намеренно узкий: глагол вкуса + тема + коротко + без деталей.
+# Длинные/детальные запросы ("посоветуй фильм про космос, ужасы, 2024")
+# идут обычным путём в модель без кнопок.
+_PICK_VERBS = (
+    "посоветуй", "порекомендуй", "подскажи", "накидай", "придумай",
+    "recommend", "suggest", "advise",
+)
+_PICK_TOPICS: dict[str, str] = {
+    "фильм": "film", "фильмы": "film", "фильмов": "film",
+    "сериал": "series", "сериалы": "series",
+    "музык": "music", "песн": "music", "трек": "music",
+    "книг": "books", "книж": "books", "книжку": "books",
+    "игр": "games", "игру": "games", "игрушку": "games",
+    "movie": "film", "movies": "film", "film": "film", "films": "film",
+    "series": "series", "show": "series", "shows": "series",
+    "music": "music", "song": "music", "songs": "music",
+    "track": "music", "tracks": "music",
+    "book": "books", "books": "books",
+    "game": "games", "games": "games",
+}
+_PICK_MAX_LEN = 60
+PICK_QUESTIONS: dict[str, str] = {
+    "film": "Что сегодня хочется?",
+    "series": "Что сегодня хочется?",
+    "music": "Какое настроение?",
+    "books": "Что сегодня хочется?",
+    "games": "Во что хочется?",
+}
+PICK_OPTIONS: dict[str, list[str]] = {
+    "film": ["Лёгкое и весёлое", "Драма", "Триллер", "Фантастика"],
+    "series": ["Лёгкое и весёлое", "Драма", "Детектив", "Фантастика"],
+    "music": ["Энергичное", "Спокойное", "Грустное", "Весёлое"],
+    "books": ["Фантастика", "Детектив", "Нон-фикшн", "Классика"],
+    "games": ["Экшен", "Стратегия", "RPG", "Головоломка"],
+}
+# Как выбор дописывается к исходному запросу перед обычным маршрутом.
+PICK_CHOICE_TEMPLATES: dict[str, str] = {
+    "film": "{original} (жанр: {choice})",
+    "series": "{original} (жанр: {choice})",
+    "music": "{original} (настроение: {choice})",
+    "books": "{original} (жанр: {choice})",
+    "games": "{original} (жанр: {choice})",
+}
+
+def match_pick_request(text_lower: str) -> str | None:
+    """Возвращает id pick-сценария (film/music/...), если текст — вкусовой
+    запрос без деталей, иначе None. Проверяется в _handle_message_core до
+    маршрута к ИИ: совпавшим запросам показываются кнопки вместо гадания."""
+    text = text_lower.strip()
+    if not text or len(text) > _PICK_MAX_LEN:
+        return None
+    # Детали (год, перечисления через запятую) — обычным путём в модель:
+    # у такого запроса уже есть вкус, кнопки не нужны.
+    if re.search(r"\b(19|20)\d{2}\b", text) or text.count(",") >= 2:
+        return None
+    if not any(v in text for v in _PICK_VERBS):
+        return None
+    for topic, scenario in _PICK_TOPICS.items():
+        # Латиницу — строго по границам слов ("notebook" — не книги,
+        # "shower" — не сериалы); кириллицу — подстрокой, как раньше
+        # (там префиксные корни вида "музык"/"книг" так и задуманы).
+        if topic.isascii():
+            if re.search(r"\b" + re.escape(topic) + r"\b", text):
+                return scenario
+        elif topic in text:
+            return scenario
+    return None
+
+
 def _find_recent_media_by_category(bucket: Any, category: str) -> tuple[str, str] | None:
     """Ищет в бакете недавних медиа (см. recent_media_ids) последний элемент,
     ТИП которого совпадает с запрошенной категорией — идя от новых к старым, а

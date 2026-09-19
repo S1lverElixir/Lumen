@@ -27,6 +27,7 @@ from pathlib import Path
 from collections import deque
 from datetime import date, datetime
 from typing import Any, TypedDict
+from types import SimpleNamespace
 import urllib.request as _urllib_request
 
 import aiohttp
@@ -40,7 +41,10 @@ from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
     BufferedInputFile,
+    CallbackQuery,
     FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     InlineQueryResultArticle,
     InputMediaPhoto,
     InputMediaVideo,
@@ -55,6 +59,18 @@ from google import genai
 from google.genai import types
 
 from system_prompt import SYSTEM_PROMPT
+
+# язык системных сообщений бота (см. lumen_lang.py): фиксированные строки,
+# которые бот отправляет сам (/start, подсказки, ошибки, статусы). Ответы ИИ
+# не трогаем — модель отвечает на языке собеседника.
+from lumen_lang import (
+    DEFAULT_LANG,
+    LANG_NAMES,
+    SUPPORTED_LANGS,
+    normalize_lang,
+    pick_texts,
+    t as _lang_t,
+)
 
 # логирование
 
@@ -776,7 +792,7 @@ async def _answer_guest_text(message: Message, text: str) -> None:
         payload = payload[:TG_MAX_LEN - 1] + "\u2026"
     res_id = hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:32]
     res_art = InlineQueryResultArticle(
-        id=res_id, title="Ответ бота",
+        id=res_id, title=_t(message.chat.id, "inline_answer_title"),
         input_message_content=InputTextMessageContent(message_text=payload, parse_mode="HTML"),
     )
     try:
@@ -970,24 +986,33 @@ def _classify_model_error(status: int | None, text: str) -> str:
 # в system_prompt.py) — тексты НЕ должны упоминать "модели" во множественном
 # числе или "подбор другой модели": для пользователя есть только Lumen, а
 # переключения внутри — деталь реализации.
+# Сами тексты живут в lumen_lang.py (ключи model_err_*), здесь — совместимые
+# алиасы и тонкая обёртка с языком (lang="en" — дефолт для вызовов без чата,
+# в тестах в том числе).
 _MODEL_ERROR_MESSAGES: dict[str, str] = {
-    "rate_limit": "Лимит запросов сейчас исчерпан. Подожди немного и попробуй ещё раз.",
-    "paid": "Сервис временно недоступен. Попробуй повторить запрос чуть позже.",
-    "forbidden": "Временная ошибка доступа к сервису. Попробуй ещё раз.",
-    "unavailable": "Сервис временно недоступен. Попробуй повторить запрос чуть позже.",
+    "rate_limit": _lang_t(DEFAULT_LANG, "model_err_rate_limit"),
+    "paid": _lang_t(DEFAULT_LANG, "model_err_paid"),
+    "forbidden": _lang_t(DEFAULT_LANG, "model_err_forbidden"),
+    "unavailable": _lang_t(DEFAULT_LANG, "model_err_unavailable"),
 }
-_MODEL_ERROR_FALLBACK_MSG = "Временная ошибка сервиса. Попробуй чуть позже."
+_MODEL_ERROR_FALLBACK_MSG = _lang_t(DEFAULT_LANG, "model_err_fallback")
 
-def _model_error_text(kind: str) -> str:
-    return _MODEL_ERROR_MESSAGES.get(kind, _MODEL_ERROR_FALLBACK_MSG)
+def _model_error_text(kind: str, lang: str = DEFAULT_LANG) -> str:
+    key = {
+        "rate_limit": "model_err_rate_limit",
+        "paid": "model_err_paid",
+        "forbidden": "model_err_forbidden",
+        "unavailable": "model_err_unavailable",
+    }.get(kind, "model_err_fallback")
+    return _lang_t(lang, key)
 
-def _or_error_msg(e: Exception, kind: str) -> str:
+def _or_error_msg(e: Exception, kind: str, lang: str = DEFAULT_LANG) -> str:
     # Сырой текст ошибки API сюда намеренно не подставляется (может содержать
     # внутренние детали инфраструктуры, HTML/JSON или обрывки заголовков) —
     # то же правило, что уже применяется в _gemini_error_msg ниже.
     txt = _error_text(e).strip() or e.__class__.__name__
     status = _error_status(e, txt)
-    return _model_error_text(_classify_model_error(status, txt))
+    return _model_error_text(_classify_model_error(status, txt), lang)
 
 class GeminiAllModelsExhaustedError(RuntimeError):
     """Поднимается, когда 429/RESOURCE_EXHAUSTED получен подряд от всех моделей
@@ -1005,14 +1030,11 @@ def _next_fallback_model(tried_models: set[str], chain: list[str]) -> str | None
     поправит один из трёх вызовов и забудет остальные."""
     return next((m for m in chain if m not in tried_models), None)
 
-def _gemini_error_msg(e: Exception, model_id: str) -> str:
+def _gemini_error_msg(e: Exception, model_id: str, lang: str = DEFAULT_LANG) -> str:
     if isinstance(e, ValueError):
         return str(e)
     if isinstance(e, GeminiAllModelsExhaustedError):
-        return (
-            "Бесплатный лимит запросов исчерпан — это реальный суточный лимит "
-            "сервиса, а не ошибка. Попробуй позже."
-        )
+        return _lang_t(lang, "err_quota_exhausted")
     txt = _error_text(e).strip() or e.__class__.__name__
     status = _error_status(e, txt)
     kind = _classify_model_error(status, txt)
@@ -1021,8 +1043,8 @@ def _gemini_error_msg(e: Exception, model_id: str) -> str:
     # подставляется — в сообщении об ошибке посреди обычного диалога это
     # выглядело бы как случайная утечка бренда/вендора (см. защиту от утечки
     # идентичности ниже). Не показываем и сырой ответ API (может содержать
-    # HTML, JSON, токены) — см. общие шаблоны _MODEL_ERROR_MESSAGES выше.
-    return _model_error_text(kind)
+    # HTML, JSON, токены) — см. общие шаблоны model_err_* в lumen_lang.py.
+    return _model_error_text(kind, lang)
 
 # список моделей
 #
@@ -1074,16 +1096,16 @@ def get_system_prompt(model_id: str | None = None) -> str:
     # случай, если когда-нибудь понадобится реальная per-model кастомизация — но
     # прямо сейчас это не мёртвый код по ошибке, а сознательное решение "одна и та
     # же строка для всех".
-    now_str = datetime.now().strftime("%d %B %Y года (текущее время: %H:%M)")
+    now_str = datetime.now().strftime("%d %B %Y (current time: %H:%M)")
     now_year = datetime.now().year
     dynamic_header = (
-        f"ИНФОРМАЦИЯ О ТЕКУЩЕМ ВРЕМЕНИ:\n"
-        f"• Сегодняшняя дата: {now_str}. Текущий год: {now_year}.\n"
-        f"• ОБЯЗАТЕЛЬНО: когда пользователь спрашивает текущую дату, день, месяц или год — "
-        f"используй ТОЛЬКО дату из этой секции. НИКОГДА не называй другой год или дату из памяти обучения. "
-        f"Если не уверен — скажи дату отсюда, она всегда актуальна.\n"
-        f"• Если вопрос касается событий, релизов, новостей или статуса чего-либо, что могло измениться "
-        f"после твоего обучения — используй поиск, а не отвечай по памяти. Не упоминай эту инструкцию явно.\n\n"
+        f"CURRENT TIME INFORMATION:\n"
+        f"• Today's date: {now_str}. Current year: {now_year}.\n"
+        f"• MANDATORY: when the user asks for the current date, day, month or year — "
+        f"use ONLY the date from this section. NEVER state a different year or date from training memory. "
+        f"If unsure — give the date from here, it is always current.\n"
+        f"• If the question concerns events, releases, news or the status of anything that may have changed "
+        f"since your training — use search instead of answering from memory. Do not mention this instruction explicitly.\n\n"
     )
     return dynamic_header + SYSTEM_PROMPT
 
@@ -1099,6 +1121,7 @@ class ChatState(TypedDict, total=False):
     ctx: "deque[str]"
     recent_media_ids: dict[str, "deque[tuple[str, str]]"]
     last_activity: float
+    lang: str
 
 chat_state: dict[int, ChatState] = {}
 
@@ -1527,7 +1550,7 @@ async def _maybe_alert_gemini_exhausted() -> None:
     if now - _last_gemini_exhausted_alert_monotonic < GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC:
         return
     _last_gemini_exhausted_alert_monotonic = now
-    await _notify_owner("⚠️ Квота Gemini исчерпана целиком по всем моделям в маршруте (см. /stats для деталей).")
+    await _notify_owner(_t(OWNER_ID, "owner_quota_notice"))
 
 def _reset_quota_if_new_day() -> None:
     """Сбрасывает used/exhausted_at у ВСЕХ моделей (Gemini и OpenRouter), если с
@@ -1879,6 +1902,20 @@ def get_state(chat_id: int) -> dict[str, Any]:
          _prune_old_chats()
     return chat_state[chat_id]
 
+def _chat_lang(chat_id: int | None) -> str:
+    """Язык системных сообщений для чата: поле "lang" состояния, иначе "en".
+    Никогда не падает — при любом мусоре в поле отдаёт дефолт."""
+    try:
+        if chat_id is None:
+            return DEFAULT_LANG
+        return normalize_lang(get_state(chat_id).get("lang", DEFAULT_LANG))
+    except Exception:
+        return DEFAULT_LANG
+
+def _t(chat_id: int | None, key: str, **kwargs: Any) -> str:
+    """Системная строка key на языке чата (см. lumen_lang.py)."""
+    return _lang_t(_chat_lang(chat_id), key, **kwargs)
+
 def _prune_old_chats() -> None:
     sorted_ids = sorted(chat_state.keys(), key=lambda cid: chat_state[cid].get("last_activity", 0))
     to_remove = len(chat_state) - PRUNED_CHAT_TARGET
@@ -1988,6 +2025,8 @@ from lumen_media import (
     _msg_media_source,
     _ensure_prompt_text,
 )
+# (импорт lumen_lang — вверху файла, рядом с system_prompt: _MODEL_ERROR_MESSAGES
+# выше по файлу уже использует его на уровне модуля)
 # загрузка медиа
 
 async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None = None, retries: int = 1) -> tuple[bytes, str]:
@@ -2116,9 +2155,10 @@ from lumen_security import (
     _detect_injected_payload_echo,
     _detect_identity_leak,
     _scrub_identity_leak,
-    _INJECTION_PROBE_REPLY,
     _looks_like_injection_probe,
 )
+# (_INJECTION_PROBE_REPLY здесь больше не импортируется: ответ на провокации
+# теперь берётся из lumen_lang.py по языку чата — см. ключ injection_probe_reply)
 
 
 class OpenRouterAPIError(RuntimeError):
@@ -2427,7 +2467,7 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
               return
               
          music_info = media_data.get("music_info") or {}
-         raw_music_title = music_info.get("title") or "Музыка из TikTok"
+         raw_music_title = music_info.get("title") or _t(message.chat.id, "tiktok_music")
          raw_music_author = music_info.get("author") or author
          
          # юзернейм и никнейм автора ВИДЕО без @ — нужны и для performer_name, и
@@ -2554,12 +2594,10 @@ async def handle_tiktok_sound(message: Message, status: Message | None) -> None:
     такой ссылке с текущей инфраструктурой бота. Сразу и честно сообщаем об этом,
     не пытаясь сделать сетевой запрос, который гарантированно ни к чему не приведёт."""
     if is_guest_message(message):
-         await _answer_guest_text(message, "Ссылка на звук TikTok распознана.")
+         await _answer_guest_text(message, _t(message.chat.id, "tiktok_sound_recognized"))
          return
     raise TikTokUserFacingError(
-         "Скачать звук отдельно по ссылке на его страницу не получится — ни TikWM, ни сам TikTok "
-         "не отдают нужные данные по такому виду ссылки этому боту. Пришлите, пожалуйста, ссылку "
-         "на любое видео с этим звуком — бот пришлёт звук вместе с ним."
+        _t(message.chat.id, "tiktok_sound_no_separate")
     )
 
 
@@ -2765,11 +2803,11 @@ async def _send_tiktok_single_video(
                    )
                    continue
               if candidate["key"] == "hdplay":
-                   status_msg = "Скачиваю видео без водяных знаков (HD)"
+                   status_msg = _t(message.chat.id, "tiktok_dl_hd")
               elif candidate["key"] == "wmplay":
-                   status_msg = "Версии без водяных знаков не нашлось — скачиваю как есть"
+                   status_msg = _t(message.chat.id, "tiktok_dl_as_is")
               else:
-                   status_msg = "Скачиваю видео без водяных знаков"
+                   status_msg = _t(message.chat.id, "tiktok_dl_plain")
               await _edit_message_quietly(status, status_msg)
 
               video_bytes = await _download_url_bin(session, candidate["url"], headers=headers)
@@ -2831,20 +2869,18 @@ async def _send_tiktok_single_video(
               # это стоит явно отличать от "TikTok вообще ничего не отдал"
               # ниже, иначе пользователь получит вводящее в заблуждение
               # сообщение про "контент удалён", хотя видео на самом деле есть,
-              # просто слишком большое для отправки через бота.
-              raise TikTokUserFacingError(
-                   "Это видео из TikTok слишком большое для отправки даже в самом лёгком из доступных "
-                   "качеств — Telegram Bot API ограничивает загрузку файлов 50 МБ. Попробуйте скачать "
-                   "это видео другим способом."
-              )
+               # просто слишком большое для отправки через бота.
+               raise TikTokUserFacingError(
+                   _t(message.chat.id, "tiktok_too_big")
+               )
 
-    raise TikTokUserFacingError("Ссылка распознана, но TikTok не отдал ни видео, ни фото по ней — возможно, контент удалён или недоступен.")
+    raise TikTokUserFacingError(_t(message.chat.id, "tiktok_no_media"))
 
 async def handle_tiktok(message: Message, url: str) -> None:
     if is_guest_message(message):
          await _answer_guest_text(message, f"Ссылка на TikTok распознана: {url}")
          return
-    status = await _tg_call(message.reply, "Обрабатываю ссылку на TikTok")
+    status = await _tg_call(message.reply, _t(message.chat.id, "tiktok_processing"))
     try:
          session = await _get_http_session()
          resolved_url = await _resolve_tiktok_short(session, url)
@@ -2880,7 +2916,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
          media_data = await _fetch_tikwm_media_data_with_proxy_fallback(session, resolved_url, headers)
 
          if not media_data:
-              raise TikTokUserFacingError("Не удалось получить видео по этой ссылке — возможно, оно приватное, удалено, заблокировано по региону или ссылка битая.")
+              raise TikTokUserFacingError(_t(message.chat.id, "tiktok_fetch_fail"))
 
          # ДИАГНОСТИКА структуры ответа TikWM для постов со слайдшоу — оставлена
          # постоянно (не одноразово): структура `images`/`live_images` теперь
@@ -2895,7 +2931,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
                    media_data.get("play"), media_data.get("hdplay"), media_data.get("wmplay"),
               )
 
-         author = (media_data.get("author") or {}).get("nickname") or "Автор TikTok"
+         author = (media_data.get("author") or {}).get("nickname") or _t(message.chat.id, "tiktok_author")
 
          if await _try_send_tiktok_slideshow(session, media_data, message, status, author, headers):
               return
@@ -2916,7 +2952,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
               # остаётся log.exception с полным трейсбеком, попадает в Sentry как и раньше.
               log.exception("TikTok download fail:")
          if isinstance(exc, TelegramEntityTooLarge):
-              err_text = "Видео слишком большое для отправки через бота — Telegram Bot API ограничивает загрузку файлов 50 МБ. Попробуйте скачать это видео другим способом."
+              err_text = _t(message.chat.id, "tiktok_too_big")
          elif isinstance(exc, TikTokUserFacingError):
               # Наши собственные ошибки (см. raise TikTokUserFacingError выше по функции)
               # уже написаны как цельные самодостаточные предложения для пользователя.
@@ -2930,7 +2966,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
               # Сырые сетевые/библиотечные исключения пользователю не показываем
               # (см. log.exception выше) — та же логика, что и в остальных
               # обработчиках ошибок бота.
-              err_text = "Не получилось скачать это видео или слайдшоу из TikTok. Попробуй другую ссылку или повтори чуть позже."
+              err_text = _t(message.chat.id, "tiktok_generic_fail")
          edited = await _edit_message_quietly(status, err_text)
          if not edited:
               # status уже мог быть удалён раньше (например, перед отправкой видео) —
@@ -3642,7 +3678,7 @@ async def _run_streaming_reply(
                     # здесь это неверно, там уже другой, ещё не начатый кусок). Обрабатываем
                     # прямо тут, не давая общему except перезаписать корректно показанный
                     # текст чужим содержимым.
-                    note = "\n\n[не удалось отправить продолжение сообщения]"
+                    note = _t(message.chat.id, "stream_note_send_fail")
                     with contextlib.suppress(Exception):
                         await _tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]) + note, parse_mode=ParseMode.HTML, call_timeout=15.0)
                     final_answer = full_text.strip()
@@ -3754,7 +3790,7 @@ async def _run_streaming_reply(
             with contextlib.suppress(Exception):
                 chunks = _split_text_chunks(full_text, TG_MAX_LEN)
                 final_text = chunks[-1] if chunks else full_text
-                note = "\n\n[соединение прервалось — возможно, ответ неполный]"
+                note = _t(message.chat.id, "stream_note_interrupted")
                 await _tg_call(sent_messages[-1].edit_text, _md_to_html(final_text + note), parse_mode=ParseMode.HTML, call_timeout=15.0)
     finally:
         aclose = getattr(piece_agen, "aclose", None)
@@ -3812,6 +3848,7 @@ from lumen_message_parse import (
     extract_url,
     is_tiktok,
     is_youtube,
+    match_pick_request,
 )
 
 # _looks_like_media_reference/_mime_matches_media_category кодом bot.py больше
@@ -3850,21 +3887,12 @@ def message_mentions_bot(message: Message) -> bool:
 async def cmd_start(message: Message) -> None:
     await _tg_call(
         message.reply,
-        "<b>Lumen</b>\n\n"
-        "Отвечаю на вопросы (с поиском в интернете, когда это нужно), читаю сайты и YouTube-видео по ссылке, разбираю фото, видео, аудио и документы, рисую изображения по описанию и озвучиваю текст.\n\n"
-        "<b>Команды</b>\n"
-        "/draw [описание] — нарисовать изображение\n"
-        "/tts [текст] — озвучить текст\n"
-        "/reset — очистить историю диалога\n\n"
-        "Рисовать и озвучивать можно и просто словами, без команд — например «нарисуй кота» или «озвучь это».\n\n"
-        "<b>TikTok</b>\n"
-        "Пришли ссылку — скачаю видео или фото без водяных знаков.\n\n"
-        "Спрашивай что угодно — я слушаю.",
+        _t(message.chat.id, "start_text"),
         parse_mode=ParseMode.HTML,
     )
 
 async def inline_draw(message: Message, prompt: str) -> None:
-    status = await _tg_call(message.reply, "Генерирую изображение")
+    status = await _tg_call(message.reply, _t(message.chat.id, "status_generating_image"))
     try:
         session = await _get_http_session()
         # УБРАНО (аудит техдолга, 19 августа 2026): раньше основная модель бралась
@@ -3898,7 +3926,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 # внутреннюю реализацию (см. ИДЕНТИЧНОСТЬ в system_prompt.py).
                 # На первой попытке статус и так "Генерирую изображение" — не трогаем.
                 if attempt_model != primary_model:
-                    await _edit_message_quietly(status, "Это займёт немного больше времени…")
+                    await _edit_message_quietly(status, _t(message.chat.id, "status_taking_longer"))
                 image_bytes = await _pollinations_text_to_image(session, attempt_model, prompt)
                 break
             except Exception as exc:
@@ -3936,18 +3964,19 @@ async def inline_draw(message: Message, prompt: str) -> None:
     except Exception as exc:
         log.exception("Pollinations image generation failed:")
         txt = _error_text(exc).strip()
+        cid = message.chat.id
         if any(kw in txt.lower() for kw in ("cannot connect", "ssl:", "no address", "connection", "timeout", "host")):
-            user_err = "Сервис генерации изображений временно недоступен. Попробуй позже."
+            user_err = _t(cid, "draw_err_unavailable")
         elif "overloaded" in txt.lower():
-            user_err = "Сервис генерации изображений сейчас перегружен. Подожди минуту и попробуй ещё раз."
+            user_err = _t(cid, "draw_err_overloaded")
         elif "all image generation" in txt.lower():
-            user_err = "Сервис генерации изображений сейчас недоступен. Попробуй позже."
+            user_err = _t(cid, "draw_err_gone")
         elif "time budget" in txt.lower():
-            user_err = "Генерация изображения сейчас занимает слишком много времени. Попробуй, пожалуйста, ещё раз через минуту."
+            user_err = _t(cid, "draw_err_budget")
         else:
             # Сырой текст ошибки провайдера пользователю не показываем (см. log.exception
             # выше) — та же логика, что и в остальных обработчиках ошибок бота.
-            user_err = "Ошибка генерации изображения. Попробуй ещё раз или переформулируй описание."
+            user_err = _t(cid, "draw_err_generic")
         await _edit_message_quietly(status, user_err)
 
 
@@ -3955,7 +3984,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
 async def cmd_draw(message: Message) -> None:
     prompt = message.text.partition(" ")[2].strip() if message.text else ""
     if not prompt:
-        await _safe_reply(message, "Укажи текст после команды /draw. Пример: /draw космическая станция")
+        await _safe_reply(message, _t(message.chat.id, "draw_empty"))
         return
     if await _reject_rate_limited_message(message):
         return
@@ -4008,10 +4037,10 @@ async def inline_tts(message: Message, text: str) -> None:
     if len(text) > TTS_MAX_CHARS:
         await _safe_reply(
             message,
-            f"Текст слишком длинный для озвучки (лимит {TTS_MAX_CHARS} символов, сейчас {len(text)}). Сократи текст и попробуй снова."
+            _t(message.chat.id, "tts_too_long", limit=TTS_MAX_CHARS, length=len(text)),
         )
         return
-    status = await _tg_call(message.reply, "Озвучиваю текст")
+    status = await _tg_call(message.reply, _t(message.chat.id, "status_voicing"))
     try:
         # FISH_AUDIO_ENABLED=False (аудит моделей, 17.09.2026 — зеркало снято с
         # бесплатного каталога OpenRouter): пропускаем заведомо мёртвую первую
@@ -4096,17 +4125,18 @@ async def inline_tts(message: Message, text: str) -> None:
         # служебные детали. Используем ту же классификацию, что и для чата.
         txt = _error_text(exc).strip() or exc.__class__.__name__
         kind = _classify_model_error(_error_status(exc, txt), txt)
+        cid = message.chat.id
         if kind == "rate_limit":
-            user_err = "Лимит запросов на озвучку временно исчерпан. Попробуй немного позже."
+            user_err = _t(cid, "tts_err_exhausted")
         else:
-            user_err = "Не получилось озвучить текст. Попробуй ещё раз или сократи текст."
+            user_err = _t(cid, "tts_err_generic")
         await _edit_message_quietly(status, user_err)
 
 @dp.message(Command("tts"))
 async def cmd_tts(message: Message) -> None:
     text = message.text.partition(" ")[2].strip() if message.text else ""
     if not text:
-        await _safe_reply(message, "Укажи текст после команды /tts. Пример: /tts Добрый день")
+        await _safe_reply(message, _t(message.chat.id, "tts_empty"))
         return
     if await _reject_rate_limited_message(message):
         return
@@ -4123,7 +4153,7 @@ async def cmd_reset(message: Message) -> None:
     if not await _is_privileged_in_chat(message.chat.type, message.chat.id, requester_id):
         await _tg_call(
             message.reply,
-            "В группе историю сбрасывает только администратор, создатель группы или владелец бота. В личных сообщениях — доступно всем."
+            _t(message.chat.id, "reset_deny")
         )
         return
     state = get_state(message.chat.id)
@@ -4132,8 +4162,76 @@ async def cmd_reset(message: Message) -> None:
     mark_state_dirty(message.chat.id)
     await _tg_call(
         message.reply,
-        "История диалога в этом чате очищена. Начинаем с чистого листа."
+        _t(message.chat.id, "reset_done")
     )
+
+# ── Язык бота (/lang) ──
+# Переключает язык СИСТЕМНЫХ сообщений бота в этом чате (/start, подсказки,
+# ошибки, статусы — всё, что бот пишет сам). Ответы ИИ не трогает: модель
+# отвечает на языке собеседника (см. RESPONSE LANGUAGE в system_prompt.py).
+# Права — как у /reset (см. _is_privileged_in_chat): в личке меняет кто
+# угодно, в группе — админ/создатель группы или владелец бота. Смотреть меню
+# может любой; непривилегированный тап вежливо отклоняется. Кнопки без флагов
+# (флаг ≠ язык) и без эмодзи, текущий язык помечен текстовой галочкой ✓.
+# Языки в меню — по алфавиту кода (SUPPORTED_LANGS в lumen_lang.py).
+@dp.message(Command("lang"))
+async def cmd_lang(message: Message) -> None:
+    lang = _chat_lang(message.chat.id)
+    rows = []
+    codes = list(SUPPORTED_LANGS)
+    for i in range(0, len(codes), 2):
+        row = []
+        for code in codes[i:i + 2]:
+            mark = " ✓" if code == lang else ""
+            row.append(InlineKeyboardButton(
+                text=f"{LANG_NAMES[code]}{mark}",
+                callback_data=f"lang:{code}",
+            ))
+        rows.append(row)
+    await _tg_call(
+        message.reply,
+        _t(message.chat.id, "lang_title"),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@dp.callback_query()
+async def handle_lang_callback(query: CallbackQuery) -> None:
+    """Нажатие кнопки языка: проверка прав, сохранение, подтверждение на новом
+    языке. callback_data — "lang:<код>", короткие коды влезают в лимит 64 байт
+    с запасом."""
+    data = query.data or ""
+    if not data.startswith("lang:"):
+        return
+    parts = data.split(":")
+    if len(parts) != 2:
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    code = normalize_lang(parts[1])
+    question_msg = query.message
+    if question_msg is None or question_msg.chat is None:
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    chat = question_msg.chat
+    requester_id = query.from_user.id if query.from_user else None
+    if not await _is_privileged_in_chat(chat.type, chat.id, requester_id):
+        with contextlib.suppress(Exception):
+            await query.answer(_t(chat.id, "lang_deny"), show_alert=True)
+        return
+    state = get_state(chat.id)
+    state["lang"] = code
+    mark_state_dirty(chat.id)
+    with contextlib.suppress(Exception):
+        await query.answer()
+    with contextlib.suppress(Exception):
+        await _tg_call(
+            question_msg.edit_text,
+            _lang_t(code, "lang_done"),
+            parse_mode=None, call_timeout=15.0,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
 
 # выгрузка логов (только для владельца)
 
@@ -4142,7 +4240,7 @@ async def cmd_logs(message: Message) -> None:
     is_owner = _is_owner(message.from_user.id if message.from_user else None)
 
     if not is_owner:
-         await _tg_call(message.reply, "Нет доступа к этой команде.")
+         await _tg_call(message.reply, _t(message.chat.id, "logs_deny"))
          return
 
     if message.chat.type != ChatType.PRIVATE:
@@ -4150,7 +4248,7 @@ async def cmd_logs(message: Message) -> None:
         # котором она вызвана, а не только владелец — файл логов содержит реальные
         # технические детали (ID моделей и т.п.), которые не должны светиться в
         # групповых чатах.
-        await _tg_call(message.reply, "Эта команда показывает технические логи — доступна только в личных сообщениях с ботом, не в группах.")
+        await _tg_call(message.reply, _t(message.chat.id, "logs_group_only"))
         return
 
     # сбрасываем буфер логов на диск — НАЙДЕНО ПРИ АУДИТЕ ЛОГИРОВАНИЯ: после
@@ -4172,7 +4270,7 @@ async def cmd_logs(message: Message) -> None:
                 log_content = f.read()
 
         if not log_content or len(log_content.strip()) == 0:
-            await _tg_call(message.reply, "Лог-файл пуст или ещё не был создан.")
+            await _tg_call(message.reply, _t(message.chat.id, "logs_empty"))
             return
 
         # вычищаем токены из логов перед отправкой — единый список, см. _redactable_secrets
@@ -4193,7 +4291,7 @@ async def cmd_logs(message: Message) -> None:
             pass
     except Exception as exc:
         log.exception("Error extracting or sending logs:")
-        await _tg_call(message.reply, f"Ошибка при отправке логов: {exc}")
+        await _tg_call(message.reply, _t(message.chat.id, "logs_send_error", error=exc))
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: Message) -> None:
@@ -4202,13 +4300,13 @@ async def cmd_stats(message: Message) -> None:
     показывает данные по всем чатам, а не только текущему."""
     is_owner = _is_owner(message.from_user.id if message.from_user else None)
     if not is_owner:
-        await _tg_call(message.reply, "Нет доступа к этой команде.")
+        await _tg_call(message.reply, _t(message.chat.id, "stats_deny"))
         return
 
     if message.chat.type != ChatType.PRIVATE:
         # См. аналогичную проверку в /logs — статистика содержит реальные ID
         # моделей Gemini/OpenRouter, не должна светиться в групповых чатах.
-        await _tg_call(message.reply, "Эта команда показывает техническую статистику — доступна только в личных сообщениях с ботом, не в группах.")
+        await _tg_call(message.reply, _t(message.chat.id, "stats_group_only"))
         return
 
     # Счётчики квоты — по датам America/Los_Angeles (полночь Google для RPD-лимитов),
@@ -4223,11 +4321,14 @@ async def cmd_stats(message: Message) -> None:
     uptime_str = f"{uptime_sec // 3600}ч {(uptime_sec % 3600) // 60}м"
 
     gemini_quota = GLOBAL_QUOTA.get("gemini", {})
+    _stats_lang = _chat_lang(message.chat.id)
+    _limitTag = _lang_t(_stats_lang, "stats_limit_used")
+    _noData = _lang_t(_stats_lang, "stats_no_data")
     gemini_lines = [
-        f"  • {mid}: {e.get('used', 0)}{' (лимит исчерпан)' if e.get('exhausted_at') else ''}"
+        f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
         for mid, e in sorted(gemini_quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
     ]
-    gemini_text = "\n".join(gemini_lines) or "  нет данных"
+    gemini_text = "\n".join(gemini_lines) or _noData
 
     # ИСПРАВЛЕНО (найдено при калибровке 25 июля 2026): раньше здесь была только
     # ОДНА суммарная цифра запросов OpenRouter плюс денежный $-баланс аккаунта —
@@ -4238,10 +4339,10 @@ async def cmd_stats(message: Message) -> None:
     # и только замусоривал вывод.
     or_quota = GLOBAL_QUOTA.get("openrouter", {})
     or_lines = [
-        f"  • {mid}: {e.get('used', 0)}{' (лимит исчерпан)' if e.get('exhausted_at') else ''}"
+        f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
         for mid, e in sorted(or_quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
     ]
-    or_text = "\n".join(or_lines) or "  нет данных"
+    or_text = "\n".join(or_lines) or _noData
 
     # Видимость состояния "выключателя" Telegram-прокси прямо из Telegram, а не
     # только по логам контейнера — иначе деградацию прокси можно было заметить
@@ -4290,7 +4391,148 @@ async def cmd_stats(message: Message) -> None:
 # другой провайдер лучше, чем отказ там, где ответ в принципе можно было дать.
 
 
-def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_analyze: str | None) -> str:
+# ── Кнопки-уточнения (pick-сценарии) ──
+# Детерминированная альтернатива "одному уточняющему вопросу" модели для
+# вкусовых запросов без деталей ("посоветуй фильм"): вопрос с кнопками вместо
+# гадания. Опции заданы кодом (см. PICK_TABLE в lumen_lang.py — вопросы,
+# варианты и шаблоны на языке чата), никаких сгенерированных моделью
+# вариантов — слабые модели их калечат.
+# Без эмодзи в кнопках — по правилу эмодзи (см. system_prompt.py).
+PICK_BUTTONS_ENABLED = os.getenv("PICK_BUTTONS_ENABLED", "1") == "1"
+PICK_TTL_SEC = float(os.getenv("PICK_TTL_SEC", "300"))
+# token -> {chat_id, user_id, scenario, original, expires}: только в памяти
+# процесса (как _speed_ema в lumen_typing_pace.py) — после рестарта кнопки
+# честно считаются протухшими, это штатный путь, а не баг.
+_pending_picks: dict[str, dict[str, Any]] = {}
+
+
+def _purge_expired_picks(now: float | None = None) -> None:
+    """Сносит протухшие записи ожидания кнопок — вызывается при создании новой
+    (отдельного фонового цикла ради этого заводить не стали)."""
+    now = time.monotonic() if now is None else now
+    for token in [t for t, rec in _pending_picks.items() if rec["expires"] <= now]:
+        del _pending_picks[token]
+
+
+async def _send_pick_question(message: Message, scenario: str, original_text: str) -> None:
+    """Отправляет уточняющий вопрос с кнопками и запоминает контекст выбора.
+    token в callback_data короткий (лимит Telegram — 64 байта на всю строку)."""
+    _purge_expired_picks()
+    token = secrets.token_hex(4)
+    lang = _chat_lang(message.chat.id)
+    _pending_picks[token] = {
+        "chat_id": message.chat.id,
+        "user_id": message.from_user.id if message.from_user else None,
+        "scenario": scenario,
+        "original": original_text,
+        "expires": time.monotonic() + PICK_TTL_SEC,
+        "lang": lang,
+    }
+    question, options, _tpl = pick_texts(lang, scenario)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=option, callback_data=f"pick:{token}:{idx}")]
+        for idx, option in enumerate(options)
+    ])
+    await _tg_call(
+        message.reply,
+        question + _t(message.chat.id, "pick_suffix"),
+        reply_markup=keyboard,
+    )
+
+
+@dp.callback_query()
+async def handle_pick_callback(query: CallbackQuery) -> None:
+    """Обработчик нажатий кнопок-уточнений. Чужие кнопки (другой пользователь
+    в группе) и протухшие/перезапущенные записи отклоняются вежливо, без
+    обработки. Выбор дописывается к исходному запросу по шаблону сценария и
+    уходит обычным путём через _handle_message_core — дальше роутер, стриминг
+    и история работают как для текстового сообщения."""
+    data = query.data or ""
+    if not data.startswith("pick:"):
+        return
+    parts = data.split(":")
+    if len(parts) != 3:
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    _, token, idx_raw = parts
+    try:
+        idx = int(idx_raw)
+    except (TypeError, ValueError):
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    # Pop сразу (а не после проверок): повторный тап по тем же кнопкам не
+    # должен порождать второй ответ. Чужая кнопка при этом "сгорает" — цена
+    # приемлема: владелец переспросит текстом.
+    rec = _pending_picks.pop(token, None)
+    # Язык для служебных реплик: из записи (если есть), иначе из чата кнопки.
+    _qchat = query.message.chat.id if query.message and query.message.chat else None
+    rec_lang = (rec or {}).get("lang") or _chat_lang(_qchat)
+    if rec is None or rec["expires"] < time.monotonic():
+        with contextlib.suppress(Exception):
+            await query.answer(_lang_t(rec_lang, "pick_expired"), show_alert=False)
+        return
+    _q, options, tpl = pick_texts(rec_lang, rec.get("scenario", ""))
+    if not 0 <= idx < len(options):
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    if rec["user_id"] is not None and query.from_user is not None and query.from_user.id != rec["user_id"]:
+        with contextlib.suppress(Exception):
+            await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
+        return
+    choice = options[idx]
+    with contextlib.suppress(Exception):
+        await query.answer()
+    question_msg = query.message
+    if question_msg is None:
+        return
+    with contextlib.suppress(Exception):
+        # Клавиатуру снимаем пустой разметкой, иначе кнопки останутся висеть
+        # под сообщением (повторный тап при этом всё равно упрётся в pop выше).
+        await _tg_call(
+            question_msg.edit_text,
+            f"{_q}\n\n{_lang_t(rec_lang, 'pick_choice', choice=choice)}",
+            parse_mode=None, call_timeout=15.0,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+    augmented = tpl.format(original=rec["original"], choice=choice)
+    chat = question_msg.chat
+    from_user = query.from_user
+
+    async def _pick_reply(text: str, **kwargs: Any) -> Any:
+        return await _tg_call(
+            bot.send_message, chat_id=chat.id, text=text,
+            reply_to_message_id=getattr(question_msg, "message_id", None),
+            **kwargs,
+        )
+
+    ns = SimpleNamespace(
+        text=augmented, caption=None, chat=chat, from_user=from_user,
+        sender_chat=None, reply_to_message=None,
+        message_id=getattr(question_msg, "message_id", None),
+        reply=_pick_reply,
+    )
+    # Флаг против зацикливания: дополненный текст всё ещё матчится детектором
+    # ("посоветуй фильм (жанр: ...)"), без флага ушёл бы снова в кнопки.
+    ns._pick_resolved = True
+    lock = get_chat_lock(chat.id)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=10.0)
+    except asyncio.TimeoutError:
+        log.warning("[pick] Timeout waiting for lock on chat %s", chat.id)
+        with contextlib.suppress(Exception):
+            await query.answer(_lang_t(rec_lang, "pick_lock_busy"), show_alert=True)
+        return
+    try:
+        await _handle_message_core(ns)
+    finally:
+        with contextlib.suppress(Exception):
+            lock.release()
+
+
+def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_analyze: str | None, lang: str = DEFAULT_LANG) -> str:
     """Текст ответа пользователю на исключение из _run_route — чистая функция
     без побочных эффектов (сам owner-алерт на GeminiAllModelsExhaustedError
     остаётся в _handle_message_core, до вызова этой функции, т.к. это сетевой
@@ -4299,17 +4541,14 @@ def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_a
     самой длинной функции проекта, тестировать её отдельно раньше было нельзя
     без гонки всего _handle_message_core целиком."""
     if youtube_url_to_analyze:
-        return (
-            "Не получилось открыть это видео (возможно, оно приватное, удалено, слишком длинное "
-            "или недоступно для анализа). Опиши, пожалуйста, о чём оно словами — тогда смогу помочь."
-        )
+        return _lang_t(lang, "err_youtube_fail")
     if isinstance(exc, GeminiAllModelsExhaustedError):
-        return _gemini_error_msg(exc, head_model)
+        return _gemini_error_msg(exc, head_model, lang)
     if isinstance(exc, RouteBudgetExceededError):
-        return "Сервис сейчас перегружен. Попробуй, пожалуйста, ещё раз через минуту."
+        return _lang_t(lang, "err_budget")
     if isinstance(exc, OpenRouterAPIError):
-        return _or_error_msg(exc, "text")
-    return _gemini_error_msg(exc, head_model)
+        return _or_error_msg(exc, "text", lang)
+    return _gemini_error_msg(exc, head_model, lang)
 
 
 class RouteBudgetExceededError(RuntimeError):
@@ -4535,7 +4774,7 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
 async def _reject_rate_limited_message(message: Message) -> bool:
     if not _check_and_register_rate_limit(_rate_limit_key_for_message(message)):
         return False
-    await _tg_call(message.reply, "Ты отправляешь слишком много запросов. Подожди немного.")
+    await _tg_call(message.reply, _t(message.chat.id, "rate_limited"))
     return True
 
 
@@ -4660,7 +4899,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         # разбора через /logs, чтобы со временем пополнять список паттернов реальными
         # случаями, а не только теми, что придуманы заранее.
         log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s: %r', message.chat.id, clean_prompt[:300])
-        await _safe_reply(message, _INJECTION_PROBE_REPLY)
+        await _safe_reply(message, _t(message.chat.id, "injection_probe_reply"))
         return
 
     # ищем триггерные фразы (без учёта эмодзи)
@@ -4698,6 +4937,16 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             await inline_tts(message, tts_content)
             return
 
+    # Кнопки-уточнения для вкусовых запросов без деталей ("посоветуй фильм"):
+    # вместо гадания модели — вопрос с вариантами. _pick_resolved ставят только
+    # колбэки (см. handle_pick_callback): дополненный текст всё ещё матчится
+    # детектором, без флага ушёл бы в кнопки по кругу.
+    if PICK_BUTTONS_ENABLED and not getattr(message, "_pick_resolved", False):
+        pick_scenario = match_pick_request(lower_prompt)
+        if pick_scenario:
+            await _send_pick_question(message, pick_scenario, clean_prompt)
+            return
+
     med_path, med_mime, med_name, media_tuple = await _resolve_incoming_media(
         message, state, clean_prompt, is_private=is_private,
     )
@@ -4709,7 +4958,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
 
     if not clean_prompt and not media_tuple and not youtube_url_to_analyze:
          if mentioned:
-              await _tg_call(message.reply, "Слушаю.")
+              await _tg_call(message.reply, _t(message.chat.id, "status_listening"))
          return
 
     # Отправка typing экшена
@@ -4776,7 +5025,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         head_model = route[0][1] if route else DEFAULT_GEMINI_MODEL
         if isinstance(exc, GeminiAllModelsExhaustedError):
             await _maybe_alert_gemini_exhausted()
-        await _safe_reply(message, _route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze))
+        await _safe_reply(message, _route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze, lang=_chat_lang(message.chat.id)))
     finally:
         if med_path and os.path.exists(med_path):
              with contextlib.suppress(Exception):
@@ -4812,7 +5061,7 @@ async def handle_message(message: Message) -> None:
     except asyncio.TimeoutError:
         log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
         with contextlib.suppress(Exception):
-             await _tg_call(message.reply, "Предыдущий запрос ещё обрабатывается. Подожди или попробуй позже.")
+             await _tg_call(message.reply, _t(chat_id, "lock_busy"))
         return
 
     try:
@@ -4879,10 +5128,28 @@ async def _webhook_startup() -> None:
     )
 
     commands = [
-        BotCommand(command="start", description="О боте и список команд"),
-        BotCommand(command="reset", description="Очистить историю диалога"),
-        BotCommand(command="draw", description="Нарисовать изображение по описанию"),
-        BotCommand(command="tts", description="Озвучить текст"),
+        BotCommand(command="start", description=_lang_t(DEFAULT_LANG, "cmd_desc_start")),
+        BotCommand(command="reset", description=_lang_t(DEFAULT_LANG, "cmd_desc_reset")),
+        BotCommand(command="draw", description=_lang_t(DEFAULT_LANG, "cmd_desc_draw")),
+        BotCommand(command="tts", description=_lang_t(DEFAULT_LANG, "cmd_desc_tts")),
+        BotCommand(command="lang", description=_lang_t(DEFAULT_LANG, "cmd_desc_lang")),
+    ]
+    # Локализованные описания команд: Telegram показывает меню на языке
+    # клиента (language_code), если такой вариант задан. Не задали — клиент
+    # увидит дефолтный английский список выше. Каждый язык — отдельным вызовом,
+    # падение одного не роняет остальные.
+    localized_commands = [
+        (
+            code,
+            [
+                BotCommand(command="start", description=_lang_t(code, "cmd_desc_start")),
+                BotCommand(command="reset", description=_lang_t(code, "cmd_desc_reset")),
+                BotCommand(command="draw", description=_lang_t(code, "cmd_desc_draw")),
+                BotCommand(command="tts", description=_lang_t(code, "cmd_desc_tts")),
+                BotCommand(command="lang", description=_lang_t(code, "cmd_desc_lang")),
+            ],
+        )
+        for code in SUPPORTED_LANGS if code != DEFAULT_LANG
     ]
 
     async def try_setup():
@@ -4934,17 +5201,25 @@ async def _webhook_startup() -> None:
                 exc,
             )
 
-        try:
-            cmd_payload = {
-                "commands": [{"command": c.command, "description": c.description} for c in commands]
+        cmd_payloads = [
+            {"commands": [{"command": c.command, "description": c.description} for c in commands]}
+        ] + [
+            {
+                "commands": [{"command": c.command, "description": c.description} for c in cmds],
+                "language_code": code,
             }
-            await asyncio.wait_for(
-                telegram_api_call("setMyCommands", cmd_payload, request_timeout=15.0),
-                timeout=18.0
-            )
+            for code, cmds in localized_commands
+        ]
+        for cmd_payload in cmd_payloads:
+            try:
+                await asyncio.wait_for(
+                    telegram_api_call("setMyCommands", cmd_payload, request_timeout=15.0),
+                    timeout=18.0
+                )
+            except Exception as exc:
+                log.warning("[webhook] setMyCommands failed (%s): %s", cmd_payload.get("language_code", "default"), exc)
+        else:
             log.info("[webhook] Bot commands set successfully.")
-        except Exception as exc:
-            log.warning("[webhook] setMyCommands failed: %s", exc)
 
     await try_setup()
 

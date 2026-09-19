@@ -588,7 +588,8 @@ def test_gemini_error_msg_all_models_exhausted():
     exc = bot.GeminiAllModelsExhaustedError(["gemini-3.5-flash", "gemini-2.5-flash"])
     msg = bot._gemini_error_msg(exc, "gemini-3.5-flash")
     assert "/provider" not in msg
-    assert "лимит" in msg.lower()
+    assert "limit" in msg.lower()
+    assert "ліміт" in bot._gemini_error_msg(exc, "gemini-3.5-flash", "uk").lower()
 
 
 def test_or_error_msg_rate_limit():
@@ -2022,7 +2023,7 @@ def test_try_gemini_streaming_failed_continuation_does_not_corrupt_first_message
         # а НЕ последний/другой кусок текста — это и была суть бага.
         first_msg_final_text = incoming.sent[0].edits[-1][0]
         assert first_msg_final_text.startswith("А")
-        assert "не удалось отправить продолжение" in first_msg_final_text
+        assert "couldn't send the rest of the message" in first_msg_final_text
     finally:
         bot.client = original_client
         bot.bot = original_bot
@@ -2630,13 +2631,14 @@ def test_build_gemini_call_config_no_system_model_includes_full_system_prompt():
     contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
     call_contents, _ = bot._build_gemini_call_config("gemma-4-26b-a4b-it", contents)
     first_user_text = call_contents[0].parts[0].text
-    assert "БЛАГОПОЛУЧИЕ И ЗДОРОВЬЕ ПОЛЬЗОВАТЕЛЯ" in first_user_text
+    # Системный промпт единый на английском (с сентября 2026).
     assert "8-800-2000-122" in first_user_text
-    assert "АВТОРСКИЕ ПРАВА" in first_user_text
-    assert "ОБЪЕКТИВНОСТЬ И НЕПРЕДВЗЯТОСТЬ" in first_user_text
+    assert "USER WELLBEING" in first_user_text
+    assert "COPYRIGHT" in first_user_text
+    assert "EVENHANDEDNESS" in first_user_text
     # Короткий проверенный на практике чеклист (личность/дата/защита от инъекций)
     # сохранён поверх полного промпта, а не заменён им.
-    assert "Твоё имя — Lumen" in first_user_text
+    assert "Your name is Lumen" in first_user_text
 
 
 def test_build_gemini_call_config_with_system_instruction_model_unaffected():
@@ -2646,7 +2648,7 @@ def test_build_gemini_call_config_with_system_instruction_model_unaffected():
     contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
     call_contents, gconfig = bot._build_gemini_call_config(bot.DEFAULT_GEMINI_MODEL, contents)
     assert call_contents is contents
-    assert "БЛАГОПОЛУЧИЕ И ЗДОРОВЬЕ ПОЛЬЗОВАТЕЛЯ" in gconfig.system_instruction
+    assert "USER WELLBEING" in gconfig.system_instruction
 
 
 # ─────────────── thinking_level/thinking_budget (калибровка 18 августа 2026) ───────────────
@@ -2822,6 +2824,8 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones():
     captured = {}
 
     class _FakeStartMessage:
+        chat = SimpleNamespace(id=1, type=bot.ChatType.PRIVATE)
+
         async def reply(self, text, **kwargs):
             captured["text"] = text
             return SimpleNamespace()
@@ -2831,6 +2835,7 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones():
     assert "/draw" in text
     assert "/tts" in text
     assert "/reset" in text
+    assert "/lang" in text
     assert "/imgmodel" not in text
 
 
@@ -2891,7 +2896,7 @@ def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
         asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
         # Ровно ОДНА попытка — бюджет исчерпался до второй, а не перебор всех 5 моделей.
         assert len(attempts) == 1
-        assert "времени" in incoming.sent[0].edits[-1][0].lower()
+        assert "too long" in incoming.sent[0].edits[-1][0].lower()
     finally:
         bot._pollinations_text_to_image = original_hf
         bot.DRAW_TOTAL_BUDGET_SEC = original_budget
@@ -2962,7 +2967,7 @@ def test_inline_draw_stops_chain_on_service_rate_limit():
         asyncio.run(bot.inline_draw(incoming, "дикобраз"))
         assert attempts == [bot._pick_image_model("дикобраз")]
         status_texts = [text for text, _ in incoming.sent[0].edits]
-        assert any("перегружен" in text for text in status_texts)
+        assert any("overloaded" in text for text in status_texts)
     finally:
         bot._pollinations_text_to_image = original_hf
         bot.chat_state.pop(chat_id, None)
@@ -3433,7 +3438,9 @@ def test_handle_message_core_known_route_outcome_logs_as_warning_not_exception(c
 def test_route_error_reply_text_youtube_takes_priority_over_exception_type():
     exc = bot.OpenRouterAPIError("boom", status_code=500)
     text = bot._route_error_reply_text(exc, "gemini-3.6-flash", youtube_url_to_analyze="https://youtu.be/x")
-    assert "видео" in text.lower()
+    assert "video" in text.lower()
+    text_ru = bot._route_error_reply_text(exc, "gemini-3.6-flash", youtube_url_to_analyze="https://youtu.be/x", lang="ru")
+    assert "видео" in text_ru.lower()
 
 
 def test_route_error_reply_text_maps_known_exception_types():
@@ -3441,7 +3448,8 @@ def test_route_error_reply_text_maps_known_exception_types():
     assert bot._route_error_reply_text(quota_exc, "gemini-3.6-flash", youtube_url_to_analyze=None) == bot._gemini_error_msg(quota_exc, "gemini-3.6-flash")
 
     budget_exc = bot.RouteBudgetExceededError(["gemini-3.6-flash"])
-    assert "перегруж" in bot._route_error_reply_text(budget_exc, "gemini-3.6-flash", youtube_url_to_analyze=None).lower()
+    assert "overloaded" in bot._route_error_reply_text(budget_exc, "gemini-3.6-flash", youtube_url_to_analyze=None).lower()
+    assert "перегруж" in bot._route_error_reply_text(budget_exc, "gemini-3.6-flash", youtube_url_to_analyze=None, lang="ru").lower()
 
     or_exc = bot.OpenRouterAPIError("boom", status_code=500)
     assert bot._route_error_reply_text(or_exc, "gemini-3.6-flash", youtube_url_to_analyze=None) == bot._or_error_msg(or_exc, "text")
@@ -5136,6 +5144,193 @@ def test_proxy_middleware_never_sends_secret_to_direct_or_unrelated_hosts():
         assert "X-Lumen-Proxy-Secret" not in seen["sent"], url
 
 
+class _FakeQueryMessage:
+    def __init__(self, chat_id=777, message_id=55):
+        self.chat = SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE)
+        self.message_id = message_id
+        self.edits = []
+
+    async def edit_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
+        return self
+
+
+def _make_pick_query(data, user_id=111, msg=None):
+    q = SimpleNamespace()
+    q.data = data
+    q.from_user = SimpleNamespace(id=user_id)
+    q.message = msg if msg is not None else _FakeQueryMessage()
+    q.answered = []
+
+    async def answer(text=None, show_alert=False):
+        q.answered.append((text, show_alert))
+
+    q.answer = answer
+    return q
+
+
+def test_match_pick_request_detects_taste_requests():
+    assert bot.match_pick_request("посоветуй фильм") == "film"
+    assert bot.match_pick_request("порекомендуй интересную книгу") == "books"
+    assert bot.match_pick_request("подскажи музыку для тренировки") == "music"
+    assert bot.match_pick_request("накидай сериалов") == "series"
+    assert bot.match_pick_request("придумай игру для компании") == "games"
+    # Английские запросы — тот же детектор (дефолтный язык бота — en).
+    assert bot.match_pick_request("recommend a movie") == "film"
+    assert bot.match_pick_request("suggest music for training") == "music"
+
+
+def test_match_pick_request_rejects_detailed_or_unrelated():
+    # Длинный запрос с деталями — обычным путём в модель, без кнопок.
+    assert bot.match_pick_request("посоветуй фильм про космос, ужасы, 2024 год, длинный список") is None
+    assert bot.match_pick_request("привет, как дела?") is None
+    assert bot.match_pick_request("нарисуй кота") is None
+    assert bot.match_pick_request("") is None
+    # Латиница — только по границам слов: "notebook" — не книги.
+    assert bot.match_pick_request("recommend a notebook") is None
+
+
+def test_pick_question_sent_instead_of_ai_route(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "посоветуй фильм"
+    fake_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_not_awaited()
+    bot.inline_tts.assert_not_awaited()
+    fake_route.assert_not_awaited()
+    assert bot._tg_call.await_count == 1
+    kwargs = bot._tg_call.await_args[1]
+    markup = kwargs.get("reply_markup")
+    assert markup is not None
+    assert len(markup.inline_keyboard) == 4
+    assert all(cb.callback_data.startswith("pick:") for row in markup.inline_keyboard for cb in row)
+
+
+def test_pick_disabled_flag_goes_to_ai_route(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "посоветуй фильм"
+    monkeypatch.setattr(bot, "PICK_BUTTONS_ENABLED", False)
+    fake_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    asyncio.run(bot._handle_message_core(message))
+    fake_route.assert_awaited_once()
+
+
+def test_pick_resolved_flag_goes_to_ai_route(rate_guard_setup, monkeypatch):
+    # Дополненный выбор ("посоветуй фильм (жанр: ...)") всё ещё матчится
+    # детектором — флаг _pick_resolved обрывает круг.
+    message = rate_guard_setup()
+    message.text = "посоветуй фильм (жанр: Триллер)"
+    message._pick_resolved = True
+    fake_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    asyncio.run(bot._handle_message_core(message))
+    fake_route.assert_awaited_once()
+
+
+def test_pick_callback_happy_path_runs_augmented_request(monkeypatch):
+    bot._pending_picks.clear()
+    bot._pending_picks["ab12cd34"] = {
+        "chat_id": 777, "user_id": 111, "scenario": "film",
+        "original": "посоветуй фильм", "expires": time.monotonic() + 300,
+        "lang": "ru",
+    }
+    q = _make_pick_query("pick:ab12cd34:2")
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    try:
+        asyncio.run(bot.handle_pick_callback(q))
+        assert q.answered and q.answered[0] == (None, False)
+        assert len(q.message.edits) == 1
+        assert "Триллер" in q.message.edits[0][0]
+        fake_core.assert_awaited_once()
+        sent_ns = fake_core.await_args[0][0]
+        assert sent_ns.text == "посоветуй фильм (жанр: Триллер)"
+        assert getattr(sent_ns, "_pick_resolved", False) is True
+        assert "ab12cd34" not in bot._pending_picks
+    finally:
+        bot._pending_picks.clear()
+
+
+def test_pick_callback_happy_path_english_template(monkeypatch):
+    # Запись без языка → язык берётся из чата (дефолт en): шаблон и опции английские.
+    bot._pending_picks.clear()
+    bot._pending_picks["en12cd34"] = {
+        "chat_id": 777, "user_id": 111, "scenario": "film",
+        "original": "recommend a movie", "expires": time.monotonic() + 300,
+    }
+    q = _make_pick_query("pick:en12cd34:2")
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    try:
+        asyncio.run(bot.handle_pick_callback(q))
+        assert len(q.message.edits) == 1
+        assert "Thriller" in q.message.edits[0][0]
+        fake_core.assert_awaited_once()
+        sent_ns = fake_core.await_args[0][0]
+        assert sent_ns.text == "recommend a movie (genre: Thriller)"
+    finally:
+        bot._pending_picks.clear()
+
+
+def test_pick_callback_second_tap_reports_expired(monkeypatch):
+    q = _make_pick_query("pick:deadbeef:0")
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    asyncio.run(bot.handle_pick_callback(q))
+    assert any("expired" in (text or "").lower() for text, _ in q.answered)
+    fake_core.assert_not_awaited()
+
+
+def test_pick_callback_wrong_user_rejected(monkeypatch):
+    bot._pending_picks.clear()
+    bot._pending_picks["cc33dd44"] = {
+        "chat_id": 777, "user_id": 111, "scenario": "film",
+        "original": "посоветуй фильм", "expires": time.monotonic() + 300,
+    }
+    q = _make_pick_query("pick:cc33dd44:0", user_id=999)
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    try:
+        asyncio.run(bot.handle_pick_callback(q))
+        assert any(alert is True for _, alert in q.answered)
+        fake_core.assert_not_awaited()
+    finally:
+        bot._pending_picks.clear()
+
+
+def test_pick_callback_bad_data_answered_quietly():
+    for data in ("pick:", "pick:tok:notanint"):
+        q = _make_pick_query(data)
+        asyncio.run(bot.handle_pick_callback(q))
+        assert q.answered
+
+
+def test_pick_callback_ignores_foreign_callbacks():
+    q = _make_pick_query("something-else-entirely")
+    asyncio.run(bot.handle_pick_callback(q))
+    assert q.answered == []
+
+
+def test_expired_picks_purged_on_new_pick(rate_guard_setup, monkeypatch):
+    bot._pending_picks.clear()
+    bot._pending_picks["old"] = {
+        "chat_id": 1, "user_id": 1, "scenario": "film",
+        "original": "x", "expires": time.monotonic() - 1,
+    }
+    message = rate_guard_setup()
+    message.text = "посоветуй фильм"
+    fake_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert "old" not in bot._pending_picks
+        assert len(bot._pending_picks) == 1
+    finally:
+        bot._pending_picks.clear()
+
+
 def test_proxy_middleware_strips_stale_secret_and_requires_secret():
     _, _, seen = _run_proxy_middleware(
         "https://api.telegram.org/bot123/sendMessage",
@@ -5264,3 +5459,121 @@ def test_rich_edit_falls_back_to_legacy_on_failure():
         assert msg.edits and msg.edits[0][0] == "<b>жирный</b>"
     finally:
         bot.bot = original_bot
+
+
+# ─────────────────── Bot language (/lang, lumen_lang.py) ───────────────────
+# Язык системных сообщений per-chat (дефолт en). Ответы ИИ не трогаем.
+
+
+def test_lang_table_covers_all_keys_in_all_languages():
+    import lumen_lang
+    assert tuple(lumen_lang.SUPPORTED_LANGS) == ("be", "en", "es", "kk", "ru", "uk")
+    assert set(lumen_lang.LANG_NAMES) == set(lumen_lang.SUPPORTED_LANGS)
+    for key, table in lumen_lang.STRINGS.items():
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            assert table.get(lang), f"missing {key}[{lang}]"
+    for lang in lumen_lang.SUPPORTED_LANGS:
+        for scenario in ("film", "series", "music", "books", "games"):
+            q, opts, tpl = lumen_lang.pick_texts(lang, scenario)
+            assert q and len(opts) == 4 and "{original}" in tpl and "{choice}" in tpl
+
+
+def test_normalize_lang_fallbacks_to_english():
+    import lumen_lang
+    assert lumen_lang.normalize_lang(None) == "en"
+    assert lumen_lang.normalize_lang("") == "en"
+    assert lumen_lang.normalize_lang("xx") == "en"
+    assert lumen_lang.normalize_lang("ru-RU") == "ru"
+    assert lumen_lang.normalize_lang("UK") == "uk"
+
+
+def test_chat_lang_defaults_to_english_and_survives_garbage(monkeypatch):
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: {})
+    assert bot._chat_lang(123) == "en"
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: {"lang": "uk"})
+    assert bot._chat_lang(123) == "uk"
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: {"lang": "xx"})
+    assert bot._chat_lang(123) == "en"
+
+
+def _make_lang_query(data, chat_type=None, user_id=111):
+    q = _make_pick_query(data, user_id=user_id)
+    q.message.chat.type = chat_type or bot.ChatType.PRIVATE
+    return q
+
+
+def test_lang_callback_sets_language_and_confirms_in_new_language():
+    bot.chat_state.pop(777, None)
+    q = _make_lang_query("lang:uk")
+    try:
+        asyncio.run(bot.handle_lang_callback(q))
+        assert bot.get_state(777).get("lang") == "uk"
+        assert q.answered and q.answered[0] == (None, False)
+        assert len(q.message.edits) == 1
+        assert q.message.edits[0][0] == "Мова: Українська."
+    finally:
+        bot.chat_state.pop(777, None)
+
+
+def test_lang_callback_denied_without_privileges(monkeypatch):
+    async def _deny(chat_type, chat_id, user_id):
+        return False
+    monkeypatch.setattr(bot, "_is_privileged_in_chat", _deny)
+    q = _make_lang_query("lang:uk", chat_type="group")
+    asyncio.run(bot.handle_lang_callback(q))
+    assert any(alert is True for _, alert in q.answered)
+    assert bot.get_state(777).get("lang") != "uk"
+    bot.chat_state.pop(777, None)
+
+
+def test_lang_callback_ignores_foreign_callbacks():
+    q = _make_lang_query("something-else-entirely")
+    asyncio.run(bot.handle_lang_callback(q))
+    assert q.answered == []
+
+
+def test_lang_menu_lists_languages_alphabetically(monkeypatch):
+    import lumen_lang
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=123, type=bot.ChatType.PRIVATE),
+        reply=AsyncMock(),
+    )
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=None))
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: {"lang": "ru"})
+    asyncio.run(bot.cmd_lang(message))
+    kwargs = bot._tg_call.await_args[1]
+    markup = kwargs.get("reply_markup")
+    codes = [cb.callback_data.split(":")[1] for row in markup.inline_keyboard for cb in row]
+    assert codes == list(lumen_lang.SUPPORTED_LANGS)
+    texts = [cb.text for row in markup.inline_keyboard for cb in row]
+    assert texts == [f"{lumen_lang.LANG_NAMES[c]}{' ✓' if c == 'ru' else ''}" for c in codes]
+
+
+def test_serialize_chat_state_persists_lang():
+    import lumen_state_storage
+    snap = lumen_state_storage._serialize_chat_state({"history": [], "recent_media_ids": {}, "lang": "kk"})
+    assert snap["lang"] == "kk"
+    snap2 = lumen_state_storage._serialize_chat_state({"history": []})
+    assert snap2["lang"] == "en"
+
+
+# ─────────────────── System prompt language (EN-only) ───────────────────
+# С сентября 2026 системный промпт единый на английском (русский вариант удалён
+# из кода). Проверяем: сторожевые фразы на месте, шапка с датой на английском.
+
+
+def test_system_prompt_en_keeps_key_guards():
+    import system_prompt
+    for guard in (
+        "You are Lumen",
+        "@SilverElixir",
+        "CRITICALLY IMPORTANT",
+        "8-800-2000-122",
+        "EMOJI USAGE RULE",
+        "NON-REMOVABLE BOUNDARIES",
+    ):
+        assert guard in system_prompt.SYSTEM_PROMPT
+
+
+def test_get_system_prompt_header_english():
+    assert "CURRENT TIME INFORMATION" in bot.get_system_prompt()

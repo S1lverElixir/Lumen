@@ -72,6 +72,8 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `STREAM_TYPING_TICK_SEC` | `0.5s` | Interval between steps of the post-stream "catch-up" reveal. |
 | `STREAM_TYPING_MAX_CATCHUP_TICKS` | `6` | Max catch-up steps, capping the extra delay this can add. |
 | `RICH_MESSAGES_ENABLED` | `1` | Send final answers via `sendRichMessage` (Bot API 10.1+: real tables, headings, math). Any failure falls back to plain HTML automatically; streaming edits always use HTML. Set to `0` (plus restart) to force legacy HTML if rendering breaks on old clients. |
+| `PICK_BUTTONS_ENABLED` | `1` | Show clarifying buttons for short taste requests without details ("посоветуй фильм"). Set to `0` (plus restart) to answer such requests as plain text instead. |
+| `PICK_TTL_SEC` | `300s` | How long pick buttons stay valid. Expired or post-restart taps get a "buttons expired, write in text" notice instead of an answer. |
 
 ## TikTok downloader
 

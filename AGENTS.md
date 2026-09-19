@@ -9,7 +9,7 @@
 
 ## What this repo is
 - Lumen: a Telegram bot (persona styled after Claude) running as a single FastAPI + aiogram webhook service on a Hugging Face Space (Docker). LLM backbone: Google Gemini + free OpenRouter models with per-message routing.
-- Entry point is bot.py (orchestrator, ~5000 lines). Focused modules sit next to it: lumen_router_config.py (model routing), lumen_formatting.py (markdown to Telegram HTML), lumen_security.py (injection/leak defenses), lumen_message_parse.py (links, draw/tts triggers, media references), lumen_media.py (mime types, file-id parsing), lumen_images.py, lumen_tts.py, lumen_tiktok.py, lumen_telegram_transport.py, lumen_state_storage.py, lumen_typing_pace.py, lumen_model_speed.py (measured model latency), plus system_prompt.py.
+- Entry point is bot.py (orchestrator, ~5000 lines). Focused modules sit next to it: lumen_router_config.py (model routing), lumen_formatting.py (markdown to Telegram HTML), lumen_security.py (injection/leak defenses), lumen_message_parse.py (links, draw/tts triggers, media references), lumen_media.py (mime types, file-id parsing), lumen_images.py, lumen_tts.py, lumen_tiktok.py, lumen_telegram_transport.py, lumen_state_storage.py, lumen_typing_pace.py, lumen_model_speed.py (measured model latency), lumen_lang.py (bot language: system messages in 6 languages), plus system_prompt.py.
 
 ## Commands (verified against CI, .github/workflows/ci.yml)
 - Full gate: pip install -r requirements.txt -r requirements-dev.txt; pyflakes bot.py lumen_*.py system_prompt.py conftest.py test_*.py; pytest -q; pip-audit -r requirements.txt

@@ -24,8 +24,10 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 - **Defenses against prompt injection and identity leaks.** A deterministic input filter plus output scrubbers keep the bot from revealing which model or provider actually answered.
 - **TikTok downloads** without watermarks: video, slideshows (including "live" photo slides), and original sound.
 - **Image generation** through Pollinations.ai. The model is picked from the prompt itself (anime, fantasy, realism, quick sketch, or a general default).
-- **Text-to-speech**, trying Fish Audio first and falling back to Gemini TTS.
+- **Text-to-speech** through Gemini TTS.
 - `/draw` and `/tts` also work as plain phrases at the start of a message ("draw a cat," "read this out loud"), no slash required.
+- **Clarifying buttons** for short taste requests without details ("посоветуй фильм" → genre buttons instead of a guess).
+- **Bot language** (`/lang`): system messages in English (default), Russian, Ukrainian, Belarusian, Kazakh or Spanish. AI answers always follow the user's own language.
 - **Persistent state.** An optional Upstash Redis backend keeps chat history and quota counters alive across redeploys.
 - **Error tracking** through an optional Sentry integration that scrubs secrets before sending anything.
 
@@ -33,7 +35,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 Lumen is a single FastAPI + aiogram service. Telegram delivers updates to a webhook. Each message gets routed through a chain of candidate models (Gemini and/or OpenRouter), built on the fly from the message's content: attachments, links, and a couple of lightweight heuristics for "does this need current information" and "is this a heavy request." The first provider that answers wins; the other is tried as a fallback if its whole chain fails.
 
-The codebase is a modular monolith. `bot.py` is the orchestrator; the rest is split into focused modules: `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, and `lumen_typing_pace.py`.
+The codebase is a modular monolith. `bot.py` is the orchestrator; the rest is split into focused modules: `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, `lumen_typing_pace.py`, `lumen_model_speed.py`, and `lumen_lang.py` (bot language: system messages in 6 languages).
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for a deeper look at routing, streaming, the security layers, and the TikTok downloader.
 
@@ -83,7 +85,7 @@ All three endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/a
 
 ## Commands
 
-`/start`, `/reset`, `/draw`, and `/tts` show up in Telegram's command menu:
+`/start`, `/reset`, `/draw`, `/tts`, and `/lang` show up in Telegram's command menu:
 
 | Command | Access | Purpose |
 |---|---|---|
@@ -91,6 +93,7 @@ All three endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/a
 | `/reset` | anyone in DMs; group admins/owner in groups | Clears the chat's conversation history. |
 | `/draw [description]` | anyone | Generates an image (see [Features](#features)). |
 | `/tts [text]` | anyone | Reads text out loud. |
+| `/lang` | anyone in DMs; group admins/owner in groups | Bot language menu (system messages; AI answers always follow your language). |
 
 Two more owner-only commands stay out of the menu on purpose, since they surface internal details that shouldn't be visible in a group chat:
 
