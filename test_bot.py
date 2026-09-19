@@ -659,6 +659,69 @@ def test_cleanup_rate_limit_dict_removes_empty_and_stale_entries():
     assert 111 not in bot.user_rate_limits
     assert 222 not in bot.user_rate_limits
     assert 333 in bot.user_rate_limits
+    bot.user_rate_limits.clear()
+
+
+def test_rate_limit_dict_evicts_stale_keys_when_over_capacity():
+    # Регрессия AUD-G-001: при переполнении новый ключ чистит протухшие.
+    original_max = bot.MAX_RATE_LIMIT_KEYS
+    bot.MAX_RATE_LIMIT_KEYS = 2
+    bot.user_rate_limits.clear()
+    try:
+        bot.user_rate_limits[1] = [time.time() - 7200]
+        bot.user_rate_limits[2] = [time.time() - 7200]
+        assert bot._check_and_register_rate_limit(3) is False
+        assert 1 not in bot.user_rate_limits
+        assert 2 not in bot.user_rate_limits
+        assert 3 in bot.user_rate_limits
+    finally:
+        bot.MAX_RATE_LIMIT_KEYS = original_max
+        bot.user_rate_limits.clear()
+
+
+def test_evict_orphan_chat_locks_keeps_live_and_held_locks():
+    # Регрессия AUD-G-001: бесхозные локи сносятся, живые и занятые остаются.
+    orphan_cid, live_cid, held_cid = 900001, 900002, 900003
+    for cid in (orphan_cid, live_cid, held_cid):
+        bot._chat_locks.pop(cid, None)
+    bot.chat_state.pop(live_cid, None)
+    bot.chat_state[live_cid] = {"history": [], "last_activity": time.time()}
+    bot.get_chat_lock(orphan_cid)
+    bot.get_chat_lock(live_cid)
+    held_lock = bot.get_chat_lock(held_cid)
+
+    async def _hold_and_evict():
+        async with held_lock:
+            return bot._evict_orphan_chat_locks()
+
+    try:
+        assert asyncio.run(_hold_and_evict()) == 1
+        assert orphan_cid not in bot._chat_locks
+        assert live_cid in bot._chat_locks
+        assert held_cid in bot._chat_locks
+    finally:
+        bot._chat_locks.pop(orphan_cid, None)
+        bot._chat_locks.pop(held_cid, None)
+        bot._chat_locks.pop(live_cid, None)
+        bot.chat_state.pop(live_cid, None)
+
+
+def test_enforce_pending_picks_cap_evicts_closest_to_expiry():
+    # Регрессия AUD-G-001: сверх лимита уходят самые близкие к протуханию.
+    original_max = bot.MAX_PENDING_PICKS
+    original_picks = dict(bot._pending_picks)
+    bot.MAX_PENDING_PICKS = 3
+    bot._pending_picks.clear()
+    try:
+        now = time.monotonic()
+        for i in range(5):
+            bot._pending_picks[f"t{i}"] = {"expires": now + i}
+        bot._enforce_pending_picks_cap()
+        assert set(bot._pending_picks) == {"t2", "t3", "t4"}
+    finally:
+        bot.MAX_PENDING_PICKS = original_max
+        bot._pending_picks.clear()
+        bot._pending_picks.update(original_picks)
 
 
 # ─────────────────────────── хранилище: локальный файл vs Upstash ───────────────────────────
@@ -3883,6 +3946,17 @@ def test_allowed_updates_contains_only_real_telegram_types():
     # setWebhook мог ответить 400 и бот замолчал бы. Гости идут через answerGuestQuery.
     assert "guest_message" not in bot.ALLOWED_UPDATES
     assert "message" in bot.ALLOWED_UPDATES
+
+
+def test_truncate_html_to_fit_keeps_short_text_and_cuts_at_source_boundary():
+    # Регрессия AUD-J-002: рез готового HTML рвал теги ("can't parse entities").
+    short = bot._truncate_html_to_fit("привет", bot.TG_MAX_LEN)
+    assert short == bot._md_to_html("привет")
+    long_md = "**" + "x" * 5000 + "**"
+    cut = bot._truncate_html_to_fit(long_md, bot.TG_MAX_LEN)
+    assert len(cut) <= bot.TG_MAX_LEN
+    assert cut.endswith("…")
+    assert cut.count("<b>") == cut.count("</b>")
 
 
 # ─────────────────── ADMIN_SECRET_SEED — независимая ротация секретов ───────────────────

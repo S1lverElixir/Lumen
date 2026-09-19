@@ -25,6 +25,6 @@ jobs:
         with:
           name: lumen-state-backup-${{ github.run_id }}
           path: export_state.json
-          # Upstash free tier архивируется через 30 дней простоя (см. README) —
-          # держим бэкапы чуть дольше на всякий случай.
-          retention-days: 35
+          # Полные истории чатов — чувствительные данные: держим 14 дней,
+          # а не дольше Upstash-окна (AUD-D-007).
+          retention-days: 14

@@ -48,7 +48,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for a deeper look at routin
    ```bash
    curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://<space-host>/webhook_url
    ```
-   then open the `register_link` it returns.
+    then fill the `register_url_template` it returns (token by hand, via curl — never open a token URL in a browser).
 5. `WEBHOOK_SECRET` and `ADMIN_PANEL_KEY` are derived deterministically from `BOT_TOKEN` (or from `ADMIN_SECRET_SEED`, if set). Fetch them with:
    ```bash
    curl -H "Authorization: Bearer <BOT_TOKEN>" https://<space-host>/admin_keys

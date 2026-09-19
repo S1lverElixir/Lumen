@@ -518,6 +518,7 @@ MAX_MEDIA_RECENT_IDS = 8  # хранится ОТДЕЛЬНО на каждог�
 # Простой трекер для rate limiting
 RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "5"))
 RATE_LIMIT_WINDOW_SEC = float(os.getenv("RATE_LIMIT_WINDOW_SEC", "30"))
+MAX_RATE_LIMIT_KEYS = int(os.getenv("MAX_RATE_LIMIT_KEYS", "20000"))
 user_rate_limits: dict[int, list[float]] = {}
 
 def _cleanup_rate_limit_dict() -> None:
@@ -784,13 +785,28 @@ def is_guest_message(message: Message | dict) -> bool:
         return bool(message.get("guest_query_id"))
     return bool(getattr(message, "guest_query_id", None))
 
+def _truncate_html_to_fit(md_text: str, limit: int) -> str:
+    """HTML по границе исходника, а не по границе тегов: резать готовый HTML
+    по codepoint можно угодить в середину <b>/ссылки — Telegram ответит
+    "can't parse entities" (AUD-J-002). Бинарным поиском ищем самый длинный
+    префикс исходника, чей HTML влезает в лимит."""
+    full = _md_to_html(md_text)
+    if len(full) <= limit:
+        return full
+    lo, hi = 0, len(md_text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(_md_to_html(md_text[:mid])) <= limit - 1:
+            lo = mid
+        else:
+            hi = mid - 1
+    return _md_to_html(md_text[:lo])[:limit - 1] + "…"
+
 async def _answer_guest_text(message: Message, text: str) -> None:
     qid = getattr(message, "guest_query_id", None)
     if not qid:
         return
-    payload = _md_to_html(text)
-    if len(payload) > TG_MAX_LEN:
-        payload = payload[:TG_MAX_LEN - 1] + "\u2026"
+    payload = _truncate_html_to_fit(text, TG_MAX_LEN)
     res_id = hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:32]
     res_art = InlineQueryResultArticle(
         id=res_id, title=_t(message.chat.id, "inline_answer_title"),
@@ -1244,16 +1260,17 @@ async def get_webhook_url(request: Request) -> dict[str, str]:
         repo = os.getenv("SPACE_REPO_NAME", "lumen").lower()
         space_host = f"{author}-{repo}.hf.space"
     webhook_url = f"https://{space_host}/webhook"
-    register_url = (
-        f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-        f"?url={webhook_url}"
-        f"&secret_token={WEBHOOK_SECRET}"
-        f"&drop_pending_updates=true"
-    )
+    # Токен в URL не отдаём: ссылка с botTOKEN светилась бы в истории браузера
+    # и логах прокси (AUD-D-001). Токен владелец берёт у @BotFather.
     return {
         "webhook_url": webhook_url,
-        "register_link": register_url,
-        "instruction": "Открой register_link в браузере чтобы зарегистрировать вебхук"
+        "register_url_template": (
+            "https://api.telegram.org/bot<TOKEN>/setWebhook"
+            f"?url={webhook_url}"
+            "&secret_token=<ADMIN_SECRET>"
+            "&drop_pending_updates=true"
+        ),
+        "instruction": "Подставь BOT_TOKEN и WEBHOOK_SECRET вручную и вызови ссылку curl, а не браузером",
     }
 
 @app.post("/webhook")
@@ -1318,18 +1335,35 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
     }
     results: dict[str, Any] = {}
     session = await _get_http_session()
-    for name, url in targets.items():
+    # Общий бюджет вместо последовательных 14×6с (~84с висящей диагностики):
+    # зонды идут параллельно, хвост обрезается бюджетом (AUD-F-001).
+    diag_budget = float(os.getenv("DIAG_TOTAL_BUDGET_SEC", "25"))
+
+    async def _probe(name: str, url: str) -> tuple[str, dict[str, Any]]:
         start = time.time()
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
-                elapsed = round(time.time() - start, 2)
-                results[name] = {"status": resp.status, "elapsed_sec": elapsed, "ok": True}
+                return name, {"status": resp.status, "elapsed_sec": round(time.time() - start, 2), "ok": True}
         except Exception as exc:
             elapsed = round(time.time() - start, 2)
             exc_str = str(exc) or repr(exc) or type(exc).__name__
             if BOT_TOKEN:
                 exc_str = exc_str.replace(BOT_TOKEN, "<TOKEN>")
-            results[name] = {"error": exc_str, "elapsed_sec": elapsed, "ok": False}
+            return name, {"error": exc_str, "elapsed_sec": elapsed, "ok": False}
+
+    tasks = {asyncio.create_task(_probe(name, url)): name for name, url in targets.items()}
+    done, pending = await asyncio.wait(tasks, timeout=diag_budget)
+    for task in done:
+        try:
+            name, res = task.result()
+        except Exception as exc:
+            name, res = tasks[task], {"error": str(exc), "elapsed_sec": diag_budget, "ok": False}
+        results[name] = res
+    for task in pending:
+        task.cancel()
+        results[tasks[task]] = {"error": "diag budget exceeded", "elapsed_sec": diag_budget, "ok": False}
+    with contextlib.suppress(Exception):
+        await asyncio.gather(*pending)
     return {"diagnostics": results, "telegram_api_base_configured": TELEGRAM_API_BASE_URL}
 
 @app.get("/export_state")
@@ -1940,6 +1974,14 @@ def get_chat_lock(chat_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _chat_locks[chat_id] = lock
     return lock
+
+def _evict_orphan_chat_locks() -> int:
+    """Сносит локи чатов, которых уже нет в chat_state и которые никто не
+    держит, — иначе _chat_locks растёт навсегда (AUD-G-001). Занятые не трогаем."""
+    orphan = [cid for cid, lock in _chat_locks.items() if cid not in chat_state and not lock.locked()]
+    for cid in orphan:
+        _chat_locks.pop(cid, None)
+    return len(orphan)
 
 def _is_owner(user_id: int | None) -> bool:
     """Единая точка проверки "это владелец бота?" — используется в /logs, /stats
@@ -4406,6 +4448,7 @@ async def cmd_stats(message: Message) -> None:
 # Без эмодзи в кнопках — по правилу эмодзи (см. system_prompt.py).
 PICK_BUTTONS_ENABLED = os.getenv("PICK_BUTTONS_ENABLED", "1") == "1"
 PICK_TTL_SEC = float(os.getenv("PICK_TTL_SEC", "300"))
+MAX_PENDING_PICKS = int(os.getenv("MAX_PENDING_PICKS", "500"))
 # token -> {chat_id, user_id, scenario, original, expires}: только в памяти
 # процесса (как _speed_ema в lumen_typing_pace.py) — после рестарта кнопки
 # честно считаются протухшими, это штатный путь, а не баг.
@@ -4420,10 +4463,22 @@ def _purge_expired_picks(now: float | None = None) -> None:
         del _pending_picks[token]
 
 
+def _enforce_pending_picks_cap() -> None:
+    """Потолок памяти на кнопки-уточнения: сверх лимита сносим самые
+    близкие к протуханию (AUD-G-001)."""
+    overflow = len(_pending_picks) - MAX_PENDING_PICKS
+    if overflow <= 0:
+        return
+    oldest = sorted(_pending_picks, key=lambda t: _pending_picks[t]["expires"])[:overflow]
+    for token in oldest:
+        del _pending_picks[token]
+
+
 async def _send_pick_question(message: Message, scenario: str, original_text: str) -> None:
     """Отправляет уточняющий вопрос с кнопками и запоминает контекст выбора.
     token в callback_data короткий (лимит Telegram — 64 байта на всю строку)."""
     _purge_expired_picks()
+    _enforce_pending_picks_cap()
     token = secrets.token_hex(4)
     lang = _chat_lang(message.chat.id)
     _pending_picks[token] = {
@@ -4768,6 +4823,8 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
     if not user_id:
         return False
     now = time.time()
+    if user_id not in user_rate_limits and len(user_rate_limits) >= MAX_RATE_LIMIT_KEYS:
+        _cleanup_rate_limit_dict()
     timestamps = user_rate_limits.setdefault(user_id, [])
     while timestamps and now - timestamps[0] > RATE_LIMIT_WINDOW_SEC:
         timestamps.pop(0)
@@ -5241,6 +5298,7 @@ async def _webhook_startup() -> None:
     while True:
         await asyncio.sleep(3600)
         _cleanup_rate_limit_dict()
+        _evict_orphan_chat_locks()
         # Проверяем и обнуляем счётчики квоты на каждом часовом тике (а не только
         # раз в сутки, как две проверки ниже) — если между тиками не пришло ни
         # одного сообщения, ленивая проверка внутри _quota_entry не сработает
