@@ -7,12 +7,16 @@
 .gitignore
 
 # Тесты и dev-инструменты — не нужны в рантайме, только раздувают образ
-test_bot_helpers.py
+test_*.py
 conftest.py
 requirements-dev.txt
 tests.yml
 .pytest_cache/
 README.md
+docs/
+assets/
+proxy.ts
+proxy_test.ts
 
 # Байткод/кэш
 __pycache__/

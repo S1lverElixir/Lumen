@@ -109,7 +109,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest -v
 ```
 
-Test files mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, and `test_lumen_typing_pace.py` each test their matching module directly, while `test_bot.py` covers everything defined in `bot.py` itself. `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets.
+Test files mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, and `test_lumen_model_speed.py` each test their matching module directly, while `test_bot.py` covers everything defined in `bot.py` itself. `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets.
 
 CI (`.github/workflows/ci.yml`) runs `pyflakes` + `pytest` + `pip-audit` on every push and pull request; a successful run triggers `sync-to-hf.yml`, which mirrors the commit to the Hugging Face Space.
 
