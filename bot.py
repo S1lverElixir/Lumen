@@ -780,9 +780,11 @@ _ADMIN_SECRET_SEED = os.getenv("ADMIN_SECRET_SEED", "").strip() or BOT_TOKEN or 
 WEBHOOK_SECRET = hashlib.sha256(_ADMIN_SECRET_SEED.encode()).hexdigest()[:32]
 ADMIN_PANEL_KEY = hashlib.sha256(_ADMIN_SECRET_SEED.encode() + b"admin_panel").hexdigest()[:24]
 
-# Только настоящие типы Update из Bot API: "guest_message" здесь был бы ошибкой
-# (Telegram ответил бы 400 и бот замолчал бы) — гости идут через answerGuestQuery, а не подписку (AUD-J-001).
-ALLOWED_UPDATES = ["message", "edited_message", "callback_query"]
+# guest_message — валидное поле Update из Bot API (guest mode: changelog и
+# раздел Update на core.telegram.org/bots/api, проверено 2026-09-21).
+# Удаление отсюда было ошибкой аудита AUD-J-001 (проверка от 2026-09-19
+# устарела): без этого типа бот не получает гостевые апдейты.
+ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "guest_message"]
 
 # хранение состояния и квот
 

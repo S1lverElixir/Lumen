@@ -257,9 +257,10 @@ def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
 
 
 def test_allowed_updates_contains_only_real_telegram_types():
-    # Регрессия AUD-J-001: "guest_message" — не тип Update из Bot API, из-за него
-    # setWebhook мог ответить 400 и бот замолчал бы. Гости идут через answerGuestQuery.
-    assert "guest_message" not in bot.ALLOWED_UPDATES
+    # guest_message — валидное поле Update (guest mode, Bot API; проверено по
+    # core.telegram.org/bots/api 2026-09-21). Удаление отсюда было ошибкой
+    # аудита AUD-J-001 и ломало гостевой режим — этот тест её ловит.
+    assert "guest_message" in bot.ALLOWED_UPDATES
     assert "message" in bot.ALLOWED_UPDATES
 
 
