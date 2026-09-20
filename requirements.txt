@@ -34,7 +34,7 @@ uvicorn==0.53.0
 # safely (see try/except in _current_quota_day), but then the quota reset
 # drifts 7-8 hours off Google's real reset — with this package it lands right.
 # Pure-pip IANA tzdb data, no compilation — does not bloat the image.
-tzdata==2026.3
+tzdata==2026.4
 # sentry-sdk — optional (see SENTRY_DSN in bot.py) persistent error tracking:
 # bot.log lives on the ephemeral HF Spaces disk and is lost on every redeploy
 # (see README, "Known limitations" — that used to be the only open item there).
