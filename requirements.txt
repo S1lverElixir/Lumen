@@ -40,4 +40,4 @@ tzdata==2026.3
 # (see README, "Known limitations" — that used to be the only open item there).
 # Without SENTRY_DSN, sentry_sdk.init() is never called — the package just
 # sits unused and changes nothing for whoever did not configure it.
-sentry-sdk==2.68.1
+sentry-sdk==2.69.2
