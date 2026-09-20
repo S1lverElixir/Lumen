@@ -26,7 +26,7 @@ aiogram==3.31.0
 fastapi==0.141.1
 google-genai==2.24.0
 mutagen==1.48.1
-uvicorn==0.52.4
+uvicorn==0.53.0
 # tzdata — python:3.13-slim (see Dockerfile) ships no system timezone database
 # via apt, while stdlib zoneinfo (used in _current_quota_day for the daily
 # quota reset on America/Los_Angeles — Google's midnight for RPD limits)
