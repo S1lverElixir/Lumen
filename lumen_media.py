@@ -67,8 +67,11 @@ def _sanitize_mime_type(file_path: str | None, mime: str | None, default_fallbac
                 ".gif": "image/gif",
                 ".mp4": "video/mp4",
                 ".mov": "video/quicktime",
-                ".m4v": "video/x-m4v",
-                ".avi": "video/x-msvideo",
+                # .m4v/.avi маппятся на поддерживаемые Gemini mime (а не
+                # video/x-m4v/x-msvideo): иначе sanitize выдавал mime, который
+                # _is_gemini_supported_mime тут же отвергал.
+                ".m4v": "video/mp4",
+                ".avi": "video/avi",
                 ".mp3": "audio/mpeg",
                 ".ogg": "audio/ogg",
                 ".oga": "audio/ogg",

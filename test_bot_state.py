@@ -72,6 +72,13 @@ def test_sanitize_mime_type_audio_ogg_passthrough():
     assert bot._sanitize_mime_type(None, "audio/ogg") == "audio/ogg"
 
 
+def test_sanitize_mime_type_maps_containers_to_supported_mimes():
+    # .m4v/.avi раньше давали video/x-m4v/x-msvideo, которые
+    # _is_gemini_supported_mime тут же отвергал.
+    assert bot._sanitize_mime_type("x.m4v", "application/octet-stream") == "video/mp4"
+    assert bot._sanitize_mime_type("x.avi", "application/octet-stream") == "video/avi"
+
+
 def test_mime_suffix_maps_audio_video_subtypes_honestly():
     # Регрессия AUD-E-005: было ".mp3 для любого audio" — расширение врало.
     assert bot._mime_suffix("audio/ogg", "") == ".ogg"
