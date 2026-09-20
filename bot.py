@@ -17,7 +17,6 @@ import os
 import queue
 import re
 import secrets
-import socket
 import sys
 import time
 from pathlib import Path
@@ -586,82 +585,11 @@ _chat_locks: dict[int, asyncio.Lock] = {}
 # так что вынос обошёлся бы дороже, чем стоит (см. докстринг lumen_telegram_transport.py).
 from lumen_telegram_transport import (
     _TelegramProxyCircuitBreaker,
-    _looks_like_proxy_garbage,
     IPv4AiohttpSession,
-    proxy_auth_middlewares,
-    get_telegram_session as _lumen_get_telegram_session,
-    close_telegram_session as _lumen_close_telegram_session,
 )
 
 TELEGRAM_PROXY_TRIP_THRESHOLD = int(os.getenv("TELEGRAM_PROXY_TRIP_THRESHOLD", "3"))
 _tg_proxy_breaker = _TelegramProxyCircuitBreaker(cooldown_sec=TELEGRAM_PROXY_COOLDOWN_SEC, trip_threshold=TELEGRAM_PROXY_TRIP_THRESHOLD)
-
-async def _get_telegram_session() -> aiohttp.ClientSession:
-    return await _lumen_get_telegram_session(
-        TELEGRAM_REQUEST_TIMEOUT,
-        proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
-    )
-
-async def _rotate_telegram_proxy() -> bool:
-    """Переключается на следующий кандидат из _TELEGRAM_PROXY_CANDIDATES по кругу —
-    вызывается из _tg_call/telegram_api_call сразу после срабатывания circuit breaker.
-    Возвращает True, если переключились на кандидата, отличного от того, с которого
-    начали этот заход (т.е. "круг" ещё не замкнулся — имеет смысл сразу попробовать
-    новый адрес без паузы), и False, если кандидат только один или круг уже замкнулся
-    (обошли всех и вернулись к началу) — в этом случае вызывающий код должен перейти
-    в обычную паузу circuit breaker'а, как будто резервных прокси не было вовсе.
-
-    _telegram_session (используется telegram_api_call) не требует пересоздания — это
-    просто aiohttp.ClientSession с коннектором, URL собирается на лету из
-    TELEGRAM_API_BASE_URL при каждом вызове. aiogram Bot.session — другое дело: сам
-    целевой сервер (TelegramAPIServer) "запечён" в сессию при её создании, поэтому
-    здесь она пересоздаётся заново, указывая на новый кандидат."""
-    global TELEGRAM_API_BASE_URL, _telegram_proxy_idx
-    async with _proxy_rotation_lock:
-        if len(_TELEGRAM_PROXY_CANDIDATES) < 2:
-            return False
-        _telegram_proxy_idx = (_telegram_proxy_idx + 1) % len(_TELEGRAM_PROXY_CANDIDATES)
-        new_url = _TELEGRAM_PROXY_CANDIDATES[_telegram_proxy_idx]
-        old_url = TELEGRAM_API_BASE_URL
-        TELEGRAM_API_BASE_URL = new_url
-    log.warning('[telegram] Switching to fallback proxy: %s -> %s', old_url, new_url)
-    if bot is not None:
-        old_session = bot.session
-        bot.session = IPv4AiohttpSession(
-            api=TelegramAPIServer.from_base(new_url),
-            proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
-        )
-        with contextlib.suppress(Exception):
-            await old_session.close()
-    return _telegram_proxy_idx != 0
-
-async def _get_http_session() -> aiohttp.ClientSession:
-    global _http_session
-    if _http_session is None or _http_session.closed:
-        _http_session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=60),
-            # limit поднят с 16 до 40 (24 июля 2026, ревизия TikTok-скачивания):
-            # слайдшоу TikTok теперь скачивается целиком за раз через
-            # asyncio.gather (см. handle_tiktok), и TikTok разрешает до 35 слайдов
-            # в одном посте — со старым лимитом 16 часть слайдов ждала бы в
-            # очереди на соединение вместо реально параллельной загрузки. Прочие
-            # потребители этой же сессии (OpenRouter, Pollinations, TikWM-запросы)
-            # используют на порядок меньше одновременных соединений, так что
-            # повышение лимита их не затрагивает.
-            connector=aiohttp.TCPConnector(family=socket.AF_INET, limit=40, ttl_dns_cache=300),
-            middlewares=proxy_auth_middlewares(
-                proxy_secret=LUMEN_PROXY_SECRET,
-                proxy_base_urls=(*_TELEGRAM_PROXY_CANDIDATES, *_tikwm_proxy_candidates()),
-            ),
-        )
-    return _http_session
-
-async def _close_sessions() -> None:
-    await _lumen_close_telegram_session()
-    if _http_session is not None and not _http_session.closed:
-        await _http_session.close()
-    if bot is not None and hasattr(bot, "session") and bot.session:
-        await bot.session.close()
 
 # конвертация markdown в html, утилиты json
 
@@ -700,122 +628,16 @@ def _json_prune_defaults(val: Any) -> Any:
         return [v for v in (_json_prune_defaults(i) for i in val) if v is not _PRUNE_SENTINEL]
     return val
 
-# безопасные обёртки над вызовами telegram
-
-async def _handle_proxy_failure(context: str) -> None:
-    """Общая реакция на "прокси вернул не-JSON/недоступен" — раньше этот блок
-    (note_failure -> если сработал выключатель, попробовать резервный прокси без
-    паузы, иначе уведомить владельца и включить паузу) был почти дословно
-    продублирован в _tg_call и telegram_api_call. НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА:
-    ровно тот класс дублирования, который проект уже устранял в других местах
-    (_next_fallback_model, _model_error_text, _or_chat_completion_with_fallback) —
-    здесь его просто не заметили при добавлении мультипрокси. `context` — короткое
-    описание вызова для лога/уведомления владельца (например "call failed" или
-    f"вызове {method}"), само решение (рубить ли попытку) остаётся на вызывающей
-    стороне — эта функция только обновляет состояние выключателя и логирует."""
-    tripped = _tg_proxy_breaker.note_failure()
-    if not tripped:
-        log.warning(
-            '[telegram] Proxy unavailable during %s (%d/%d in a row, circuit breaker not tripped yet).',
-            context, _tg_proxy_breaker.consecutive_failures, _tg_proxy_breaker.trip_threshold,
-        )
-        return
-    lap_not_done = await _rotate_telegram_proxy()
-    if lap_not_done:
-        # Есть ещё не испробованный в этом заходе кандидат — переключились на
-        # него и сбрасываем счётчик, чтобы дать ему честный шанс без немедленной
-        # паузы (см. _rotate_telegram_proxy).
-        _tg_proxy_breaker.consecutive_failures = 0
-        log.warning(
-            '[telegram] Proxy unavailable during %s %d time(s) in a row — switching to fallback address %s without a pause.',
-            context, _tg_proxy_breaker.trip_threshold, TELEGRAM_API_BASE_URL,
-        )
-        return
-    # Либо резервных прокси нет вообще, либо мы уже обошли их все по кругу за
-    # этот заход — теперь действительно пауза. Уведомляем ДО trip(), иначе
-    # собственный is_down-гейт _tg_call/telegram_api_call заблокирует само уведомление.
-    await _notify_owner(
-        f"⚠️ Telegram-прокси недоступен при {context} ({_tg_proxy_breaker.consecutive_failures} сбоев "
-        f"подряд, резервные адреса тоже не помогли). Пауза {_tg_proxy_breaker.cooldown_sec:.0f}с. "
-        f"Активный адрес: {TELEGRAM_API_BASE_URL}"
-    )
-    _tg_proxy_breaker.trip()
-    log.warning(
-        '[telegram] Proxy unavailable during %s %d time(s) in a row (threshold %d) — pausing for %.0fs. Check availability of %s.',
-        context, _tg_proxy_breaker.consecutive_failures, _tg_proxy_breaker.trip_threshold, _tg_proxy_breaker.cooldown_sec,
-        TELEGRAM_API_BASE_URL,
-    )
-
-async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, retries: int = 1, **kwargs: Any) -> Any:
-    now = time.monotonic()
-    if _tg_proxy_breaker.is_down(now):
-        # Прокси уже недавно помечен недоступным (см. срабатывание ниже) — не бьёмся
-        # заново в мёртвый прокси на каждое сообщение из бэклога, тихо возвращаем None,
-        # как будто вызов не удался (вызывающий код и так умеет это обрабатывать).
-        # Лог пишем не чаще раза в TELEGRAM_PROXY_COOLDOWN_SEC (см. log_still_down_if_due),
-        # а не на каждый пропущенный вызов — иначе тот же лавинный спам никуда не
-        # денется, просто сменит текст.
-        _tg_proxy_breaker.log_still_down_if_due(now)
-        return None
-    last_exc = None
-    timeout_val = call_timeout if call_timeout is not None else 35.0
-    for attempt in range(retries + 1):
-        try:
-            result = await asyncio.wait_for(method(*args, **kwargs), timeout=timeout_val)
-            _tg_proxy_breaker.note_success()
-            return result
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            last_exc = exc
-            if attempt < retries:
-                await asyncio.sleep(0.5 * (attempt + 1))
-    if last_exc is not None and "message is not modified" in str(last_exc).lower():
-        # Это настоящий, валидный ответ Telegram API (сообщение не изменилось —
-        # семантический не-op), а не признак сбоя прокси-звена — засчитываем как
-        # успех, иначе безобидные повторные edit_text с тем же текстом ложно
-        # накручивали бы счётчик сбоев прокси.
-        _tg_proxy_breaker.note_success()
-        return None
-    if last_exc is not None and _looks_like_proxy_garbage(last_exc):
-        # Не Telegram ответил ошибкой, а прокси перед ним отдал не-JSON (см.
-        # _looks_like_proxy_garbage) — похоже на приостановку/лимит/сбой самого
-        # прокси-хостинга (что бы это ни было — Vercel/Cloudflare/Deno/другое,
-        # см. TELEGRAM_API_BASE_URL). Считаем это ОДНИМ сбоем в серии, а не
-        # сразу включаем выключатель — единичная заминка на одной ноде anycast-
-        # CDN не должна глушить ответы бота всем чатам целиком (см. историю
-        # проекта: именно так один разовый глюк выглядел как "бот не отвечает").
-        await _handle_proxy_failure("вызове (не-JSON ответ прокси)")
-        return None
-    log.warning("[telegram] call failed: %s", last_exc)
-    return None
-
-async def telegram_api_call(method: str, payload: dict, *, request_timeout: float | None = None) -> Any:
-    if _tg_proxy_breaker.is_down(time.monotonic()):
-        raise RuntimeError(f"Telegram API {method}: proxy is currently marked unavailable (see previous [telegram] warnings), skipping the network call.")
-    url = f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/{method}"
-    session = await _get_telegram_session()
-    pruned = _json_prune_defaults(payload)
-    timeout = aiohttp.ClientTimeout(total=request_timeout or TELEGRAM_REQUEST_TIMEOUT)
-    try:
-        async with session.post(url, json=pruned, timeout=timeout) as resp:
-            data = await resp.json(content_type=None)
-    except Exception as exc:
-        exc_str = str(exc) or repr(exc) or type(exc).__name__
-        if BOT_TOKEN:
-            exc_str = exc_str.replace(BOT_TOKEN, "<TOKEN>")
-        if _looks_like_proxy_garbage(exc):
-            # См. _handle_proxy_failure — выключатель срабатывает по счётчику
-            # подряд идущих сбоев (см. _TelegramProxyCircuitBreaker), а не на первый же сбой.
-            await _handle_proxy_failure(f"вызове {method}")
-        raise RuntimeError(f"Network error in telegram_api_call for {method}: {exc_str}") from None
-    if not isinstance(data, dict) or not data.get("ok"):
-        # Прокси round-trip'нул нормально и вернул валидный JSON — сам факт, что
-        # Telegram ответил "ok: false", НЕ вина прокси-звена, засчитываем успех.
-        _tg_proxy_breaker.note_success()
-        raise RuntimeError(f"Telegram API {method} failed: {data}")
-    _tg_proxy_breaker.note_success()
-    return data["result"]
+# Транспортные вызовы живут в lumen_transport_calls.py (P2).
+from lumen_transport_calls import (
+    _get_telegram_session,
+    _rotate_telegram_proxy,
+    _get_http_session,
+    _close_sessions,
+    _handle_proxy_failure,
+    _tg_call,
+    telegram_api_call,
+)
 
 # Отправка (rich/гости/ч-text) живёт в lumen_rich.py, скачивание медиа — в
 # lumen_media_flow.py (P2): здесь только реэкспорт имён.
@@ -1190,6 +1012,15 @@ __all__ = [
     "_fetch_media",
     "_sanitize_mime_type",
     "_mime_suffix",
+    # Имена транспортных вызовов и _notify_owner — только для `bot.X` в тестах.
+    "_get_telegram_session",
+    "_rotate_telegram_proxy",
+    "_get_http_session",
+    "_close_sessions",
+    "_handle_proxy_failure",
+    "_tg_call",
+    "telegram_api_call",
+    "_notify_owner",
 ]
 
 # Троттлинг для уведомления владельца о полном исчерпании квоты Gemini (см.
