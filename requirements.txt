@@ -24,7 +24,7 @@
 aiohttp==3.14.3
 aiogram==3.31.0
 fastapi==0.141.1
-google-genai==2.22.0
+google-genai==2.24.0
 mutagen==1.48.1
 uvicorn==0.52.4
 # tzdata — python:3.13-slim (see Dockerfile) ships no system timezone database
