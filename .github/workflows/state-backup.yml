@@ -3,8 +3,16 @@ name: State backup
 # Ежедневный автоматический бэкап /export_state (см. README, раздел
 # "Диагностика") — раньше это был ручной curl владельца без расписания.
 # Требует секреты в настройках репозитория:
-#   SPACE_HOST      — хост HF Space (например, silverelixir-lumen.hf.space)
-#   ADMIN_PANEL_KEY — см. curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys
+#   SPACE_HOST         — хост HF Space (например, silverelixir-lumen.hf.space)
+#   ADMIN_PANEL_KEY    — см. curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys
+#   STATE_BACKUP_REPO  — приватный репозиторий для бэкапов, например S1lverElixir/Lumen-state
+#   STATE_BACKUP_TOKEN — fine-grained PAT с Contents: read+write только на STATE_BACKUP_REPO
+#
+# ПРИВАТНОСТЬ (инцидент, сентябрь 2026): раньше файл заливался артефактом
+# Actions, а артефакты публичного репозитория может скачать любой. Теперь
+# бэкап пушится git-коммитом в отдельный ПРИВАТНЫЙ репозиторий — каждый день
+# отдельный коммит, история и есть глубина хранения. Ничего чувствительного
+# в артефакты больше не кладётся.
 on:
   schedule:
     - cron: "0 3 * * *"  # 03:00 UTC ежедневно
@@ -21,10 +29,16 @@ jobs:
             "https://${{ secrets.SPACE_HOST }}/export_state" \
             -o export_state.json
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: lumen-state-backup-${{ github.run_id }}
-          path: export_state.json
-          # Полные истории чатов — чувствительные данные: держим 14 дней,
-          # а не дольше Upstash-окна (AUD-D-007).
-          retention-days: 14
+      - name: Push to private backup repo
+        env:
+          STATE_BACKUP_TOKEN: ${{ secrets.STATE_BACKUP_TOKEN }}
+          STATE_BACKUP_REPO: ${{ secrets.STATE_BACKUP_REPO }}
+        run: |
+          git config --global user.name "lumen-backup"
+          git config --global user.email "lumen-backup@local"
+          git clone "https://x-access-token:${STATE_BACKUP_TOKEN}@github.com/${STATE_BACKUP_REPO}.git" backup-repo
+          cp export_state.json backup-repo/export_state.json
+          cd backup-repo
+          git add export_state.json
+          git diff --cached --quiet || git commit -m "Backup $(date -u +%Y-%m-%d)"
+          git push origin HEAD:main
