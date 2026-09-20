@@ -59,7 +59,6 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
     raise RuntimeError(f"Network error in download_telegram_file_bytes: {exc_str}") from None
 
 def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | None) -> None:
-    import bot
     file_id, mime, _ = _media_file_id_and_mime(source)
     if not file_id or user_id is None:
         return
