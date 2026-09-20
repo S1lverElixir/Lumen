@@ -74,9 +74,13 @@ def test_sanitize_mime_type_audio_ogg_passthrough():
 
 def test_sanitize_mime_type_maps_containers_to_supported_mimes():
     # .m4v/.avi раньше давали video/x-m4v/x-msvideo, которые
-    # _is_gemini_supported_mime тут же отвергал.
+    # _is_gemini_supported_mime тут же отвергал. На Linux mimetypes
+    # угадывает x-msvideo сам (на Windows — нет), поэтому нормализация
+    # проверяется и детерминированно, без оглядки на платформу.
     assert bot._sanitize_mime_type("x.m4v", "application/octet-stream") == "video/mp4"
     assert bot._sanitize_mime_type("x.avi", "application/octet-stream") == "video/avi"
+    assert bot._sanitize_mime_type(None, "video/x-msvideo") == "video/avi"
+    assert bot._sanitize_mime_type(None, "video/x-m4v") == "video/mp4"
 
 
 def test_mime_suffix_maps_audio_video_subtypes_honestly():

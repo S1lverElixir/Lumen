@@ -51,12 +51,19 @@ def _is_gemini_supported_mime(mime: str) -> bool:
     return False
 
 def _sanitize_mime_type(file_path: str | None, mime: str | None, default_fallback: str = "application/octet-stream") -> str:
+    # mimetypes.guess_type зависит от платформы (/etc/mime.types на Linux,
+    # реестр Windows): один и тот же .avi даёт video/x-msvideo там и None тут.
+    # Каноникализируем известные нестандартные варианты в поддерживаемые mime.
+    canonical = {
+        "video/x-msvideo": "video/avi",
+        "video/x-m4v": "video/mp4",
+    }
     m = (mime or "").strip().lower()
     if not m or m in ("application/octet-stream", "binary/oct-stream", "application/x-binary", "octet/stream"):
         if file_path:
              guessed, _ = mimetypes.guess_type(file_path)
              if guessed:
-                 return guessed.lower()
+                 return canonical.get(guessed.lower(), guessed.lower())
         if file_path:
             ext = Path(file_path).suffix.lower()
             ext_map = {
@@ -93,7 +100,7 @@ def _sanitize_mime_type(file_path: str | None, mime: str | None, default_fallbac
         return "audio/ogg"
     if m == "video/quicktime":
         return "video/quicktime"
-    return m
+    return canonical.get(m, m)
 
 def _media_file_id_and_mime(source: Any) -> tuple[str, str, str]:
     file_id, mime, filename = "", "", ""
