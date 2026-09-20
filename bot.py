@@ -34,7 +34,6 @@ from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
     Message,
-    Update,
 )
 from google import genai
 from google.genai import types  # нужен тестам как bot.types (сборка Content/Part)
@@ -1012,6 +1011,40 @@ __all__ = [
     "_fetch_media",
     "_sanitize_mime_type",
     "_mime_suffix",
+    "_msg_media_source",
+    "_media_file_id_and_mime",
+    "_ensure_prompt_text",
+    "_looks_like_injection_probe",
+    "DRAW_TRIGGER_PREFIXES",
+    "TTS_TRIGGER_PREFIXES",
+    "_NO_MEDIA_NOTE",
+    "_match_trigger_prefix",
+    "_media_reference_category",
+    "_find_recent_media_by_category",
+    "_strip_reply_marker",
+    "extract_url",
+    "is_tiktok",
+    "is_youtube",
+    "match_pick_request",
+    "clean_mention",
+    "inline_draw",
+    "inline_tts",
+    "_send_pick_question",
+    "DEFAULT_GEMINI_MODEL",
+    "_looks_like_heavy_query",
+    "_looks_like_freshness_query",
+    "_build_route",
+    "_maybe_alert_gemini_exhausted",
+    "mark_state_dirty",
+    "get_state",
+    "_chat_lang",
+    "_check_and_register_rate_limit",
+    "_record_passive_group_context",
+    "_should_only_record_passively",
+    "_rate_limit_key_for_message",
+    "_reject_rate_limited_message",
+    "_resolve_incoming_media",
+    "_process_raw_update",
     # Имена транспортных вызовов и _notify_owner — только для `bot.X` в тестах.
     "_get_telegram_session",
     "_rotate_telegram_proxy",
@@ -1348,342 +1381,7 @@ PICK_BUTTONS_ENABLED = os.getenv("PICK_BUTTONS_ENABLED", "1") == "1"
 
 # обработка сообщений
 
-async def _process_media_group_buffers(mgid: str) -> None:
-    await asyncio.sleep(0.8)
-    messages = _mg_buffers.pop(mgid, [])
-    _mg_tasks.pop(mgid, None)
-    if not messages:
-         return
-    # Первое сообщение альбома обычно несёт подпись (caption) — используем его
-    # как основное. Остальные фото/видео из альбома собираем как доп. вложения,
-    # чтобы модель реально видела все присланные медиафайлы, а не только первый.
-    main_msg = messages[0]
-    extra_media: list[tuple[bytes, str]] = []
-    MAX_ALBUM_EXTRA = 9  # первое уходит как основное, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу)
-    album_state = get_state(main_msg.chat.id)
-    album_user_id = main_msg.from_user.id if main_msg.from_user else None
-    for m in messages[1:1 + MAX_ALBUM_EXTRA]:
-        src = _msg_media_source(m)
-        if not src:
-            continue
-        fid, mime, _ = _media_file_id_and_mime(src)
-        if not fid:
-            continue
-        fetched = await _fetch_media(fid, mime)
-        if fetched:
-            extra_media.append(fetched)
-            # РЕГРЕССИЯ: раньше эти файлы качались ТОЛЬКО для текущего ответа
-            # (extra_media ниже) и никогда не попадали в recent_media_ids —
-            # "а что было на втором фото" не находило файл, хотя бот его видел.
-            _save_media_to_history(src, album_state, album_user_id)
-    await _handle_message_core(main_msg, extra_media=extra_media or None)
-
-def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
-    """Пассивная запись сообщения группы в фон чата (бот не упомянут) — только
-    логирование контекста и запоминание последнего медиа отправителя, без
-    какого-либо ответа. Вынесено из _handle_message_core (см. аудит техдолга,
-    разбиение самой длинной функции проекта на именованные шаги) — чистый
-    побочный эффект над state, поведение не изменилось."""
-    if t.strip():
-        username = message.from_user.username or message.from_user.first_name or "User"
-        state["ctx"].append(f"@{username}: {t.strip()}")
-    _save_media_to_history(_msg_media_source(message), state, message.from_user.id if message.from_user else None)
-    mark_state_dirty(message.chat.id)
-
-
-def _should_only_record_passively(message: Message, t: str, *, is_private: bool, is_guest: bool, mentioned: bool) -> bool:
-    """True, если сообщение — это фон группового чата без обращения к боту (см.
-    _record_passive_group_context выше) и активная обработка не нужна вообще.
-    Единственное исключение — ссылка на TikTok обрабатывается ВСЕГДА, даже без
-    упоминания бота (исторически так и задумано, см. комментарий в исходной
-    _handle_message_core)."""
-    if is_private or is_guest or mentioned:
-        return False
-    url = extract_url(t)
-    return not url or not is_tiktok(url)
-
-
-def _rate_limit_key_for_message(message: Message) -> int:
-    """Возвращает идентификатор для скользящего окна rate limit по сообщению.
-
-    НАЙДЕНО ПРИ СЕКЬЮРИТИ-РЕВЬЮ: Telegram не всегда прикладывает from_user к сообщению —
-    например, сообщение отправлено "от имени канала" в привязанной группе (Telegram
-    официально это разрешает любому админу канала), либо иной сценарий без обычного
-    пользователя. Раньше _handle_message_core в этом случае передавал в
-    _check_and_register_rate_limit буквальный None, а тот безусловно возвращает False
-    ("не лимитирован") для любого falsy ключа — то есть отправитель без from_user мог
-    слать запросы к платным AI-провайдерам вообще без ограничения скорости (реальный,
-    а не гипотетический обход rate limit). Используем sender_chat.id (если есть) или
-    сам chat.id как запасной идентификатор — тогда такой отправитель (или весь чат)
-    всё равно попадает под скользящее окно, а не обходит его полностью."""
-    if message.from_user:
-        return message.from_user.id
-    sender_chat = getattr(message, "sender_chat", None)
-    return sender_chat.id if sender_chat else message.chat.id
-
-
-async def _reject_rate_limited_message(message: Message) -> bool:
-    if not _check_and_register_rate_limit(_rate_limit_key_for_message(message)):
-        return False
-    await _tg_call(message.reply, _t(message.chat.id, "rate_limited"))
-    return True
-
-
-async def _resolve_incoming_media(
-    message: Message, state: dict[str, Any], clean_prompt: str, *, is_private: bool,
-) -> tuple[str | None, str, str, tuple[bytes, str] | None]:
-    """Три приоритета определения "о каком медиа речь" для текущего сообщения —
-    вынесено из _handle_message_core (аудит техдолга, разбиение самой длинной
-    функции проекта) как один логический шаг, дальше используется как есть.
-
-    1. Прямое вложение в САМОМ сообщении (фото/видео/аудио/документ и т.п.).
-    2. Явный реплай на сообщение с медиа — пользователь прямо указал файл.
-    3. Словесная отсылка ("что на фото") без реплая — берётся последнее медиа
-       ИМЕННО этого пользователя (не всего чата, см. комментарий ниже).
-
-    Возвращает (med_path, med_mime, med_name, media_tuple) — та же четвёрка,
-    что раньше собиралась инлайн; med_path непустой ТОЛЬКО для приоритета №1
-    (файл реально лежит на диске и должен быть удалён вызывающим кодом в
-    finally), приоритеты №2/№3 работают через _fetch_media (в память, без
-    временного файла)."""
-    asking_user_id = message.from_user.id if message.from_user else None
-    media_src = _msg_media_source(message)
-    med_path, med_mime, med_name = None, "", ""
-    media_tuple = None
-
-    if media_src:
-        res = await _download_message_attachment_to_tmp(media_src)
-        if res:
-            med_path, med_mime, med_name = res
-            _save_media_to_history(media_src, state, asking_user_id)
-            with open(med_path, "rb") as f:
-                media_tuple = (f.read(), med_mime)
-
-    # Приоритет №2: явный реплай на сообщение с медиа — самый надёжный сигнал,
-    # пользователь прямо указал, о каком файле речь. Работает без триггер-слов.
-    if media_tuple is None and message.reply_to_message is not None:
-        reply_src = _msg_media_source(message.reply_to_message)
-        if reply_src:
-            reply_fid, reply_mime, _ = _media_file_id_and_mime(reply_src)
-            if reply_fid:
-                fetched = await _fetch_media(reply_fid, reply_mime)
-                if fetched:
-                    media_tuple = fetched
-
-    # Приоритет №3: словесная отсылка к "тому самому" файлу без реплая.
-    # Ищем СНАЧАЛА среди недавних медиа именно этого пользователя (не всего чата —
-    # в группе разные люди шлют разные файлы, и общий "последний в чате" элемент
-    # почти всегда окажется чужим и не тем, о чём спрашивают). НАЙДЕНО ПРИ КАЛИБРОВКЕ
-    # (18 августа 2026): раньше здесь брался last элемент БЕЗ проверки типа — "покажи
-    # стикер", когда стикер не отправлялся вообще, доставал последнее фото/скриншот
-    # и подробно ЕГО описывал. Теперь ищем именно элемент запрошенной категории
-    # (см. _find_recent_media_by_category) — если такого нет, честно None, а не
-    # ближайший неподходящий по типу файл.
-    if media_tuple is None and state.get("recent_media_ids"):
-        category = _media_reference_category(clean_prompt)
-        if category:
-            buckets: dict[str, Any] = state["recent_media_ids"]
-            own_bucket = buckets.get(str(asking_user_id)) if asking_user_id is not None else None
-            fid_mime = None
-            if own_bucket:
-                fid_mime = _find_recent_media_by_category(own_bucket, category)
-            elif is_private:
-                # В личке с ботом собеседник ровно один — не так критично,
-                # можно поискать по всем известным бакетам чата вообще.
-                for bucket in buckets.values():
-                    fid_mime = _find_recent_media_by_category(bucket, category)
-                    if fid_mime:
-                        break
-            if fid_mime:
-                fid, mime = fid_mime
-                fetched = await _fetch_media(fid, mime)
-                if fetched:
-                    media_tuple = fetched
-
-    return med_path, med_mime, med_name, media_tuple
-
-
-async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
-    state = get_state(message.chat.id)
-    t = message.text or message.caption or ""
-    is_private = message.chat.type == ChatType.PRIVATE
-    is_guest = is_guest_message(message)
-    mentioned = message_mentions_bot(message)
-
-    if _should_only_record_passively(message, t, is_private=is_private, is_guest=is_guest, mentioned=mentioned):
-        _record_passive_group_context(message, state, t)
-        return
-
-    # Начинаем обработку активного запроса с проверкой rate limit
-    if await _reject_rate_limited_message(message):
-        return
-
-    # Проверка на ссылки загрузки (TikTok — сразу всегда, даже в группах без упоминания)
-
-    url = extract_url(t)
-    needs_youtube = False
-    needs_website = False
-    youtube_url_to_analyze: str | None = None
-    if url:
-        if is_tiktok(url):
-             await handle_tiktok(message, url)
-             return
-        # Gemini (теперь доступный автоматически на любое сообщение, а не по
-        # ручному выбору провайдера) реально умеет анализировать YouTube-видео
-        # по ссылке (file_uri) и читать содержимое обычных сайтов через
-        # url_context — модель сама решает, вызывать ли второе, если видит
-        # ссылку в тексте. Роутер (см. _build_route) направит такое сообщение
-        # именно в Gemini; если конкретный вызов не сработает (приватное видео,
-        # сайт недоступен и т.п.) — код ниже поймает исключение и даст честный
-        # ответ "не смог открыть", а не будет молчать или врать.
-        if is_youtube(url):
-             needs_youtube = True
-             youtube_url_to_analyze = url
-        else:
-             # needs_website читает ссылку сама модель через url_context на
-             # стороне Google — наш сервер произвольные URL не скачивает
-             # (свои загрузки — только через _download_url_bin с гардом схемы).
-             needs_website = True
-
-    clean_prompt = clean_mention(t).strip()
-
-    if clean_prompt and _looks_like_injection_probe(clean_prompt):
-        # Явная попытка промт-инъекции — отвечаем заготовленной фразой БЕЗ обращения
-        # к LLM вообще (см. _INJECTION_PROBE_RE выше). Логируем для последующего
-        # разбора через /logs, чтобы со временем пополнять список паттернов реальными
-        # случаями, а не только теми, что придуманы заранее.
-        log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s: %r', message.chat.id, clean_prompt[:300])
-        await _safe_reply(message, _t(message.chat.id, "injection_probe_reply"))
-        return
-
-    # ищем триггерные фразы (без учёта эмодзи)
-    lower_prompt = clean_prompt.lower().strip()
-
-    matched_draw_trigger = _match_trigger_prefix(lower_prompt, DRAW_TRIGGER_PREFIXES)
-    matched_tts_trigger = _match_trigger_prefix(lower_prompt, TTS_TRIGGER_PREFIXES)
-
-    if matched_draw_trigger:
-        prompt_content = clean_prompt[len(matched_draw_trigger):].strip()
-        prompt_content = re.sub(r'^[:\s\-\,]+', '', prompt_content).strip()
-        # Триггер сказан без содержания ("нарисуй" / "нарисуй это" в ответ на
-        # сообщение с описанием) — берём текст из reply вместо того, чтобы
-        # просто промолчать/уйти в обычный диалог.
-        prompt_content = _strip_reply_marker(prompt_content)
-        if not prompt_content and message.reply_to_message is not None:
-            reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
-            if reply_text:
-                prompt_content = reply_text
-        if prompt_content:
-            await inline_draw(message, prompt_content)
-            return
-
-    if matched_tts_trigger:
-        tts_content = clean_prompt[len(matched_tts_trigger):].strip()
-        tts_content = re.sub(r'^[:\s\-\,]+', '', tts_content).strip()
-        # То же самое для озвучки — реплай "озвучь"/"озвучь это" без текста
-        # означает "озвучь ТО сообщение, на которое я отвечаю".
-        tts_content = _strip_reply_marker(tts_content)
-        if not tts_content and message.reply_to_message is not None:
-            reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
-            if reply_text:
-                tts_content = reply_text
-        if tts_content:
-            await inline_tts(message, tts_content)
-            return
-
-    # Кнопки-уточнения для вкусовых запросов без деталей ("посоветуй фильм"):
-    # вместо гадания модели — вопрос с вариантами. _pick_resolved ставят только
-    # колбэки (см. handle_pick_callback): дополненный текст всё ещё матчится
-    # детектором, без флага ушёл бы в кнопки по кругу.
-    if PICK_BUTTONS_ENABLED and not getattr(message, "_pick_resolved", False):
-        pick_scenario = match_pick_request(lower_prompt)
-        if pick_scenario:
-            await _send_pick_question(message, pick_scenario, clean_prompt)
-            return
-
-    med_path, med_mime, med_name, media_tuple = await _resolve_incoming_media(
-        message, state, clean_prompt, is_private=is_private,
-    )
-
-    if media_tuple and not clean_prompt:
-         clean_prompt = _ensure_prompt_text(None, media_tuple[1])
-    if youtube_url_to_analyze and not clean_prompt:
-         clean_prompt = "Подробно перескажи и опиши содержание этого YouTube-видео."
-
-    if not clean_prompt and not media_tuple and not youtube_url_to_analyze:
-         if mentioned:
-              await _tg_call(message.reply, _t(message.chat.id, "status_listening"))
-         return
-
-    # Отправка typing экшена
-    try:
-        if not is_guest:
-             await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    except Exception:
-         pass
-
-    media_mime = media_tuple[1] if media_tuple else None
-    is_heavy = _looks_like_heavy_query(clean_prompt)
-    needs_freshness = _looks_like_freshness_query(clean_prompt)
-    route = _build_route(
-        needs_youtube=needs_youtube, needs_website=needs_website,
-        media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
-    )
-    log.info(
-        '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s route=%s',
-        message.chat.id, is_heavy, needs_freshness, needs_youtube, needs_website, media_mime,
-        [f"{p}:{m}" for p, m in route],
-    )
-
-    ai_prompt = clean_prompt
-    if (
-        media_tuple is None
-        and not extra_media
-        and youtube_url_to_analyze is None
-        and _media_reference_category(clean_prompt) is not None
-    ):
-        # Прод-кейс 17.09.2026: "что на фото?" без файла — модель выдумала
-        # подробное описание несуществующего скриншота, хотя промпт требует
-        # обратного. Разрешение резолвинга уже позади (приоритеты 1–3 ничего не
-        # нашли), поэтому этот факт сообщаем модели явно: слабым моделям одного
-        # раздела промпта не хватает, а с пометкой перед глазами сочинять
-        # сложнее. Ветка истории ("то фото" с текстовым описанием выше)
-        # сознательно НЕ отрезается — пометка велит проверить её сначала.
-        ai_prompt += _NO_MEDIA_NOTE
-    gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
-    gemini_media_list = gemini_media_list or None
-    # Стриминг ("живой" эффект печати) имеет смысл только для простого
-    # текстового обмена без вложений/YouTube — см. _run_route.
-    allow_stream = not gemini_media_list and not youtube_url_to_analyze
-    try:
-        ans, reply_already_sent = await _run_route(
-            message.chat.id, ai_prompt, route, message,
-            media=gemini_media_list, media_filename=med_name,
-            youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
-        )
-        if not reply_already_sent:
-            await _safe_reply(message, ans)
-        mark_state_dirty(message.chat.id)
-    except Exception as exc:
-        if isinstance(exc, (GeminiAllModelsExhaustedError, RouteBudgetExceededError)):
-            # Известный, уже обрабатываемый исход (реальный суточный лимит квоты /
-            # общий бюджет времени маршрута исчерпан) — не баг, а штатная деградация,
-            # для которой пользователь и так получает понятный текст ниже, а владелец
-            # (в случае квоты) отдельно уведомляется через _maybe_alert_gemini_exhausted.
-            # log.exception на КАЖДЫЙ такой случай безусловно заводил issue в Sentry —
-            # см. LUMEN-3 (аудит логирования): 8 событий за месяц оказались этим
-            # классом, маскируя реальные новые баги среди ожидаемого шума.
-            log.warning("Chat AI processing hit a known, already-handled outcome: %s", exc)
-        else:
-            log.exception("Chat AI processing failed:")
-        head_model = route[0][1] if route else DEFAULT_GEMINI_MODEL
-        if isinstance(exc, GeminiAllModelsExhaustedError):
-            await _maybe_alert_gemini_exhausted()
-        await _safe_reply(message, _route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze, lang=_chat_lang(message.chat.id)))
-    finally:
-        if med_path and os.path.exists(med_path):
-             with contextlib.suppress(Exception):
-                  os.unlink(med_path)
+# Ядро обработки сообщений живёт в lumen_message_core.py (P2).
 
 @dp.errors()
 async def global_error_handler(event: Any) -> bool:
@@ -1725,27 +1423,16 @@ async def handle_message(message: Message) -> None:
               lock.release()
 
 # вебхук и запуск
-
-async def _process_raw_update(raw_update: dict) -> None:
-    if not isinstance(raw_update, dict):
-         return
-    try:
-        guest = raw_update.get("guest_message")
-        if isinstance(guest, dict):
-            try:
-                 msg_obj = Message.model_validate(guest, context={"bot": bot})
-                 gq_id = guest.get("guest_query_id")
-                 if gq_id is not None and not getattr(msg_obj, "guest_query_id", None):
-                     with contextlib.suppress(Exception):
-                         object.__setattr__(msg_obj, "guest_query_id", gq_id)
-                 await _handle_message_core(msg_obj)
-            except Exception as exc:
-                 log.warning("[guest] Guest processing failed: %s", exc)
-            return
-        upd = Update.model_validate(raw_update, context={"bot": bot})
-        await dp.feed_update(bot, upd)
-    except Exception as exc:
-        log.warning("[update] Raw update processing failed: %s", exc)
+from lumen_message_core import (
+    _process_media_group_buffers,
+    _record_passive_group_context,
+    _should_only_record_passively,
+    _rate_limit_key_for_message,
+    _reject_rate_limited_message,
+    _resolve_incoming_media,
+    _handle_message_core,
+    _process_raw_update,
+)
 
 async def _webhook_startup() -> None:
     load_state_from_disk()
