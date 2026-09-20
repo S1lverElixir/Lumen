@@ -109,7 +109,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest -v
 ```
 
-Test files mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, and `test_lumen_model_speed.py` each test their matching module directly, while `test_bot_admin.py`, `test_bot_commands.py`, `test_bot_routes.py`, `test_bot_state.py`, `test_bot_streaming.py`, `test_bot_tiktok.py`, `test_bot_transport.py`, and `test_bot_tts.py` cover `bot.py` by domain (shared fakes live in `bot_test_helpers.py`). `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets.
+Test files live in `tests/` and mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, and `test_lumen_model_speed.py` each test their matching module directly, while `test_bot_admin.py`, `test_bot_commands.py`, `test_bot_routes.py`, `test_bot_state.py`, `test_bot_streaming.py`, `test_bot_tiktok.py`, `test_bot_transport.py`, and `test_bot_tts.py` cover `bot.py` by domain (shared fakes live in `bot_test_helpers.py`). `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets.
 
 CI (`.github/workflows/ci.yml`) runs `pyflakes` + `pytest` + `pip-audit` on every push and pull request; a successful run triggers `sync-to-hf.yml`, which mirrors the commit to the Hugging Face Space.
 

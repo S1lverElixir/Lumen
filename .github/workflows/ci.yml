@@ -32,8 +32,8 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
 
       # тот же самый гейт, что и раньше гонялся вручную (см. README) —
-      # без glob, явным списком файлов, чтобы ловить кросс-файловые проблемы
-      - run: pyflakes bot.py lumen_*.py system_prompt.py conftest.py test_*.py
+      # явный список плюс glob по каталогам, чтобы ловить кросс-файловые проблемы
+      - run: pyflakes bot.py lumen_*.py system_prompt.py tests/*.py
 
       - run: pytest -q
 

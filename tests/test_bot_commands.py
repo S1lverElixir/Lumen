@@ -10,7 +10,7 @@ import bot
 import lumen_limits
 import pytest
 import time
-from bot_test_helpers import (
+from tests.bot_test_helpers import (
     _FakeIncomingMessage,
     _make_lang_query,
     _make_pick_query,

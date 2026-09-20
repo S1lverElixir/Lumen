@@ -8,7 +8,7 @@ import bot
 import lumen_telegram_transport
 import pytest
 import time
-from bot_test_helpers import (
+from tests.bot_test_helpers import (
     _run_proxy_middleware,
 )
 

@@ -15,7 +15,7 @@ import lumen_limits
 import sentry_sdk
 import sys
 import time
-from bot_test_helpers import (
+from tests.bot_test_helpers import (
     _FakeIncomingMessage,
     _FakeOwnerBot,
     _run_core_capturing_prompt,

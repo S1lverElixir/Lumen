@@ -20,9 +20,9 @@
 - Model routing lives in lumen_router_config.py, injection and leak defenses in lumen_security.py.
 
 ## Commands (verified against CI, .github/workflows/ci.yml)
-- Full gate: pip install -r requirements.txt -r requirements-dev.txt; pyflakes bot.py lumen_*.py system_prompt.py conftest.py test_*.py; pytest -q; pip-audit -r requirements.txt
-- Single test file: pytest test_bot_routes.py -v; single test: pytest test_bot_routes.py::test_classify_model_error_rate_limit_by_status -v
-- Proxy (Deno): deno test proxy_test.ts (no external imports, works offline; see proxy_test.ts header)
+- Full gate: pip install -r requirements.txt -r requirements-dev.txt; pyflakes bot.py lumen_*.py system_prompt.py tests/*.py; pytest -q; pip-audit -r requirements.txt
+- Single test file: pytest tests/test_bot_routes.py -v; single test: pytest tests/test_bot_routes.py::test_classify_model_error_rate_limit_by_status -v
+- Proxy (Deno): deno test proxy/proxy_test.ts (no external imports, works offline; see proxy_test.ts header)
 - Run the gate before changing anything (green baseline) and after each batch of changes. Never say "done" or "tests pass" without having run it.
 
 ## Gotchas

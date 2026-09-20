@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import asyncio
 import base64
 import bot
-from bot_test_helpers import (
+from tests.bot_test_helpers import (
     _FakeIncomingMessage,
     _FakeSSEResponse,
     _FakeSessionForSSE,

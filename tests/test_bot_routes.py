@@ -8,7 +8,7 @@ import asyncio
 import bot
 import pytest
 import time
-from bot_test_helpers import (
+from tests.bot_test_helpers import (
     _FakeCandidate,
     _FakeExc,
     _FakeGeminiResponse,

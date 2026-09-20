@@ -9,7 +9,7 @@ import bot
 import lumen_tiktok
 import pytest
 import time
-from bot_test_helpers import (
+from tests.bot_test_helpers import (
     _FakeAudioBot,
     _FakeDownloadResponse,
     _FakeDownloadSession,
