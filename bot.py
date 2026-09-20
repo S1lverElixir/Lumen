@@ -19,10 +19,8 @@ import re
 import secrets
 import socket
 import sys
-import tempfile
 import time
 from pathlib import Path
-from collections import deque
 from datetime import date
 from typing import Any
 import urllib.request as _urllib_request
@@ -36,11 +34,7 @@ from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
-    InlineQueryResultArticle,
-    InputRichMessage,
-    InputTextMessageContent,
     Message,
-    ReplyParameters,
     Update,
 )
 from google import genai
@@ -504,7 +498,6 @@ from lumen_chat_state import (
     MAX_CHAT_LIMIT,
     PRUNED_CHAT_TARGET,
     MAX_CHAT_HISTORY_LEN,
-    MAX_MEDIA_RECENT_IDS,
     _STATE_DIR,
     STATE_FILE_PATH,
     GLOBAL_QUOTA_FILE,
@@ -688,7 +681,7 @@ async def _close_sessions() -> None:
 # именно ради старых тестов на `bot.X`, но с переездом тестов на прямой импорт
 # модуля этот ре-экспорт стал мёртвым (см. аудит техдолга, 26 августа 2026) и
 # убран вместе с соответствующим `__all__`.
-from lumen_formatting import _md_to_html, _md_to_rich_html, _split_text_chunks, _strip_markdown, _truncate_html_to_fit
+from lumen_formatting import _split_text_chunks
 
 _PRUNE_SENTINEL = object()
 
@@ -824,160 +817,25 @@ async def telegram_api_call(method: str, payload: dict, *, request_timeout: floa
     _tg_proxy_breaker.note_success()
     return data["result"]
 
-def is_guest_message(message: Message | dict) -> bool:
-    if isinstance(message, dict):
-        return bool(message.get("guest_query_id"))
-    return bool(getattr(message, "guest_query_id", None))
-
-async def _answer_guest_text(message: Message, text: str) -> None:
-    qid = getattr(message, "guest_query_id", None)
-    if not qid:
-        return
-    payload = _truncate_html_to_fit(text, TG_MAX_LEN)
-    res_id = hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:32]
-    res_art = InlineQueryResultArticle(
-        id=res_id, title=_t(message.chat.id, "inline_answer_title"),
-        input_message_content=InputTextMessageContent(message_text=payload, parse_mode="HTML"),
-    )
-    try:
-        await telegram_api_call("answerGuestQuery", {
-            "guest_query_id": str(qid),
-            "result": res_art.model_dump(exclude_none=True),
-        }, request_timeout=10)
-    except Exception as exc:
-        log.warning("[guest] Failed answering guest: %s", exc)
-
-def _is_real_telegram_message(res: Any) -> bool:
-    """Настоящий Message от Telegram API, а не тестовая заглушка: у реальных
-    ответов message_id — int. Нужно, чтобы в тестах (фейковые боты без
-    send_rich_message/edit_message_text) рич-путь тихо откатывался на legacy,
-    а не "успешно" ронял ветку через MagicMock."""
-    return isinstance(res, Message)
-
-
-async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bool, **kwargs: Any) -> Any:
-    """Отправка чанка через sendRichMessage (таблицы/заголовки/математика).
-    Возвращает отправленное сообщение или None — тогда вызывающий код идёт
-    обычным HTML-путём. Флаг RICH_MESSAGES_ENABLED — рубильник на случай
-    проблем с рендером (см. комментарий у флага).
-    Reply threading — ТОЛЬКО для первого чанка (is_first_chunk): иначе каждый
-    кусок длинного ответа придёт отдельным ответом с нотификацией, а не
-    продолжением (найдено код-ревью). parse_mode/reply_parameters из kwargs
-    не пробрасываются: у рич-метода их нет (parse_mode) или он строится здесь
-    (reply threading) — чужое значение дало бы TypeError/невалидный запрос,
-    а aiogram сложил бы неизвестные kwargs в тело запроса молча."""
-    if not RICH_MESSAGES_ENABLED:
-        return None
-    sender = getattr(bot, "send_rich_message", None)
-    if sender is None or message is None:
-        return None
-    kwargs.pop("parse_mode", None)
-    reply_parameters = kwargs.pop("reply_parameters", None)
-    if reply_parameters is None and is_first_chunk and isinstance(getattr(message, "message_id", None), int):
-        reply_parameters = ReplyParameters(message_id=message.message_id)
-    call_timeout = kwargs.pop("call_timeout", TELEGRAM_REQUEST_TIMEOUT)
-    res = await _tg_call(
-        sender, chat_id=message.chat.id, rich_message=InputRichMessage(html=rich_html),
-        reply_parameters=reply_parameters, call_timeout=call_timeout, **kwargs,
-    )
-    return res if _is_real_telegram_message(res) else None
-
-
-async def _try_edit_rich(msg: Message | None, rich_html: str, **kwargs: Any) -> bool:
-    """Правка сообщения через editMessageText+rich_message. Возвращает True
-    только при реальном успехе — иначе вызывающий код идёт legacy-правкой.
-    Фейковые сообщения тестов (без int chat.id/message_id) отсекаются гейтом."""
-    if not RICH_MESSAGES_ENABLED or msg is None:
-        return False
-    editor = getattr(bot, "edit_message_text", None)
-    chat = getattr(msg, "chat", None)
-    chat_id = getattr(chat, "id", None)
-    message_id = getattr(msg, "message_id", None)
-    if editor is None or not isinstance(chat_id, int) or not isinstance(message_id, int):
-        return False
-    kwargs.pop("parse_mode", None)
-    call_timeout = kwargs.pop("call_timeout", 15.0)
-    res = await _tg_call(
-        editor, text=None, rich_message=InputRichMessage(html=rich_html),
-        chat_id=chat_id, message_id=message_id, call_timeout=call_timeout, **kwargs,
-    )
-    return _is_real_telegram_message(res)
-
-
-async def _send_text(message: Message, text: str, parse_html: bool = True, **kwargs: Any) -> None:
-    if is_guest_message(message):
-        await _answer_guest_text(message, text)
-        return
-
-    chunks = _split_text_chunks(text, TG_MAX_LEN)
-    for i, chunk in enumerate(chunks):
-        chunk_kwargs = kwargs if i == len(chunks) - 1 else {k: v for k, v in kwargs.items() if k != "reply_markup"}
-        if parse_html:
-            # Сначала рич (таблицы/заголовки/математика), при любом неуспехе —
-            # обычный HTML-путь ниже. Reply threading — только у первого чанка.
-            rich_res = await _try_send_rich(message, _md_to_rich_html(chunk), is_first_chunk=(i == 0), **chunk_kwargs)
-            if rich_res is not None:
-                continue
-        if i == 0:
-            res = await _tg_call(
-                message.reply, _md_to_html(chunk) if parse_html else chunk,
-                call_timeout=TELEGRAM_REQUEST_TIMEOUT,
-                parse_mode=ParseMode.HTML if parse_html else None,
-                **chunk_kwargs,
-            )
-            if res is None and parse_html:
-                res = await _tg_call(
-                    message.reply, _strip_markdown(chunk),
-                    call_timeout=TELEGRAM_REQUEST_TIMEOUT,
-                    parse_mode=None,
-                    **chunk_kwargs,
-                )
-        else:
-            res = await _tg_call(
-                bot.send_message,
-                chat_id=message.chat.id, text=_md_to_html(chunk) if parse_html else chunk,
-                call_timeout=TELEGRAM_REQUEST_TIMEOUT,
-                parse_mode=ParseMode.HTML if parse_html else None,
-                **chunk_kwargs,
-            )
-            if res is None and parse_html:
-                await _tg_call(
-                    bot.send_message,
-                    chat_id=message.chat.id, text=_strip_markdown(chunk),
-                    call_timeout=TELEGRAM_REQUEST_TIMEOUT,
-                    parse_mode=None,
-                    **chunk_kwargs,
-                )
-
-async def _safe_reply(message: Message, text: str, parse_html: bool = True, **kwargs: Any) -> None:
-    await _send_text(message, text, parse_html=parse_html, **kwargs)
-
-async def _delete_message_quietly(msg: Message | None) -> None:
-    if msg is None:
-        return
-    with contextlib.suppress(Exception):
-        await msg.delete()
-
-async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -> bool:
-    if msg is None:
-        return False
-    try:
-        # Сначала рич-правка (таблицы/заголовки/математика — см. _try_edit_rich),
-        # при любом неуспехе — обычный HTML-путь, затем голый текст. Порядок
-        # важен: таблицы и формулы видны только через рич.
-        if await _try_edit_rich(msg, _md_to_rich_html(text), **kwargs):
-            return True
-        kwargs.setdefault("parse_mode", ParseMode.HTML)
-        res = await _tg_call(msg.edit_text, _md_to_html(text), **kwargs)
-        if res is not None:
-            return True
-        kwargs["parse_mode"] = None
-        # Последний рубеж — голый текст БЕЗ markdown-синтаксиса (см.
-        # _strip_markdown): сырые `**` в чате хуже потери жирности.
-        res = await _tg_call(msg.edit_text, _strip_markdown(text), **kwargs)
-        return res is not None
-    except Exception:
-        return False
+# Отправка (rich/гости/ч-text) живёт в lumen_rich.py, скачивание медиа — в
+# lumen_media_flow.py (P2): здесь только реэкспорт имён.
+from lumen_rich import (
+    is_guest_message,
+    _answer_guest_text,
+    _is_real_telegram_message,
+    _try_send_rich,
+    _try_edit_rich,
+    _send_text,
+    _safe_reply,
+    _delete_message_quietly,
+    _edit_message_quietly,
+)
+from lumen_media_flow import (
+    _download_telegram_file_bytes,
+    _save_media_to_history,
+    _download_message_attachment_to_tmp,
+    _fetch_media,
+)
 
 # разбор ошибок
 
@@ -1314,6 +1172,24 @@ __all__ = [
     "_gemini_error_msg",
     "get_system_prompt",
     "_MODEL_ERROR_FALLBACK_MSG",
+    # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
+    "ParseMode",
+    "_split_text_chunks",
+    "is_guest_message",
+    "_answer_guest_text",
+    "_is_real_telegram_message",
+    "_try_send_rich",
+    "_try_edit_rich",
+    "_send_text",
+    "_safe_reply",
+    "_delete_message_quietly",
+    "_edit_message_quietly",
+    "_download_telegram_file_bytes",
+    "_save_media_to_history",
+    "_download_message_attachment_to_tmp",
+    "_fetch_media",
+    "_sanitize_mime_type",
+    "_mime_suffix",
 ]
 
 # Троттлинг для уведомления владельца о полном исчерпании квоты Gemini (см.
@@ -1369,85 +1245,7 @@ from lumen_media import (
 # выше по файлу уже использует его на уровне модуля)
 # загрузка медиа
 
-async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None = None, retries: int = 1) -> tuple[bytes, str]:
-    # Один ретрай с короткой паузой — раньше здесь не было НИКАКОГО повторного
-    # обращения (в отличие от _tg_call, у которого есть свой параметр retries),
-    # поэтому одна-единственная транзиентная заминка прокси (не-JSON/обрыв ровно
-    # на getMe/getFile, см. _looks_like_proxy_garbage) насовсем валила скачивание
-    # медиа. Именно эта функция стояла за инцидентом "[media] Download media failed
-    # ... NOT_FOUND" в логах этой сессии — единичный сбой прокси не должен означать
-    # "пользователь прислал фото/видео, а бот его просто не увидел".
-    last_exc: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            file = await asyncio.wait_for(bot.get_file(file_id), timeout=TELEGRAM_GET_FILE_TIMEOUT)
-            file_path = getattr(file, "file_path", None) or getattr(file, "path", None)
-            if not file_path:
-                raise RuntimeError("File path is empty")
-            session = await _get_telegram_session()
-            url = f"{TELEGRAM_API_BASE_URL}/file/bot{BOT_TOKEN}/{file_path}"
-            async with session.get(url, timeout=timeout or TELEGRAM_MEDIA_TIMEOUT) as resp:
-                resp.raise_for_status()
-                data = await resp.read()
-                mime = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip()
-            real_mime = _sanitize_mime_type(file_path, mime)
-            return data, real_mime
-        except Exception as exc:
-            last_exc = exc
-            if attempt < retries:
-                log.warning('[media] Attempt %d/%d to download file_id %s failed, retrying in 0.5s: %s', attempt + 1, retries + 1, file_id, exc)
-                await asyncio.sleep(0.5)
-    exc_str = str(last_exc) or repr(last_exc) or type(last_exc).__name__
-    if BOT_TOKEN:
-        exc_str = exc_str.replace(BOT_TOKEN, "<TOKEN>")
-    raise RuntimeError(f"Network error in download_telegram_file_bytes: {exc_str}") from None
 
-def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | None) -> None:
-    file_id, mime, _ = _media_file_id_and_mime(source)
-    if not file_id or user_id is None:
-        return
-    buckets: dict[str, deque] = state.setdefault("recent_media_ids", {})
-    key = str(user_id)
-    recent = buckets.setdefault(key, deque(maxlen=MAX_MEDIA_RECENT_IDS))
-    if not recent or recent[-1][0] != file_id:
-        recent.append((file_id, mime or "application/octet-stream"))
-
-async def _download_message_attachment_to_tmp(source: Any) -> tuple[str, str, str] | None:
-    file_id, mime, filename = _media_file_id_and_mime(source)
-    if not file_id:
-        return None
-    suffix = _mime_suffix(mime, filename)
-    fd, tmp_path = tempfile.mkstemp(prefix="tg_media_", suffix=suffix)
-    os.close(fd)
-    try:
-        data, real_mime = await _download_telegram_file_bytes(file_id)
-        final_mime = _sanitize_mime_type(filename or "", mime)
-        if final_mime == "application/octet-stream" or not final_mime:
-             final_mime = _sanitize_mime_type(None, real_mime)
-        if final_mime == "application/octet-stream" or not final_mime:
-             final_mime = mime or "application/octet-stream"
-        with open(tmp_path, "wb") as h:
-            h.write(data)
-        return tmp_path, final_mime, filename or Path(tmp_path).name
-    except Exception:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp_path)
-        raise
-
-async def _fetch_media(file_id: str, mime: str) -> tuple[bytes, str] | None:
-    if not file_id:
-        return None
-    try:
-        data, real_mime = await _download_telegram_file_bytes(file_id)
-        final_mime = _sanitize_mime_type(None, mime)
-        if final_mime == "application/octet-stream":
-            final_mime = _sanitize_mime_type(None, real_mime)
-        return data, final_mime
-    except Exception as exc:
-        log.warning("[media] Download media failed for file_id %s: %s", file_id, exc)
-        return None
-
-# учёт квот
 
 
 # openrouter api
