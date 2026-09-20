@@ -726,6 +726,21 @@ def test_restore_single_chat_accepts_current_schema_version_record():
         bot.chat_state.pop(cid, None)
 
 
+def test_restore_single_chat_keeps_language_across_restart():
+    # Прод-баг: /lang слетал при каждом деплое — восстановление пересоздавало
+    # состояние без поля lang, хотя сериализатор его писал.
+    cid = 999907
+    try:
+        bot._restore_single_chat(cid, {"history": [], "lang": "uk"})
+        assert bot.chat_state[cid]["lang"] == "uk"
+        bot._restore_single_chat(cid, {"history": [], "lang": "xx-quebrada"})
+        assert bot.chat_state[cid]["lang"] == "en"
+        bot._restore_single_chat(cid, {"history": []})
+        assert bot.chat_state[cid]["lang"] == "en"
+    finally:
+        bot.chat_state.pop(cid, None)
+
+
 def test_check_and_register_rate_limit_blocks_after_five_requests():
     bot.user_rate_limits.pop(999950, None)
     try:

@@ -326,6 +326,9 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
         "recent_media_ids": media_buckets,
         "last_activity": time.monotonic(),
+        # Язык переживает рестарт: сериализатор его пишет, а восстановление
+        # раньше теряло (прод-баг: /lang слетал при каждом деплое).
+        "lang": normalize_lang(s.get("lang")),
     }
 
 def _save_chat_index() -> None:
