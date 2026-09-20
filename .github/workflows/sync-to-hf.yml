@@ -15,7 +15,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Явно берём тот коммит, что проверялся CI (workflow_run сам по себе
           # не чекаутит его) — иначе можно было бы задеплоить более поздний,
