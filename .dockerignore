@@ -9,7 +9,6 @@
 # Тесты и dev-инструменты — не нужны в рантайме, только раздувают образ
 tests/
 requirements-dev.txt
-tests.yml
 .pytest_cache/
 README.md
 docs/

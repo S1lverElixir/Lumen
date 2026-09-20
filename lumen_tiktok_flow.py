@@ -503,7 +503,7 @@ async def handle_tiktok(message: Message, url: str) -> None:
          # URL и правильно разнесённых по времени запросах. Причина подтверждена вручную —
          # блокировка исходящего IP HF Spaces (см. подробный диагностический комментарий в
          # _fetch_tikwm_media_data). TIKWM_API_BASE_URL — единственное реально работающее
-         # решение: запрос уходит через выделенный прокси с другого IP (см. proxy.ts).
+         # решение: запрос уходит через выделенный прокси с другого IP (см. proxy/proxy.ts).
          media_data = await _fetch_tikwm_media_data_with_proxy_fallback(session, resolved_url, headers)
 
          if not media_data:

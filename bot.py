@@ -107,7 +107,7 @@ def _setup_logging() -> logging.Logger:
     # py-spy дамп стеков зависшего процесса): _setup_logging() вызывается больше
     # одного раза за процесс — сам модуль вызывает её один раз при импорте, а
     # test_setup_logging_respects_log_level_env/test_setup_logging_defaults_to_
-    # info_when_unset в test_bot.py вызывают её ещё 2 раза (проверка LOG_LEVEL).
+    # info_when_unset в tests/test_bot_state.py вызывают её ещё 2 раза (проверка LOG_LEVEL).
     # Без остановки СТАРОГО листенера здесь каждый повторный вызов заводил ЕЩЁ
     # ОДИН QueueListener с ЕЩЁ ОДНИМ фоновым потоком-monitor'ом, читающим из ТОЙ
     # ЖЕ общей _LOG_QUEUE — несколько потоков-конкурентов дёргают dequeue() из
@@ -243,7 +243,7 @@ _proxy_rotation_lock = asyncio.Lock()
 # в этом случае стучится в TikWM напрямую (два зеркала), как и раньше; если
 # задано — идёт ОДНИМ запросом через прокси вместо прямого обращения к двум
 # зеркалам напрямую (сам прокси уже решает, к какому реальному хосту TikWM
-# стучаться — см. proxy.ts).
+# стучаться — см. proxy/proxy.ts).
 TIKWM_API_BASE_URL = os.getenv("TIKWM_API_BASE_URL", "").strip().rstrip("/")
 # Резервные прокси для TikWM (тот же принцип, что и TELEGRAM_API_BASE_URL_FALLBACKS
 # выше по логике — см. _TELEGRAM_PROXY_CANDIDATES) — асимметрии быть не должно:
@@ -865,7 +865,7 @@ __all__ = [
     "_run_streaming_reply",
     "_try_gemini_streaming",
     "_try_openrouter_streaming",
-    # Точка подмены тестов (см. monkeypatch в test_bot.py) — сам код bot.py её
+    # Точка подмены тестов (см. monkeypatch в tests/) — сам код bot.py её
     # больше не читает напрямую после выноса стриминга.
     "_model_first_chunk_limit",
     # Константы-фолбэки тестов (читаются как bot._IDENTITY_LEAK_FALLBACK).
@@ -1227,12 +1227,12 @@ from lumen_model_speed import (
 # Точка подмены для тестов (тот же приём, что и у bot._get_http_session/bot.
 # _openrouter_stream_pieces и т.п. в этом файле) — реальный await asyncio.sleep()
 # в фазе "довывода" (см. _run_streaming_reply) не нужен ни в одном тесте и заметно
-# замедлил бы весь сьют без единой пользы; conftest.py безусловно патчит эту
+# замедлил бы весь сьют без единой пользы; tests/conftest.py безусловно патчит эту
 # ссылку на no-op для каждого теста.
 _typing_sleep = asyncio.sleep
 
 # Отдельная точка подмены для анимации точек (см. _tick_waiting_dots ниже) —
-# НАМЕРЕННО не покрыта autouse-фикстурой conftest.py: если бы она была no-op,
+# НАМЕРЕННО не покрыта autouse-фикстурой tests/conftest.py: если бы она была no-op,
 # тикер в каждом стриминг-тесте успевал бы наставить лишних правок до прихода
 # мгновенного фейкового куска и сломал бы все проверки последовательностей
 # правок. В проде — обычный asyncio.sleep; в тестах анимации патчится явно.
