@@ -1,10 +1,10 @@
 # Security Policy
 
-Нашли уязвимость — напишите владельцу через GitHub Issues (приватно, без деталей
-эксплуатации в публичном тексте) или в личных сообщениях Telegram-бота.
+Found a vulnerability? Please report it privately — open a GitHub issue
+without exploit details in the public text, or message the bot owner directly.
 
-Что полезно прислать: где (файл и строка), что может сделать атакующий,
-как воспроизвести на тестовом окружении. Не присылайте боевые ключи и токены.
+Helpful reports include: where (file and line), what an attacker could do,
+and how to reproduce it in a test environment. Never send live keys or tokens.
 
-Секреты в `.env` и переменные окружения никогда не коммитятся (см. `.gitignore`).
-Если ключ утек — скажите об этом прямо, ключ будет перевыпущен.
+Secrets in `.env` and environment variables are never committed (see
+`.gitignore`). If a key has leaked, say so directly and it will be rotated.
