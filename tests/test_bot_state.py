@@ -12,6 +12,7 @@ import json
 import logging
 import lumen_chat_state
 import lumen_limits
+import pathlib
 import sentry_sdk
 import sys
 import time
@@ -1093,3 +1094,11 @@ def test_serialize_chat_state_persists_lang():
     snap2 = lumen_state_storage._serialize_chat_state({"history": []})
     assert snap2["lang"] == "en"
 
+
+def test_module_alias_for_prod_entry():
+    # Прод-инцидент: прод запускается как `python bot.py` (__main__), а десятки
+    # отложенных `import bot` внутри функций без алиаса выполняли весь bot.py
+    # вторым модулем — пустое состояние и вечный bot=None (все апдейты в 503).
+    # Тест-канарейка: алиас обязан оставаться в голове bot.py, проверяется текстом.
+    src = pathlib.Path(bot.__file__).read_text(encoding="utf-8")
+    assert 'sys.modules.setdefault("bot"' in src or "sys.modules.setdefault('bot'" in src

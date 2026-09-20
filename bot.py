@@ -6,6 +6,16 @@ Lumen — телеграм-бот на Gemini/OpenRouter, webhook-режим.
 
 from __future__ import annotations
 
+# КРИТИЧНО (прод-инцидент, сентябрь 2026): прод запускается как `python bot.py`
+# (`__main__`), а тесты — через `import bot`. Без этой строки любой отложенный
+# `import bot` внутри функций (их десятки после распила P2) при прод-запуске
+# ЗАНОВО выполнял весь bot.py как отдельный модуль: второе приложение, пустые
+# chat_state/квоты и вечный bot=None → все апдейты уходили в 503, бот молчал.
+# Алиас делает `import bot` везде тем же объектом, что и запущенный модуль.
+import sys as _sys
+_sys.modules.setdefault("bot", _sys.modules[__name__])
+del _sys
+
 import asyncio
 import atexit
 import contextlib
@@ -46,6 +56,11 @@ from lumen_lang import (
     SUPPORTED_LANGS,
     t as _lang_t,
 )
+
+# setMyCommands принимает только двухбуквенные ISO 639-1 коды (прод-инцидент:
+# "fil" ронял регистрацию с 400 Bad Request). У филиппинского такого кода нет
+# (fil — ISO 639-2), эти пользователи видят команды на английском по умолчанию.
+COMMAND_LOCALES = [c for c in SUPPORTED_LANGS if c != DEFAULT_LANG and c != "fil"]
 
 # логирование
 
@@ -1492,7 +1507,7 @@ async def _webhook_startup() -> None:
                 BotCommand(command="lang", description=_lang_t(code, "cmd_desc_lang")),
             ],
         )
-        for code in SUPPORTED_LANGS if code != DEFAULT_LANG
+        for code in COMMAND_LOCALES
     ]
 
     async def try_setup():

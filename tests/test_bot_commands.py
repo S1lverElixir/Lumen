@@ -620,3 +620,9 @@ def test_lang_menu_lists_languages_alphabetically(monkeypatch):
     texts = [cb.text for row in markup.inline_keyboard for cb in row]
     assert texts == [f"{lumen_lang.LANG_NAMES[c]}{' ✓' if c == 'ru' else ''}" for c in codes]
 
+
+def test_command_locales_excludes_filipino_without_iso_639_1_code():
+    # Прод-инцидент: "fil" ронял setMyCommands с 400 (Bot API принимает только
+    # двухбуквенные ISO 639-1 коды, которых у филиппинского нет).
+    assert "fil" not in bot.COMMAND_LOCALES
+    assert set(bot.COMMAND_LOCALES) == (set(bot.SUPPORTED_LANGS) - {bot.DEFAULT_LANG, "fil"})
