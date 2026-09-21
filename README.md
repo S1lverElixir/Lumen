@@ -11,6 +11,12 @@ pinned: false
   <img src="assets/lumen-banner.svg" alt="Lumen: Intelligence. Clarity." width="480">
 </p>
 
+<p align="center">
+  <a href="https://github.com/S1lverElixir/Lumen/actions/workflows/ci.yml"><img src="https://github.com/S1lverElixir/Lumen/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/python-3.13-blue.svg" alt="Python 3.13">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
+
 A Telegram bot styled after Claude's tone and personality (direct, warm, light on hedging), running on Google Gemini and free OpenRouter models with automatic per-message routing between them. Lumen also generates images, downloads TikTok videos without watermarks, and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
 
 **Stack:** Python 3.13 · aiogram · FastAPI · google-genai · Docker
@@ -62,14 +68,14 @@ Only `BOT_TOKEN` and `GEMINI_API_KEY` are required. Everything else has a sane d
 
 ## Proxy setup
 
-Hugging Face Spaces' outbound IPs are blocked by Telegram's Bot API entirely, and TikWM (the TikTok API this bot uses) returns `403` to the same IPs. Both are fixed by one small pass-through proxy, deployed separately on Deno Deploy (source: `proxy.ts`):
+Hugging Face Spaces' outbound IPs are blocked by Telegram's Bot API entirely, and TikWM (the TikTok API this bot uses) returns `403` to the same IPs. Both are fixed by one small pass-through proxy, deployed separately on Deno Deploy (source: `proxy/proxy.ts`):
 
 ```bash
 TELEGRAM_API_BASE_URL=https://<proxy-domain>/fetch/api.telegram.org
 TIKWM_API_BASE_URL=https://<proxy-domain>/fetch/www.tikwm.com
 ```
 
-The proxy only forwards to an explicit host allowlist (`api.telegram.org`, `www.tikwm.com`, `tikwm.com`). See `proxy.ts` for the implementation and `proxy_test.ts` for its tests.
+The proxy only forwards to an explicit host allowlist (`api.telegram.org`, `www.tikwm.com`, `tikwm.com`). See `proxy/proxy.ts` for the implementation and `proxy/proxy_test.ts` for its tests.
 
 ## Diagnostics
 
@@ -119,3 +125,11 @@ CI (`.github/workflows/ci.yml`) runs `pyflakes` + `pytest` + `pip-audit` on ever
 - YouTube downloading isn't supported, because Hugging Face Spaces' outbound IPs are blocked at the TLS handshake level. Viewing and analyzing a video by link still works.
 - TikTok downloading depends on the unofficial TikWM API, not an official TikTok endpoint, and needs the proxy above to work from Hugging Face Spaces at all.
 - Streaming has only been exercised against mocked clients, not live Gemini/OpenRouter SSE traffic. See the manual smoke-test checklist in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before touching that code path.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability. Secrets are scrubbed from logs and Sentry events before they leave the container.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
