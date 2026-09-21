@@ -426,27 +426,31 @@ async def cmd_stats(message: Message) -> None:
     _stats_lang = bot._chat_lang(message.chat.id)
     _limitTag = _lang_t(_stats_lang, "stats_limit_used")
     _noData = _lang_t(_stats_lang, "stats_no_data")
-    gemini_lines = [
-        f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
-        for mid, e in sorted(gemini_quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
-    ]
-    gemini_text = "\n".join(gemini_lines) or _noData
 
-    # OpenRouter — разбивка по моделям как у Gemini (калибровка 25.07.2026: одна суммарная цифра для отладки бесполезна; $-баланс убран — все модели :free).
-    or_quota = bot.GLOBAL_QUOTA.get("openrouter", {})
-    or_lines = [
-        f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
-        for mid, e in sorted(or_quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
-    ]
-    or_text = "\n".join(or_lines) or _noData
+    def _quota_section(quota: dict, daily_limit: int | None) -> str:
+        # Показываем только модели с движением (расход или метка исчерпания) — нули по
+        # давно мёртвым моделям копятся в хранилище через рестарты и превращали вывод в простыню.
+        items = sorted(quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
+        used_total = sum(int(e.get("used") or 0) for _, e in items)
+        active = [(mid, e) for mid, e in items if (e.get("used") or 0) or e.get("exhausted_at")]
+        lines = [
+            f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
+            for mid, e in active
+        ]
+        idle = len(items) - len(active)
+        if idle:
+            lines.append(f"  …и ещё {idle} без обращений")
+        total = f"  Σ: {used_total}"
+        if daily_limit is not None:
+            total += f" / {daily_limit} (осталось {max(0, daily_limit - used_total)})"
+        lines.append(total)
+        return "\n".join(lines) or _noData
 
-    # Groq — та же разбивка по моделям (прямой провайдер с собственным дневным лимитом).
-    groq_quota = bot.GLOBAL_QUOTA.get("groq", {})
-    groq_lines = [
-        f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
-        for mid, e in sorted(groq_quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
-    ]
-    groq_text = "\n".join(groq_lines) or _noData
+    gemini_text = _quota_section(gemini_quota, None)
+    # OpenRouter — дневной лимит free-моделей 50 (с $10 — 1000, тогда остаток врёт в меньшую сторону).
+    or_text = _quota_section(bot.GLOBAL_QUOTA.get("openrouter", {}), 50)
+    # Groq — дневной лимит free-плана 1000 запросов (калибровка 21.09.2026).
+    groq_text = _quota_section(bot.GLOBAL_QUOTA.get("groq", {}), 1000)
 
     # Состояние прокси — из самого breaker'а (раньше команда лезла в четыре глобала напрямую).
     proxy_line = bot._tg_proxy_breaker.status_text()
