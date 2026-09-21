@@ -37,6 +37,13 @@ jobs:
 
       - run: pytest -q
 
+      # Deno-тесты прокси (proxy/proxy_test.ts — без внешних импортов, офлайн).
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - run: deno test proxy/proxy_test.ts
+
       # проверка requirements.txt на известные CVE в зафиксированных версиях —
       # requirements-dev.txt (pytest/pyflakes/pip-audit) не сканируем: это
       # dev-инструменты, не попадающие в рантайм-образ (см. Dockerfile/.dockerignore)

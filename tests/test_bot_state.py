@@ -4,6 +4,7 @@ test_bot_state.py — Состояние и утилиты: хранилище, 
 Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
 """
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 import asyncio
@@ -500,6 +501,16 @@ def test_ordinary_question_gets_no_file_notice(rate_guard_setup, monkeypatch):
     message.text = "столица Венгрии?"
     prompt = _run_core_capturing_prompt(message, monkeypatch)
     assert "[Служебная пометка" not in prompt
+
+
+def test_message_core_sends_typing_indicator(rate_guard_setup, monkeypatch):
+    # Регрессия: вызов шёл в bot.send_chat_action (такой функции нет) вместо bot.bot.send_chat_action — индикатор "печатает" молча не показывался.
+    message = rate_guard_setup()
+    message.text = "столица Венгрии?"
+    fake_bot = SimpleNamespace(send_chat_action=AsyncMock())
+    monkeypatch.setattr(bot, "bot", fake_bot)
+    _run_core_capturing_prompt(message, monkeypatch)
+    fake_bot.send_chat_action.assert_awaited_once_with(chat_id=123, action="typing")
 
 
 def test_media_question_with_attached_file_gets_no_file_notice(rate_guard_setup, monkeypatch):
