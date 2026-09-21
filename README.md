@@ -21,6 +21,20 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 **Stack:** Python 3.13 · aiogram · FastAPI · google-genai · Docker
 
+## Contents
+
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Deploying on Hugging Face Spaces](#deploying-on-hugging-face-spaces)
+- [Configuration](#configuration)
+- [Proxy setup](#proxy-setup)
+- [Diagnostics](#diagnostics)
+- [Commands](#commands)
+- [Testing](#testing)
+- [Known limitations](#known-limitations)
+- [Security](#security)
+- [License](#license)
+
 > The YAML block above is Hugging Face Space metadata, not a mistake: this same `README.md` doubles as the Space card. Everything below it is normal GitHub documentation.
 
 ## Features
