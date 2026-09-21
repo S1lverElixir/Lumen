@@ -382,6 +382,30 @@ def test_streaming_whitespace_only_returns_none_not_empty_response():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_streaming_reveal_follows_arrival_pace_not_full_dump():
+    # Куски капают постепенно (10 × 20 симв. с паузами): первая правка обязана показать
+    # ЧАСТЬ ответа, а не весь текст разом — часы показа идут от первого куска.
+    chat_id = 999308
+    full = "x" * 200
+
+    async def paced_pieces():
+        for _ in range(10):
+            await asyncio.sleep(0.05)
+            yield "x" * 20
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="pace:free",
+            piece_agen=paced_pieces(),
+        ))
+        assert answer == full
+        first_edit = incoming.sent[0].edits[0][0]
+        assert 0 < len(first_edit) < len(full)
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_try_openrouter_streaming_returns_none_on_early_failure():
     chat_id = 999106
 

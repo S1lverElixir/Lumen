@@ -23,6 +23,11 @@ MAX_CHARS_PER_SEC = 260.0
 # под реальную смену бэкенда OpenRouter под тем же слагом.
 _EMA_ALPHA = 0.3
 
+# Насколько быстро скользящее среднее прихода подстраивается под новый кусок.
+# Больше, чем у EMA всего ответа (0.3): темп прихода меняется внутри одного
+# стрима (пауза → ливень), оценка должна успевать за ним, а не тянуться.
+_ARRIVAL_ALPHA = 0.5
+
 _speed_ema: dict[str, float] = {}
 
 
@@ -75,3 +80,19 @@ def catchup_reveal_steps(remaining_len: int, chars_per_sec: float, tick_interval
     if steps and steps[-1] < remaining_len:
         steps[-1] = remaining_len
     return steps
+
+
+def blend_arrival_speed(prev_ewma: float | None, piece_len: int, dt_sec: float) -> float | None:
+    """Подмешивает один пришедший кусок в оценку темпа прихода (симв/сек) — чистая функция для стриминга.
+    Нулевая/отрицательная дельта (куски пришли пачкой в один тик часов) — не наблюдение, возвращаем прежнее."""
+    if piece_len <= 0 or dt_sec <= 0:
+        return prev_ewma
+    inst = max(MIN_CHARS_PER_SEC, min(MAX_CHARS_PER_SEC, piece_len / dt_sec))
+    return inst if prev_ewma is None else _ARRIVAL_ALPHA * inst + (1 - _ARRIVAL_ALPHA) * prev_ewma
+
+
+def display_speed_for(arrival_ewma: float | None, pace_key: str) -> float:
+    """Скорость показа: измеренный темп прихода, пока он есть; иначе глобальная EMA модели (затравка на первые куски)."""
+    if arrival_ewma is not None:
+        return max(MIN_CHARS_PER_SEC, min(MAX_CHARS_PER_SEC, arrival_ewma))
+    return get_typing_speed(pace_key)

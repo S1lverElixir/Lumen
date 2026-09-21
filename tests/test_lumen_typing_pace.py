@@ -114,3 +114,32 @@ def test_catchup_reveal_steps_single_tick_when_fast_enough():
     # Скорость достаточно высокая, чтобы весь остаток поместился в один тик.
     steps = lumen_typing_pace.catchup_reveal_steps(20, 200.0, 0.5, 6)
     assert steps == [20]
+
+
+# ─────────────────────────── blend_arrival_speed / display_speed_for ───────────────────────────
+
+def test_blend_arrival_speed_first_sample_sets_estimate():
+    # Первый кусок: оценки ещё нет — мгновенная скорость становится ею (в границах).
+    assert lumen_typing_pace.blend_arrival_speed(None, 100, 1.0) == 100.0
+    # Выбросы жмутся в границы, а не утаскивают оценку.
+    assert lumen_typing_pace.blend_arrival_speed(None, 10000, 0.01) == lumen_typing_pace.MAX_CHARS_PER_SEC
+    assert lumen_typing_pace.blend_arrival_speed(None, 1, 100.0) == lumen_typing_pace.MIN_CHARS_PER_SEC
+
+
+def test_blend_arrival_speed_ignores_non_positive_inputs():
+    assert lumen_typing_pace.blend_arrival_speed(90.0, 0, 1.0) == 90.0
+    assert lumen_typing_pace.blend_arrival_speed(90.0, 50, 0.0) == 90.0
+    assert lumen_typing_pace.blend_arrival_speed(None, 50, 0.0) is None
+
+
+def test_blend_arrival_speed_moves_toward_new_sample():
+    # 100 симв/сек было, приехало 200 симв/сек — оценка сдвинулась вверх, но не прыгнула целиком.
+    updated = lumen_typing_pace.blend_arrival_speed(100.0, 200, 1.0)
+    assert 100.0 < updated < 200.0
+
+
+def test_display_speed_for_prefers_measured_arrival():
+    key = lumen_typing_pace.speed_key("gemini", "__test_display_model__")
+    assert lumen_typing_pace.display_speed_for(150.0, key) == 150.0
+    # Без замера прихода — глобальная EMA модели (затравка на первые куски).
+    assert lumen_typing_pace.display_speed_for(None, key) == lumen_typing_pace.get_typing_speed(key)

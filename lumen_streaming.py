@@ -31,9 +31,10 @@ from lumen_security import (
 )
 from lumen_typing_pace import (
     speed_key as _typing_speed_key,
-    get_typing_speed as _get_typing_speed,
     record_observed_speed as _record_typing_speed,
     catchup_reveal_steps as _typing_catchup_steps,
+    blend_arrival_speed as _typing_arrival_update,
+    display_speed_for as _typing_display_speed,
 )
 
 log = logging.getLogger("bot")
@@ -205,10 +206,13 @@ async def _run_streaming_reply(
     last_edit_ts = 0.0
     last_edited_plain = ""
     first_piece_ts: float | None = None
-    # Замеры скорости/латентности — см. lumen_typing_pace.py (overall один раз на весь ответ, chunk — заново на каждое новое сообщение).
+    # Замеры скорости/латентности — см. lumen_typing_pace.py (overall один раз на весь ответ, arrival — заново на каждое новое сообщение).
     pace_key = _typing_speed_key(provider, model_id)
     overall_start_ts = time.monotonic()
-    current_chunk_start_ts = overall_start_ts
+    # reveal_base_ts — момент ПЕРВОГО куска, а не старта стрима: иначе после долгой тишины формула сразу разрешала показать всё накопленное разом. last_piece_ts/arrival_ewma — замер реального темпа прихода.
+    reveal_base_ts: float | None = None
+    last_piece_ts: float | None = None
+    arrival_ewma: float | None = None
 
     try:
         placeholder = await bot._tg_call(message.reply, "…", call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
@@ -224,8 +228,13 @@ async def _run_streaming_reply(
         async for piece in piece_agen:
             if not piece:
                 continue
+            now_piece = time.monotonic()
             if first_piece_ts is None:
-                first_piece_ts = time.monotonic()
+                first_piece_ts = now_piece
+                reveal_base_ts = now_piece
+            else:
+                arrival_ewma = _typing_arrival_update(arrival_ewma, len(piece), now_piece - (last_piece_ts or now_piece))
+            last_piece_ts = now_piece
             full_text += piece
 
             leak_kind = None
@@ -278,14 +287,14 @@ async def _run_streaming_reply(
                 await bot._tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]), parse_mode=ParseMode.HTML, call_timeout=15.0)
                 sent_messages.append(new_msg)
                 last_edited_plain = ""
-                # Новое сообщение — новый "лист", печать в нём начинается с нуля.
-                current_chunk_start_ts = time.monotonic()
+                # Новое сообщение — новый "лист", показ в нём начинается с нуля (темп прихода бэкенда тот же).
+                reveal_base_ts = time.monotonic()
 
-            # Троттлинг edit_text (~раз в интервал, иначе 429) + видимый срез по оценённой скорости печати (верхняя граница — реально пришедшее).
+            # Троттлинг edit_text (~раз в интервал, иначе 429) + видимый срез по измеренному темпу прихода (верхняя граница — реально пришедшее).
             now = time.monotonic()
             target_full = chunks[-1] if chunks else ""
-            typing_speed = _get_typing_speed(pace_key)
-            reveal_len = min(len(target_full), max(0, int((now - current_chunk_start_ts) * typing_speed)))
+            typing_speed = _typing_display_speed(arrival_ewma, pace_key)
+            reveal_len = min(len(target_full), max(0, int((now - (reveal_base_ts or now)) * typing_speed)))
             current_chunk_text = target_full[:reveal_len]
             if now - last_edit_ts >= bot.STREAM_EDIT_MIN_INTERVAL_SEC and current_chunk_text != last_edited_plain:
                 await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0)
@@ -310,7 +319,7 @@ async def _run_streaming_reply(
         already_shown_len = len(last_edited_plain) if last_edited_plain and target_full.startswith(last_edited_plain) else 0
         remaining_len = len(target_full) - already_shown_len
         if remaining_len > 0:
-            typing_speed = _get_typing_speed(pace_key)
+            typing_speed = _typing_display_speed(arrival_ewma, pace_key)
             for step_len in _typing_catchup_steps(remaining_len, typing_speed, bot.STREAM_TYPING_TICK_SEC, bot.STREAM_TYPING_MAX_CATCHUP_TICKS):
                 await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
                 current_chunk_text = target_full[:already_shown_len + step_len]
