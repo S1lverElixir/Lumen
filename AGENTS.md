@@ -37,6 +37,9 @@
 - Comments explain why, not what. Keep the dated evidence comments that prevent regressions, but keep them short and move long write-ups to docs/.
 - No filler prose, emojis, or heavy dash use in code, comments, or docs.
 
+## Docs lookup
+- When you need current library docs (aiogram, FastAPI, google-genai, Deno) rather than memory, use the `context7` MCP tools.
+
 ## Session hygiene (the owner does not track this, guide them)
 - Effort: for tasks above the default (High: streaming, security, refactor; XHigh: audits, architecture, production incidents), say which level fits and why, then wait for the owner's OK. For default-level tasks (Low: read, explain, rename; Medium: single-module fixes, tests, docs) just proceed. You cannot change effort yourself; the owner does.
 - Suggest a new chat when the topic changes completely, and /compact when the session gets long.
