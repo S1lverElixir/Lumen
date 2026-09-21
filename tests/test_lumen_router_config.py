@@ -114,13 +114,16 @@ def test_build_route_freshness_query_prioritizes_search_capable_gemini_models():
     assert route[0][0] == "gemini"
     # OpenRouter должен присутствовать как резерв на случай полного отказа Gemini.
     assert any(p == "openrouter" for p, _ in route)
+    # Groq — последним резервом (ответ по знаниям, если легли оба).
+    assert route[-1][0] == "groq"
 
 
-def test_build_route_plain_text_prefers_openrouter_to_save_gemini_quota():
-    # Основной сценарий из требования: обычный текст без вложений/ссылок/нужды
-    # в интернете — должен идти в OpenRouter первым делом, а не в Gemini.
+def test_build_route_plain_text_prefers_groq_to_save_quotas():
+    # Обычный текст — сначала Groq (1000/день против 50 у OpenRouter, калибровка 21.09.2026),
+    # дальше OpenRouter, Gemini — резервом.
     route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
-    assert route[0][0] == "openrouter"
+    assert route[0] == ("groq", "qwen/qwen3.8-27b")
+    assert any(p == "openrouter" for p, _ in route)
     assert any(p == "gemini" for p, _ in route)  # Gemini всё ещё есть как резерв
 
 

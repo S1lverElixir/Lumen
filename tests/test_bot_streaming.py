@@ -179,6 +179,36 @@ def test_openrouter_stream_pieces_parses_sse_chunks():
         bot.OPENROUTER_API_KEY = original_key
 
 
+def test_groq_stream_pieces_parses_sse_chunks():
+    # Groq-подключение 21.09.2026: тот же OpenAI-SSE, что у OpenRouter — куски собираются, [DONE] завершает.
+    lines = [
+        'data: {"choices":[{"delta":{"content":"Кан"}}]}\n'.encode("utf-8"),
+        'data: {"choices":[{"delta":{"content":"берра"}}]}\n'.encode("utf-8"),
+        b"data: [DONE]\n",
+    ]
+    fake_resp = _FakeSSEResponse(lines)
+    fake_session = _FakeSessionForSSE(fake_resp)
+
+    async def fake_get_http_session():
+        return fake_session
+
+    original_get_session = bot._get_http_session
+    original_key = bot.GROQ_API_KEY
+    bot._get_http_session = fake_get_http_session
+    bot.GROQ_API_KEY = "fake-key"
+    try:
+        async def collect():
+            pieces = []
+            async for piece in bot._groq_stream_pieces("qwen/qwen3.8-27b", [{"role": "user", "content": "hi"}]):
+                pieces.append(piece)
+            return pieces
+        pieces = asyncio.run(collect())
+        assert pieces == ["Кан", "берра"]
+    finally:
+        bot._get_http_session = original_get_session
+        bot.GROQ_API_KEY = original_key
+
+
 def test_openrouter_stream_pieces_raises_on_http_error_status():
     fake_resp = _FakeSSEResponse([], status=500)
     fake_session = _FakeSessionForSSE(fake_resp)

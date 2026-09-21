@@ -145,6 +145,52 @@ async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
             if piece:
                 yield piece
 
+async def _groq_stream_pieces(model_id: str, messages: list[dict]):
+    """Куски от Groq: тот же OpenAI-SSE, что у OpenRouter (Groq — OpenAI-совместимый API). Таймаут на строку — STREAM_CHUNK_TIMEOUT_SEC."""
+    import bot
+    if not bot.GROQ_API_KEY:
+        raise bot.GroqAPIError("GROQ_API_KEY is not set")
+    headers = {
+        "Authorization": f"Bearer {bot.GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    session = await bot._get_http_session()
+    url = f"{bot.GROQ_BASE_URL}/chat/completions"
+    payload = {"model": model_id, "messages": messages, "stream": True}
+    async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=None, connect=12.0)) as resp:
+        if resp.status >= 400:
+            body = await resp.read()
+            raise bot.GroqAPIError(f"HTTP {resp.status}: {body[:300]!r}", status_code=resp.status)
+        line_iter = resp.content.__aiter__()
+        while True:
+            try:
+                raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=bot.STREAM_CHUNK_TIMEOUT_SEC)
+            except StopAsyncIteration:
+                break
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data_str = line[len("data:"):].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                obj = json.loads(data_str)
+            except Exception:
+                continue
+            # Ошибка внутри SSE-чанка — как у OpenRouter: поднимаем, дальше штатно (ранний сбой — откат, поздний — пометка).
+            err_obj = obj.get("error")
+            if err_obj:
+                err_msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
+                err_code = err_obj.get("code") if isinstance(err_obj, dict) else None
+                raise bot.GroqAPIError(err_msg or "Groq returned an error in the stream body", status_code=err_code)
+            choices = obj.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            piece = delta.get("content") or ""
+            if piece:
+                yield piece
+
 async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
 ) -> tuple[str | None, Message | None]:
@@ -334,3 +380,11 @@ async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Messa
     # Генератор — через bot.: тесты подменяют bot._openrouter_stream_pieces фейком.
     piece_agen = bot._openrouter_stream_pieces(model_id, messages)
     return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen)
+
+async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str) -> tuple[str | None, Message | None]:
+    """Обёртка _run_streaming_reply для Groq (SSE через chat/completions)."""
+    import bot
+    messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
+    # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
+    piece_agen = bot._groq_stream_pieces(model_id, messages)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen)

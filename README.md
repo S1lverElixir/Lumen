@@ -39,7 +39,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 ## Features
 
-- **Automatic model routing.** Every message goes to whichever provider actually has what it needs: web search and link reading go to Gemini, everything else defaults to free OpenRouter models, protecting Gemini's tight daily quota.
+- **Automatic model routing.** Every message goes to whichever provider actually has what it needs: plain text starts at Groq (1000 free requests/day), web search and link reading go to Gemini, OpenRouter covers the rest — protecting Gemini's tight daily quota.
 - **Streaming replies** with a self-calibrating typing-speed pacer, so answers type themselves in instead of landing in a few large chunks.
 - **Defenses against prompt injection and identity leaks.** A deterministic input filter plus output scrubbers keep the bot from revealing which model or provider actually answered.
 - **TikTok downloads** without watermarks: video, slideshows (including "live" photo slides), and original sound.

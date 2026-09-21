@@ -197,6 +197,10 @@ _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
     "inclusionai/ling-3.0-flash-vl:free",
     "liquid/lfm-2.5-2.6b:free",
     "gemini-3.8-flash",
+    "openrouter/free",
+    # Groq-ID без :free-суффикса — те же семейства, что выше через OpenRouter; дословно в ответе им тоже не место.
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-120b",
 ]
 TEXT_MODEL_ORDER = _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION  # алиас для обратной совместимости
 # Аудит 02.08.2026 (логи + каталог): laguna-s-2.1 и ling-3.0-flash, калибровку не проходили (только факт free-квоты).
@@ -309,6 +313,17 @@ def _or_route(models: list[str]) -> list[tuple[str, str]]:
 
 def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
     return [("gemini", m) for m in models]
+
+# ── Groq (прямой провайдер, не через OpenRouter) ──
+# Калибровка русского живьём 21.09.2026 (4 пробы на модель через API с VPN): Qwen отвечает чисто и по делу, gpt-oss-120b тоже верен, но представляется ChatGPT от OpenAI (ловит фильтр утечек) и тратит 30-70 reasoning-токенов на ответ — они едят минутный бюджет. Поэтому Qwen голова, gpt-oss второй. Лимиты free-плана по офиц. доке: 30 RPM / 1000 RPD / 8K TPM / 200K TPD на модель.
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+_GROQ_LIGHT_ORDER: list[str] = [
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-120b",
+]
+
+def _groq_route(models: list[str]) -> list[tuple[str, str]]:
+    return [("groq", m) for m in models]
 
 
 # ── "Лёгкие" запросы — САМЫЙ ЧАСТЫЙ маршрут, целиком OpenRouter (квоту Gemini не трогаем).
@@ -468,12 +483,13 @@ def _build_route(
     if needs_freshness:
         # Текст без вложений, но нужна свежая информация — только у Gemini
         # реально есть поиск; OpenRouter в конце как резерв на случай, если
-        # Gemini исчерпан целиком (без поиска, но хоть какой-то ответ).
-        return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_HEAVY_ORDER if is_heavy else _OR_LIGHT_ORDER)
+        # Gemini исчерпан целиком (без поиска, но хоть какой-то ответ), Groq —
+        # последним (ответ по знаниям, если легли оба).
+        return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_HEAVY_ORDER if is_heavy else _OR_LIGHT_ORDER) + _groq_route(_GROQ_LIGHT_ORDER)
 
     # Основной случай: обычный текст без вложений/ссылок/признаков нужды в
-    # интернете — целиком к OpenRouter, Gemini — резерв на случай отказа всей
-    # цепочки OpenRouter разом.
+    # интернете — сначала Groq (1000/день против 50 у OpenRouter — главный объём),
+    # дальше OpenRouter, Gemini — резерв на случай отказа обоих разом.
     if is_heavy:
         return _or_route(_OR_HEAVY_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
-    return _or_route(_OR_LIGHT_ORDER) + _gemini_route(GEMINI_SEARCH_CHAIN)
+    return _groq_route(_GROQ_LIGHT_ORDER) + _or_route(_OR_LIGHT_ORDER) + _gemini_route(GEMINI_SEARCH_CHAIN)

@@ -50,6 +50,41 @@ class OpenRouterAPIError(RuntimeError):
         self.status_code = status_code
         self.payload = payload
 
+class GroqAPIError(RuntimeError):
+    """То же, что OpenRouterAPIError, для прямого Groq-эндпоинта (статус кладём рядом — его читает _error_status/_classify_model_error)."""
+    def __init__(self, message: str, status_code: int | None = None, payload: Any = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload
+
+async def _groq_request(path: str, method: str = "GET", *, json_body: dict | None = None) -> Any:
+    """Прямой запрос к Groq (OpenAI-совместимый API) — по образцу _or_request: тот же бюджет попытки, та же вычистка ключа из ошибок."""
+    import bot
+    if not bot.GROQ_API_KEY:
+        raise bot.GroqAPIError("GROQ_API_KEY is not set")
+    headers = {"Authorization": f"Bearer {bot.GROQ_API_KEY}"}
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+    session = await bot._get_http_session()
+    url = f"{bot.GROQ_BASE_URL}/{path.lstrip('/')}"
+    try:
+        async with session.request(
+            method.upper(), url, headers=headers, json=json_body,
+            timeout=aiohttp.ClientTimeout(total=bot.ROUTE_MODEL_TIMEOUT_SEC, connect=10.0)
+        ) as resp:
+            if resp.status >= 400:
+                payload = await resp.json(content_type=None)
+                msg = payload.get("error", {}).get("message") or f"HTTP {resp.status}"
+                raise bot.GroqAPIError(msg, status_code=resp.status, payload=payload)
+            return await resp.json(content_type=None)
+    except bot.GroqAPIError:
+        raise
+    except Exception as exc:
+        exc_str = str(exc) or repr(exc) or exc.__class__.__name__
+        if bot.GROQ_API_KEY:
+            exc_str = exc_str.replace(bot.GROQ_API_KEY, "<KEY>")
+        raise bot.GroqAPIError(f"Groq network error: {exc_str}") from exc
+
 async def _or_request(path: str, method: str = "GET", *, json_body: dict | None = None) -> Any:
     import bot
     if not bot.OPENROUTER_API_KEY:
@@ -106,15 +141,18 @@ async def _probe_or_model_liveness() -> None:
         return
     day_idx = date.today().timetuple().tm_yday
     lists = {
-        "_OR_LIGHT_ORDER": _OR_LIGHT_ORDER,
-        "_OR_HEAVY_ORDER": _OR_HEAVY_ORDER,
-        "_OR_VISION_ORDER": _OR_VISION_ORDER,
+        "_OR_LIGHT_ORDER": (_OR_LIGHT_ORDER, bot._or_request),
+        "_OR_HEAVY_ORDER": (_OR_HEAVY_ORDER, bot._or_request),
+        "_OR_VISION_ORDER": (_OR_VISION_ORDER, bot._or_request),
     }
-    heads = {name: models[day_idx % len(models)] for name, models in lists.items() if models}
-    for list_name, model_id in heads.items():
+    if bot.GROQ_API_KEY:
+        from lumen_router_config import _GROQ_LIGHT_ORDER
+        lists["_GROQ_LIGHT_ORDER"] = (_GROQ_LIGHT_ORDER, bot._groq_request)
+    heads = {name: (models[day_idx % len(models)], req) for name, (models, req) in lists.items() if models}
+    for list_name, (model_id, req_fn) in heads.items():
         try:
             payload = {"model": model_id, "messages": [{"role": "user", "content": "ping"}], "stream": False}
-            await bot._or_request("chat/completions", "POST", json_body=payload)
+            await req_fn("chat/completions", "POST", json_body=payload)
         except Exception as exc:
             txt = bot._error_text(exc).strip() or exc.__class__.__name__
             kind = bot._classify_model_error(bot._error_status(exc, txt), txt)
@@ -188,8 +226,59 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     history.append({"role": "assistant", "content": answer})
     ctx.clear()
     if len(history) > bot.SHARED_HISTORY_MAX_LEN:
-         del history[:-bot.SHARED_HISTORY_MAX_LEN]
+        del history[:-bot.SHARED_HISTORY_MAX_LEN]
     bot._record_quota_usage("openrouter", model_trial)
+    return answer
+
+async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
+    """Обычный текстовый запрос через прямой Groq — по образцу ask_openrouter_text: одна попытка на модель, скраб утечек, расход в квоту "groq". Сообщения строит общий _build_openrouter_turn_messages (тот же OpenAI-формат)."""
+    import bot
+    from lumen_router_config import _GROQ_LIGHT_ORDER
+    state = bot.get_state(chat_id)
+    history = state.setdefault("history", [])
+    ctx = state.get("ctx", deque())
+    # Дедупликация с сохранением приоритета роутера; запасной — голова актуального _GROQ_LIGHT_ORDER.
+    trial_models = list(dict.fromkeys(model_chain)) or [_GROQ_LIGHT_ORDER[0]]
+    primary_model_id = trial_models[0]
+    messages = bot._build_openrouter_turn_messages(chat_id, user_text, primary_model_id)
+
+    last_exc: Exception | None = None
+    tried: list[str] = []
+    for model_trial in trial_models:
+        if deadline is not None and time.monotonic() > deadline:
+            log.warning('[groq] Route time budget exhausted before model %s. Tried: %s', model_trial, ", ".join(tried) or "none")
+            raise bot.RouteBudgetExceededError(tried)
+        tried.append(model_trial)
+        messages[0]["content"] = bot.get_system_prompt(model_trial)
+        attempt_start = time.monotonic()
+        try:
+            payload = {"model": model_trial, "messages": messages, "stream": False}
+            resp = await bot._groq_request("chat/completions", "POST", json_body=payload)
+            choices = resp.get("choices") or []
+            answer = ""
+            if choices:
+                answer = bot._or_extract_text(choices[0].get("message") or "")
+            answer = answer.strip()
+            if not answer:
+                # Пустой ответ — повод попробовать следующую модель (тот же прод-кейс 17.09.2026, что у OR/Gemini).
+                raise RuntimeError(f"Model {model_trial} returned an empty response")
+            answer = _scrub_identity_leak(answer, source=f"groq_chat_completion:{model_trial}")
+            log.info('[groq] Successful response from model %s (primary=%s, models tried: %d)', model_trial, primary_model_id, len(tried))
+            _record_model_latency(_model_speed_key("groq", model_trial), total_sec=time.monotonic() - attempt_start)
+            break
+        except Exception as exc:
+            last_exc = exc
+            log.warning("[groq] Model %s failed: %s. Switching to next candidate...", model_trial, str(last_exc) or last_exc.__class__.__name__)
+    else:
+        raise last_exc or RuntimeError("No candidate model returned an answer.")
+
+    # В историю — чистый текст пользователя, как у остальных провайдеров.
+    history.append({"role": "user", "content": user_text})
+    history.append({"role": "assistant", "content": answer})
+    ctx.clear()
+    if len(history) > bot.SHARED_HISTORY_MAX_LEN:
+        del history[:-bot.SHARED_HISTORY_MAX_LEN]
+    bot._record_quota_usage("groq", model_trial)
     return answer
 
 async def ask_openrouter_multimodal(
@@ -556,6 +645,8 @@ def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_a
         return bot._lang_t(lang, "err_budget")
     if isinstance(exc, bot.OpenRouterAPIError):
         return bot._or_error_msg(exc, "text", lang)
+    if isinstance(exc, bot.GroqAPIError):
+        return bot._or_error_msg(exc, "groq", lang)
     return bot._gemini_error_msg(exc, head_model, lang)
 
 
@@ -581,11 +672,12 @@ async def _run_route(
     route = _reorder_route_by_speed(route)
     deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
 
-    groups: dict[str, list[str]] = {"gemini": [], "openrouter": []}
+    groups: dict[str, list[str]] = {"gemini": [], "openrouter": [], "groq": []}
     for provider, model_id in route:
-        groups[provider].append(model_id)
+        groups.setdefault(provider, []).append(model_id)
     first_provider = route[0][0]
-    provider_order = [first_provider, "openrouter" if first_provider == "gemini" else "gemini"]
+    # Порядок провайдеров — по первому появлению в маршруте (для прежних двухпровайдерных маршрутов то же самое: голова + второй).
+    provider_order = list(dict.fromkeys(p for p, _ in route))
 
     # Стримим только голову маршрута; плейсхолдер "…" переиспользуем под финальный текст следующей модели, а не сносим.
     tried_stream_model: str | None = None
@@ -607,6 +699,13 @@ async def _run_route(
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "openrouter"
             reusable_placeholder = placeholder
+        elif first_provider == "groq":
+            streamed, placeholder = await bot._try_groq_streaming(chat_id, ai_prompt, message, head_model)
+            if streamed is not None:
+                log.info('[router] chat=%s response received via streaming (groq:%s)', chat_id, head_model)
+                return streamed, True
+            tried_stream_model, tried_stream_provider = head_model, "groq"
+            reusable_placeholder = placeholder
 
     is_video_or_audio = bool(media) and not media[0][1].startswith("image/")
     last_exc: Exception | None = None
@@ -625,6 +724,8 @@ async def _run_route(
         try:
             if provider == "gemini":
                 ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline)
+            elif provider == "groq":
+                ans = await bot.ask_groq_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
             elif media:
                 ans = await bot.ask_openrouter_multimodal(chat_id, ai_prompt, media[0], media_filename, model_chain=ids, deadline=deadline)
             else:

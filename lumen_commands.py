@@ -440,6 +440,14 @@ async def cmd_stats(message: Message) -> None:
     ]
     or_text = "\n".join(or_lines) or _noData
 
+    # Groq — та же разбивка по моделям (прямой провайдер с собственным дневным лимитом).
+    groq_quota = bot.GLOBAL_QUOTA.get("groq", {})
+    groq_lines = [
+        f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
+        for mid, e in sorted(groq_quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
+    ]
+    groq_text = "\n".join(groq_lines) or _noData
+
     # Состояние прокси — из самого breaker'а (раньше команда лезла в четыре глобала напрямую).
     proxy_line = bot._tg_proxy_breaker.status_text()
 
@@ -451,7 +459,8 @@ async def cmd_stats(message: Message) -> None:
         f"Аптайм процесса: {uptime_str}\n"
         f"Счётчики квоты за сутки: {quota_day} (America/Los_Angeles, сбрасываются автоматически)\n\n"
         f"<b>Gemini — запросов по моделям:</b>\n{gemini_text}\n\n"
-        f"<b>OpenRouter — запросов по моделям:</b>\n{or_text}"
+        f"<b>OpenRouter — запросов по моделям:</b>\n{or_text}\n\n"
+        f"<b>Groq — запросов по моделям:</b>\n{groq_text}"
         f"{proxy_line}"
     )
     await bot._tg_call(message.reply, text, parse_mode=ParseMode.HTML)

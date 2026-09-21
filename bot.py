@@ -68,7 +68,7 @@ _LOG_LISTENER: logging.handlers.QueueListener | None = None
 
 _SECRET_NAMES = (
     "BOT_TOKEN", "TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY",
-    "OPENROUTER_API_KEY", "OPENROUTER_KEY", "ADMIN_SECRET_SEED",
+    "OPENROUTER_API_KEY", "OPENROUTER_KEY", "GROQ_API_KEY", "ADMIN_SECRET_SEED",
     "_ADMIN_SECRET_SEED", "WEBHOOK_SECRET", "ADMIN_PANEL_KEY",
     "UPSTASH_REDIS_REST_TOKEN", "LUMEN_PROXY_SECRET",
 )
@@ -242,6 +242,9 @@ _OPENROUTER_HTTP_REFERER_ENV_SET = bool(os.getenv("OPENROUTER_HTTP_REFERER", "")
 OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", f"https://t.me/{BOT_USERNAME}").strip()
 OPENROUTER_TITLE = os.getenv("OPENROUTER_TITLE", BOT_USERNAME).strip()
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Groq — прямой провайдер лёгкого текста (калибровка 21.09.2026): 1000 запросов/день против 50 у OpenRouter.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 # Раньше у OpenRouter был свой отдельный лимит истории (30), меньший, чем у Gemini
 # (100) — при переключении провайдера (/provider или /model) ощущалось резкое
 # "обнуление" контекста разговора. Теперь история ОБЩАЯ (см. state["history"] в
@@ -526,6 +529,7 @@ from lumen_router_config import (
     _OR_LIGHT_ORDER,
     _OR_HEAVY_ORDER,
     _OR_VISION_ORDER,
+    _GROQ_LIGHT_ORDER,
     GEMINI_TTS_MODELS,
     FISH_AUDIO_TTS_MODEL,
     FISH_AUDIO_ENABLED,
@@ -657,9 +661,11 @@ __all__ = [
     "_pieces_with_waiting_feedback",
     "_gemini_stream_pieces",
     "_openrouter_stream_pieces",
+    "_groq_stream_pieces",
     "_run_streaming_reply",
     "_try_gemini_streaming",
     "_try_openrouter_streaming",
+    "_try_groq_streaming",
     # Точка подмены тестов (см. monkeypatch в tests/) — сам код bot.py её
     # больше не читает напрямую после выноса стриминга.
     "_model_first_chunk_limit",
@@ -693,13 +699,16 @@ __all__ = [
     # Имена из lumen_routes.py код bot.py сам не читает — они нужны как `bot.X`
     # существующим тестам и `_handle_message_core` ниже.
     "OpenRouterAPIError",
+    "GroqAPIError",
     "_or_request",
+    "_groq_request",
     "_or_extract_text",
     "_is_account_wide_or_rate_limit",
     "_probe_or_model_liveness",
     "_or_chat_completion_with_fallback",
     "ask_openrouter_text",
     "ask_openrouter_multimodal",
+    "ask_groq_text",
     "_gemini_history_contents",
     "_build_gemma_identity_contents",
     "_build_gemini_call_config",
@@ -714,6 +723,7 @@ __all__ = [
     "_OR_LIGHT_ORDER",
     "_OR_HEAVY_ORDER",
     "_OR_VISION_ORDER",
+    "_GROQ_LIGHT_ORDER",
     "_history_user_text",
     # Пространство имён genai-типов для тестов (bot.types.Content/...).
     "types",
@@ -917,13 +927,16 @@ from lumen_security import (
 # имён, чтобы `bot.X` в тестах и `_handle_message_core` не менялись.
 from lumen_routes import (
     OpenRouterAPIError,
+    GroqAPIError,
     _or_request,
+    _groq_request,
     _or_extract_text,
     _is_account_wide_or_rate_limit,
     _probe_or_model_liveness,
     _or_chat_completion_with_fallback,
     ask_openrouter_text,
     ask_openrouter_multimodal,
+    ask_groq_text,
     _gemini_history_contents,
     _build_gemma_identity_contents,
     _build_gemini_call_config,
@@ -1011,9 +1024,11 @@ from lumen_streaming import (
     _pieces_with_waiting_feedback,
     _gemini_stream_pieces,
     _openrouter_stream_pieces,
+    _groq_stream_pieces,
     _run_streaming_reply,
     _try_gemini_streaming,
     _try_openrouter_streaming,
+    _try_groq_streaming,
 )
 
 # определение ссылок и упоминаний, триггеры draw/tts, категории медиа —

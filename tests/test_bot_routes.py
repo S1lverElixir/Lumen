@@ -447,6 +447,34 @@ def test_run_route_falls_back_from_failed_openrouter_stream_to_non_streaming():
         bot.ask_openrouter_text = original_or_text
 
 
+def test_run_route_tries_groq_head_with_stream_fallback_to_text():
+    # Groq-подключение 21.09.2026: голова-groq стримится через _try_groq_streaming, при раннем сбое — обычный ask_groq_text без пере-пробы упавшей модели.
+    chat_id = 999703
+
+    async def fake_groq_stream_fail(cid, prompt, message, model_id):
+        return None, None
+
+    calls = []
+
+    async def fake_groq_text(cid, prompt, model_chain, deadline=None):
+        calls.append(model_chain)
+        return "Ответ Groq без стрима"
+
+    original_stream = bot._try_groq_streaming
+    original_groq_text = bot.ask_groq_text
+    bot._try_groq_streaming = fake_groq_stream_fail
+    bot.ask_groq_text = fake_groq_text
+    try:
+        route = [("groq", "qwen/qwen3.8-27b"), ("groq", "openai/gpt-oss-120b")]
+        ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
+        assert ans == "Ответ Groq без стрима"
+        assert sent is False
+        assert calls[0] == ["openai/gpt-oss-120b"]
+    finally:
+        bot._try_groq_streaming = original_stream
+        bot.ask_groq_text = original_groq_text
+
+
 def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
     # Регрессия на реальный найденный при тестировании баг: раньше при неудачном
     # стриме плейсхолдер "…" тут же удалялся, а следующая модель отправляла
@@ -918,4 +946,76 @@ def test_system_prompt_en_keeps_key_guards():
 
 def test_get_system_prompt_header_english():
     assert "CURRENT TIME INFORMATION" in bot.get_system_prompt()
+
+
+def test_ask_groq_text_success_records_groq_quota(monkeypatch):
+    # Groq-подключение 21.09.2026: успешный ответ пишется в историю и в квоту "groq", как у остальных провайдеров.
+    from collections import deque
+    chat_id = 999701
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+
+    async def fake_groq_request(path, method="GET", *, json_body=None):
+        assert json_body["model"] == "qwen/qwen3.8-27b"
+        return {"choices": [{"message": {"content": "Канберра."}}]}
+
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    recorded = {}
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model: recorded.setdefault("v", (provider, model)))
+    answer = asyncio.run(bot.ask_groq_text(chat_id, "Столица Австралии?", model_chain=["qwen/qwen3.8-27b"]))
+    assert answer == "Канберра."
+    assert recorded["v"] == ("groq", "qwen/qwen3.8-27b")
+
+
+def test_ask_groq_text_falls_back_to_next_model(monkeypatch):
+    # Одна попытка на модель: первая падает — идём на вторую, а не ретраим.
+    from collections import deque
+    chat_id = 999702
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+    seen = []
+
+    async def fake_groq_request(path, method="GET", *, json_body=None):
+        seen.append(json_body["model"])
+        if json_body["model"] == "qwen/qwen3.8-27b":
+            raise bot.GroqAPIError("overloaded", status_code=503)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model: None)
+    answer = asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]))
+    assert answer == "ok"
+    assert seen == ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
+
+
+def test_groq_request_requires_key(monkeypatch):
+    # Без GROQ_API_KEY — понятная ошибка, а не сетевой вызов в никуда.
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "")
+    with pytest.raises(bot.GroqAPIError):
+        asyncio.run(bot._groq_request("chat/completions", "POST", json_body={"model": "x"}))
+
+
+def test_groq_request_scrubs_api_key_from_network_exception_message(monkeypatch):
+    # Тот же defense-in-depth, что у _or_request: ключ не должен светиться в тексте ошибок.
+    class _FakeSessionRaisingWithKey:
+        def request(self, *args, **kwargs):
+            raise RuntimeError("connection failed, headers: Bearer fake-groq-key-123")
+
+    async def fake_get_http_session():
+        return _FakeSessionRaisingWithKey()
+
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-groq-key-123")
+    with pytest.raises(bot.GroqAPIError) as exc_info:
+        asyncio.run(bot._groq_request("chat/completions", "POST", json_body={"model": "x"}))
+    assert "fake-groq-key-123" not in str(exc_info.value)
+    assert "<KEY>" in str(exc_info.value)
+
+
+def test_route_error_reply_text_maps_groq_error():
+    # Ошибка Groq — пользовательский текст через общую классификацию, без сырого API.
+    exc = bot.GroqAPIError("Rate limit reached", status_code=429)
+    text = bot._route_error_reply_text(exc, "qwen/qwen3.8-27b", youtube_url_to_analyze=None, lang="en")
+    assert "Rate limit reached" not in text
+    assert text.strip() != ""
 

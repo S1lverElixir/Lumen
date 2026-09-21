@@ -129,6 +129,7 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         "gemini_api": "https://generativelanguage.googleapis.com",
         "huggingface": "https://huggingface.co",
         "openrouter": "https://openrouter.ai",
+        "groq_api": "https://api.groq.com",
         "tikwm": "https://www.tikwm.com",
         "pollinations": "https://image.pollinations.ai",
         "upstash": bot.UPSTASH_REDIS_REST_URL if bot.USE_UPSTASH else "https://upstash.com",
