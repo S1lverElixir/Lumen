@@ -109,11 +109,7 @@ def test_build_route_website_link_forces_gemini_only_and_excludes_gemma():
 
 def test_build_route_freshness_query_prioritizes_search_capable_gemini_models():
     route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=True)
-    # ОБНОВЛЕНО (24.07.2026, по реальным данным дашборда AI Studio): search grounding
-    # подтверждён ТОЛЬКО у поколения Gemini 2.5 (общий бакет "Gemini 2.5" — 21/1500) —
-    # у всего модельного ряда Gemini 3.x (включая обе "lite", которые раньше по
-    # ошибке стояли здесь первыми) общий бакет "Gemini 3" показывает 0/0. Первым
-    # кандидатом теперь должна идти gemini-2.5-flash.
+    # Search grounding подтверждён только у 2.5 (дашборд 24.07.2026; у 3.x бакет 0/0) — первой идёт 2.5-flash.
     assert route[0] == ("gemini", "gemini-2.5-flash")
     assert route[0][0] == "gemini"
     # OpenRouter должен присутствовать как резерв на случай полного отказа Gemini.
@@ -188,10 +184,7 @@ def test_gemma_models_both_have_no_search_flag():
 
 
 def test_new_gemini_models_present_and_prioritized():
-    # ОБНОВЛЕНО (аудит моделей, 17 августа 2026): Gemini 3.7 Flash (GA 13 августа
-    # 2026) сменил 3.6 Flash в роли флагмана — см. историю правок в
-    # lumen_router_config.py про источники (офиц. release notes Google + дашборд
-    # AI Studio владельца).
+    # Аудит 17.08.2026: 3.7 Flash (GA 13.08) сменил 3.6 в роли флагмана.
     assert "gemini-3.7-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.6-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.5-flash-lite" in lumen_router_config.GEMINI_MODELS
@@ -270,11 +263,7 @@ def test_check_unconfirmed_model_quotas_no_warnings_once_all_models_confirmed(ca
 # слаг) — модель должна быть полностью исключена из автоматического выбора.
 
 def test_dead_qwen3_next_model_excluded_from_router():
-    # ОБНОВЛЕНО (аудит моделей, 2 августа 2026): z-ai/glm-4.5-air:free раньше был
-    # здесь "живым" контрольным примером — с тех пор он сам подтверждённо умер
-    # (см. _OR_MODEL_HEALTH, 8/8 HTTP 404 в реальных логах), поэтому больше не
-    # годится как пример "модели, которую роутер оставляет" — заменён на
-    # nemotron-3-super, чей живой статус ничем не поставлен под сомнение.
+    # Аудит 02.08.2026: glm-4.5-air сам умер (8/8 HTTP 404) — живым примером стал nemotron-3-super.
     assert "qwen/qwen3-next-80b-a3b-instruct:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
     route = lumen_router_config._or_route(["qwen/qwen3-next-80b-a3b-instruct:free", "nvidia/nemotron-3-super-120b-a12b:free"])
     ids = [m for _, m in route]
@@ -384,9 +373,7 @@ def test_nemotron_3_5_lightning_promoted_to_light_order_head():
 
 
 def test_nemotron_3_nano_30b_a3b_excluded_after_removal_date_passed():
-    # ОБНОВЛЕНО (аудит моделей, 17 сентября 2026): анонсированная дата снятия
-    # (24.08.2026) прошла, слаг пропал из живого каталога OpenRouter — подтверждение
-    # состоялось, модель переехала из _SCHEDULED_OR_REMOVALS в _OR_MODEL_HEALTH.
+    # Аудит 17.09.2026: дата снятия прошла + слаг пропал из каталога — модель переехала в _OR_MODEL_HEALTH.
     assert "nvidia/nemotron-3-nano-30b-a3b:free" in lumen_router_config._OR_MODEL_HEALTH
     assert "nvidia/nemotron-3-nano-30b-a3b:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
     assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._OR_LIGHT_ORDER
@@ -397,12 +384,7 @@ def test_or_light_order_ends_with_generic_reserve():
     assert lumen_router_config._OR_LIGHT_ORDER[-1] == "openrouter/free"
 
 
-# ─────────────────── новые модели OpenRouter (аудит моделей, 17 августа 2026) ───────────────────
-# Найдены по актуальному "Top Weekly free" каталогу OpenRouter, слаги сверены
-# точными web-поисками по офиц. страницам openrouter.ai (см. историю правок в
-# lumen_router_config.py) — обе вышли буквально за неделю до аудита и ещё не
-# прогонялись через калибровочное сравнение с Claude Sonnet, поэтому добавлены
-# последними кандидатами в своих списках, а не выше уже проверенных моделей.
+# ── Новые модели OpenRouter (аудит 17.08.2026, Top Weekly free): вышли за неделю до аудита, калибровку не проходили — добавлены последними, не выше проверенных.
 
 def test_new_or_models_registered_for_leak_detection():
     assert "nvidia/nemotron-3.5-lightning:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
@@ -410,11 +392,7 @@ def test_new_or_models_registered_for_leak_detection():
 
 
 def test_dots3_note_preview_stays_last_before_reserve_in_heavy_order():
-    # ОБНОВЛЕНО (22.08.2026): новые uncalibrated-модели этого захода (glm-5.2/
-    # laguna-s-2.1/north-mini-code/laguna-xs-2.1) добавлены ПЕРЕД dots-3-note-
-    # preview (не после) — та ближе к снятию (см. _SCHEDULED_OR_REMOVALS), поэтому
-    # намеренно остаётся последней перед generic-резервом, а не просто "последней
-    # добавленной".
+    # 22.08.2026: некалиброванные новички — перед dots-3-note-preview (та ближе к снятию, остаётся последней перед резервом).
     assert lumen_router_config._OR_HEAVY_ORDER[-1] == "openrouter/free"
     assert lumen_router_config._OR_HEAVY_ORDER[-2] == "dots-studio/dots-3-note-preview:free"
 
@@ -428,13 +406,7 @@ def test_new_or_models_not_accidentally_health_excluded():
     assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free", "dots-studio/dots-3-note-preview:free"]
 
 
-# ─────────────────── четыре новых модели OpenRouter (аудит моделей, 22 августа 2026) ───────────────────
-# Из актуального каталога "Top Weekly free" (см. историю правок): все — coding/
-# agentic-модели, добавлены в _OR_HEAVY_ORDER после уже проверенных калибровкой
-# моделей, но перед dots-3-note-preview (та ближе к снятию — см. выше). Слаги
-# poolside/laguna-s-2.1:free, poolside/laguna-xs-2.1:free и cohere/north-mini-code:free
-# уже были в _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION (числились в утечках, но ни разу
-# не использовались в реальном роутинге) — z-ai/glm-5.2:free полностью новая.
+# ── Четыре coding-модели (аудит 22.08.2026): после проверенных калибровкой, перед dots-3-note-preview (та ближе к снятию).
 
 def test_new_heavy_models_present_and_healthy():
     new_models = (
@@ -469,9 +441,7 @@ def test_or_heavy_order_still_headed_by_calibrated_flagships():
 # только постфактум). _check_scheduled_removals_due закрывает этот пробел.
 
 def test_scheduled_removals_registered_for_dots3_preview_only():
-    # ОБНОВЛЕНО (аудит моделей, 17 сентября 2026): nano-30b-a3b подтверждённо умер
-    # (дата прошла + пропал из каталога) и переехал в _OR_MODEL_HEALTH — в реестре
-    # будущих снятий остался только dots-3-note-preview (30.09.2026).
+    # Аудит 17.09.2026: nano-30b-a3b умер и переехал в реестр — в будущих снятиях только dots-3-note-preview.
     assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._SCHEDULED_OR_REMOVALS
     assert lumen_router_config._SCHEDULED_OR_REMOVALS["dots-studio/dots-3-note-preview:free"].isoformat() == "2026-09-30"
 

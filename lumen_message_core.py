@@ -53,9 +53,7 @@ async def _process_media_group_buffers(mgid: str) -> None:
     bot._mg_tasks.pop(mgid, None)
     if not messages:
          return
-    # Первое сообщение альбома обычно несёт подпись (caption) — используем его
-    # как основное. Остальные фото/видео из альбома собираем как доп. вложения,
-    # чтобы модель реально видела все присланные медиафайлы, а не только первый.
+    # Первое сообщение альбома с caption — основное, остальные файлы отдаём модели как доп. вложения.
     main_msg = messages[0]
     extra_media: list[tuple[bytes, str]] = []
     MAX_ALBUM_EXTRA = 9  # первое уходит как основное, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу)
@@ -71,18 +69,12 @@ async def _process_media_group_buffers(mgid: str) -> None:
         fetched = await bot._fetch_media(fid, mime)
         if fetched:
             extra_media.append(fetched)
-            # РЕГРЕССИЯ: раньше эти файлы качались ТОЛЬКО для текущего ответа
-            # (extra_media ниже) и никогда не попадали в recent_media_ids —
-            # "а что было на втором фото" не находило файл, хотя бот его видел.
+            # Регрессия: файлы альбома пишем в recent_media_ids, иначе "что на втором фото" не найдёт их.
             bot._save_media_to_history(src, album_state, album_user_id)
     await bot._handle_message_core(main_msg, extra_media=extra_media or None)
 
 def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
-    """Пассивная запись сообщения группы в фон чата (бот не упомянут) — только
-    логирование контекста и запоминание последнего медиа отправителя, без
-    какого-либо ответа. Вынесено из _handle_message_core (см. аудит техдолга,
-    разбиение самой длинной функции проекта на именованные шаги) — чистый
-    побочный эффект над state, поведение не изменилось."""
+    """Фон группы без упоминания: только контекст и медиа в state, без ответа."""
     import bot
     if t.strip():
         username = message.from_user.username or message.from_user.first_name or "User"
@@ -104,18 +96,7 @@ def _should_only_record_passively(message: Message, t: str, *, is_private: bool,
 
 
 def _rate_limit_key_for_message(message: Message) -> int:
-    """Возвращает идентификатор для скользящего окна rate limit по сообщению.
-
-    НАЙДЕНО ПРИ СЕКЬЮРИТИ-РЕВЬЮ: Telegram не всегда прикладывает from_user к сообщению —
-    например, сообщение отправлено "от имени канала" в привязанной группе (Telegram
-    официально это разрешает любому админу канала), либо иной сценарий без обычного
-    пользователя. Раньше _handle_message_core в этом случае передавал в
-    _check_and_register_rate_limit буквальный None, а тот безусловно возвращает False
-    ("не лимитирован") для любого falsy ключа — то есть отправитель без from_user мог
-    слать запросы к платным AI-провайдерам вообще без ограничения скорости (реальный,
-    а не гипотетический обход rate limit). Используем sender_chat.id (если есть) или
-    сам chat.id как запасной идентификатор — тогда такой отправитель (или весь чат)
-    всё равно попадает под скользящее окно, а не обходит его полностью."""
+    """Ключ rate limit: без from_user (пост от канала) берём sender_chat/chat.id, иначе обход лимита к платным провайдерам."""
     if message.from_user:
         return message.from_user.id
     sender_chat = getattr(message, "sender_chat", None)
@@ -133,20 +114,7 @@ async def _reject_rate_limited_message(message: Message) -> bool:
 async def _resolve_incoming_media(
     message: Message, state: dict[str, Any], clean_prompt: str, *, is_private: bool,
 ) -> tuple[str | None, str, str, tuple[bytes, str] | None]:
-    """Три приоритета определения "о каком медиа речь" для текущего сообщения —
-    вынесено из _handle_message_core (аудит техдолга, разбиение самой длинной
-    функции проекта) как один логический шаг, дальше используется как есть.
-
-    1. Прямое вложение в САМОМ сообщении (фото/видео/аудио/документ и т.п.).
-    2. Явный реплай на сообщение с медиа — пользователь прямо указал файл.
-    3. Словесная отсылка ("что на фото") без реплая — берётся последнее медиа
-       ИМЕННО этого пользователя (не всего чата, см. комментарий ниже).
-
-    Возвращает (med_path, med_mime, med_name, media_tuple) — та же четвёрка,
-    что раньше собиралась инлайн; med_path непустой ТОЛЬКО для приоритета №1
-    (файл реально лежит на диске и должен быть удалён вызывающим кодом в
-    finally), приоритеты №2/№3 работают через _fetch_media (в память, без
-    временного файла)."""
+    """Чьё медиа: 1) вложение, 2) реплай, 3) слова. Файл на диске только в №1, остальное через _fetch_media в памяти."""
     import bot
     asking_user_id = message.from_user.id if message.from_user else None
     media_src = _msg_media_source(message)
@@ -172,15 +140,7 @@ async def _resolve_incoming_media(
                 if fetched:
                     media_tuple = fetched
 
-    # Приоритет №3: словесная отсылка к "тому самому" файлу без реплая.
-    # Ищем СНАЧАЛА среди недавних медиа именно этого пользователя (не всего чата —
-    # в группе разные люди шлют разные файлы, и общий "последний в чате" элемент
-    # почти всегда окажется чужим и не тем, о чём спрашивают). НАЙДЕНО ПРИ КАЛИБРОВКЕ
-    # (18 августа 2026): раньше здесь брался last элемент БЕЗ проверки типа — "покажи
-    # стикер", когда стикер не отправлялся вообще, доставал последнее фото/скриншот
-    # и подробно ЕГО описывал. Теперь ищем именно элемент запрошенной категории
-    # (см. _find_recent_media_by_category) — если такого нет, честно None, а не
-    # ближайший неподходящий по типу файл.
+    # №3 ищем у автора, не последнее в чате: калибровка 18.08.2026 — "покажи стикер" описывал чужое фото.
     if media_tuple is None and state.get("recent_media_ids"):
         category = _media_reference_category(clean_prompt)
         if category:
@@ -231,14 +191,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         if is_tiktok(url):
              await bot.handle_tiktok(message, url)
              return
-        # Gemini (теперь доступный автоматически на любое сообщение, а не по
-        # ручному выбору провайдера) реально умеет анализировать YouTube-видео
-        # по ссылке (file_uri) и читать содержимое обычных сайтов через
-        # url_context — модель сама решает, вызывать ли второе, если видит
-        # ссылку в тексте. Роутер (см. _build_route) направит такое сообщение
-        # именно в Gemini; если конкретный вызов не сработает (приватное видео,
-        # сайт недоступен и т.п.) — код ниже поймает исключение и даст честный
-        # ответ "не смог открыть", а не будет молчать или врать.
+        # YouTube/сайт читает сама модель (file_uri/url_context), сервер чужое не качает.
+        # Не открылось — скажем честно.
         if is_youtube(url):
              needs_youtube = True
              youtube_url_to_analyze = url
@@ -251,15 +205,11 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     clean_prompt = bot.clean_mention(t).strip()
 
     if clean_prompt and _looks_like_injection_probe(clean_prompt):
-        # Явная попытка промт-инъекции — отвечаем заготовленной фразой БЕЗ обращения
-        # к LLM вообще (см. _INJECTION_PROBE_RE выше). Логируем для последующего
-        # разбора через /logs, чтобы со временем пополнять список паттернов реальными
-        # случаями, а не только теми, что придуманы заранее.
+        # Инъекция: отвечаем без LLM и логируем для /logs, чтобы пополнять паттерны реальными случаями.
         log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s: %r', message.chat.id, clean_prompt[:300])
         await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
         return
 
-    # ищем триггерные фразы (без учёта эмодзи)
     lower_prompt = clean_prompt.lower().strip()
 
     matched_draw_trigger = _match_trigger_prefix(lower_prompt, DRAW_TRIGGER_PREFIXES)
@@ -318,10 +268,10 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
               await bot._tg_call(message.reply, bot._t(message.chat.id, "status_listening"))
          return
 
-    # Отправка typing экшена
+    # Отправка typing экшена (bot.bot — инстанс aiogram Bot, не модуль).
     try:
         if not is_guest:
-             await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+             await bot.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     except Exception:
          pass
 
@@ -345,13 +295,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         and youtube_url_to_analyze is None
         and _media_reference_category(clean_prompt) is not None
     ):
-        # Прод-кейс 17.09.2026: "что на фото?" без файла — модель выдумала
-        # подробное описание несуществующего скриншота, хотя промпт требует
-        # обратного. Разрешение резолвинга уже позади (приоритеты 1–3 ничего не
-        # нашли), поэтому этот факт сообщаем модели явно: слабым моделям одного
-        # раздела промпта не хватает, а с пометкой перед глазами сочинять
-        # сложнее. Ветка истории ("то фото" с текстовым описанием выше)
-        # сознательно НЕ отрезается — пометка велит проверить её сначала.
+        # Прод-кейс 17.09.2026: без файла модель выдумывала фото. Дописываем _NO_MEDIA_NOTE, историю не режем.
         ai_prompt += _NO_MEDIA_NOTE
     gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
     gemini_media_list = gemini_media_list or None
@@ -369,13 +313,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         bot.mark_state_dirty(message.chat.id)
     except Exception as exc:
         if isinstance(exc, (bot.GeminiAllModelsExhaustedError, bot.RouteBudgetExceededError)):
-            # Известный, уже обрабатываемый исход (реальный суточный лимит квоты /
-            # общий бюджет времени маршрута исчерпан) — не баг, а штатная деградация,
-            # для которой пользователь и так получает понятный текст ниже, а владелец
-            # (в случае квоты) отдельно уведомляется через _maybe_alert_gemini_exhausted.
-            # log.exception на КАЖДЫЙ такой случай безусловно заводил issue в Sentry —
-            # см. LUMEN-3 (аудит логирования): 8 событий за месяц оказались этим
-            # классом, маскируя реальные новые баги среди ожидаемого шума.
+            # Квота/бюджет маршрута штатно, не баг: только warning, иначе Sentry тонет (LUMEN-3: 8 шумов за месяц).
             log.warning("Chat AI processing hit a known, already-handled outcome: %s", exc)
         else:
             log.exception("Chat AI processing failed:")

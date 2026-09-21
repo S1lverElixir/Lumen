@@ -62,12 +62,7 @@ except Exception as _state_dir_exc:
     _STATE_DIR = Path(tempfile.gettempdir())
 STATE_FILE_PATH = _STATE_DIR / "chat_state.json"
 GLOBAL_QUOTA_FILE = _STATE_DIR / "global_quota.json"
-# Per-chat хранилище (см. код-ревью suggestion #7): раньше ВЕСЬ chat_state (до 5000
-# чатов) сериализовался и писался ОДНИМ блоком при каждом флаше — с Upstash это один
-# большой REST-запрос; один неудачный/слишком большой write рисковал потерять сразу
-# всё разом, а не одну запись. Теперь у каждого чата свой собственный ключ/файл, а
-# CHAT_INDEX_KEY/CHAT_INDEX_FILE хранит только список ID чатов — так при рестарте
-# известно, какие per-chat ключи вообще нужно прочитать.
+# Per-chat ключи вместо одного блоба: меньше payload и blast radius при сбое.
 _CHATS_DIR = _STATE_DIR / "chats"
 with contextlib.suppress(Exception):
     _CHATS_DIR.mkdir(parents=True, exist_ok=True)
@@ -115,28 +110,9 @@ def _chat_storage_path(chat_id: int) -> Path:
     import bot
     return _lumen_chat_storage_path(bot._storage_config(), chat_id)
 
-# _save_chat_to_storage/_delete_chat_storage НАМЕРЕННО остаются здесь как реальные
-# (не тонкие обёрточные) реализации, а не делегируют в lumen_state_storage.py, как
-# остальные функции этой секции: они вызывают _storage_write_text/_storage_delete_text
-# ПО ИМЕНИ, разрешаемому в собственном пространстве имён bot.py на момент вызова —
-# это ЕДИНСТВЕННЫЙ способ, которым существующие тесты (патчащие именно
-# `bot._storage_write_text`/`bot._storage_delete_text` через unittest.mock.patch)
-# продолжают перехватывать вызов. Если бы эти две функции были обёртками вокруг
-# lumen_state_storage._save_chat_to_storage (как остальные выше), тот вызывал бы
-# СВОЮ собственную, непропатченную копию _storage_write_text внутри своего модуля —
-# патч bot._storage_write_text никак её не затронул бы (patch мутирует атрибут
-# только на объекте bot, а не на объекте lumen_state_storage).
+# Реальный код здесь, а не обёртки над storage: иначе тесты не перехватили бы вызовы через bot._storage_*.
 def _save_chat_to_storage(chat_id: int, state: dict[str, Any]) -> bool:
-    """Возвращает True при успехе, False при сбое. НАЙДЕНО ПРИ КОД-РЕВЬЮ: раньше эта
-    функция ничего не возвращала — вызывающий код (_flush_dirty_state) уже успевал
-    убрать chat_id из "грязного" набора ДО того, как запись реально прошла, и при
-    сбое (например, временный 5xx/сетевой сбой Upstash) исключение здесь просто
-    логировалось и терялось — состояние чата (вся история диалога) молча пропадало
-    до следующей независимой мутации этого же чата. Если это было последнее
-    сообщение перед долгим затишьем — при рестарте контейнера данные терялись
-    безвозвратно, ровно то, что персистентность через Upstash должна была
-    предотвращать. Теперь вызывающий код (_flush_dirty_state) возвращает неудавшиеся
-    chat_id обратно в _dirty_chat_ids для повтора на следующем цикле."""
+    """True/False для повтора во флаше: раньше сбой молча терял историю до рестарта."""
     import bot
     try:
         payload = json.dumps(_serialize_chat_state(state), ensure_ascii=False)
@@ -147,10 +123,7 @@ def _save_chat_to_storage(chat_id: int, state: dict[str, Any]) -> bool:
         return False
 
 def _delete_chat_storage(chat_id: int) -> bool:
-    """Возвращает True при успехе, False при сбое — тот же принцип, что и у
-    _save_chat_to_storage выше (см. докстринг там): неудавшееся удаление теперь
-    тоже возвращается в очередь на повтор, а не молча забывается (иначе вытесненный
-    чат мог бы бесхозно остаться в Upstash/на диске навсегда при транзиентном сбое)."""
+    """Как выше: неудалённое возвращается в очередь, иначе бесхозные ключи навсегда."""
     import bot
     try:
         bot._storage_delete_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id))
@@ -159,11 +132,7 @@ def _delete_chat_storage(chat_id: int) -> bool:
         log.warning("[state] Deleting chat %s failed: %s", chat_id, exc)
         return False
 
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: форма одной записи GLOBAL_QUOTA[provider][model_id]
-# (см. _quota_entry/_record_quota_usage/_mark_quota_exhausted ниже) была разбросанным
-# по коду соглашением, а не задокументированной структурой. Как и ChatState выше —
-# чисто типовая аннотация, ничего не меняет в рантайме (GLOBAL_QUOTA остаётся
-# обычным dict из dict'ов).
+# Форма записи GLOBAL_QUOTA — TypedDict QuotaEntry (только аннотация, рантайм не меняет).
 class QuotaEntry(TypedDict):
     used: int
     exhausted_at: float | None
@@ -171,28 +140,11 @@ class QuotaEntry(TypedDict):
 GLOBAL_QUOTA: dict[str, Any] = {
     "gemini": {},
     "openrouter": {},
-    # НАЙДЕНО ПРИ КАЛИБРОВКЕ (25 июля 2026): /stats показывал сотни запросов
-    # по моделям при аптайме процесса всего 12 минут — счётчик "used" копится
-    # НАВСЕГДА (переживает рестарты через Upstash, см. _save_chat_to_storage/
-    # load_global_quota), а реальные суточные лимиты Google/OpenRouter обнуляются
-    # каждые сутки. Бот об этом не знал вообще — "used"/"exhausted_at" не
-    # сбрасывались никогда, поэтому /stats после нескольких дней работы показывал
-    # бы бессмысленно огромные числа, а модель, один раз поймавшая 429 в первый
-    # день, так и висела бы с пометкой "(лимит исчерпан)" даже после того, как
-    # реальный лимит давно обновился. quota_day хранит дату (ISO, по America/
-    # Los_Angeles — именно там у Google полночь, когда реально обнуляется RPD-
-    # лимит) последнего сброса счётчиков — см. _reset_quota_if_new_day ниже.
+    # used/exhausted сбрасываются в полночь LA: иначе вечный рост и залипший "лимит исчерпан" (калибровка 25.07.2026).
     "quota_day": None,
 }
 
-# НАЙДЕНО ПРИ CODE-REVIEW (перф): _quota_entry вызывает _reset_quota_if_new_day
-# на КАЖДОЕ обращение к квоте (а таких обращений — по несколько на каждый успешный/
-# неудачный вызов любой модели, т.е. потенциально десятки в секунду при активном
-# трафике). Без троттлинга это означало бы конструирование ZoneInfo("America/
-# Los_Angeles") и datetime.now(...) на каждый такой вызов — сама по себе дата не
-# меняется чаще раза в сутки, минутная неточность здесь совершенно не важна.
-# _QUOTA_CHECK_THROTTLE_SEC ограничивает, как часто мы вообще пересчитываем
-# текущую дату; между пересчётами просто ничего не делаем.
+# Дата пересчитывается не чаще раза в минуту: ZoneInfo на каждое обращение дорого.
 _QUOTA_CHECK_THROTTLE_SEC = 60.0
 
 
@@ -265,38 +217,14 @@ def save_global_quota() -> None:
     except Exception as exc:
         log.warning("[quota] Failed to save global quota: %s", exc)
 
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: до сих пор каждый формат-дрейф персистентного
-# снимка чата (слияние gemini_history/or_history в единую history) обнаруживался
-# в _restore_single_chat ad hoc проверками "есть ли такой-то ключ в JSON" —
-# рабочий, но накопительный подход: с каждым новым изменением формата туда
-# добавлялась ещё одна ветка "если ключа нет — значит старая запись".
-# CHAT_STATE_SCHEMA_VERSION (импортирован из lumen_state_storage.py вместе с
-# _serialize_chat_state — см. блок импорта в начале секции "хранение состояния и
-# квот") делает следующую подобную миграцию однозначной: новый код сможет
-# проверять `s.get("schema_version", 0)` одним явным числом вместо повторного
-# гадания по присутствию ключей. Существующие персистентные записи (сделанные до
-# введения этого поля) не имеют "schema_version" вообще — они естественно
-# трактуются как версия 0 и продолжают проходить через уже отлаженные эвристики
-# ниже без каких-либо изменений в их поведении (это поле — задел на будущее, а
-# не ретроактивная миграция уже написанной логики).
+# schema_version — задел под следующую миграцию (if version < N); старые записи = v0 без смены поведения.
 
 def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
     """Разворачивает сериализованный снимок одного чата (см. _serialize_chat_state)
     обратно в chat_state[cid] — общая логика между новым per-chat форматом чтения
     и одноразовой миграцией из старого общего блоба (см. load_state_from_disk).
 
-    Поля "gemini_model"/"openrouter_text_model"/"chat_provider"/"image_model" из
-    старых записей (созданных до перехода на автоматический роутер для текста и,
-    позже, для генерации изображений — см. README, "Автоматический выбор модели")
-    намеренно нигде ниже не читаются — они устарели и больше ни на что не влияют.
-
-    schema_version (см. CHAT_STATE_SCHEMA_VERSION выше) в самих записях, читаемых
-    здесь, пока ни на что не влияет — существующая миграция (history/gemini_history)
-    уже надёжно определяется по присутствию конкретных ключей, и это не нужно
-    менять задним числом. Поле — задел на СЛЕДУЮЩИЙ формат-дрейф: тогда новую
-    ветку можно будет добавить как `if s.get("schema_version", 0) < N`, а не
-    подбирать очередную эвристику по ключам, как приходилось делать для миграции
-    ниже."""
+    Старые поля моделей игнорируются: роутер автоматический; schema пока только задел."""
     import bot
     schema_version = s.get("schema_version", 0)
     log.debug('[state] Restoring chat %s (schema_version=%s)', cid, schema_version)
@@ -353,12 +281,7 @@ _pending_chat_deletions: set[int] = set()
 _index_dirty = False
 _quota_dirty = False
 FLUSH_INTERVAL_SEC = 10.0
-# НАЙДЕНО ПРИ КОД-РЕВЬЮ (performance): раньше ничего не ограничивало число ОДНОВРЕМЕННЫХ
-# asyncio.to_thread-вызовов внутри одного цикла _flush_dirty_state — резкий всплеск
-# "грязных" чатов разом (например, после активности сразу в нескольких группах) мог бы
-# породить сотни параллельных блокирующих HTTP-запросов к Upstash одновременно. Не
-# критично при текущем масштабе бота, но дешёвая защита на будущее — ограничиваем
-# конкурентность семафором, а не оставляем неограниченной.
+# Конкурентность флаша — семафором: всплеск "грязных" чатов иначе породил бы сотни параллельных HTTP к Upstash.
 STATE_FLUSH_CONCURRENCY = int(os.getenv("STATE_FLUSH_CONCURRENCY", "10"))
 _state_flush_semaphore = asyncio.Semaphore(STATE_FLUSH_CONCURRENCY)
 
@@ -414,12 +337,7 @@ async def _flush_dirty_state_once() -> None:
                 *(bot._delete_chat_storage_limited(cid) for cid in to_delete),
                 return_exceptions=True,
             )
-            # ИСПРАВЛЕНО (код-ревью): раньше результат просто игнорировался — при
-            # сбое удаление молча "терялось" (чат оставался бесхозно висеть в
-            # хранилище навсегда, если это был единственный шанс его удалить).
-            # Теперь неудавшиеся id возвращаются в очередь для повтора на
-            # следующем цикле (return_exceptions=True защищает и от неожиданного
-            # исключения, которое не было поймано внутри самой _delete_chat_storage).
+            # Неудавшиеся id возвращаются в очередь для повтора, а не теряются при 5xx/429 Upstash.
             failed_deletes = {cid for cid, res in zip(to_delete, del_results) if res is not True}
             if failed_deletes:
                 _pending_chat_deletions.update(failed_deletes)
@@ -437,16 +355,7 @@ async def _flush_dirty_state_once() -> None:
                 *(bot._save_chat_to_storage_limited(cid, chat_state[cid]) for cid in attempted_ids),
                 return_exceptions=True,
             )
-            # ИСПРАВЛЕНО (найдено при код-ревью, КРИТИЧНО): раньше to_save
-            # очищался ДО того, как запись реально прошла, а _save_chat_to_storage
-            # сама ловила исключение и просто логировала его — наружу в gather
-            # ничего не долетало. При транзиентном сбое Upstash (сетевой глюк,
-            # 429 и т.п.) состояние чата (вся история диалога) молча терялось до
-            # следующей независимой мутации этого же чата — а если это было
-            # последнее сообщение перед долгим затишьем, данные пропадали
-            # безвозвратно при следующем рестарте контейнера. Теперь неудавшиеся
-            # id возвращаются обратно в _dirty_chat_ids для повтора на следующем
-            # цикле (FLUSH_INTERVAL_SEC секунд спустя), а не теряются молча.
+            # Неудавшиеся id возвращаются в грязные для повтора, а не теряются при 5xx/429 Upstash.
             failed_ids = {cid for cid, res in zip(attempted_ids, save_results) if res is not True}
             if failed_ids:
                 _dirty_chat_ids.update(failed_ids)
@@ -624,24 +533,12 @@ def _evict_orphan_chat_locks() -> int:
     return len(orphan)
 
 def _is_owner(user_id: int | None) -> bool:
-    """Единая точка проверки "это владелец бота?" — используется в /logs, /stats
-    и при гейтинге привилегированных действий в группах (см. _is_privileged_in_chat
-    ниже). Модель/провайдер бот теперь выбирает сам (см. секцию "автоматический
-    выбор модели"), поэтому проверка реальных названий моделей ("показывать ли
-    Gemini/Gemma/OpenRouter владельцу") больше не нужна нигде — эти названия
-    вообще никому не показываются, включая владельца."""
+    """Владелец по OWNER_ID; названий моделей никому не показываем (см. автороутер)."""
     import bot
     return bot.OWNER_ID is not None and user_id is not None and user_id == bot.OWNER_ID
 
 async def _notify_owner(text: str) -> None:
-    """Минимальная наблюдаемость (аудит техдолга, август 2026): раньше единственным
-    способом узнать о проблеме было ручное открытие /stats или /logs владельцем.
-    Отправляет короткое ЛС владельцу через уже существующего бота — без внешнего
-    сервиса мониторинга. Вызывается только на редкие, действительно важные события
-    (срабатывание circuit breaker прокси, полное исчерпание квоты Gemini — см. сайты
-    вызова), с собственным троттлингом на стороне вызывающего кода, чтобы не спамить
-    владельца на каждое повторяющееся сообщение. Никогда не поднимает исключение —
-    сбой уведомления не должен ронять обработку сообщения, из-за которого его вызвали."""
+    """ЛС владельцу о редких важных событиях; с троттлингом у вызывателя, никогда не кидает."""
     import bot
     if bot.OWNER_ID is None or bot.bot is None:
         return
@@ -649,14 +546,7 @@ async def _notify_owner(text: str) -> None:
         await bot._tg_call(bot.bot.send_message, chat_id=bot.OWNER_ID, text=text, call_timeout=10.0)
 
 async def _is_privileged_in_chat(chat_type: str, chat_id: int, user_id: int | None) -> bool:
-    """Может ли этот пользователь менять ОБЩИЕ настройки данного чата (модель
-    для генерации изображений, сброс истории — выбор модели/провайдера для
-    текстового чата больше не настройка чата вообще, см. "автоматический выбор
-    модели" ниже)? В личных сообщениях у чата всего один пользователь —
-    разрешено всегда. Владелец бота (OWNER_ID) — разрешено всегда, в любом чате.
-    В группах/супергруппах — только создатель или администратор ЭТОЙ группы
-    (проверяется через getChatMember, не требует особых прав у бота помимо
-    членства в чате)."""
+    """Общие настройки чата: личка — всегда, владелец — везде, группы — только creator/admin."""
     import bot
     if chat_type == ChatType.PRIVATE:
         return True
@@ -679,10 +569,7 @@ def _quota_entry(provider: str, model_id: str) -> QuotaEntry:
     return sub.setdefault(model_id, {"used": 0, "exhausted_at": None})
 
 def _mark_quota_exhausted(provider: str, model_id: str) -> None:
-    """Записывает момент, когда API реально вернул 429/RESOURCE_EXHAUSTED для модели.
-    Используется, потому что _record_quota_usage инкрементирует "used" только при
-    успешном ответе — без этого счётчик мог годами показывать 0, даже если все
-    запросы к модели упирались в реальный лимит на стороне Google/OpenRouter."""
+    """Метка exhausted: used растёт только на успехах, без неё 429 выглядел как 0."""
     import bot
     e = bot._quota_entry(provider, model_id)
     e["exhausted_at"] = time.time()

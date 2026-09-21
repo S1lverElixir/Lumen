@@ -265,11 +265,7 @@ def test_try_openrouter_streaming_happy_path_accumulates_and_finalizes():
 
 
 def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
-    # Зависший первый кусок (бэкенд молчит) — обёртка бросает TimeoutError по
-    # FIRST_CHUNK_TIMEOUT_SEC, _run_streaming_reply отдаёт плейсхолдер дальше
-    # по цепочке вместо бесконечного ожидания. РАНЬШЕ внешнего предела вообще
-    # не было — такой стрим держал лок чата до STREAM_CHUNK_TIMEOUT_SEC внутри
-    # генератора (30с) или навсегда при фейковом висящем генераторе.
+    # Висящий первый кусок — TimeoutError и плейсхолдер дальше по цепочке (раньше предела не было — лок держался до 30с/навсегда).
     chat_id = 999301
 
     async def hanging_pieces():

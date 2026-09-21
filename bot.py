@@ -6,12 +6,8 @@ Lumen — телеграм-бот на Gemini/OpenRouter, webhook-режим.
 
 from __future__ import annotations
 
-# КРИТИЧНО (прод-инцидент, сентябрь 2026): прод запускается как `python bot.py`
-# (`__main__`), а тесты — через `import bot`. Без этой строки любой отложенный
-# `import bot` внутри функций (их десятки после распила P2) при прод-запуске
-# ЗАНОВО выполнял весь bot.py как отдельный модуль: второе приложение, пустые
-# chat_state/квоты и вечный bot=None → все апдейты уходили в 503, бот молчал.
-# Алиас делает `import bot` везде тем же объектом, что и запущенный модуль.
+# Алиас против дубля модуля при `python bot.py` + `import bot`: иначе второй инстанс,
+# пустые state/квоты и вечный 503 (прод-инцидент, сентябрь 2026).
 import sys as _sys
 _sys.modules.setdefault("bot", _sys.modules[__name__])
 del _sys
@@ -94,10 +90,7 @@ class _SecretLogFormatter(logging.Formatter):
 
 
 def _setup_logging() -> logging.Logger:
-    # LOG_LEVEL — раньше был захардкожен INFO везде (root+оба handler'а), из-за
-    # чего оба существующих log.debug(...) в проекте не печатались никогда, ни в
-    # каком окружении — единственный нетюнящийся через env уровень в проекте, где
-    # даже таймауты в 15с настраиваются переменной. DEBUG остаётся дефолтом.
+    # LOG_LEVEL из env: раньше INFO был зашит везде и глушил все debug.
     level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").strip().upper(), logging.INFO)
     root = logging.getLogger()
     root.setLevel(level)
@@ -118,27 +111,7 @@ def _setup_logging() -> logging.Logger:
     _LOG_QUEUE_HANDLER.setFormatter(_SecretLogFormatter())
 
     global _LOG_LISTENER
-    # НАЙДЕНО ПРИ АУДИТЕ (4 сентября 2026, реальный воспроизведённый инцидент — см.
-    # py-spy дамп стеков зависшего процесса): _setup_logging() вызывается больше
-    # одного раза за процесс — сам модуль вызывает её один раз при импорте, а
-    # test_setup_logging_respects_log_level_env/test_setup_logging_defaults_to_
-    # info_when_unset в tests/test_bot_state.py вызывают её ещё 2 раза (проверка LOG_LEVEL).
-    # Без остановки СТАРОГО листенера здесь каждый повторный вызов заводил ЕЩЁ
-    # ОДИН QueueListener с ЕЩЁ ОДНИМ фоновым потоком-monitor'ом, читающим из ТОЙ
-    # ЖЕ общей _LOG_QUEUE — несколько потоков-конкурентов дёргают dequeue() из
-    # одной очереди одновременно. _stop_logging() (atexit) кладёт в очередь РОВНО
-    # ОДИН sentinel и join()-ит только ПОСЛЕДНИЙ созданный листенер — если этот
-    # единственный sentinel по гонке достаётся не тому потоку (а одному из более
-    # старых, уже "осиротевших" от module-level ссылки, но всё ещё живых), поток,
-    # который реально join()-ят, ждёт сигнала, который к нему никогда не придёт —
-    # процесс зависает НАВСЕГДА уже ПОСЛЕ того, как pytest успел допечатать
-    # "N passed" (сами тесты проходят, зависает только выход из процесса). Именно
-    # так объясняется зафиксированный на практике недетерминированный (не каждый
-    # прогон) хенг полного пакета тестов что локально, что в GitHub Actions —
-    # обычный запуск строго одного файла/маркера, не затрагивающий эти два теста,
-    # никогда не показывал проблему. Останавливаем предыдущий листенер ПЕРЕД тем,
-    # как завести новый — гарантирует не больше одного живого monitor-потока на
-    # эту очередь в любой момент времени, гонка исключена структурно.
+    # Перед стартом останавливаем старый QueueListener: иначе потоки плодятся на одной очереди и вешают выход после "N passed" (гонка за sentinel, 04.09.2026).
     if _LOG_LISTENER is not None:
         with contextlib.suppress(Exception):
             _LOG_LISTENER.stop()
@@ -149,11 +122,7 @@ def _setup_logging() -> logging.Logger:
     logging.captureWarnings(True)
     for name in ("httpx", "google_genai", "aiohttp", "uvicorn.access"):
         logging.getLogger(name).setLevel(logging.WARNING)
-    # Единый логгер "bot" для всего проекта — logging.getLogger(__name__) здесь
-    # давал "__main__" в проде (python -u bot.py), но "bot" при импорте тестами
-    # (import bot) — рассинхрон с lumen_*.py, которые везде явно берут
-    # logging.getLogger("bot") именно ради единого пространства имён логов.
-    # Подтверждено реальным событием в Sentry с тегом logger=__main__.
+    # Единый логгер "bot": __main__ в проде расходился с lumen_*.py (видно в Sentry).
     return logging.getLogger("bot")
 
 logger = _setup_logging()
@@ -212,9 +181,7 @@ else:
     log.info("[setup] BOT_TOKEN configured successfully (length: %d)", len(BOT_TOKEN))
 
 def _normalize_telegram_base_url(url: str) -> str:
-    """Добавляет https://, если задан голый хост без схемы (см. реальный инцидент
-    ниже) — общая логика для основного TELEGRAM_API_BASE_URL и резервных прокси
-    из TELEGRAM_API_BASE_URL_FALLBACKS."""
+    """Голый хост без схемы чиним в https://: иначе aiohttp валится на каждом вызове невнятной ошибкой."""
     url = url.strip().rstrip("/")
     if url and not url.lower().startswith(("http://", "https://")):
         # Реальный инцидент: TELEGRAM_API_BASE_URL был задан как голый хост воркера
@@ -232,13 +199,7 @@ LUMEN_PROXY_SECRET = os.getenv("LUMEN_PROXY_SECRET", "")
 TELEGRAM_API_BASE_URL = _normalize_telegram_base_url(os.getenv("TELEGRAM_API_BASE_URL", "https://api.telegram.org"))
 log.info("[setup] Using Telegram API Base URL: %s", TELEGRAM_API_BASE_URL)
 
-# ИСПРАВЛЕНО (аудит техдолга, август 2026): раньше был ровно один настроенный прокси —
-# единая точка отказа для ВСЕЙ исходящей и входящей связи с Telegram (см. README, раздел
-# про блокировку датацентровых IP HF Spaces). TELEGRAM_API_BASE_URL_FALLBACKS — опциональный
-# список через запятую (например второй прокси на Deno) — при срабатывании circuit breaker
-# (см. _rotate_telegram_proxy ниже) бот переключается на следующий кандидат по кругу вместо
-# того, чтобы просто ждать cooldown на единственном известном адресе. Если переменная не
-# задана — список из одного элемента, поведение не меняется.
+# Список резервных прокси по кругу вместо единой точки отказа (аудит, август 2026).
 _TELEGRAM_PROXY_FALLBACKS = [
     _normalize_telegram_base_url(u) for u in os.getenv("TELEGRAM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
 ]
@@ -248,17 +209,8 @@ _telegram_proxy_idx = 0  # индекс текущего активного пр
 # уводят индекс на два шага и пропускают кандидата (AUD-E-004).
 _proxy_rotation_lock = asyncio.Lock()
 
-# НАЙДЕНО ПРИ ОТЛАДКЕ (11-12 августа 2026, реальный инцидент): TikWM стабильно
-# отвечает HTTP 403 с ПУСТЫМ телом на запросы с IP HF Spaces (см. историю правок
-# в lumen_tiktok.py — троттлинг, ретраи и подмена заголовков не помогли, реальная
-# причина — блокировка исходящего IP, а не что-либо, что чинится на нашей
-# стороне). TIKWM_API_BASE_URL — опциональная база для прокси-запроса к TikWM
-# (единый прокси с Telegram, см. README/proxy.ts — тот же принцип, что уже
-# применяется для TELEGRAM_API_BASE_URL). Пусто по умолчанию — _fetch_tikwm_media_data
-# в этом случае стучится в TikWM напрямую (два зеркала), как и раньше; если
-# задано — идёт ОДНИМ запросом через прокси вместо прямого обращения к двум
-# зеркалам напрямую (сам прокси уже решает, к какому реальному хосту TikWM
-# стучаться — см. proxy/proxy.ts).
+# База прокси для TikWM: HF IP банится с пустым 403, лечится только прокси (инцидент 11–12.08.2026).
+# Пусто — стучимся в два зеркала напрямую, как раньше.
 TIKWM_API_BASE_URL = os.getenv("TIKWM_API_BASE_URL", "").strip().rstrip("/")
 # Резервные прокси для TikWM (тот же принцип, что и TELEGRAM_API_BASE_URL_FALLBACKS
 # выше по логике — см. _TELEGRAM_PROXY_CANDIDATES) — асимметрии быть не должно:
@@ -285,15 +237,7 @@ def _tikwm_proxy_candidates() -> list[str]:
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_KEY") or "").strip()
-# Найдено при код-ревью: раньше этот дефолт вычислялся ОДИН РАЗ здесь, на старте
-# модуля, из ЕЩЁ НЕ уточнённого BOT_USERNAME (env-заглушка "LumenAI_bot" по
-# умолчанию) — до того, как try_setup() ниже реально спрашивает getMe и мог бы
-# обновить настоящий юзернейм бота. Если владелец не задал BOT_USERNAME в env (или
-# задал неверно) — заголовок HTTP-Referer к OpenRouter так и оставался бы со
-# старым/неверным t.me/... адресом весь срок жизни процесса. _OPENROUTER_HTTP_
-# REFERER_ENV_SET запоминает, была ли переменная задана ЯВНО владельцем — чтобы
-# try_setup() ниже пересчитывал referer по свежему юзернейму, только если
-# владелец сам не переопределил его в env (иначе не перетираем явную настройку).
+# Referer пересчитываем в try_setup, если владелец не задал его явно: иначе t.me остался бы со заглушкой.
 _OPENROUTER_HTTP_REFERER_ENV_SET = bool(os.getenv("OPENROUTER_HTTP_REFERER", "").strip())
 OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", f"https://t.me/{BOT_USERNAME}").strip()
 OPENROUTER_TITLE = os.getenv("OPENROUTER_TITLE", BOT_USERNAME).strip()
@@ -305,31 +249,13 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 SHARED_HISTORY_MAX_LEN = 100
 
 # ── Sentry (опционально) — персистентный трекинг ошибок между рестартами ──
-# НАЙДЕНО: bot.log живёт на эфемерном диске контейнера HF Spaces и теряется при
-# каждом редеплое (это верно даже с настроенным Upstash — тот покрывает только
-# chat_state/quota, не логи), поэтому единственным способом узнать о падении
-# было "/logs" вручную или жалоба пользователя (см. README, "Известные
-# ограничения"). sentry_sdk по умолчанию патчит стандартный logging и сам ловит
-# любой log.exception()/log.error() по всему проекту (их уже десятки — см.
-# handle_tiktok/inline_draw/inline_tts/cmd_logs/_handle_message_core/
-# global_error_handler) без единого изменения в местах вызова.
-# Тот же принцип опциональности, что и у Upstash выше: SENTRY_DSN не задан —
-# sentry_sdk.init() не вызывается вообще, поведение не меняется для тех, кто
-# его не настроил.
+# Sentry: bot.log теряется при редеплое, Upstash логи не покрывает; ловит log.error без правок точек вызова.
 def _redactable_secrets() -> tuple[str, ...]:
-    """Единый список секретов для /logs и Sentry — раньше оба места вычищали
-    только BOT_TOKEN/GEMINI_API_KEY/OPENROUTER_API_KEY, хотя WEBHOOK_SECRET/
-    ADMIN_PANEL_KEY заявлены проектом как "никогда не логируются в plaintext"
-    наравне с BOT_TOKEN, а UPSTASH_REDIS_REST_TOKEN даёт полный доступ ко всем
-    сохранённым историям чатов. honey: имена читаются по значению на момент
-    вызова — WEBHOOK_SECRET/ADMIN_PANEL_KEY/UPSTASH_REDIS_REST_TOKEN объявлены
-    ниже по файлу, это безопасно для module-level globals в теле функции."""
+    """Единый список секретов для /logs и Sentry (включая производные секреты и Upstash-токен — полный доступ к историям)."""
     return _current_log_secrets()
 
 def _sentry_scrub_secrets(event: dict, hint: dict) -> dict | None:
-    """before_send-хук Sentry — вычищает секреты из события ПЕРЕД отправкой.
-    Определена БЕЗУСЛОВНО (не только внутри `if SENTRY_DSN`), чтобы её можно
-    было протестировать напрямую без настоящего DSN."""
+    """before_send-хук Sentry: вычищает секреты. Определена безусловно — тестируется без настоящего DSN."""
     payload = json.dumps(event, default=str, ensure_ascii=False)
     for secret in _redactable_secrets():
         payload = payload.replace(secret, "<REDACTED>")
@@ -340,9 +266,7 @@ if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         before_send=_sentry_scrub_secrets,
-        # Только трекинг ошибок — трейсинг производительности намеренно выключен
-        # (traces_sample_rate=0), чтобы не тратить бесплатную квоту Sentry
-        # (Developer-тир: 5000 событий/мес) на то, что тут отдельно не измеряется.
+        # Только трекинг ошибок (трейсинг выключен — бережём квоту Sentry 5000 событий/мес).
         traces_sample_rate=0.0,
         send_default_pii=False,
     )
@@ -361,24 +285,9 @@ TELEGRAM_MEDIA_TIMEOUT = float(os.getenv("TELEGRAM_MEDIA_TIMEOUT", "25"))
 # Раньше было захардкожено как 15.0 прямо внутри _download_telegram_file_bytes —
 # несогласованно с остальными таймаутами, которые все конфигурируются через env.
 TELEGRAM_GET_FILE_TIMEOUT = float(os.getenv("TELEGRAM_GET_FILE_TIMEOUT", "15"))
-# Если сам прокси перед Telegram (tg-proxy на Deno Deploy) недоступен/приостановлен
-# (например, исчерпан лимит бесплатного тарифа Deno — ответ вида "503 ... USAGE_EXCEEDED"),
-# он вместо валидного JSON от Telegram отдаёт HTML/текстовую страницу ошибки. Ни aiogram,
-# ни наш telegram_api_call не могут её распарсить — падают с JSONDecodeError на КАЖДЫЙ
-# вызов, а исходящих вызовов в Telegram за секунду может быть десятки (reply, typing-экшен,
-# get_file и т.д. на каждое входящее сообщение) — без выключателя это лавина одинаковых
-# WARNING-строк в логах и бессмысленные повторные попытки в мёртвый прокси. См. _tg_call/
-# telegram_api_call и _looks_like_proxy_garbage ниже. TELEGRAM_PROXY_COOLDOWN_SEC — на сколько
-# секунд отключаем реальные сетевые попытки после первой пойманной такой ошибки.
+# Cooldown после HTML-мусора от прокси вместо JSON: без него десятки вызовов/сек валят лавину WARNING (см. _tg_call).
 TELEGRAM_PROXY_COOLDOWN_SEC = float(os.getenv("TELEGRAM_PROXY_COOLDOWN_SEC", "20"))
-# В отличие от ask_gemini/ask_openrouter_text (которые ограничены ROUTE_TOTAL_
-# BUDGET_SEC на весь маршрут), у стриминга раньше не было НИКАКОГО таймаута вокруг
-# ожидания следующего куска — генуинно подвисший (не упавший с исключением, а
-# просто переставший присылать куски) стрим мог держать лок чата (_chat_locks)
-# бесконечно. Теперь каждое ожидание СЛЕДУЮЩЕГО куска (для ЛЮБОГО провайдера —
-# Gemini или OpenRouter, см. _run_streaming_reply) ограничено этим таймаутом —
-# если тишина затянулась дольше него, поднимается TimeoutError, которую функция
-# и так уже умеет корректно обрабатывать.
+# Лимит ожидания следующего куска для любого провайдера: зависший стрим иначе держит лок чата бесконечно.
 STREAM_CHUNK_TIMEOUT_SEC = float(os.getenv("STREAM_CHUNK_TIMEOUT_SEC", "30"))
 # ── Паттерн "живой печати" при стриминге (см. lumen_typing_pace.py и
 # _run_streaming_reply ниже) ── Раньше во время стрима сообщение показывало РОВНО
@@ -428,14 +337,7 @@ TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "800"))
 _PROCESS_START_MONOTONIC = time.monotonic()
 # ── Тайминги автоматического маршрутизатора моделей (см. секцию "автоматический
 # выбор модели" ниже) ──
-# Раньше (до перехода на роутер) при таймауте/503/500 бот ретраил ОДНУ и ту же
-# модель 2-3 раза с экспоненциальной задержкой, и только потом переключался на
-# следующую в цепочке — именно это было причиной ответов по 2+ минуты при
-# малейшей нестабильности API (см. историю: несколько моделей подряд по
-# 3 попытки × до 45с каждая). Теперь ретраев ОДНОЙ модели нет вообще: любая
-# ошибка (таймаут, 429, 503/500, что угодно ещё) — сразу переход к следующей
-# модели в маршруте. ROUTE_MODEL_TIMEOUT_SEC — сколько ждём ОДНУ попытку одной
-# модели, прежде чем считать её неудачной и пробовать следующую.
+# Без ретраев одной модели: любая ошибка — сразу следующая в маршруте; общий бюджет ROUTE_TOTAL_BUDGET_SEC держит лок чата от минутного зависания.
 ROUTE_MODEL_TIMEOUT_SEC = float(os.getenv("ROUTE_MODEL_TIMEOUT_SEC", "22"))
 # ROUTE_TOTAL_BUDGET_SEC — общий бюджет времени на ВЕСЬ маршрут одного сообщения,
 # включая ОБА провайдера (Gemini и OpenRouter), если маршрут предполагает
@@ -445,60 +347,21 @@ ROUTE_MODEL_TIMEOUT_SEC = float(os.getenv("ROUTE_MODEL_TIMEOUT_SEC", "22"))
 # попытки прекращаются и пользователь получает честное "сейчас всё перегружено"
 # вместо тихого зависания.
 ROUTE_TOTAL_BUDGET_SEC = float(os.getenv("ROUTE_TOTAL_BUDGET_SEC", "40"))
-# DRAW_TOTAL_BUDGET_SEC — тот же принцип, что и ROUTE_TOTAL_BUDGET_SEC выше, но для
-# фолбэк-цепочки генерации изображений (см. inline_draw). НАЙДЕНО ПРИ КОД-РЕВЬЮ
-# (28 августа 2026): в отличие от текстового роутинга, у /draw не было ВООБЩЕ
-# никакого общего бюджета времени — каждый вызов _pollinations_text_to_image ждёт до 90с
-# (см. aiohttp.ClientTimeout в _pollinations_generate, lumen_images.py), а моделей
-# в POLLINATIONS_IMAGE_MODELS пять. Если Pollinations.ai лежит целиком, пользователь мог
-# ждать до ~7.5 минут, прежде чем увидеть любую ошибку — статусное сообщение
-# "Генерирую изображение" всё это время просто висело. 120с — достаточно на одну
-# полную попытку (90с) плюс запас на вторую, но ограничивает худший случай вдвое
-# от одного медленного таймаута, а не в разы от их числа.
+# Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
 DRAW_TOTAL_BUDGET_SEC = float(os.getenv("DRAW_TOTAL_BUDGET_SEC", "120"))
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
-# завершения fire-and-forget задач обработки апдейтов (см. _inflight_tasks/
-# _drain_inflight_tasks) перед тем, как отменить оставшиеся. Найдено по реальному
-# инциденту в Sentry (LUMEN-2, "Task was destroyed but it is pending!") — без
-# этого такие задачи могли быть уничтожены event loop'ом прямо посреди сетевого
-# вызова (например bot.send_message(...)) при SIGTERM/редеплое.
+# завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
 INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = float(os.getenv("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", "10"))
 TG_MAX_LEN = 4096
-# Telegram Bot API ограничивает загрузку файлов, отправляемых ботом (upload, а не
-# по file_id/URL), 50 МБ — используется в _tiktok_video_candidates/handle_tiktok
-# ниже, чтобы заранее пропускать заведомо слишком большой вариант качества видео,
-# не тратя время и трафик на скачивание файла, который Telegram всё равно отклонит.
+# Upload-ботов Telegram режет 50 МБ — слишком большие варианты качества пропускаем до скачивания.
 TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
-# TikTok официально разрешает до 35 фото/слайдов в одном посте формата "слайдшоу"
-# (photo mode) — см. справку TikTok. sendMediaGroup при этом жёстко ограничен 10
-# элементами ЗА ОДИН вызов — это ограничение Telegram Bot API, а не наше. Чтобы
-# реально доставить ВЕСЬ пост (а не только первые 10, как было раньше), слайды
-# делятся на группы по TELEGRAM_MEDIA_GROUP_CHUNK и отправляются несколькими
-# последовательными вызовами sendMediaGroup — см. handle_tiktok.
+# Слайдшоу TikTok — до 35 штук, media group — по 10: шлём весь пост несколькими вызовами.
 TIKTOK_SLIDESHOW_MAX_ITEMS = 35
 TELEGRAM_MEDIA_GROUP_CHUNK = 10
-# TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY — НАЙДЕНО ПРИ КОД-РЕВЬЮ (28 августа 2026):
-# в отличие от скачивания слайдов (см. комментарий у asyncio.gather в handle_tiktok —
-# то уже покрыто connector limit=40 в _get_http_session), пробинг видео-слайдов
-# запускает НАСТОЯЩИЕ os-подпроцессы (ffprobe + ffmpeg на каждый видео-слайд) без
-# единого ограничения — слайдшоу с несколькими видео-слайдами могло бы дать
-# заметный всплеск CPU-нагрузки одновременно на контейнере HF Spaces с
-# ограниченными ресурсами. Лимит небольшой (не 35, как для сетевых скачиваний) —
-# это реальные CPU-тяжёлые процессы, а не ожидание сетевого I/O.
+# Лимит ffprobe/ffmpeg-процессов: без него слайдшоу кладёт CPU контейнера (ревью 28.08.2026).
 TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = int(os.getenv("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", "4"))
 _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
-# TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY — НАЙДЕНО ПРИ АУДИТЕ TikTok-функций (4 сентября
-# 2026): слайды слайдшоу (до TIKTOK_SLIDESHOW_MAX_ITEMS=35) скачиваются через
-# asyncio.gather БЕЗ единого ограничения конкурентности — тот же класс проблемы,
-# что уже был найден и исправлен для CPU-тяжёлого пробинга (см. комментарий у
-# TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY выше), только здесь это не CPU, а
-# соединения общей aiohttp-сессии (_get_http_session, connector limit=40 — ОБЩИЙ
-# на весь процесс, а не только на TikTok). Один слайдшоу-пост из 35 слайдов мог
-# бы разом занять почти весь пул соединений и создать head-of-line blocking для
-# несвязанных запросов из других чатов (Gemini/OpenRouter/Pollinations/другие
-# TikTok-ссылки тоже используют этот же session). Небольшой лимит (не 35) —
-# оставляет запас пула для остального трафика бота, при этом всё ещё заметно
-# быстрее полностью последовательного скачивания.
+# Лимит скачивания слайдов 8: 35 слайдов иначе занимают весь пул сессии (limit=40) и стопорят другие чаты (аудит 04.09.2026).
 TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = int(os.getenv("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", "8"))
 _tiktok_slide_download_semaphore = asyncio.Semaphore(TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
 
@@ -582,21 +445,14 @@ from lumen_limits import (
 )
 
 # ── Инициализация клиентов внутри цикла обработки событий (решает RuntimeError) ──
-bot: Bot = None  
+bot: Bot = None
 dp = Dispatcher()
-client: genai.Client = None  
+client: genai.Client = None
 
 _http_session: aiohttp.ClientSession | None = None
 _chat_locks: dict[int, asyncio.Lock] = {}
 
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА (разбиение bot.py на модули): класс выключателя, детектор
-# "прокси вернул не-JSON", конфигурация TCPConnector, IPv4-сессия aiogram и кэш общей
-# aiohttp-сессии для telegram_api_call — всё это самодостаточно (не мутирует
-# TELEGRAM_API_BASE_URL/bot/BOT_TOKEN) и вынесено в lumen_telegram_transport.py. Сама
-# оркестрация (_tg_call/telegram_api_call/_rotate_telegram_proxy/_handle_proxy_failure)
-# остаётся здесь — она читает И мутирует TELEGRAM_API_BASE_URL/bot, которые в этом файле
-# используются ещё в добром десятке несвязанных мест (/diag, скачивание файлов, main()),
-# так что вынос обошёлся бы дороже, чем стоит (см. докстринг lumen_telegram_transport.py).
+# Транспорт — в lumen_transport_calls.py.
 from lumen_telegram_transport import (
     _TelegramProxyCircuitBreaker,
     IPv4AiohttpSession,
@@ -607,28 +463,12 @@ _tg_proxy_breaker = _TelegramProxyCircuitBreaker(cooldown_sec=TELEGRAM_PROXY_COO
 
 # конвертация markdown в html, утилиты json
 
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: вся логика конвертации markdown/LaTeX/таблиц/
-# маркеров списков в Telegram HTML вынесена в отдельный модуль lumen_formatting.py —
-# это чистые функции над строками без единой зависимости от Telegram/Gemini/
-# OpenRouter/рантайм-состояния бота, самый безопасный кандидат на выделение из
-# монолитного bot.py. Публичные имена и поведение не изменились — импортируется
-# напрямую, чтобы `bot._md_to_html(...)` продолжал работать ровно как раньше.
-#
-# Только `_md_to_html` реально нужна здесь (используется в коде bot.py) —
-# остальные внутренние хелперы (`_scrub_latex`/`_normalize_bullet_markers`/
-# `_TABLE_SEP_RE`/`_LATEX_SYMBOL_MAP` и т.п.) нужны только САМОЙ `_md_to_html`
-# внутри lumen_formatting.py; тесты на них теперь тоже импортируют
-# lumen_formatting напрямую (см. test_lumen_formatting.py), а не через `bot.X` —
-# раньше `_scrub_latex`/`_normalize_bullet_markers` были ре-экспортированы здесь
-# именно ради старых тестов на `bot.X`, но с переездом тестов на прямой импорт
-# модуля этот ре-экспорт стал мёртвым (см. аудит техдолга, 26 августа 2026) и
-# убран вместе с соответствующим `__all__`.
+# Конвертация markdown/LaTeX/таблиц в Telegram HTML — чистые функции в lumen_formatting.py.
 from lumen_formatting import _split_text_chunks
 
 _PRUNE_SENTINEL = object()
 
 def _json_prune_defaults(val: Any) -> Any:
-    # Очистка дефолтных служебных значений
     if val.__class__.__name__ == "Default":
         return _PRUNE_SENTINEL
     if isinstance(val, dict):
@@ -677,23 +517,7 @@ from lumen_media_flow import (
 
 # список моделей
 #
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: конфигурация моделей и логика построения маршрута
-# (GEMINI_MODELS, TEXT_MODEL_ORDER, единый реестр "нездоровых" моделей
-# _OR_MODEL_HEALTH/_ROUTER_EXCLUDED_OR_MODELS, порядок моделей OpenRouter,
-# цепочки Gemini, эвристики "тяжёлый запрос?"/"нужна свежая информация?" и сами
-# _build_route/_or_route/_gemini_route) вынесены в lumen_router_config.py — это
-# чистые конфигурация+функции принятия решения без единого обращения к Telegram/
-# Gemini/OpenRouter API, поэтому безопасный кандидат на отдельный модуль (в
-# отличие от ask_gemini/_run_route ниже, которые реально ИСПОЛНЯЮТ маршрут и
-# остаются здесь). Импорт стоит именно тут (там, где раньше физически начиналось
-# определение GEMINI_MODELS) для консистентности с историей файла, хотя строгой
-# необходимости в этом больше нет: _LEAK_LITERAL_STRINGS (которая раньше требовала
-# GEMINI_MODELS/TEXT_MODEL_ORDER на уровне модуля именно в этой точке файла)
-# теперь целиком строится внутри lumen_security.py, а не здесь.
-# Публичные имена и поведение не изменились. Импортируются только реально
-# используемые здесь (в коде bot.py или напрямую в тестах через `bot.X`) имена —
-# например, `_gemini_route`/`_OR_HEAVY_ORDER`/`TEXT_MODEL_ORDER` нужны только
-# САМОЙ `_build_route` внутри lumen_router_config.py, а не bot.py.
+# Конфигурация моделей и маршрутизация — в lumen_router_config.py (импорт на месте прежнего GEMINI_MODELS; только реально используемые имена).
 from lumen_router_config import (
     DEFAULT_GEMINI_MODEL,
     _check_unconfirmed_model_quotas,
@@ -724,28 +548,13 @@ from lumen_errors import (
     _MODEL_ERROR_FALLBACK_MSG,
 )
 
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: форма одного элемента chat_state[chat_id] раньше
-# нигде не была описана явно — она собиралась по кусочкам из трёх разных мест
-# (get_state/_restore_single_chat/_serialize_chat_state), и чтобы понять "из чего
-# вообще состоит состояние чата", нужно было читать все три. ChatState — чисто
-# типовая аннотация (TypedDict), НЕ меняет поведение в рантайме: chat_state[cid]
-# остаётся обычным dict, никакой валидации здесь не добавляется — это только
-# документация формы для статических проверок типов и читаемости.
+# Форма chat_state[chat_id] — TypedDict ChatState (только аннотация для типов/читаемости, рантайм не меняет).
 
 # Буферы альбомов/медиа-групп
 _mg_buffers: dict[str, list[Message]] = {}
 _mg_tasks: dict[str, asyncio.Task] = {}
 
-# НАЙДЕНО ПРИ АУДИТЕ ЛОГИРОВАНИЯ (Sentry LUMEN-2: "Task was destroyed but it is
-# pending!", logger=asyncio): fire-and-forget таски обработки входящих апдейтов
-# (webhook_handler -> _process_raw_update, буферы медиа-групп -> _mg_tasks) нигде
-# не собирались в единый набор — main() при остановке отменял только startup_task/
-# flush_task, а эти задачи (внутри которых реальные bot.send_message(...) и т.п.)
-# могли быть уничтожены event loop'ом прямо посреди сетевого вызова при SIGTERM/
-# редеплое, без единого шанса штатно завершиться или хотя бы залогировать себя.
-# _inflight_tasks — общий набор таких задач, done_callback снимает таску из набора
-# сама (без отдельной периодической чистки); используется _drain_inflight_tasks
-# в main() при остановке (см. там же).
+# _inflight_tasks — общий набор fire-and-forget задач (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое); main() дренирует при остановке.
 _inflight_tasks: set[asyncio.Task] = set()
 
 def _track_inflight_task(task: asyncio.Task) -> asyncio.Task:
@@ -774,23 +583,7 @@ from lumen_admin import (
     export_state,
 )
 
-# ИСПРАВЛЕНО (аудит техдолга, август 2026): раньше WEBHOOK_SECRET/ADMIN_PANEL_KEY
-# выводились ИСКЛЮЧИТЕЛЬНО из BOT_TOKEN — компрометация одного токена бота мгновенно
-# компрометировала оба производных секрета разом, и ни один нельзя было ротировать
-# независимо (только вместе со сменой самого BOT_TOKEN у @BotFather, что рвёт webhook).
-# ADMIN_SECRET_SEED — опциональная независимая соль: если задана, оба секрета выводятся
-# из неё, а не из BOT_TOKEN, и можно сменить только её, не трогая токен бота. Если не
-# задана — тихий откат на прежнее поведение (соль = BOT_TOKEN), никаких изменений для
-# тех, кто её не настраивал.
-# НАЙДЕНО ПРИ СЕКЬЮРИТИ-РЕВЬЮ: последний запасной вариант раньше был литеральной строкой
-# "default" — этот репозиторий публичный, поэтому в сценарии "ADMIN_SECRET_SEED не задан
-# И BOT_TOKEN пуст" (например, ошибка конфигурации) WEBHOOK_SECRET/ADMIN_PANEL_KEY стали
-# бы ЗАРАНЕЕ ИЗВЕСТНЫМИ КОНСТАНТАМИ, вычислимыми любым, кто читает этот исходник — секрет,
-# который не секрет. На практике без валидного BOT_TOKEN сам процесс всё равно не поднимется
-# (main() падает на Bot(token=BOT_TOKEN, ...) ещё до старта uvicorn.serve(), см. main() ниже) —
-# поэтому этот путь маловероятен в реальном продакшене, но это защита по глубине "на всякий
-# случай": secrets.token_hex(32) даёт непредсказуемый секрет на время жизни процесса вместо
-# захардкоженной в открытом коде строки.
+# ADMIN_SECRET_SEED — независимая соль для секретов (иначе всё выводилось из BOT_TOKEN и ротировалось только с ним). Пустой seed при пустом токене — случайный секрет процесса, а не захардкоженная строка.
 _ADMIN_SECRET_SEED = os.getenv("ADMIN_SECRET_SEED", "").strip() or BOT_TOKEN or secrets.token_hex(32)
 WEBHOOK_SECRET = hashlib.sha256(_ADMIN_SECRET_SEED.encode()).hexdigest()[:32]
 ADMIN_PANEL_KEY = hashlib.sha256(_ADMIN_SECRET_SEED.encode() + b"admin_panel").hexdigest()[:24]
@@ -818,22 +611,7 @@ log.info(
     "Upstash Redis" if USE_UPSTASH else f"локальный файл в {_STATE_DIR} (см. README про эфемерность на HF Spaces)"
 )
 
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА (разбиение bot.py на модули): клиент Upstash REST API,
-# ветвление backend'а (Upstash/локальный файл), сериализация одного чата в JSON-снимок
-# и сохранение/удаление ОДНОЙ записи чата вынесены в lumen_state_storage.py — эти
-# функции не заводят собственных module-level globals, завязанных на chat_state/
-# GLOBAL_QUOTA (см. докстринг модуля). chat_state/GLOBAL_QUOTA и то, ЧТО считается
-# "грязным" и когда сбрасывается — по-прежнему здесь: это состояние читается/
-# мутируется из ~30 несвязанных мест по всему файлу, выносить его означало бы не
-# разделение ответственности, а искусственное разрывание единого куска состояния.
-#
-# `_upstash_*`/`_storage_*`/`_chat_storage_path`/`_save_chat_to_storage`/
-# `_delete_chat_storage` ниже — тонкие обёртки с ТЕМИ ЖЕ именами и (за вычетом
-# внутреннего StorageConfig) сигнатурами, что были раньше: собирают свежий
-# StorageConfig из текущих значений UPSTASH_REDIS_REST_URL/_TOKEN/USE_UPSTASH/
-# _CHATS_DIR (в т.ч. подменённых в тестах через `bot.UPSTASH_REDIS_REST_URL = ...`/
-# `bot._CHATS_DIR = ...`) на КАЖДЫЙ вызов и прокидывают в lumen_state_storage —
-# публичный интерфейс и поведение не изменились.
+# Хранилище — в lumen_state_storage.py + lumen_chat_state.py.
 from lumen_state_storage import (
     CHAT_STATE_SCHEMA_VERSION,
     _serialize_chat_state,
@@ -1082,20 +860,7 @@ GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC = 3600.0
 
 # генерация изображений (pollinations)
 #
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА (разбиение bot.py на модули): вся эта секция (каталог
-# моделей Pollinations, автоматический выбор модели по промпту, сам вызов
-# Pollinations.ai) вынесена в lumen_images.py — не пишет в chat_state/GLOBAL_QUOTA,
-# не зовёт Telegram API и не зависит от глобальных bot/client, самый изолированный
-# кандидат из пяти намеченных. Единственное отличие от прежнего кода:
-# _pollinations_generate/_pollinations_text_to_image теперь принимают уже готовую aiohttp-сессию
-# параметром (см. докстринг модуля) — раньше сессия получалась неявно через
-# _get_http_session() внутри самой функции, что означало бы либо тянуть этот геттер
-# в новый модуль, либо заводить там свой отдельный источник сессий; вызывающий код
-# (inline_draw ниже) теперь сам получает сессию и передаёт её. Публичные имена и
-# остальное поведение не изменились.
-# _image_model_label здесь больше не импортируется (сентябрь 2026): бот не
-# показывает названия моделей генерации ни в статусе, ни в подписи — см.
-# ИДЕНТИЧНОСТЬ в system_prompt.py. Сама функция живёт в lumen_images.py.
+# Генерация картинок — в lumen_images.py (чистые функции, сессию передаёт вызывающий код).
 from lumen_images import (
     DEFAULT_POLLINATIONS_IMAGE_MODEL,
     POLLINATIONS_IMAGE_MODELS,
@@ -1138,16 +903,7 @@ from lumen_media import (
 # ask_openrouter_*/_or_chat_completion_with_fallback и т.д.).
 
 # ─────────────────── защита от утечки провайдера/модели и промт-инъекций ───────────────────
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: детекторы утечки идентичности (_detect_identity_leak/
-# _scrub_identity_leak/_detect_injected_payload_echo) и входной префильтр промт-
-# инъекций (_looks_like_injection_probe) вынесены в lumen_security.py — чистые
-# функции над строками (плюс регэкспы/константы), не зависящие от Telegram/рантайм-
-# состояния бота. Импортируются напрямую — публичные имена и поведение (включая
-# логирование через тот же логгер "bot", см. lumen_security.py) не изменились.
-# Только реально используемые здесь имена импортируются явно — регэкспы
-# (`_IDENTITY_LEAK_RE`/`_INJECTION_PROBE_RE`/`_INJECTED_PAYLOAD_ECHO_RE` и
-# составляющие их `_LEAK_BRAND_TOKENS`/`_LEAK_LITERAL_STRINGS`) нужны только
-# самим детекторам внутри lumen_security.py, а не коду bot.py.
+# Детекторы утечек/инъекций — чистые функции в lumen_security.py (импортируем только используемое).
 from lumen_security import (
     _IDENTITY_LEAK_FALLBACK,
     _INJECTED_PAYLOAD_ECHO_FALLBACK,
@@ -1241,18 +997,10 @@ from lumen_model_speed import (
     first_chunk_limit_sec as _model_first_chunk_limit,
 )
 
-# Точка подмены для тестов (тот же приём, что и у bot._get_http_session/bot.
-# _openrouter_stream_pieces и т.п. в этом файле) — реальный await asyncio.sleep()
-# в фазе "довывода" (см. _run_streaming_reply) не нужен ни в одном тесте и заметно
-# замедлил бы весь сьют без единой пользы; tests/conftest.py безусловно патчит эту
-# ссылку на no-op для каждого теста.
+# Точка подмены сна довывода: tests/conftest.py глушит, иначе сьют тормозит.
 _typing_sleep = asyncio.sleep
 
-# Отдельная точка подмены для анимации точек (см. _tick_waiting_dots ниже) —
-# НАМЕРЕННО не покрыта autouse-фикстурой tests/conftest.py: если бы она была no-op,
-# тикер в каждом стриминг-тесте успевал бы наставить лишних правок до прихода
-# мгновенного фейкового куска и сломал бы все проверки последовательностей
-# правок. В проде — обычный asyncio.sleep; в тестах анимации патчится явно.
+# Точка подмены анимации точек — намеренно БЕЗ autouse: no-op сломал бы проверки последовательностей правок.
 _dots_sleep = asyncio.sleep
 
 
@@ -1312,10 +1060,8 @@ def message_mentions_bot(message: Message) -> bool:
     if message.chat.type == ChatType.PRIVATE:
          return True
     t = message.text or message.caption or ""
-    # 1. Прямое упоминание бота через @username
     if f"@{BOT_USERNAME}".lower() in t.lower():
          return True
-    # 2. Ответ на сообщение бота в группе
     if message.reply_to_message and message.reply_to_message.from_user:
          if message.reply_to_message.from_user.username and message.reply_to_message.from_user.username.lower() == BOT_USERNAME.lower():
               return True
@@ -1354,30 +1100,7 @@ dp.callback_query.register(handle_pick_callback)
 
 
 # ─────────────────── автоматический выбор модели (роутер) ───────────────────
-# Полностью заменяет ручной выбор через /model и /provider (обе команды удалены).
-# Пользователь никогда явно не выбирает ни провайдера, ни модель — на КАЖДОЕ
-# сообщение маршрут строится заново, исходя из того, что реально требуется для
-# ответа: наличие вложений/ссылок (детерминированно, из самого сообщения) и
-# грубая эвристическая оценка сложности/нужды в свежей информации (без
-# обращения к LLM — классификация отдельным вызовом модели тратила бы ровно ту
-# же дефицитную квоту, которую роутер должен экономить).
-#
-# Ключевое архитектурное решение: Gemini — единственный провайдер с реальным
-# доступом к поиску в интернете, чтению сайтов по ссылке (url_context) и
-# разбору YouTube-видео по ссылке (file_uri). Квота Gemini (у флагмана
-# gemini-3.5-flash — всего 20 запросов/сутки по дашборду AI Studio) — самый
-# дефицитный ресурс бота, поэтому Gemini используется ТОЛЬКО когда сообщение
-# реально требует одну из этих трёх возможностей. Все остальные (и
-# значительно более частые) запросы — без вложений, без ссылок, без явных
-# признаков нужды в свежих данных — обслуживаются бесплатными моделями
-# OpenRouter, у которых лимит намного мягче и которые не тратят вообще ничего
-# из бюджета Gemini. Каждый провайдер выступает резервом для другого, если его
-# собственная цепочка кандидатов откажет целиком — раньше (при ручном выборе
-# через /model и /provider) переход между провайдерами был намеренно запрещён
-# ("выбрали провайдера — работает только его цепочка"), но это ограничение
-# имело смысл только пока выбор был явным решением пользователя; при
-# автоматическом роутинге такого выбора не существует, и честная эскалация в
-# другой провайдер лучше, чем отказ там, где ответ в принципе можно было дать.
+# Маршрут строится заново на каждое сообщение; Gemini только под поиск/ссылки/YouTube — его квота самая дефицитная.
 
 
 # ── Кнопки-уточнения (pick-сценарии) ──
@@ -1471,14 +1194,7 @@ async def _webhook_startup() -> None:
 
     log.info("[webhook] Space URL: https://%s", space_host)
     log.info("[webhook] Webhook endpoint: %s", webhook_url)
-    # Полные WEBHOOK_SECRET/ADMIN_PANEL_KEY больше НЕ печатаются в логи при каждом
-    # старте (см. критическую находку код-ревью — эти строки попадали в скриншоты/
-    # чаты наравне с остальными логами, а тот, у кого есть ADMIN_PANEL_KEY, получает
-    # полный доступ к /diag и /webhook_url). Показываем только урезанный "отпечаток"
-    # для сверки между рестартами; полные значения — через GET /admin_keys с заголовком
-    # Authorization (гейтится самим BOT_TOKEN — ИСПРАВЛЕНО при повторном код-ревью:
-    # раньше токен передавался как ?bot_token=... в URL, что попадало в access-логи
-    # прокси/историю браузера; см. _check_bot_token_auth).
+    # Полные секреты в логи не печатаем (доступ к /diag и /webhook_url), только отпечаток; полные — через /admin_keys с Bearer BOT_TOKEN (не query — токен в URL оседает в логах прокси).
     log.info('[webhook] WEBHOOK_SECRET (fingerprint): %s', _redact_secret(WEBHOOK_SECRET))
     log.info(
         '[admin] Full keys (WEBHOOK_SECRET/ADMIN_PANEL_KEY): curl -H "Authorization: Bearer <your BOT_TOKEN>" https://%s/admin_keys',
@@ -1546,14 +1262,7 @@ async def _webhook_startup() -> None:
             )
             log.info("[webhook] Webhook registered successfully: %s", webhook_url)
         except Exception as exc:
-            # Полный WEBHOOK_SECRET сюда больше НЕ подставляется (см. критическую
-            # находку код-ревью про секреты, печатавшиеся в лог целиком при каждом
-            # старте). Готовая ссылка с реальным секретом доступна через уже
-            # существующий /webhook_url — ИСПРАВЛЕНО (аудит техдолга): раньше вызывался
-            # как GET .../webhook_url?key=<ADMIN_PANEL_KEY>, теперь (как и /admin_keys)
-            # требует заголовок Authorization: Bearer <ADMIN_PANEL_KEY> — сам ADMIN_PANEL_KEY
-            # при необходимости получить через curl -H "Authorization: Bearer <BOT_TOKEN>"
-            # .../admin_keys (см. _check_bot_token_auth).
+            # Секрет в лог не подставляем — готовая ссылка живёт в /webhook_url (Bearer ADMIN_PANEL_KEY, не query).
             log.warning(
                 '[webhook] setWebhook failed — register it manually via: curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://.../webhook_url (get ADMIN_PANEL_KEY via curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys if you don\'t have it handy): %s',
                 exc,
@@ -1582,13 +1291,7 @@ async def _webhook_startup() -> None:
     await try_setup()
 
     log.info("[webhook] Bot is running in webhook mode. Updates arrive via POST /webhook")
-    # НАЙДЕНО ПРИ КОД-РЕВЬЮ: _check_temporary_free_models_expiry()/_check_unconfirmed_
-    # model_quotas() вызывались ТОЛЬКО один раз при старте (см. вызов в начале этой же
-    # функции). Если контейнер работает без редеплоя достаточно долго, чтобы промо-акция
-    # истекла УЖЕ ПОСЛЕ старта (ровно так и вышло с tencent/hy3:free — истекла спустя пару
-    # дней после последнего рестарта) — предупреждение не всплывёт в логах до следующего
-    # рестарта. Используем уже существующий часовой цикл, чтобы дополнительно
-    # перепроверять обе функции раз в сутки, без отдельного нового фонового таска.
+    # Суточные перепроверки моделей в часовом цикле: иначе истёкшее промо (как hy3:free) видно только после рестарта.
     _last_daily_check_date = date.today()
     while True:
         await asyncio.sleep(3600)
@@ -1660,10 +1363,7 @@ async def main() -> None:
              await startup_task
         with contextlib.suppress(asyncio.CancelledError):
              await flush_task
-        # Даём незавершённым апдейтам (webhook/медиа-группы) шанс закончиться
-        # штатно ДО финального сброса состояния и закрытия сессий — иначе их
-        # правки chat_state рисковали не попасть в _flush_state_now ниже, а сами
-        # сетевые вызовы внутри них — быть оборваны на середине (см. LUMEN-2).
+        # Незавершённым апдейтам — шанс закончиться ДО сброса состояния/закрытия сессий (иначе правки chat_state терялись, сеть рвалась — LUMEN-2).
         await _drain_inflight_tasks()
         # Финальный синхронный сброс — не ждём следующего тика периодического
         # флаша (раз в FLUSH_INTERVAL_SEC), иначе последние изменения между

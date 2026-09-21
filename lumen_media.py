@@ -51,9 +51,7 @@ def _is_gemini_supported_mime(mime: str) -> bool:
     return False
 
 def _sanitize_mime_type(file_path: str | None, mime: str | None, default_fallback: str = "application/octet-stream") -> str:
-    # mimetypes.guess_type зависит от платформы (/etc/mime.types на Linux,
-    # реестр Windows): один и тот же .avi даёт video/x-msvideo там и None тут.
-    # Каноникализируем известные нестандартные варианты в поддерживаемые mime.
+    # guess_type врёт по-разному на Linux/Windows — каноникализируем известные варианты.
     canonical = {
         "video/x-msvideo": "video/avi",
         "video/x-m4v": "video/mp4",
@@ -74,9 +72,7 @@ def _sanitize_mime_type(file_path: str | None, mime: str | None, default_fallbac
                 ".gif": "image/gif",
                 ".mp4": "video/mp4",
                 ".mov": "video/quicktime",
-                # .m4v/.avi маппятся на поддерживаемые Gemini mime (а не
-                # video/x-m4v/x-msvideo): иначе sanitize выдавал mime, который
-                # _is_gemini_supported_mime тут же отвергал.
+                # .m4v/.avi — в поддерживаемые Gemini: иначе sanitize выдавал mime, который сам же отвергал.
                 ".m4v": "video/mp4",
                 ".avi": "video/avi",
                 ".mp3": "audio/mpeg",
@@ -123,13 +119,7 @@ def _media_file_id_and_mime(source: Any) -> tuple[str, str, str]:
         if class_name == "PhotoSize":
             mime = "image/jpeg"
         elif class_name == "Sticker":
-            # Синтетическое значение для ВСЕХ стикеров (статичных webp, анимированных
-            # TGS/Lottie и видео-webm) — не настоящий Content-Type, а маркер категории
-            # "это стикер" для _mime_matches_media_category в _resolve_incoming_media.
-            # Различать три реальных формата здесь не нужно: ни один них downstream-код
-            # не декодирует как картинку напрямую (см. приоритеты медиа в
-            # _resolve_incoming_media — стикеры участвуют только в поиске по категории,
-            # не в реальной отправке байтов в Gemini/OpenRouter как "image/webp").
+            # Стикер — маркер категории "image/webp": формат downstream не важен, байты как картинку не шлём.
             mime = "image/webp"
         elif class_name == "Voice":
             mime = "audio/ogg"
@@ -149,8 +139,7 @@ def _mime_suffix(mime: str, filename: str = "") -> str:
     if m.startswith("image/"):
         sub = m.split("/", 1)[1]
         return {"jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"}.get(sub, f".{sub}")
-    # Честная карта вместо ".mp3 для любого audio" (AUD-E-005): расширение врёт
-    # редко, но метка временному файлу должна соответствовать содержимому.
+    # Расширение по содержимому (AUD-E-005): ".mp3 для всего" врало.
     if m.startswith("audio/"):
         sub = m.split("/", 1)[1].split(";")[0].strip()
         return {

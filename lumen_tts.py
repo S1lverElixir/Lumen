@@ -1,22 +1,7 @@
 """
-lumen_tts.py — TTS-пайплайн: синтез речи через Fish Audio S2.1 Pro (free, поверх
-OpenRouter) с резервом на цепочку моделей Gemini TTS, плюс вспомогательная конвертация
-сырого PCM в WAV (`pcm_to_wav`).
+lumen_tts.py — TTS: Fish Audio S2.1 Pro (free, через OpenRouter) с резервом на Gemini TTS, плюс pcm_to_wav.
 
-Вынесено из bot.py при разбиении на модули (см. README, аудит техдолга). В отличие от
-lumen_images.py (полностью изолирован), эта пара функций синтеза действительно зовёт
-внешнее для себя состояние — общую aiohttp-сессию, конфигурацию OpenRouter, глобальный
-клиент Gemini, учёт квоты (GLOBAL_QUOTA) и классификацию ошибок. Ни один из этих кусков
-состояния здесь НЕ дублируется новым module-level global — вместо этого обе функции
-принимают всё нужное параметрами (сессию, ключи/URL, клиент, и три callback'а:
-классификация "это рейт-лимит?", отметка исчерпанной модели, отметка успешного расхода).
-
-bot.py держит тонкие обёртки с ТЕМИ ЖЕ именами (`_fish_audio_tts_bytes`/`_gemini_tts_bytes`,
-см. секцию "TTS-пайплайн (Fish Audio + Gemini TTS)" там же), которые на каждый вызов читают
-актуальные значения СВОИХ модульных глобалов (OPENROUTER_API_KEY, client и т.п. — в т.ч.
-те, что подменяются в тестах через `bot.OPENROUTER_API_KEY = ...`/`bot.client = ...`) и
-прокидывают их сюда — поэтому публичный интерфейс `bot._fish_audio_tts_bytes(text)`/
-`bot._gemini_tts_bytes(text)` и поведение существующих тестов не изменились ни на йоту.
+Вынесено из bot.py (аудит техдолга). Внешнее состояние (сессия, ключи, клиент, квота, классификация ошибок) не дублируется — принимается параметрами и callback'ами; bot.py держит тонкие обёртки с теми же именами, интерфейс и тесты не изменились.
 """
 
 from __future__ import annotations
@@ -47,29 +32,14 @@ def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sam
     return wav_buf.getvalue()
 
 
-# ─────────────────── Fish Audio S2.1 Pro (free) — TTS через OpenRouter ───────────────────
-# Пробуется ПЕРВОЙ (см. inline_tts в bot.py): у Gemini TTS лимит 10 запросов/сутки НА
-# МОДЕЛЬ (обе модели вместе — 20/сутки) — жёстче, чем у любой текстовой модели в
-# боте; у Fish Audio free-тира заявленного дневного потолка нет вообще (только
-# Fair Use Policy). При любой неудаче — тихий откат на цепочку Gemini TTS
-# (_gemini_tts_bytes) без изменений в её поведении.
+# ── Fish Audio S2.1 Pro (free) — пробуется первой: у Gemini TTS всего 10 запросов/сутки на модель, у Fish заявленного потолка нет. При неудаче — тихий откат на Gemini TTS.
 
 async def _fish_audio_tts_bytes(
     session: aiohttp.ClientSession, text: str, *,
     api_key: str, http_referer: str, title: str, base_url: str,
     model_id: str, request_timeout_sec: float,
 ) -> bytes | None:
-    """Синтез речи через Fish Audio S2.1 Pro (free) — аудио-модальность OpenRouter
-    chat/completions (modalities=["text","audio"], обязательно stream=true, куски
-    приходят как SSE data: {...} с base64 в delta.audio.data — см. openrouter.ai/
-    docs/guides/overview/multimodal/audio). Возвращает сырые байты mp3 или None
-    при ЛЮБОЙ неудаче (нет ключа, сетевая ошибка, неожиданный формат ответа) —
-    вызывающий код (inline_tts в bot.py) в этом случае просто откатывается на Gemini TTS,
-    поэтому здесь нарочно нет ни одного raise.
-    Формат ответа не проверялся вручную на реальном трафике (модель для бота
-    новая) — согласно принципу "сначала диагностика, потом фикс" (см. остальной
-    проект), при любой странности в форме ответа функция логирует сырой кусок и
-    возвращает None, а не пытается угадать дальше."""
+    """Fish Audio через OpenRouter (modalities text+audio, stream SSE с base64 в delta.audio.data). Возвращает mp3-байты или None при ЛЮБОЙ неудаче — вызывающий код откатывается на Gemini TTS, поэтому ни одного raise. Формат ответа на реальном трафике не проверялся: при странностях логируем сырой кусок и возвращаем None."""
     if not api_key:
         return None
     headers = {
@@ -132,19 +102,7 @@ async def _gemini_tts_bytes(
     on_model_exhausted: Callable[[str], None],
     on_model_success: Callable[[str], None],
 ) -> tuple[bytes, str, str]:
-    """Синтез речи через цепочку Gemini TTS-моделей (резерв после Fish Audio,
-    см. _fish_audio_tts_bytes выше). Возвращает (pcm_bytes, mime_type, used_model)
-    или бросает исключение, если вся цепочка отказала — inline_tts в bot.py ловит
-    его тем же except, что и раньше.
-
-    `client` (genai.Client) и три callback'а передаются вызывающим кодом — см.
-    докстринг модуля про то, почему они не читаются здесь напрямую из bot.py:
-    `is_rate_limit_error` — та же классификация ошибок (_error_text/_error_status/
-    _classify_model_error), что используется и для обычных чат-моделей в bot.py;
-    `on_model_exhausted`/`on_model_success` — запись в GLOBAL_QUOTA (_mark_quota_
-    exhausted/_record_quota_usage в bot.py), т.к. по дашборду AI Studio у TTS-моделей
-    лимит всего 10 запросов/сутки на модель — жёстче даже флагманских текстовых
-    моделей, и расход должен учитываться в том же реестре квоты, что и у них."""
+    """Gemini TTS (резерв после Fish Audio): возвращает (pcm_bytes, mime_type, used_model) или бросает исключение. Состояние передаётся параметрами (см. докстринг модуля); расход пишется в GLOBAL_QUOTA — у TTS всего 10 запросов/сутки на модель."""
     def call_tts(model_name: str):
         contents = [
             types.Content(
@@ -188,10 +146,7 @@ async def _gemini_tts_bytes(
         else:
             raise RuntimeError("Не удалось выполнить синтез с доступными моделями TTS.")
 
-    # Расход реально состоявшегося успешного вызова — фиксируем сразу после
-    # получения resp (а не после всей последующей обработки аудио/ffmpeg), т.к.
-    # именно на этом шаге тратится дефицитная суточная квота API, независимо от
-    # того, удастся ли дальше сконвертировать/отправить голосовое сообщение.
+    # Расход фиксируем сразу после resp: именно здесь тратится суточная квота, независимо от дальнейшей конвертации.
     on_model_success(used_tts_model)
 
     audio_bytes = None
@@ -210,9 +165,7 @@ async def _gemini_tts_bytes(
     if not audio_bytes:
         raise RuntimeError("В ответе API отсутствуют звуковые данные.")
 
-    # google-genai SDK возвращает inline_data.data как bytes, НЕ base64-строку.
-    # base64.b64decode(bytes) трактует сырые байты как base64-алфавит → 33% данных
-    # теряются → вместо речи слышен клик. Проверяем тип перед декодированием.
+    # SDK возвращает bytes, а не base64-строку: декодировать сырые байты как base64 — потерять треть данных (вместо речи клик).
     if isinstance(audio_bytes, (bytes, bytearray)):
         pcm_bytes = bytes(audio_bytes)
     else:

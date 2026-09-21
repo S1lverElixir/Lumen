@@ -1,13 +1,5 @@
 """
-lumen_streaming.py — провайдер-агностичный стриминг ответов (вынесено из bot.py,
-P2 аудита): плейсхолдер, бегущие точки, троттлинг правок, пейсинг по измеренной
-скорости, скраб утечек на каждый чанк, catch-up довывод.
-
-Связи с рантаймом bot.py — ТОЛЬКО через отложенный `import bot` внутри функций
-(модульного цикла нет). bot.py реэкспортирует имена — `bot._run_streaming_reply`
-и т.п. в тестах и `_run_route` не менялись. Точки подмены для тестов
-(`bot._typing_sleep`, `bot._dots_sleep`, `bot._DOTS_*`) читаются через `bot.`
-в момент вызова, поэтому monkeypatch/conftest видят их как раньше.
+lumen_streaming.py — провайдер-агностичный стриминг (плейсхолдер, точки, троттлинг правок, скраб утечек на чанк, catch-up). Связи с bot.py — только через отложенный `import bot`; точки подмены для тестов читаются через `bot.` в момент вызова.
 """
 from __future__ import annotations
 
@@ -47,11 +39,7 @@ from lumen_typing_pace import (
 log = logging.getLogger("bot")
 
 async def _tick_waiting_dots(placeholder: Message) -> None:
-    """Бегущие точки в плейсхолдере, пока стрим не прислал первый кусок.
-    Первый кадр — только после _DOTS_START_AFTER_SEC тишины (быстрые модели
-    анимации не видят вообще), дальше — кадр каждые _DOTS_TICK_SEC. Правки идут
-    через _tg_call (ошибки глотаются — плейсхолдер могли удалить/переиспользовать
-    параллельно), отмена задачи — штатный путь остановки после первого куска."""
+    """Точки в плейсхолдере до первого куска: первый кадр после паузы (быстрые модели анимации не видят), дальше кадр по тику. Правки через _tg_call с глотанием ошибок, отмена — штатная остановка."""
     import bot
     try:
         await bot._dots_sleep(bot._DOTS_START_AFTER_SEC)
@@ -66,14 +54,7 @@ async def _tick_waiting_dots(placeholder: Message) -> None:
 
 
 async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, first_chunk_limit: float):
-    """Оборачивает генератор кусков стрима двумя вещами сразу (обе касаются
-    только ОЖИДАНИЯ ПЕРВОГО куска — дальше генератор пробрасывается как есть):
-    1. Адаптивный предел (см. lumen_model_speed.first_chunk_limit_sec): зависшая
-       попытка бросается TimeoutError — вызывающий код (_run_streaming_reply)
-       уже умеет отдавать плейсхолдер следующей модели по цепочке.
-    2. Анимация точек (_tick_waiting_dots): гасится строго до yield первого
-       куска, поэтому с показом текста не пересекается ни одним кадром.
-     Пустой стрим (StopAsyncIteration сразу) — просто конец без кусков."""
+    """Генератор + ожидание первого куска: адаптивный предел (зависшая попытка — TimeoutError, плейсхолдер уйдёт следующей модели) и анимация точек строго до первого yield. Пустой стрим — просто конец."""
     dots_task = asyncio.create_task(_tick_waiting_dots(placeholder))
     try:
         try:
@@ -94,12 +75,7 @@ async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, fir
                 await aclose()
 
 async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig):
-    """Асинхронный генератор кусков текста от Gemini — тонкая обёртка над
-    client.aio.models.generate_content_stream с таймаутом на КАЖДЫЙ следующий
-    кусок (см. STREAM_CHUNK_TIMEOUT_SEC), чтобы генуинно подвисший стрим не
-    держал лок чата бесконечно. Провайдер-специфичная часть стриминга — вся
-    Telegram-логика (плейсхолдер, чанкинг, троттлинг, защита от утечек) теперь
-    общая для любого провайдера, см. _run_streaming_reply."""
+    """Куски от Gemini (тонкая обёртка над generate_content_stream). Таймаут на каждый кусок — подвисший стрим не держит лок чата. Telegram-логика — общая в _run_streaming_reply."""
     import bot
     stream = await bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig)
     stream_iter = stream.__aiter__()
@@ -122,11 +98,7 @@ async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig):
                 await aclose()
 
 async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
-    """Асинхронный генератор кусков текста от OpenRouter — SSE-стриминг
-    (`"stream": true`) через тот же chat/completions эндпоинт, что и обычный
-    (нестримленный) вызов. OpenRouter отдаёт события построчно, вида
-    `data: {...}\\n\\n`, с финальной строкой `data: [DONE]`. Таймаут на каждую
-    следующую строку — тот же STREAM_CHUNK_TIMEOUT_SEC, что и у Gemini."""
+    """Куски от OpenRouter: SSE `data: {...}` с финальным `data: [DONE]`, таймаут на строку — тот же STREAM_CHUNK_TIMEOUT_SEC."""
     import bot
     if not bot.OPENROUTER_API_KEY:
         raise bot.OpenRouterAPIError("OPENROUTER_API_KEY is not set")
@@ -159,19 +131,7 @@ async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
                 obj = json.loads(data_str)
             except Exception:
                 continue
-            # НАЙДЕНО ПРИ АУДИТЕ СТРИМИНГА: если провайдер за OpenRouter падает
-            # УЖЕ ПОСЛЕ старта генерации (не сразу, на середине ответа), сам HTTP-
-            # статус остаётся 200 (стрим уже открыт) — ошибка приходит не как
-            # resp.status >= 400 выше, а прямо ВНУТРИ SSE-чанка:
-            # {"error": {"message": ..., "code": ...}} вместо {"choices": [...]}.
-            # Раньше такой чанк тихо пропускался (choices пустой -> continue), и
-            # пользователь получал молча укороченный ответ без единого намёка на
-            # причину — то же самое силентное поглощение, которого проект уже
-            # избегает во всех остальных местах (ask_gemini/ask_openrouter_text).
-            # Поднимаем как OpenRouterAPIError — дальше её уже штатно обрабатывает
-            # _run_streaming_reply: ранний сбой (ничего ещё не показано) -> откат
-            # на следующую модель маршрута, поздний сбой (часть ответа уже
-            # показана) -> честная пометка "соединение прервалось".
+            # Ошибка может прийти ВНУТРИ SSE-чанка (HTTP 200, стрим уже открыт): {"error": ...} вместо choices. Раньше молча резало ответ — поднимаем, дальше штатно: ранний сбой — откат на следующую модель, поздний — пометка "соединение прервалось".
             err_obj = obj.get("error")
             if err_obj:
                 err_msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
@@ -188,33 +148,7 @@ async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
 async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
 ) -> tuple[str | None, Message | None]:
-    """Провайдер-агностичная реализация стриминга: принимает асинхронный генератор
-    кусков текста (см. _gemini_stream_pieces/_openrouter_stream_pieces) и делает
-    всё остальное — плейсхолдер, разбиение на несколько сообщений при превышении
-    лимита Telegram, троттлинг edit_text, обрыв при обнаружении утечки идентичности
-    или эха внедрённой инъекции, финальную HTML-конвертацию и запись в общую
-    историю чата. Раньше эта логика была написана только под Gemini — сейчас она
-    ОДНА на любого провайдера, чтобы стриминг работал одинаково для Gemini и для
-    OpenRouter (см. _try_gemini_streaming/_try_openrouter_streaming — тонкие
-    обёртки, которые строят провайдер-специфичный call_contents/messages и
-    генератор кусков, а дальше передают его сюда).
-
-    Возвращает (ответ, плейсхолдер):
-    - Успех: (текст_ответа, None) — плейсхолдер уже отредактирован до финального
-      текста, вызывающему коду больше нечего с ним делать.
-    - Ошибка ДО показа хоть одного символа ответа: (None, плейсхолдер_или_None).
-      РАНЬШЕ плейсхолдер тут же удалялся, и следующая модель по цепочке отправляла
-      СОВСЕМ НОВОЕ сообщение — визуально это выглядело как "точки исчезли, потом
-      из ниоткуда появился целый ответ одним блоком", без единого "живого" эффекта.
-      Теперь плейсхолдер НЕ удаляется здесь — он возвращается вызывающему коду
-      (_run_route), чтобы тот попробовал доправить в него финальный ответ от
-      следующей модели по цепочке напрямую, а не создавать новое сообщение.
-      Если ни одна дальнейшая модель не пригодится, _run_route сам аккуратно
-      уберёт этот плейсхолдер.
-    - Ошибка ПОСЛЕ показа части ответа — уже показанное не удаляется и не
-      подменяется другим ответом, в конец добавляется пометка о возможном обрыве;
-      возвращается (текст_ответа, None), как и при обычном успехе.
-    """
+    """Стриминг: генератор кусков + плейсхолдер, чанкинг, троттлинг, обрыв при утечке/инъекции, HTML-финал, запись в историю. Возвращает (ответ, плейсхолдер): успех — (текст, None); сбой до показа — (None, плейсхолдер для следующей модели); сбой после — (показанное + пометка, None)."""
     import bot
     state = bot.get_state(chat_id)
     hist = state.setdefault("history", [])
@@ -225,11 +159,7 @@ async def _run_streaming_reply(
     last_edit_ts = 0.0
     last_edited_plain = ""
     first_piece_ts: float | None = None
-    # pace_key/overall_start_ts/current_chunk_start_ts — см. lumen_typing_pace.py.
-    # overall_start_ts фиксируется ОДИН раз (для замера реальной скорости бэкенда
-    # целиком, даже если ответ займёт несколько сообщений), current_chunk_start_ts
-    # сбрасывается на каждое НОВОЕ сообщение (см. continuation ниже) — паттерн
-    # печати у каждого отдельного Telegram-сообщения свой, начинается заново.
+    # Замеры скорости/латентности — см. lumen_typing_pace.py (overall один раз на весь ответ, chunk — заново на каждое новое сообщение).
     pace_key = _typing_speed_key(provider, model_id)
     overall_start_ts = time.monotonic()
     current_chunk_start_ts = overall_start_ts
@@ -240,10 +170,7 @@ async def _run_streaming_reply(
             return None, None
         sent_messages.append(placeholder)
 
-        # Обёртка ожидания первого куска: адаптивный предел + бегущие точки
-        # (см. _pieces_with_waiting_feedback). Дальше цикл не отличим от чтения
-        # исходного генератора напрямую — все существующие проверки кусков,
-        # утечек и троттлинга ниже работают без изменений.
+        # Дальше цикл читает генератор напрямую — проверки кусков/утечек/троттлинга ниже без изменений.
         piece_agen = _pieces_with_waiting_feedback(
             piece_agen, placeholder,
             first_chunk_limit=_model_first_chunk_limit(_model_speed_key(provider, model_id), bot.FIRST_CHUNK_TIMEOUT_SEC),
@@ -263,11 +190,7 @@ async def _run_streaming_reply(
                 leak_kind = "payload_echo"
 
             if leak_kind:
-                # Проверяем СРАЗУ после накопления куска и ДО любого edit_text ниже —
-                # на этот момент ни одно уже показанное пользователю сообщение ещё не
-                # содержит только что добавленный (утекающий) кусок текста, поэтому
-                # обрыв здесь гарантированно не даёт утечке "мигнуть" на экране хотя бы
-                # на долю секунды, в отличие от проверки уже после финальной правки.
+                # Проверяем ДО edit_text — утечка не успевает "мигнуть" на экране.
                 tag = "identity-leak" if leak_kind == "identity" else "injection-echo"
                 log.warning(
                     '[%s] Stream %s/%s started leaking internal details/echoing an injected instruction — aborting the stream and showing a neutral reply instead of the partially accumulated text: %r', tag, provider, model_id, full_text[:500],
@@ -287,27 +210,14 @@ async def _run_streaming_reply(
                 return final_answer, None
 
             chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
-            # Финализируем все чанки кроме последнего (текущего, ещё растущего) —
-            # тот же алгоритм разбиения, что и для обычных (нестримленных) длинных ответов.
+            # Чанки кроме последнего (растущего) финализируем тем же разбиением, что у нестримленных ответов.
             while len(chunks) > len(sent_messages):
                 idx = len(sent_messages) - 1
-                # НАЙДЕНО ПРИ АУДИТЕ СТРИМИНГА: раньше здесь СНАЧАЛА финализировался
-                # sent_messages[idx] полным edit_text, а ПОТОМ, если открыть сообщение-
-                # продолжение не удавалось, тот же самый edit_text вызывался ЕЩЁ РАЗ с
-                # тем же текстом плюс пометка — два сетевых вызова ради одного и того же
-                # результата в ветке отказа. Пробуем continuation ПЕРВЫМ, и финализируем
-                # idx ровно одним вызовом сразу с нужным текстом (с пометкой или без) —
-                # тот же итоговый результат для пользователя, но без лишнего HTTP-запроса
-                # к Telegram, когда continuation всё равно проваливается.
-                # bot.bot — инстанс aiogram Bot (в модуле имя bot занято самим модулем).
+                # Continuation открываем ПЕРВЫМ и финализируем одним вызовом — раньше было два edit_text при отказе (лишний HTTP-запрос).
+                # bot.bot — инстанс aiogram Bot (имя bot занято модулем).
                 new_msg = await bot._tg_call(bot.bot.send_message, chat_id=message.chat.id, text="…", call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
                 if new_msg is None:
-                    # Не удалось открыть сообщение под продолжение. ВАЖНО: sent_messages[idx]
-                    # ещё НЕ финализирован — это НЕ то же самое, что общий except ниже
-                    # (который считает, что sent_messages[-1] соответствует chunks[-1] —
-                    # здесь это неверно, там уже другой, ещё не начатый кусок). Обрабатываем
-                    # прямо тут, не давая общему except перезаписать корректно показанный
-                    # текст чужим содержимым.
+                    # idx ещё НЕ финализирован — не даём общему except перезаписать показанный текст чужим (там инвариант "sent[-1] == chunks[-1]" уже неверен).
                     note = bot._t(message.chat.id, "stream_note_send_fail")
                     with contextlib.suppress(Exception):
                         await bot._tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]) + note, parse_mode=ParseMode.HTML, call_timeout=15.0)
@@ -325,15 +235,7 @@ async def _run_streaming_reply(
                 # Новое сообщение — новый "лист", печать в нём начинается с нуля.
                 current_chunk_start_ts = time.monotonic()
 
-            # Троттлинг: реальный edit_text не чаще ~раза в STREAM_EDIT_MIN_INTERVAL_SEC,
-            # иначе Telegram начинает отвечать 429 на слишком частые правки одного
-            # сообщения. Видимый текст — не всё, что уже накоплено (full_text), а
-            # срез, растущий по оценённой скорости печати этой модели (см.
-            # lumen_typing_pace.py) — реальному приходу кусков он "верит" только
-            # как верхней границе (min(...)): если модель прислала текст МЕДЛЕННЕЕ
-            # оценённой скорости, показывается всё, что реально пришло, без
-            # искусственного придерживания; лимитирует именно случай, когда бэкенд
-            # присылает крупными редкими кусками быстрее, чем "читалось" бы вслух.
+            # Троттлинг edit_text (~раз в интервал, иначе 429) + видимый срез по оценённой скорости печати (верхняя граница — реально пришедшее).
             now = time.monotonic()
             target_full = chunks[-1] if chunks else ""
             typing_speed = _get_typing_speed(pace_key)
@@ -345,33 +247,18 @@ async def _run_streaming_reply(
                 last_edit_ts = now
 
         if not full_text.strip():
-            # Стрим завершился, но не прислал ни одного символа текста — считаем
-            # попытку неудавшейся. Плейсхолдер НЕ удаляем (см. докстринг) — отдаём
-            # его вызывающему коду, вдруг пригодится для следующей модели.
+            # Пустой стрим — неудача, но плейсхолдер отдаём вызывающему коду (см. докстринг).
             return None, sent_messages[-1]
 
-        # Замер РЕАЛЬНОЙ скорости бэкенда — обязательно ДО фазы "довывода" ниже,
-        # иначе самим же добавленная пауза исказила бы будущую оценку скорости
-        # этой модели (см. докстринг record_observed_speed в lumen_typing_pace.py).
+        # Замеры — ДО довывода (пауза не должна искажать оценку), catch-up паузы в total модели — сознательно (важна видимая задержка).
         _record_typing_speed(pace_key, time.monotonic() - overall_start_ts, len(full_text))
-        # Замер задержки модели для умного роутера (см. lumen_model_speed.py) —
-        # рядом с замером скорости печати, из тех же меток времени. first_piece_ts
-        # здесь уже точно установлен (успех означает ≥1 кусок). Catch-up паузы
-        # сознательно ВКЛЮЧЕНЫ в total: для решения "кого ставить первым" важна
-        # задержка, видимая пользователем, а не только время бэкенда.
         _record_model_latency(
             _model_speed_key(provider, model_id),
             total_sec=time.monotonic() - overall_start_ts,
             ttf_sec=(first_piece_ts - overall_start_ts) if first_piece_ts is not None else None,
         )
 
-        # "Довывод" остатка последнего сообщения, который стрим уже прислал
-        # целиком, но пейсинг выше ещё не успел показать (частый случай для
-        # бэкендов, присылающих готовый текст одним большим SSE-куском в конце —
-        # см. lumen_typing_pace.py) — без этого пользователь увидел бы "…" почти
-        # до самого конца, а затем весь ответ разом. Ограничено по построению
-        # (см. catchup_reveal_steps) сверху STREAM_TYPING_MAX_CATCHUP_TICKS *
-        # STREAM_TYPING_TICK_SEC секунд — не тянет отправку ответа надолго.
+        # "Довывод" остатка: бэкенды одним куском в конце показывали бы "…" до самого финала. Ограничено catchup-лимитом сверху.
         final_chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
         target_full = final_chunks[-1]
         already_shown_len = len(last_edited_plain) if last_edited_plain and target_full.startswith(last_edited_plain) else 0
@@ -385,28 +272,19 @@ async def _run_streaming_reply(
                     await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0)
                     last_edited_plain = current_chunk_text
 
-        # Финальный сброс последнего сообщения — уже с полной HTML-конвертацией
-        # markdown (во время стрима сознательно показывался голый текст: частичный
-        # markdown при редактировании мог бы дать несбалансированные теги и сломать
-        # parse_mode=HTML на промежуточных правках).
+        # Финал — с полной HTML-конвертацией (во время стрима голый текст: частичный markdown дал бы несбалансированные теги).
         final_text = final_chunks[-1]
-        # _edit_message_quietly уже инкапсулирует тот же HTML->plain fallback,
-        # что здесь раньше был продублирован вручную (см. аудит техдолга) —
-        # **kwargs проходит через неё прямиком в _tg_call, поэтому call_timeout
-        # передаётся без изменений в сигнатуре самой _edit_message_quietly.
+        # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
         await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
 
     except Exception as exc:
         if not full_text.strip():
-            # ВАЖНО: плейсхолдер больше НЕ удаляется здесь (в отличие от старой
-            # версии) — см. докстринг функции про переиспользование сообщения.
+            # Плейсхолдер НЕ удаляем — возвращаем для переиспользования (см. докстринг).
             log.warning('[stream] Stream %s/%s failed before showing any content, falling back to a regular call: %s', provider, model_id, exc)
             return None, (sent_messages[-1] if sent_messages else None)
         log.warning('[stream] Stream %s/%s failed after partially showing the response, finishing as-is: %s', provider, model_id, exc)
         if _detect_identity_leak(full_text):
-            # На практике сюда почти невозможно попасть (см. проверку сразу после
-            # каждого куска выше) — оставлено как последняя страховка на случай бага
-            # в основной проверке, а не полагаясь только на один рубеж.
+            # Последняя страховка (основная проверка — на каждый кусок выше).
             log.warning('[identity-leak] Leak caught by the fallback guard (%s_stream_exception_path): %r', provider, full_text[:500])
             full_text = _IDENTITY_LEAK_FALLBACK
             with contextlib.suppress(Exception):
@@ -428,8 +306,7 @@ async def _run_streaming_reply(
             with contextlib.suppress(Exception):
                 await aclose()
 
-    # Пустой full_text сюда не доходит (проверка выше возвращает None раньше),
-    # поэтому фолбэка "Empty response" больше нет — мёртвый код убран.
+    # Пустой full_text сюда не доходит — ветки "Empty response" нет.
     final_answer = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
     hist.append({"role": "user", "content": _history_user_text(user_text)})
     hist.append({"role": "assistant", "content": final_answer})
@@ -440,9 +317,7 @@ async def _run_streaming_reply(
     return final_answer, None
 
 async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str) -> tuple[str | None, Message | None]:
-    """Тонкая обёртка над _run_streaming_reply для Gemini: строит contents/config,
-    специфичные для Gemini API, и передаёт их в общую (провайдер-агностичную)
-    реализацию стриминга. Возвращает (ответ, плейсхолдер) — см. _run_streaming_reply."""
+    """Обёртка _run_streaming_reply для Gemini (строит contents/config)."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
     if not conf.get("stream", True):
@@ -453,8 +328,7 @@ async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, 
     return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen)
 
 async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str) -> tuple[str | None, Message | None]:
-    """Тонкая обёртка над _run_streaming_reply для OpenRouter — тот же принцип,
-    что и _try_gemini_streaming, но с SSE-стримингом через chat/completions."""
+    """Обёртка _run_streaming_reply для OpenRouter (SSE через chat/completions)."""
     import bot
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
     # Генератор — через bot.: тесты подменяют bot._openrouter_stream_pieces фейком.
