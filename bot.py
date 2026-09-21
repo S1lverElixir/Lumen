@@ -1218,9 +1218,9 @@ async def _webhook_startup() -> None:
 
     commands = [
         BotCommand(command="start", description=_lang_t(DEFAULT_LANG, "cmd_desc_start")),
-        BotCommand(command="reset", description=_lang_t(DEFAULT_LANG, "cmd_desc_reset")),
         BotCommand(command="draw", description=_lang_t(DEFAULT_LANG, "cmd_desc_draw")),
         BotCommand(command="tts", description=_lang_t(DEFAULT_LANG, "cmd_desc_tts")),
+        BotCommand(command="reset", description=_lang_t(DEFAULT_LANG, "cmd_desc_reset")),
         BotCommand(command="lang", description=_lang_t(DEFAULT_LANG, "cmd_desc_lang")),
     ]
     # Локализованные описания команд: Telegram показывает меню на языке
@@ -1232,9 +1232,9 @@ async def _webhook_startup() -> None:
             code,
             [
                 BotCommand(command="start", description=_lang_t(code, "cmd_desc_start")),
-                BotCommand(command="reset", description=_lang_t(code, "cmd_desc_reset")),
                 BotCommand(command="draw", description=_lang_t(code, "cmd_desc_draw")),
                 BotCommand(command="tts", description=_lang_t(code, "cmd_desc_tts")),
+                BotCommand(command="reset", description=_lang_t(code, "cmd_desc_reset")),
                 BotCommand(command="lang", description=_lang_t(code, "cmd_desc_lang")),
             ],
         )
