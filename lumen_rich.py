@@ -57,24 +57,12 @@ async def _answer_guest_text(message: Message, text: str) -> None:
         log.warning("[guest] Failed answering guest: %s", exc)
 
 def _is_real_telegram_message(res: Any) -> bool:
-    """Настоящий Message от Telegram API, а не тестовая заглушка: у реальных
-    ответов message_id — int. Нужно, чтобы в тестах (фейковые боты без
-    send_rich_message/edit_message_text) рич-путь тихо откатывался на legacy,
-    а не "успешно" ронял ветку через MagicMock."""
+    """Только реальный Message (int message_id): фейки тестов тихо уходят на legacy."""
     return isinstance(res, Message)
 
 
 async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bool, **kwargs: Any) -> Any:
-    """Отправка чанка через sendRichMessage (таблицы/заголовки/математика).
-    Возвращает отправленное сообщение или None — тогда вызывающий код идёт
-    обычным HTML-путём. Флаг RICH_MESSAGES_ENABLED — рубильник на случай
-    проблем с рендером (см. комментарий у флага).
-    Reply threading — ТОЛЬКО для первого чанка (is_first_chunk): иначе каждый
-    кусок длинного ответа придёт отдельным ответом с нотификацией, а не
-    продолжением (найдено код-ревью). parse_mode/reply_parameters из kwargs
-    не пробрасываются: у рич-метода их нет (parse_mode) или он строится здесь
-    (reply threading) — чужое значение дало бы TypeError/невалидный запрос,
-    а aiogram сложил бы неизвестные kwargs в тело запроса молча."""
+    """Рич-отправка; при неуспехе — None и legacy. Трединг только первого чанка, иначе каждый кусок пиликает отдельно."""
     import bot
     if not bot.RICH_MESSAGES_ENABLED:
         return None
@@ -94,9 +82,7 @@ async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bo
 
 
 async def _try_edit_rich(msg: Message | None, rich_html: str, **kwargs: Any) -> bool:
-    """Правка сообщения через editMessageText+rich_message. Возвращает True
-    только при реальном успехе — иначе вызывающий код идёт legacy-правкой.
-    Фейковые сообщения тестов (без int chat.id/message_id) отсекаются гейтом."""
+    """Рич-правка; True только при успехе, иначе legacy. Фейки без int id отсекаются."""
     import bot
     if not bot.RICH_MESSAGES_ENABLED or msg is None:
         return False
@@ -176,9 +162,7 @@ async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -
     if msg is None:
         return False
     try:
-        # Сначала рич-правка (таблицы/заголовки/математика — см. _try_edit_rich),
-        # при любом неуспехе — обычный HTML-путь, затем голый текст. Порядок
-        # важен: таблицы и формулы видны только через рич.
+        # Порядок: рич → HTML → голый текст; таблицы видны только через рич.
         if await bot._try_edit_rich(msg, _md_to_rich_html(text), **kwargs):
             return True
         kwargs.setdefault("parse_mode", ParseMode.HTML)

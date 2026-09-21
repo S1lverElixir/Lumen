@@ -1,11 +1,5 @@
 """
-lumen_commands.py — команды бота, TTS/Draw-пайплайны и кнопки-уточнения
-(вынесено из bot.py, P2 аудита).
-
-Связи с рантаймом bot.py — только через отложенный `import bot` внутри функций
-(модульного цикла нет). bot.py реэкспортирует имена и регистрирует хендлеры
-в диспетчере явными dp.*.register() — `bot.cmd_draw` и т.п. в тестах
-не менялись.
+lumen_commands.py — команды бота, TTS/Draw-пайплайны и кнопки-уточнения. Связи с bot.py — только через отложенный `import bot`; bot.py реэкспортирует имена и регистрирует хендлеры.
 """
 from __future__ import annotations
 
@@ -60,15 +54,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_generating_image"))
     try:
         session = await bot._get_http_session()
-        # УБРАНО (аудит техдолга, 19 августа 2026): раньше основная модель бралась
-        # из ручного выбора пользователя (/imgmodel, команда удалена — см. README,
-        # "Автоматический выбор модели"). Теперь _pick_image_model сама подбирает
-        # модель по содержимому промпта на каждый вызов, без какого-либо состояния
-        # чата — тот же принцип, что уже применяется к тексту (_build_route).
+        # Модель — автовыбором по промпту (/imgmodel убран 19.08.2026), без состояния чата.
         primary_model = _pick_image_model(prompt)
 
-        # Фолбэк-цепочка: пробуем сначала подобранную модель,
-        # при ошибке переключаемся на следующие по порядку из POLLINATIONS_IMAGE_MODELS
+        # Фолбэк-цепочка: подобранная модель первой, дальше остальные по порядку.
         all_model_ids = list(POLLINATIONS_IMAGE_MODELS.keys())
         fallback_chain = [primary_model] + [m for m in all_model_ids if m != primary_model]
 
@@ -87,9 +76,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 )
                 break
             try:
-                # Статус нейтральный, без названий моделей: бот не раскрывает
-                # внутреннюю реализацию (см. ИДЕНТИЧНОСТЬ в system_prompt.py).
-                # На первой попытке статус и так "Генерирую изображение" — не трогаем.
+                # Статус без названий моделей (см. ИДЕНТИЧНОСТЬ в system_prompt.py); на первой попытке статус и так стоит.
                 if attempt_model != primary_model:
                     await bot._edit_message_quietly(status, bot._t(message.chat.id, "status_taking_longer"))
                 image_bytes = await bot._pollinations_text_to_image(session, attempt_model, prompt)
@@ -97,9 +84,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
             except Exception as exc:
                 last_error = exc
                 txt = bot._error_text(exc).lower()
-                # 429 — перегрузка ВСЕГО сервиса (см. прод 17.09.2026: все 5 моделей
-                # вернули 429 подряд), а не одной модели — гонять остаток цепочки
-                # бессмысленно, сразу говорим пользователю подождать.
+                # 429 — перегрузка ВСЕГО сервиса (прод 17.09.2026: все 5 моделей подряд), остаток цепочки не гоняем.
                 if "429" in txt or "rate" in txt or "too many" in txt:
                     log.warning("[draw] Service rate-limited (429) on model %s — stopping the fallback chain.", attempt_model)
                     rate_limited = True
@@ -139,8 +124,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
         elif "time budget" in txt.lower():
             user_err = bot._t(cid, "draw_err_budget")
         else:
-            # Сырой текст ошибки провайдера пользователю не показываем (см. log.exception
-            # выше) — та же логика, что и в остальных обработчиках ошибок бота.
+            # Сырой текст провайдера пользователю не показываем — generic-текст.
             user_err = bot._t(cid, "draw_err_generic")
         await bot._edit_message_quietly(status, user_err)
 
@@ -174,8 +158,7 @@ async def _gemini_tts_bytes(text: str) -> tuple[bytes, str, str]:
         err_txt = bot._error_text(e).strip() or e.__class__.__name__
         return bot._classify_model_error(bot._error_status(e, err_txt), err_txt) == "rate_limit"
 
-    # Пишем в тот же провайдер "gemini" — /stats уже показывает GLOBAL_QUOTA["gemini"]
-    # по всем моделям отсортированным по расходу, TTS-модели появляются там же.
+    # TTS пишется в провайдер "gemini" — модели видны в /stats рядом с остальными.
     return await _lumen_gemini_tts_bytes(
         bot.client, text, tts_models=bot.GEMINI_TTS_MODELS,
         is_rate_limit_error=_is_rate_limit,
@@ -194,10 +177,7 @@ async def inline_tts(message: Message, text: str) -> None:
         return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_voicing"))
     try:
-        # FISH_AUDIO_ENABLED=False (аудит моделей, 17.09.2026 — зеркало снято с
-        # бесплатного каталога OpenRouter): пропускаем заведомо мёртвую первую
-        # попытку и идём сразу на Gemini TTS. Ветка fish оставлена, не удалена —
-        # см. комментарий у флага в lumen_router_config.py.
+        # Fish снят с free-каталога (17.09.2026) — пропускаем мёртвую попытку, ветка оставлена (см. флаг).
         fish_bytes = await bot._fish_audio_tts_bytes(text) if bot.FISH_AUDIO_ENABLED else None
         if fish_bytes is not None:
             pcm_bytes, mime_type, used_tts_model = fish_bytes, "audio/mp3", bot.FISH_AUDIO_TTS_MODEL
@@ -218,8 +198,7 @@ async def inline_tts(message: Message, text: str) -> None:
             src_ext = ".wav"
             raw_audio = pcm_to_wav(pcm_bytes, sample_rate=24000)
 
-        # конвертируем в OGG/Opus через ffmpeg — send_voice в Telegram без этого
-        # покажет длительность 0:00
+        # send_voice без ffmpeg-конвертации показал бы 0:00.
         final_audio = raw_audio
         final_filename = "speech.ogg"
         voice_duration = 0
@@ -272,9 +251,7 @@ async def inline_tts(message: Message, text: str) -> None:
         )
     except Exception as exc:
         log.exception("TTS synthesis failed:")
-        # Сырой текст ошибки пользователю не показываем — он может содержать
-        # реальные ID моделей ("gemini-3.1-flash-tts-preview" и т.п.) или другие
-        # служебные детали. Используем ту же классификацию, что и для чата.
+        # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
         kind = bot._classify_model_error(bot._error_status(exc, txt), txt)
         cid = message.chat.id
@@ -296,11 +273,7 @@ async def cmd_tts(message: Message) -> None:
 
 
 async def cmd_reset(message: Message) -> None:
-    """Сбрасывает историю диалога в текущем чате. Намеренно скрыта: не добавлена
-    в setMyCommands и не упомянута в /start — чтобы не загромождать меню команд
-    (как и /logs). Доступ: в личных сообщениях — всем (это история только одного
-    человека), в группах — только администратору/создателю группы или владельцу
-    бота (сброс общей истории всей группы — не рядовое действие)."""
+    """Сброс истории чата. Скрыта из меню (как /logs). Личка — всем, группа — админам/владельцу."""
     import bot
     requester_id = message.from_user.id if message.from_user else None
     if not await bot._is_privileged_in_chat(message.chat.type, message.chat.id, requester_id):
@@ -318,15 +291,7 @@ async def cmd_reset(message: Message) -> None:
         bot._t(message.chat.id, "reset_done")
     )
 
-# ── Язык бота (/lang) ──
-# Переключает язык СИСТЕМНЫХ сообщений бота в этом чате (/start, подсказки,
-# ошибки, статусы — всё, что бот пишет сам). Ответы ИИ не трогает: модель
-# отвечает на языке собеседника (см. RESPONSE LANGUAGE в system_prompt.py).
-# Права — как у /reset (см. _is_privileged_in_chat): в личке меняет кто
-# угодно, в группе — админ/создатель группы или владелец бота. Смотреть меню
-# может любой; непривилегированный тап вежливо отклоняется. Кнопки без флагов
-# (флаг ≠ язык) и без эмодзи, текущий язык помечен текстовой галочкой ✓.
-# Языки в меню — по алфавиту кода (SUPPORTED_LANGS в lumen_lang.py).
+# ── Язык системных сообщений (/lang) — ответы ИИ не трогает (см. RESPONSE LANGUAGE в system_prompt.py). Права как у /reset; кнопки без флагов/эмодзи, текущий — с ✓, меню по алфавиту кода.
 async def cmd_lang(message: Message) -> None:
     import bot
     lang = bot._chat_lang(message.chat.id)
@@ -349,9 +314,7 @@ async def cmd_lang(message: Message) -> None:
 
 
 async def handle_lang_callback(query: CallbackQuery) -> None:
-    """Нажатие кнопки языка: проверка прав, сохранение, подтверждение на новом
-    языке. callback_data — "lang:<код>", короткие коды влезают в лимит 64 байт
-    с запасом."""
+    """Кнопка языка ("lang:<код>", влезает в лимит 64 байт): права, сохранение, подтверждение на новом языке."""
     import bot
     data = query.data or ""
     if not data.startswith("lang:"):
@@ -397,18 +360,11 @@ async def cmd_logs(message: Message) -> None:
          return
 
     if message.chat.type != ChatType.PRIVATE:
-        # Найдено при код-ревью: результат команды видят ВСЕ участники чата, в
-        # котором она вызвана, а не только владелец — файл логов содержит реальные
-        # технические детали (ID моделей и т.п.), которые не должны светиться в
-        # групповых чатах.
+        # Результат команды видят ВСЕ в чате — файл логов с ID моделей в группы не отдаём.
         await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_group_only"))
         return
 
-    # сбрасываем буфер логов на диск — НАЙДЕНО ПРИ АУДИТЕ ЛОГИРОВАНИЯ: после
-    # перехода на QueueHandler/QueueListener у root-логгера остался только сам
-    # QueueHandler (его flush() — no-op), реальные file_handler/console_handler
-    # живут внутри _LOG_LISTENER, а не на root — цикл по logging.getLogger().handlers
-    # ничего не флашил уже с момента этой миграции.
+    # Флашим хендлеры _LOG_LISTENER (у root — только QueueHandler с no-op flush).
     try:
         if bot._LOG_LISTENER is not None:
             for handler in bot._LOG_LISTENER.handlers:
@@ -447,9 +403,7 @@ async def cmd_logs(message: Message) -> None:
         await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
 
 async def cmd_stats(message: Message) -> None:
-    """Глобальная статистика бота. Скрыта (не в setMyCommands, не в /start) и
-    доступна только владельцу — тот же принцип доступа, что и у /logs, т.к.
-    показывает данные по всем чатам, а не только текущему."""
+    """Статистика (скрыта, только владелец — данные по всем чатам)."""
     import bot
     is_owner = bot._is_owner(message.from_user.id if message.from_user else None)
     if not is_owner:
@@ -457,16 +411,11 @@ async def cmd_stats(message: Message) -> None:
         return
 
     if message.chat.type != ChatType.PRIVATE:
-        # См. аналогичную проверку в /logs — статистика содержит реальные ID
-        # моделей Gemini/OpenRouter, не должна светиться в групповых чатах.
+    # ID моделей в группы не отдаём — та же проверка, что в /logs.
         await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_group_only"))
         return
 
-    # Счётчики квоты — по датам America/Los_Angeles (полночь Google для RPD-лимитов),
-    # см. _reset_quota_if_new_day. Проверяем прямо перед отрисовкой /stats, чтобы
-    # владелец не увидел вчерашние числа, даже если часовой фоновый тик ещё не
-    # успел сработать (реальный найденный баг — см. историю: used-счётчики копились
-    # НАВСЕГДА через рестарты и не имели отношения к аптайму процесса).
+    # Счётчики — по датам Google (сброс в _reset_quota_if_new_day проверяем перед отрисовкой: фоновый тик мог не успеть, а used копились через рестарты).
     bot._reset_quota_if_new_day()
 
     total_chats = len(bot.chat_state)
@@ -483,13 +432,7 @@ async def cmd_stats(message: Message) -> None:
     ]
     gemini_text = "\n".join(gemini_lines) or _noData
 
-    # ИСПРАВЛЕНО (найдено при калибровке 25 июля 2026): раньше здесь была только
-    # ОДНА суммарная цифра запросов OpenRouter плюс денежный $-баланс аккаунта —
-    # для отладки роутинга и выявления "тупящих" моделей это бесполезно: не видно,
-    # КАКАЯ именно модель отвечала и сколько раз. Теперь — та же разбивка по
-    # моделям, что уже была у Gemini, отсортированная по расходу. $-баланс убран
-    # целиком: все модели в списке — :free, платный баланс тут ни на что не влияет
-    # и только замусоривал вывод.
+    # OpenRouter — разбивка по моделям как у Gemini (калибровка 25.07.2026: одна суммарная цифра для отладки бесполезна; $-баланс убран — все модели :free).
     or_quota = bot.GLOBAL_QUOTA.get("openrouter", {})
     or_lines = [
         f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
@@ -497,11 +440,7 @@ async def cmd_stats(message: Message) -> None:
     ]
     or_text = "\n".join(or_lines) or _noData
 
-    # Видимость состояния "выключателя" Telegram-прокси прямо из Telegram, а не
-    # только по логам контейнера — иначе деградацию прокси можно было заметить
-    # только копаясь в логах HF Spaces (см. код-ревью, suggestion #1). Текст
-    # теперь собирает сам _tg_proxy_breaker (см. _TelegramProxyCircuitBreaker) —
-    # раньше эта команда лезла в четыре module-level globals напрямую.
+    # Состояние прокси — из самого breaker'а (раньше команда лезла в четыре глобала напрямую).
     proxy_line = bot._tg_proxy_breaker.status_text()
 
     quota_day = bot.GLOBAL_QUOTA.get("quota_day") or "—"
@@ -547,11 +486,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
 
 
 async def handle_pick_callback(query: CallbackQuery) -> None:
-    """Обработчик нажатий кнопок-уточнений. Чужие кнопки (другой пользователь
-    в группе) и протухшие/перезапущенные записи отклоняются вежливо, без
-    обработки. Выбор дописывается к исходному запросу по шаблону сценария и
-    уходит обычным путём через _handle_message_core — дальше роутер, стриминг
-    и история работают как для текстового сообщения."""
+    """Кнопки-уточнения: чужие/протухшие отклоняем, выбор дописываем к запросу и гоним обычным путём (_handle_message_core)."""
     import bot
     data = query.data or ""
     if not data.startswith("pick:"):
@@ -568,9 +503,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer()
         return
-    # Pop сразу (а не после проверок): повторный тап по тем же кнопкам не
-    # должен порождать второй ответ. Чужая кнопка при этом "сгорает" — цена
-    # приемлема: владелец переспросит текстом.
+    # Pop сразу: повторный тап не плодит второй ответ (чужая кнопка "сгорает" — владелец переспросит текстом).
     rec = bot._pending_picks.pop(token, None)
     # Язык для служебных реплик: из записи (если есть), иначе из чата кнопки.
     _qchat = query.message.chat.id if query.message and query.message.chat else None
@@ -595,8 +528,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     if question_msg is None:
         return
     with contextlib.suppress(Exception):
-        # Клавиатуру снимаем пустой разметкой, иначе кнопки останутся висеть
-        # под сообщением (повторный тап при этом всё равно упрётся в pop выше).
+        # Клавиатуру снимаем пустой разметкой, иначе кнопки повиснут (повторный тап всё равно упрётся в pop).
         await bot._tg_call(
             question_msg.edit_text,
             f"{_q}\n\n{_lang_t(rec_lang, 'pick_choice', choice=choice)}",
@@ -620,8 +552,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         message_id=getattr(question_msg, "message_id", None),
         reply=_pick_reply,
     )
-    # Флаг против зацикливания: дополненный текст всё ещё матчится детектором
-    # ("посоветуй фильм (жанр: ...)"), без флага ушёл бы снова в кнопки.
+    # Флаг против зацикливания: дополненный текст всё ещё матчит детектор — без флага снова ушёл бы в кнопки.
     ns._pick_resolved = True
     lock = bot.get_chat_lock(chat.id)
     try:

@@ -66,10 +66,7 @@ async def _or_request(path: str, method: str = "GET", *, json_body: dict | None 
     try:
         async with session.request(
             method.upper(), url, headers=headers, json=json_body,
-            # ponytail: было захардкожено total=12.0, независимо от ROUTE_MODEL_
-            # TIMEOUT_SEC (22с по умолчанию) — модель могла получить меньше времени,
-            # чем задокументированный бюджет одной попытки, и валиться таймаутом
-            # раньше, чем должна была (см. аудит моделей 2 августа 2026).
+            # Бюджет попытки — ROUTE_MODEL_TIMEOUT_SEC, а не хардкод (иначе модель валилась таймаутом раньше бюджета).
             timeout=aiohttp.ClientTimeout(total=bot.ROUTE_MODEL_TIMEOUT_SEC, connect=10.0)
         ) as resp:
             if resp.status >= 400:
@@ -80,18 +77,9 @@ async def _or_request(path: str, method: str = "GET", *, json_body: dict | None 
     except bot.OpenRouterAPIError:
         raise
     except Exception as exc:
-        # str(exc) часто пуст для таймаутов/CancelledError-обёрток (см. реальный
-        # найденный случай в логах: "Сетевая ошибка OpenRouter: " без единой
-        # детали) — тогда используем repr/имя класса, чтобы в логах вообще было
-        # видно, что произошло, а не пустая строка.
+        # str(exc) у таймаутов часто пуст — берём repr/имя класса, иначе в логах пустая строка.
         exc_str = str(exc) or repr(exc) or exc.__class__.__name__
-        # НАЙДЕНО ПРИ СЕКЬЮРИТИ-РЕВЬЮ: telegram_api_call/_download_telegram_file_bytes
-        # уже вычищают BOT_TOKEN из текста сетевых исключений (см. эти функции выше) —
-        # здесь та же защита ранее отсутствовала для OPENROUTER_API_KEY. На практике ключ
-        # передаётся только в заголовке Authorization, а не в URL, поэтому обычные
-        # исключения aiohttp его не содержат — но это защита по глубине (defense-in-depth)
-        # на случай нестандартного сообщения об ошибке (например, от прокси/мидлвари),
-        # которое могло бы процитировать заголовки запроса целиком.
+        # Вычищаем OPENROUTER_API_KEY из текста ошибок (defense-in-depth: обычно ключ только в заголовке, но прокси может процитировать заголовки).
         if bot.OPENROUTER_API_KEY:
             exc_str = exc_str.replace(bot.OPENROUTER_API_KEY, "<KEY>")
         raise bot.OpenRouterAPIError(f"OpenRouter network error: {exc_str}") from exc
@@ -107,37 +95,12 @@ def _or_extract_text(data: Any) -> str:
     return ""
 
 def _is_account_wide_or_rate_limit(text: str) -> bool:
-    """"free-models-per-day" — это лимит на весь аккаунт OpenRouter целиком (см.
-    реальный найденный случай: "Rate limit exceeded: free-models-per-day. Add 10
-    credits to unlock 1000 free model requests per day"), а не на одну конкретную
-    модель. Раньше при этой ошибке бот всё равно честно перебирал ВСЕ 7-8
-    кандидатов цепочки по очереди — и получал одну и ту же ошибку на каждом,
-    иногда суммарно теряя больше минуты (реальный случай в логах — 168 секунд)
-    только на то, чтобы наконец сдаться и попробовать Gemini. Если видим этот
-    текст — сразу прекращаем всю цепочку OpenRouter, а не тратим время на
-    заведомо обречённые попытки остальных моделей."""
+    """"free-models-per-day" — лимит на весь аккаунт, а не модель: при нём сразу рвём всю цепочку (иначе минуты попыток впустую — в логах было 168с)."""
     low = text.lower()
     return "free-models-per-day" in low
 
 async def _probe_or_model_liveness() -> None:
-    """Лёгкая проактивная проверка живости моделей из _OR_LIGHT_ORDER/_OR_HEAVY_ORDER/
-    _OR_VISION_ORDER (аудит техдолга, август 2026). Раньше единственным способом узнать
-    о протухшей бесплатной модели было чтение продакшен-логов постфактум в ходе
-    отдельных "аудитов моделей" — так за последний месяц вручную нашли 7+ мёртвых
-    моделей (см. _OR_MODEL_HEALTH). Эта функция НЕ мутирует _OR_MODEL_HEALTH
-    автоматически (это курируемый реестр с человеческим ревью причины для каждой
-    записи, см. сам реестр) — только громко предупреждает в логах, если проверяемая
-    модель отвечает тем же паттерном ошибки ("unavailable"/"forbidden"), что и уже
-    известные мёртвые модели, чтобы протухание было замечено раньше следующего
-    ручного аудита. Вызывается раз в сутки из фонового цикла в _webhook_startup.
-
-    РАНЬШЕ проверялась только голова (index 0) каждого списка — 3 модели навечно,
-    остальные ~25+ моделей в списках могли протухнуть и годами оставаться
-    непроверенными этим циклом. ИСПРАВЛЕНО: вместо фиксированного index 0 берём
-    `day-of-year % len(list)` — так за N дней проверяются все N моделей списка по
-    очереди, а суммарная стоимость (сколько бесплатной квоты стороннего провайдера
-    тратится на сам факт диагностики) остаётся той же — по-прежнему ровно 3 запроса
-    в сутки, просто на разные модели в разные дни, а не всегда на одни и те же."""
+    """Проактивная проверка живости (раз в сутки): только предупреждает в логах тем же паттерном, что у известных мёртвых — реестр _OR_MODEL_HEALTH не мутирует (курируется вручную). Ротация day-of-year % len — за N дней проверяются все модели списка за те же 3 запроса/сутки."""
     import bot
     if not bot.OPENROUTER_API_KEY:
         return
@@ -165,29 +128,7 @@ async def _or_chat_completion_with_fallback(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
     deadline: float | None = None,
 ) -> tuple[str, str]:
-    """Общий цикл fallback по цепочке моделей для запросов к OpenRouter
-    chat/completions. Раньше это был почти идентичный код, продублированный внутри
-    ask_openrouter_text И ask_openrouter_multimodal — риск, что при будущей правке
-    (например, добавлении новой категории временной ошибки) кто-то поправит только
-    одну из двух копий и они молча разойдутся. messages[0] должен быть системным
-    сообщением — его content переписывается под каждую пробуемую модель (т.к. у
-    разных моделей разный get_system_prompt).
-
-    Ровно одна попытка на модель, без ретраев той же самой модели — та же причина,
-    что и убранные ретраи в ask_gemini (см. комментарий там): при массовой
-    нестабильности одной модели ретраи ощутимо замедляли весь маршрут. Любая ошибка —
-    сразу следующий кандидат по цепочке.
-
-    УБРАНО (аудит техдолга, август 2026): раньше здесь был параметр attempts_per_model
-    и классификация "стоит ли повторить именно эту модель" — с единственным реальным
-    значением attempts_per_model=1 внутренний повторный цикл никогда не делал второй
-    итерации, поэтому вся эта классификация была мёртвым кодом без единого наблюдаемого
-    эффекта. Убрана целиком вместе с параметром, а не оставлена "на будущее".
-
-    Возвращает (answer, реально_использованная_модель) при успехе. Если ни одна
-    модель из trial_models не дала ответ — поднимает последнее пойманное исключение,
-    либо RouteBudgetExceededError, если общий бюджет времени маршрута закончился
-    раньше, чем дошла очередь до оставшихся кандидатов."""
+    """Общий fallback-цикл по цепочке OpenRouter (раньше дублировался в ask_openrouter_text/multimodal). Ровно одна попытка на модель — ретраи одной модели при массовой нестабильности замедляли весь маршрут. Возвращает (answer, used_model); иначе последнее исключение или RouteBudgetExceededError."""
     import bot
     last_exc: Exception | None = None
     tried: list[str] = []
@@ -207,10 +148,7 @@ async def _or_chat_completion_with_fallback(
                 answer = bot._or_extract_text(choices[0].get("message") or "")
             answer = answer.strip()
             if not answer:
-                # Пустой ответ — не ответ пользователю, а повод попробовать
-                # следующую модель (прод-кейс 17.09.2026: пользователь дважды
-                # увидел буквальное "Empty response"). Исключение ловится ниже
-                # общим except — цепочка идёт дальше как при обычной ошибке.
+                # Пустой ответ — повод попробовать следующую модель (прод 17.09.2026: юзер дважды увидел "Empty response").
                 raise RuntimeError(f"Model {model_trial} returned an empty response")
 
             answer = _scrub_identity_leak(answer, source=f"or_chat_completion:{model_trial}")
@@ -237,28 +175,15 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     state = bot.get_state(chat_id)
     history = state.setdefault("history", [])
     ctx = state.get("ctx", deque())
-    # model_chain строится роутером (см. _build_route) — здесь только убираем
-    # дубликаты, сохраняя порядок приоритета, заданный роутером. Пустой model_chain
-    # в норме не должен случаться (_build_route всегда возвращает непустой маршрут),
-    # это последняя страховка "на всякий случай". ИСПРАВЛЕНО (24 июля 2026): раньше
-    # здесь запасным вариантом стоял meta-llama/llama-3.3-70b-instruct:free — та же
-    # модель, что подтверждённо снята провайдером с бесплатного тира (см. README —
-    # повторяющиеся HTTP 404 "unavailable for free") и по этой причине уже исключена
-    # из _OR_LIGHT_ORDER/_OR_HEAVY_ORDER. Оставлять её единственным запасным
-    # вариантом здесь означало тот же самый риск с другой стороны — заменено на
-    # первую модель актуального _OR_LIGHT_ORDER (единый источник правды).
+    # Дедупликация с сохранением приоритета роутера; запасной — голова актуального _OR_LIGHT_ORDER (мёртвый llama-3.3 убран 24.07.2026).
     trial_models = list(dict.fromkeys(model_chain)) or [_OR_LIGHT_ORDER[0]]
     primary_model_id = trial_models[0]
-    # УБРАНО (аудит техдолга, август 2026): сборка messages (история+фон чата+вопрос)
-    # раньше была продублирована здесь инлайн — теперь единственный источник
-    # правды это _build_openrouter_turn_messages (используется и стримингом).
+    # Сборка messages — только в _build_openrouter_turn_messages (общая со стримингом).
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, primary_model_id)
 
     answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline)
 
-    # В общую историю пишем ЧИСТЫЙ текст пользователя (без служебного префикса
-    # "Фон разговора") — эту же историю теперь читает и Gemini (см. SHARED_HISTORY_
-    # MAX_LEN), и разовый ephemeral-контекст группового чата не должен там оседать.
+    # В историю пишем чистый текст (без "Фон разговора") — её читает и Gemini, разовый групповой контекст там оседать не должен.
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": answer})
     ctx.clear()
@@ -282,11 +207,7 @@ async def ask_openrouter_multimodal(
         full_text = "Фон разговора в чате (для контекста, не обращение к тебе):\n" + "\n".join(ctx) + "\n\nТекущий вопрос/сообщение: " + user_text
 
     history = state.setdefault("history", [])
-    # ИСПРАВЛЕНО (аудит техдолга, август 2026): раньше здесь стоял захардкоженный литерал
-    # "nvidia/nemotron-nano-12b-v2-vl:free" — тот же класс бага, что уже был найден и
-    # исправлен в ask_openrouter_text (там раньше был мёртвый meta-llama/llama-3.3-70b-
-    # instruct:free). Сейчас эта модель жива и совпадает с _OR_VISION_ORDER[0], но ничто
-    # не мешало ей молча протухнуть так же, как остальные модели в _OR_MODEL_HEALTH.
+    # Запасной — голова _OR_VISION_ORDER (захардкоженный nemotron убран: молча протухал бы как остальные в реестре).
     trial_models = list(dict.fromkeys(model_chain)) or [_OR_VISION_ORDER[0]]
     primary_model_id = trial_models[0]
     messages: list[dict] = [{"role": "system", "content": bot.get_system_prompt(primary_model_id)}]
@@ -322,34 +243,7 @@ async def _gemini_history_contents(history: list[dict]) -> list[types.Content]:
     return contents
 
 def _build_gemma_identity_contents(model_id: str, contents: list[types.Content]) -> list[types.Content]:
-    """Строит фейковый identity-обмен для Gemma (no_system-модели) — вынесено
-    из _build_gemini_call_config при разбиении на именованные шаги (аудит
-    техдолга, 7 сентября 2026); тело не изменилось ни на строчку.
-
-    # Для моделей без system instruction (Gemma) инжектируем ключевые инструкции
-    # через фейковый первый обмен — стандартный подход для таких моделей.
-    #
-    # НАЙДЕНО ПРИ АУДИТЕ СИСТЕМНОГО ПРОМПТА (10 августа 2026): раньше здесь был ТОЛЬКО
-    # короткий пронумерованный список ниже (8 пунктов) — Gemma при этом ПОЛНОСТЬЮ не
-    # получала ни строчки из настоящего SYSTEM_PROMPT (system_prompt.py): ни раздел
-    # БЛАГОПОЛУЧИЕ И ЗДОРОВЬЕ ПОЛЬЗОВАТЕЛЯ (протокол при сообщении о суициде/
-    # самоповреждении — телефон доверия, тёплый тон без уточняющих вопросов), ни
-    # АВТОРСКИЕ ПРАВА, ни ОБЪЕКТИВНОСТЬ И НЕПРЕДВЗЯТОСТЬ, ни ЮРИДИЧЕСКИЕ И ФИНАНСОВЫЕ
-    # ВОПРОСЫ, ни ФОРМАТИРОВАНИЕ и т.д. Gemma стоит последней в GEMINI_HEAVY_CHAIN
-    # (редкий путь — только если весь остальной маршрут отказал), но если очередь до
-    # неё дойдёт именно в чувствительном разговоре, этих защит не было бы вообще.
-    # Теперь get_system_prompt(model_id) — ТА ЖЕ строка, что получают system_instruction
-    # все остальные модели — подставляется как основа фейкового первого сообщения:
-    # единый источник правды (тот же принцип, что уже применяется к TEXT_MODEL_ORDER/
-    # _MODEL_ERROR_MESSAGES в этом файле) вместо отдельного захардкоженного пересказа,
-    # который рисковал бы разойтись с system_prompt.py при будущих правках. Короткий
-    # пронумерованный чеклист ниже сохранён КАК ЕСТЬ поверх него — это не про
-    # недостающий контент, а про надёжность: у Gemma нет отдельного канала
-    # system_instruction, и явное повторение самых важных пунктов (личность/дата/
-    # защита от инъекций) прямо перед стартом разговора проверено на практике и
-    # работает надёжнее, чем полагаться на то, что модель одинаково хорошо удержит
-    # их из середины длинного текста.
-    """
+    """Фейковый identity-обмен для Gemma (no_system): основа — тот же get_system_prompt, что у остальных (аудит 10.08.2026: раньше Gemma не получала SYSTEM_PROMPT вообще), поверх — короткий чеклист критичного (личность/дата/инъекции): без отдельного канала system_instruction повтор удерживается надёжнее."""
     import bot
     _now_date = datetime.now().strftime("%d %B %Y")
     _now_year = datetime.now().year
@@ -406,50 +300,33 @@ def _build_gemma_identity_contents(model_id: str, contents: list[types.Content])
     return call_contents
 
 def _build_gemini_call_config(model_id: str, contents: list[types.Content]) -> tuple[list[types.Content], "types.GenerateContentConfig | None"]:
-    """Строит (call_contents, gconfig) для ОДНОГО вызова Gemini под конкретную модель:
-    system_instruction (кроме no_system-моделей), grounding-инструменты по данным
-    дашборда AI Studio, и фейковый identity-обмен для Gemma (no_system — иначе Gemma
-    называет себя Google/Gemini и игнорирует правила). Вынесено в отдельную функцию,
-    чтобы ask_gemini (внутри цикла retry/fallback) и потоковая _try_gemini_streaming
-    не дублировали эту логику в двух местах и не расходились со временем."""
+    """Строит (call_contents, gconfig) для ОДНОГО вызова Gemini: system_instruction (кроме no_system), grounding по дашборду, фейковый identity-обмен для Gemma. Одна функция на ask_gemini и стриминг — чтобы не расходились."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
     kwargs: dict[str, Any] = {}
     if not conf.get("no_system"):
         kwargs["system_instruction"] = bot.get_system_prompt(model_id)
-    # Инструменты подключаются по данным реального дашборда AI Studio (не все
-    # модели имеют бесплатную квоту на grounding-инструменты — например, у
-    # gemini-3.5-flash и gemini-3-flash-preview лимит на Map grounding был 0/0,
-    # то есть квоты нет вовсе, а не просто "не расходовано"). Gemma не
-    # поддерживает эти инструменты в принципе (no_search уже это покрывает).
+    # Инструменты — только у кого есть free-квота по дашборду (у 3.5/preview map 0/0); Gemma не умеет их в принципе.
     tools_list = []
     if not conf.get("no_search"):
         if conf.get("search_grounding", True):
             try:
                 tools_list.append(types.Tool(google_search=types.GoogleSearch()))
             except Exception:
-                pass  # SDK version doesn't support google_search
+                pass  # в этом SDK нет google_search
         if conf.get("map_grounding", False):
             try:
                 tools_list.append(types.Tool(google_maps=types.GoogleMaps()))
             except Exception:
-                pass  # SDK version doesn't support google_maps
+                pass  # в этом SDK нет google_maps
         if conf.get("url_context", True):
             try:
                 tools_list.append(types.Tool(url_context=types.UrlContext()))
             except Exception:
-                pass  # SDK version doesn't support url_context
+                pass  # в этом SDK нет url_context
     if tools_list:
         kwargs["tools"] = tools_list
-    # Эффорт мышления (thinking_level/thinking_budget, google-genai) — низкий ТОЛЬКО
-    # для не-heavy запросов: калибровка 18 августа 2026 поймала gemini-3.7-flash на
-    # 17 таймаутах (22с) из 18 попыток за сессию — снижение эффорта на нетяжёлых
-    # запросах (в т.ч. когда Gemini — просто fallback после отказа OpenRouter) режет
-    # именно этот риск. Heavy-запросы намеренно НЕ трогаем: там таймаут и так более
-    # вероятен, а собственный (medium/dynamic) дефолт модели уже балансирует
-    # скорость/глубину лучше, чем наша угадайка. Gemini 3.x — thinking_level,
-    # Gemini 2.5.x — thinking_budget (в токенах, 0 = выкл); Gemma эффорта не имеет
-    # (no_system уже исключает её выше).
+    # Эффорт мышления — низкий только для не-heavy: калибровка 18.08.2026 поймала 3.7-flash на 17 таймаутах из 18. Heavy не трогаем (дефолт модели балансирует лучше). 3.x — thinking_level, 2.5 — thinking_budget.
     if not conf.get("no_system"):
         last_text = next((p.text for p in reversed(contents[-1].parts) if getattr(p, "text", None)), "") if contents else ""
         if not _looks_like_heavy_query(last_text):
@@ -466,12 +343,7 @@ def _build_gemini_call_config(model_id: str, contents: list[types.Content]) -> t
     return call_contents, gconfig
 
 async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents: list, gconfig) -> str:
-    """Извлекает текст ответа Gemini: сначала resp.text, а если пусто — вручную
-    разбирает candidates/parts (текст по кускам, tool calls, и повторная попытка
-    БЕЗ инструментов при MALFORMED_FUNCTION_CALL) — вынесено из ask_gemini при
-    разбиении на именованные шаги (аудит техдолга, 7 сентября 2026); тело не
-    изменилось ни на строчку (кроме имени параметра curr_model_id -> model_id).
-    """
+    """Текст ответа Gemini: сначала resp.text, иначе разбор candidates/parts вручную (включая повтор БЕЗ инструментов при MALFORMED_FUNCTION_CALL)."""
     import bot
     ans = ""
     tool_calls: list[str] = []
@@ -509,9 +381,7 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
             ans = "[Tool call: " + "; ".join(tool_calls) + "]"
         elif not ans and reasons:
             if any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
-                # Модель сломала собственный вызов инструмента (search/maps) — вместо
-                # бесполезного сообщения об ошибке пробуем повторить тот же запрос,
-                # но БЕЗ инструментов, чтобы модель ответила своими знаниями напрямую.
+                # Модель сломала собственный вызов инструмента — повторяем БЕЗ инструментов (ответ своими знаниями вместо ошибки).
                 try:
                     retry_gconfig = gconfig.model_copy(update={"tools": None}) if gconfig is not None else None
                     retry_fut = asyncio.to_thread(
@@ -526,9 +396,7 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                     log.warning("[gemini] Retry without tools after MALFORMED_FUNCTION_CALL also failed: %s", retry_exc)
             if not ans:
                 ans = f"[Ответ заблокирован или пуст. Причина: {', '.join(reasons)}]"
-    # Пустая строка (без блокировки) — НЕ "Empty response": вызывающий
-    # ask_gemini распознаёт пустоту и пробует следующую модель. Текст
-    # блокировки выше — настоящий пользовательский текст, идёт как есть.
+    # Пустая строка без блокировки — не "Empty response": ask_gemini пробует следующую модель.
     return ans.strip()
 
 async def ask_gemini(
@@ -546,10 +414,7 @@ async def ask_gemini(
     hist = state.setdefault("history", [])
     ctx = state.get("ctx", deque())
 
-    # Медиа/YouTube-части, которые нужно добавить в тот же Content, что и текст
-    # вопроса (см. _build_gemini_turn_contents ниже — теперь единственное место,
-    # где собирается история+фон чата+текущий вопрос; раньше эта сборка была
-    # продублирована здесь инлайн).
+    # Медиа/YouTube-части в тот же Content, что и текст (сборка — только в _build_gemini_turn_contents).
     extra_parts: list[types.Part] = []
     if media:
         for b, mime in media:
@@ -558,38 +423,18 @@ async def ask_gemini(
              else:
                  raise ValueError(f"Тип вложения '{mime}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
     if youtube_url:
-         # Gemini умеет анализировать публичные YouTube-видео напрямую по ссылке,
-         # без скачивания файла — передаём file_uri. РЕАЛЬНЫЙ НАЙДЕННЫЙ БАГ: если
-         # не указать mime_type явно, SDK пытается угадать его по виду самой
-         # ссылки — и не справляется с youtube.com/shorts/... (в отличие от
-         # обычных youtube.com/watch?v=... или youtu.be/...), падая с "Failed to
-         # determine mime type for file". video/* — валидный универсальный
-         # mime_type для видео по URI, работает одинаково для обычных видео и Shorts.
+          # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))
     contents = await bot._build_gemini_turn_contents(chat_id, user_text, extra_parts=extra_parts or None)
 
-    # Запуск в отдельном потоке (asyncio.to_thread) предотвращает зависание event loop.
-    #
-    # ВАЖНО (изменение при переходе на автоматический роутер моделей): раньше здесь
-    # была ещё внутренняя логика ретраев ОДНОЙ модели (2 попытки с экспоненциальной
-    # задержкой на таймаут/503/500) — именно она была главной причиной ответов по
-    # 2+ минуты при малейшей нестабильности API: модель могла съесть до 3× ROUTE_
-    # MODEL_TIMEOUT_SEC, прежде чем бот вообще переходил к следующей. Теперь на
-    # КАЖДУЮ модель — ровно одна попытка; любая ошибка (таймаут, 429, 503/500,
-    # NOT_FOUND, что угодно ещё) сразу переключает на следующую модель в `chain`
-    # (её порядок и состав теперь строит роутер — см. _build_route — а не
-    # захардкоженный список внутри этой функции). Полный маршрут в худшем случае
-    # укладывается в len(chain) × ROUTE_MODEL_TIMEOUT_SEC, а сверху всё ещё режется
-    # общим бюджетом `deadline` (общий на весь маршрут, включая резерв в другом
-    # провайдере — см. _run_route).
+    # to_thread — не вешаем event loop. Ровно одна попытка на модель (ретраи одной давали ответы по 2+ минуты); порядок — от роутера, сверху режет общий deadline.
     resp = None
     curr_model_id = chain[0]
     tried_models: set[str] = set()
     quota_exhausted_models: list[str] = []
 
     loop_guard = 0
-    # Небольшой запас сверх длины цепочки — NOT_FOUND может увести на модель вне
-    # `chain`, если её там не было (маловероятно с роутером, но не исключено).
+    # Запас len+4: NOT_FOUND может увести на модель вне chain.
     max_loop_guard = len(chain) + 4
 
     while True:
@@ -609,9 +454,7 @@ async def ask_gemini(
             ans = await bot._extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig)
             ans = ans.strip()
             if not ans:
-                # Пустой ответ — не ответ пользователю (прод-кейс 17.09.2026:
-                # буквальное "Empty response" в чате), а повод попробовать
-                # следующую модель — как при обычной ошибке ниже.
+                # Пустой ответ — пробуем следующую модель (прод 17.09.2026: юзер увидел буквальное "Empty response").
                 raise RuntimeError(f"Model {curr_model_id} returned an empty response")
             break
         except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
@@ -625,24 +468,14 @@ async def ask_gemini(
             log.warning("[gemini] Model %s timed out and no fallback models remain in route.", curr_model_id)
             raise
         except Exception as exc:
-            # НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: раньше здесь была отдельная, ad hoc
-            # классификация статуса ошибки (ручной разбор подстрок "429"/
-            # "resource_exhausted"/"quota" -> 429 и т.п.) — своя, третья версия
-            # той же классификации, что уже делают _error_status/_classify_model_error
-            # (используются в _gemini_error_msg/_or_error_msg и по духу совпадают
-            # с тем, что нужно и здесь). Теперь используются те же самые общие
-            # хелперы — один источник правды на "какая это ошибка" вместо трёх
-            # независимых реализаций, которые рисковали разойтись при будущей правке.
+            # Классификация — общими хелперами (_error_status/_classify_model_error), а не третьей ad-hoc копией.
             txt = bot._error_text(exc).strip() or exc.__class__.__name__
             status_code = bot._error_status(exc, txt)
             kind = bot._classify_model_error(status_code, txt)
             exc_class = exc.__class__.__name__
 
             if kind == "rate_limit":
-                # Квота — это НЕ временная перегрузка, а реальный лимит на стороне
-                # Google, поэтому только здесь помечаем модель как исчерпанную
-                # через _mark_quota_exhausted (влияет на порядок в будущих
-                # маршрутах роутера — см. _build_route/GLOBAL_QUOTA).
+                # Квота — реальный лимит Google, а не перегрузка: помечаем исчерпанной (влияет на будущие маршруты).
                 bot._mark_quota_exhausted("gemini", curr_model_id)
                 quota_exhausted_models.append(curr_model_id)
                 next_model = bot._next_fallback_model(tried_models, chain)
@@ -653,10 +486,7 @@ async def ask_gemini(
                 log.warning("[gemini] All Gemini models in route exhausted their quota (429): %s", ", ".join(quota_exhausted_models))
                 raise bot.GeminiAllModelsExhaustedError(quota_exhausted_models) from exc
 
-            # "unavailable" (модель снята/переименована на стороне Google, он же
-            # NOT_FOUND), "forbidden", "other" (503/500 — временная перегрузка) и
-            # любая прочая непойманная ошибка — все обрабатываются одинаково: ОДНА
-            # попытка, сразу следующая модель по цепочке, без ретраев текущей.
+            # Остальные исходы — одна попытка и сразу следующая модель, без ретраев.
             next_model = bot._next_fallback_model(tried_models, chain)
             if next_model:
                 reason = f"{kind}/{status_code}" if status_code else f"{kind}/{exc_class}"
@@ -684,14 +514,7 @@ async def ask_gemini(
 async def _build_gemini_turn_contents(
     chat_id: int, user_text: str, extra_parts: list[types.Part] | None = None,
 ) -> list[types.Content]:
-    """Строит contents (история чата + фон группового разговора + текущий вопрос)
-    для ОДНОГО хода. Общая логика между стримингом (без вложений/YouTube — см.
-    allow_stream в _run_route) и обычным ask_gemini — тот передаёт extra_parts
-    (медиа-вложения/YouTube file_uri), которые добавляются в тот же Content, что
-    и текст вопроса. РАНЬШЕ (аудит техдолга, август 2026): ask_gemini не переиспользовал
-    эту функцию и держал вторую копию той же сборки истории+фона+вопроса инлайн —
-    объединено в одну, чтобы будущая правка формата (например, обновление текста
-    префикса "Фон разговора в чате") не могла тихо разойтись между двумя местами."""
+    """Contents на один ход (история + фон группы + вопрос). Одна функция на ask_gemini и стриминг — правка формата не разойдётся."""
     import bot
     state = bot.get_state(chat_id)
     hist = state.setdefault("history", [])
@@ -707,9 +530,7 @@ async def _build_gemini_turn_contents(
     return contents
 
 def _build_openrouter_turn_messages(chat_id: int, user_text: str, model_id: str) -> list[dict]:
-    """То же самое, что и _build_gemini_turn_contents, но в формате messages для
-    OpenRouter chat/completions — общая логика между ask_openrouter_text и
-    стримингом OpenRouter (см. _openrouter_stream_pieces/_try_openrouter_streaming)."""
+    """То же для OpenRouter chat/completions (общая у ask_openrouter_text и стриминга)."""
     import bot
     state = bot.get_state(chat_id)
     ctx = state.get("ctx", deque())
@@ -725,13 +546,7 @@ def _build_openrouter_turn_messages(chat_id: int, user_text: str, model_id: str)
 
 
 def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_analyze: str | None, lang: str = DEFAULT_LANG) -> str:
-    """Текст ответа пользователю на исключение из _run_route — чистая функция
-    без побочных эффектов (сам owner-алерт на GeminiAllModelsExhaustedError
-    остаётся в _handle_message_core, до вызова этой функции, т.к. это сетевой
-    вызов, а не выбор текста). Вынесено при разбиении _handle_message_core на
-    именованные шаги (аудит техдолга) — было последней веткой if/elif внутри
-    самой длинной функции проекта, тестировать её отдельно раньше было нельзя
-    без гонки всего _handle_message_core целиком."""
+    """Текст ответа на исключение из _run_route — чистая функция (owner-алерт остаётся в вызывающем коде: там сетевой вызов)."""
     import bot
     if youtube_url_to_analyze:
         return bot._lang_t(lang, "err_youtube_fail")
@@ -745,41 +560,24 @@ def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_a
 
 
 class RouteBudgetExceededError(RuntimeError):
-    """Общий бюджет времени на подбор модели (см. ROUTE_TOTAL_BUDGET_SEC) закончился
-    раньше, чем нашёлся рабочий ответ — защита от многоминутного ожидания при
-    массовом одновременном сбое сразу нескольких моделей/провайдеров подряд
-    (именно так раньше выглядели ответы по 2+ минуты)."""
+    """Бюджет времени маршрута исчерпан — защита от многоминутного ожидания при массовом сбое моделей подряд."""
     def __init__(self, tried: list[str]) -> None:
         self.tried = tried
         super().__init__(f"Route time budget exhausted. Tried: {', '.join(tried) or 'none'}")
 
 
-# Конфигурация моделей и логика построения маршрута (GEMINI_MODELS, TEXT_MODEL_ORDER,
-# _OR_MODEL_HEALTH/_ROUTER_EXCLUDED_OR_MODELS, цепочки, _build_route и т.д.) вынесены
-# в lumen_router_config.py — см. импорт в начале файла (там же, где раньше был
-# GEMINI_MODELS, чтобы порядок определения имён для остального кода не менялся).
+# Маршрутизация вынесена в lumen_router_config.py — порядок имён для остального кода не менялся.
 
 async def _run_route(
     chat_id: int, ai_prompt: str, route: list[tuple[str, str]], message: Message, *,
     media: list[tuple[bytes, str]] | None = None, media_filename: str = "",
     youtube_url: str | None = None, allow_stream: bool = False,
 ) -> tuple[str, bool]:
-    """Проходит по маршруту, построенному _build_route, пробуя каждого
-    провайдера по очереди (в порядке, заданном маршрутом) — внутри каждого
-    провайдера ask_gemini/ask_openrouter_* уже сами пробуют РОВНО один раз
-    каждую модель своей части маршрута (без ретраев — см. комментарии в
-    ask_gemini/_or_chat_completion_with_fallback про причину ответов по 2+
-    минуты). Если целый провайдер отказал (все его модели не сработали),
-    пробуем другой провайдер из маршрута как резерв — если он там есть.
-
-    Возвращает (ответ, reply_already_sent). Второй элемент True, если ответ уже
-    отправлен в чат стримингом (см. allow_stream) и повторно отправлять не нужно."""
+    """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
     if not route:
         raise RuntimeError("Empty route — no model to choose from.")
-    # Умный порядок по измеренным задержкам (см. lumen_model_speed.py): внутри
-    # каждого провайдера — быстрые вперёд, сами провайдерные блоки и их порядок
-    # не трогаем (защита скудной квоты Gemini — см. _build_route).
+    # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
     route = _reorder_route_by_speed(route)
     deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
 
@@ -789,19 +587,7 @@ async def _run_route(
     first_provider = route[0][0]
     provider_order = [first_provider, "openrouter" if first_provider == "gemini" else "gemini"]
 
-    # Стриминг имеет смысл только для самого первого кандидата маршрута — иначе
-    # неоткуда взять "живой" эффект, а подмешивать другую модель в уже показанный
-    # пользователю текст нельзя. Раньше стримился только Gemini — теперь это
-    # общая возможность (см. _run_streaming_reply), поэтому пробуем стрим для
-    # ГОЛОВНОГО кандидата вне зависимости от того, какой это провайдер.
-    #
-    # reusable_placeholder — РЕАЛЬНЫЙ НАЙДЕННЫЙ ПРИ ТЕСТИРОВАНИИ БАГ: раньше при
-    # неудачном стриме (например, первая модель маршрута недоступна) плейсхолдер
-    # "…" тут же удалялся, а следующая модель отправляла СОВСЕМ НОВОЕ сообщение —
-    # выглядело так, будто "точки исчезли, а затем из ниоткуда появился готовый
-    # ответ одним блоком", без единого "живого" эффекта печати. Теперь плейсхолдер
-    # сохраняется и, если следующая модель успешно ответит, финальный текст
-    # правится ПРЯМО В НЕГО — так же, как если бы эта модель сама стримила.
+    # Стримим только голову маршрута; плейсхолдер "…" переиспользуем под финальный текст следующей модели, а не сносим.
     tried_stream_model: str | None = None
     tried_stream_provider: str | None = None
     reusable_placeholder: Message | None = None
@@ -831,8 +617,7 @@ async def _run_route(
         if not ids:
             continue
         if provider == "openrouter" and is_video_or_audio:
-            # OpenRouter физически не принимает видео/аудио вложения — резерв
-            # в эту сторону невозможен, пропускаем без попытки.
+            # OpenRouter не принимает видео/аудио — пропускаем без попытки.
             continue
         if time.monotonic() > deadline:
             log.warning('[router] Route time budget exhausted before trying provider %s.', provider)
@@ -846,10 +631,7 @@ async def _run_route(
                 ans = await bot.ask_openrouter_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
 
             if reusable_placeholder is not None:
-                # Пытаемся доправить готовый ответ ПРЯМО В плейсхолдер стрима,
-                # чтобы не создавать новое сообщение — но только если ответ
-                # умещается в одно сообщение Telegram; иначе (редкий случай)
-                # проще отправить обычным способом с автоматическим разбиением.
+                # Готовый ответ — прямо в плейсхолдер (если влезает в одно сообщение), иначе обычным путём с разбиением.
                 fits_one_message = len(_split_text_chunks(ans, bot.TG_MAX_LEN)) == 1
                 reused = fits_one_message and await bot._edit_message_quietly(reusable_placeholder, ans)
                 if not reused:
@@ -863,9 +645,7 @@ async def _run_route(
             log.warning('[router] Provider %s failed completely (%s), trying the next one on the route, if any.', provider, exc)
 
     if reusable_placeholder is not None:
-        # Плейсхолдер стрима так и остался невостребованным — весь оставшийся
-        # маршрут тоже не сработал. Убираем "…" перед тем как поднять
-        # исключение, иначе он повиснет в чате навсегда.
+        # Невостребованный плейсхолдер убираем перед raise — иначе "…" повиснет в чате навсегда.
         await bot._delete_message_quietly(reusable_placeholder)
 
     raise last_exc or RuntimeError("No route candidate returned an answer.")

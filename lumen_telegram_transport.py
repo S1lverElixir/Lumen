@@ -1,24 +1,7 @@
 """
-lumen_telegram_transport.py — низкоуровневый Telegram-транспорт: circuit breaker для
-мёртвого HTTP-прокси перед Telegram Bot API, распознавание "прокси вернул мусор, а не
-JSON", общая конфигурация TCP-коннектора и кэш aiohttp-сессии для прямых HTTP-вызовов.
+lumen_telegram_transport.py — низкоуровневый Telegram-транспорт: circuit breaker мёртвого прокси, детектор "прокси вернул мусор", TCP-коннектор, IPv4-сессия, кэш сессии.
 
-Вынесено из bot.py при разбиении на модули (см. README, аудит техдолга). НЕ включает
-`_tg_call`/`telegram_api_call`/`_rotate_telegram_proxy`/`_handle_proxy_failure` — эти
-функции читают И мутируют `TELEGRAM_API_BASE_URL`/`bot`/`BOT_TOKEN`, которые в bot.py
-используются ещё в добром десятке несвязанных мест (`/diag`, скачивание файлов из
-Telegram, `main()` и т.д.). Вынос этой части потребовал бы переписывать все эти сайты
-на доступ через новый модуль вместо простого чтения module-level переменной — реальный
-риск регрессии ради небольшого выигрыша, не стоящий того при "чистом рефакторинге без
-изменения поведения". Эта часть осознанно остаётся в bot.py как тонкая обёртка поверх
-перенесённых сюда строительных блоков (см. секцию "Telegram-транспорт" там же).
-
-Всё, что действительно самодостаточно (не требует global-мутации TELEGRAM_API_BASE_URL/
-bot) — здесь: сам класс выключателя (`_TelegramProxyCircuitBreaker`), детектор "не-JSON
-от прокси" (`_looks_like_proxy_garbage`), конфигурация `TCPConnector`
-(`_build_telegram_connector`), aiogram-сессия с принудительным IPv4 (`IPv4AiohttpSession`)
-и кэш aiohttp-сессии для `telegram_api_call` в bot.py (`get_telegram_session`/
-`close_telegram_session`).
+Только самодостаточное: мутирующие TELEGRAM_API_BASE_URL/bot обёртки (_tg_call и др.) осознанно остались в bot.py — их вынос трогал бы десяток мест ради "чистого рефакторинга".
 """
 
 from __future__ import annotations
@@ -38,26 +21,11 @@ from aiogram.client.session.aiohttp import AiohttpSession
 log = logging.getLogger("bot")
 
 
-# НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: состояние "выключателя" мёртвого Telegram-прокси
-# раньше жило как четыре независимых module-level globals (_tg_proxy_down_until/
-# _tg_proxy_down_logged_at/_tg_proxy_consecutive_failures/_tg_proxy_garbage_event_count),
-# мутируемых через `global` из двух разных функций (_tg_call/telegram_api_call) —
-# такое размазанное состояние сложнее читать и тестировать, чем один объект с
-# понятными методами. _TelegramProxyCircuitBreaker ниже — чистая инкапсуляция,
-# поведение (включая формулы cooldown/threshold) не изменилось ни на йоту.
+# Размазанные globals выключателя собраны в класс (поведение/формулы не менялись).
 #
-# Выключатель срабатывает по СЧЁТЧИКУ подряд идущих сбоев, а не на первый же
-# сбой. Раньше ОДНА-единственная заминка прокси (например разовый сетевой глюк
-# на одной ноде anycast-CDN — Vercel/Cloudflare/Deno все матчат запросы на
-# множество географически разных нод) полностью глушила ответы бота ВСЕМ чатам
-# на TELEGRAM_PROXY_COOLDOWN_SEC секунд — то есть один случайный сбой был неотличим
-# от реально упавшего прокси. Теперь выключатель включается, только когда
-# подряд (без единого успеха между ними) накопилось trip_threshold сбоев —
-# единичные заминки его больше не запускают.
+# Срабатывает по СЧЁТЧИКУ подряд идущих сбоев: раньше одна заминка ноды глушила все чаты на весь cooldown.
 class _TelegramProxyCircuitBreaker:
-    """Инкапсулирует состояние выключателя — см. комментарий выше. Используется
-    как единственный module-level инстанс (_tg_proxy_breaker в bot.py), но методы
-    не трогают globals напрямую, что делает поведение проще проверять."""
+    """Состояние выключателя (единственный инстанс — в bot.py); методы globals не трогают — проще тестировать."""
 
     def __init__(self, *, cooldown_sec: float, trip_threshold: int) -> None:
         self.cooldown_sec = cooldown_sec
@@ -65,17 +33,14 @@ class _TelegramProxyCircuitBreaker:
         self.down_until: float = 0.0
         self.down_logged_at: float = 0.0
         self.consecutive_failures: int = 0
-        # Совокупный (не сбрасывается) счётчик срабатываний "прокси вернул не-JSON"
-        # за время жизни процесса — виден через /stats, чтобы деградацию прокси
-        # можно было заметить прямо из Telegram, а не только копаясь в логах контейнера.
+        # Совокупный счётчик "прокси вернул не-JSON" за жизнь процесса — виден в /stats.
         self.garbage_event_count: int = 0
 
     def is_down(self, now: float) -> bool:
         return now < self.down_until
 
     def log_still_down_if_due(self, now: float) -> None:
-        """Логирует "прокси всё ещё недоступен" не чаще раза в cooldown_sec —
-        иначе лавина одинаковых WARNING на каждый пропущенный вызов из бэклога."""
+        """Лог "прокси всё ещё недоступен" — не чаще раза в cooldown (иначе лавина WARNING из бэклога)."""
         if now - self.down_logged_at > self.cooldown_sec:
             self.down_logged_at = now
             log.warning('[telegram] Proxy still unavailable, skipping calls for another ~%.0fs.', self.down_until - now)

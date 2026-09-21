@@ -951,8 +951,7 @@ def test_resolve_incoming_media_sticker_request_ignores_unrelated_recent_photo()
 def test_resolve_incoming_media_sticker_request_finds_older_sticker_past_newer_photo():
     chat_id = 999955
     state = bot.get_state(chat_id)
-    # Стикер был отправлен РАНЬШЕ фото — наивное "просто последний элемент" взяло
-    # бы фото; правильное поведение — найти именно стикер, невзирая на порядок.
+    # Стикер раньше фото — ищем именно стикер, а не "последний элемент".
     state["recent_media_ids"] = {"555": [("sticker_id", "image/webp"), ("photo_id", "image/jpeg")]}
     try:
         msg = _FakeIncomingMessage(chat_id)

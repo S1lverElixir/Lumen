@@ -19,11 +19,7 @@ user_rate_limits: dict[int, list[float]] = {}
 
 
 def _cleanup_rate_limit_dict() -> None:
-    """user_rate_limits раньше никогда не уменьшался — ключи (user_id) оставались
-    в словаре навсегда, даже когда список timestamp'ов у конкретного пользователя
-    полностью очищался скользящим окном в _handle_message_core. За месяцы работы
-    с большим числом разных пользователей это медленная, но реальная утечка
-    памяти. Вызывается раз в час из фонового цикла в _webhook_startup."""
+    """Чистка раз в час: скользящее окно оставляло пустые ключи навсегда — медленная утечка."""
     now = time.time()
     stale = [uid for uid, ts in user_rate_limits.items() if not ts or now - ts[-1] > 3600]
     for uid in stale:
@@ -31,11 +27,7 @@ def _cleanup_rate_limit_dict() -> None:
 
 
 def _check_and_register_rate_limit(user_id: int | None) -> bool:
-    """Скользящее окно 5 запросов/30 сек на пользователя (или запасной ключ — см.
-    _rate_limit_key_for_message в bot.py). Возвращает True, если лимит уже исчерпан
-    (вызывающий код должен ответить и прекратить обработку) — в этом случае, в
-    отличие от успешного случая, TIMESTAMP НЕ добавляется, чтобы не продлевать
-    наказание бесконечно на каждое следующее сообщение сверху лимита."""
+    """Окно 5/30с; при отказе метка не пишется — иначе наказание продлевалось бы само."""
     if not user_id:
         return False
     now = time.time()
@@ -52,15 +44,12 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
 
 PICK_TTL_SEC = float(os.getenv("PICK_TTL_SEC", "300"))
 MAX_PENDING_PICKS = int(os.getenv("MAX_PENDING_PICKS", "500"))
-# token -> {chat_id, user_id, scenario, original, expires}: только в памяти
-# процесса (как _speed_ema в lumen_typing_pace.py) — после рестарта кнопки
-# честно считаются протухшими, это штатный путь, а не баг.
+# Только в памяти: после рестарта кнопки честно протухают, это штатно.
 _pending_picks: dict[str, dict[str, Any]] = {}
 
 
 def _purge_expired_picks(now: float | None = None) -> None:
-    """Сносит протухшие записи ожидания кнопок — вызывается при создании новой
-    (отдельного фонового цикла ради этого заводить не стали)."""
+    """Чистка протухших при создании новой: отдельный цикл не заводили."""
     now = time.monotonic() if now is None else now
     for token in [t for t, rec in _pending_picks.items() if rec["expires"] <= now]:
         del _pending_picks[token]

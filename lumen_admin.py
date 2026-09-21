@@ -29,15 +29,7 @@ log = logging.getLogger("bot")
 app = FastAPI()
 
 def _check_bearer_token(request: Request, expected: str) -> bool:
-    """Общая проверка `Authorization: Bearer <expected>` — единственный легитимный
-    способ пройти ЛЮБОЙ из секрет-гейтованных эндпоинтов (/admin_keys, /diag,
-    /webhook_url, /export_state). ИСПРАВЛЕНО (аудит техдолга): раньше секреты (и
-    BOT_TOKEN, и отдельно ADMIN_PANEL_KEY) читались из query-параметра (?bot_token=.../
-    ?key=...) — CWE-598: секрет в URL попадает в access-логи промежуточных прокси/CDN,
-    в историю браузера, в заголовок Referer при переходе по внешней ссылке. Query-
-    параметр теперь не проверяется вообще — только заголовок. Раньше это были две
-    независимые (но идентичные) реализации этой проверки — _check_admin_key и
-    _check_bot_token_auth ниже теперь лишь называют разный секрет-кандидат."""
+    """Только Bearer-заголовок: секрет в URL светится в логах/истории/Referer (CWE-598)."""
     auth_header = request.headers.get("Authorization", "")
     provided = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
     return bool(expected) and bool(provided) and hmac.compare_digest(provided, expected)
@@ -47,47 +39,26 @@ def _check_admin_key(request: Request) -> bool:
     return _check_bearer_token(request, bot.ADMIN_PANEL_KEY)
 
 def _redact_secret(value: str) -> str:
-    """Показывает только последние несколько символов секрета — достаточно, чтобы
-    владелец мог на глаз подтвердить "да, это тот же секрет, что и в прошлый раз"
-    между рестартами, но недостаточно, чтобы кто-то посторонний, увидевший только
-    эту урезанную строку в логах/скриншоте, мог им воспользоваться."""
+    """Отпечаток: последние символы для сверки между рестартами, воспользоваться нельзя."""
     if not value:
         return "<empty>"
     return "…" + value[-6:] if len(value) > 6 else "…" + value
 
 def _check_bot_token_auth(request: Request) -> bool:
-    """Как _check_admin_key, но против BOT_TOKEN — это МАСТЕР-секрет, из которого
-    выводятся оба остальных (WEBHOOK_SECRET/ADMIN_PANEL_KEY), гейтует только
-    /admin_keys. См. _check_bearer_token выше про саму проверку и почему не
-    query-параметр."""
+    """Как _check_admin_key, но мастер-секрет BOT_TOKEN; только для /admin_keys (иначе круг)."""
     import bot
     return _check_bearer_token(request, bot.BOT_TOKEN)
 
 @app.get("/")
 async def healthcheck() -> dict[str, Any]:
-    # ИСПРАВЛЕНО (аудит техдолга, август 2026): раньше здесь безусловно возвращался
-    # "ok" даже если bot/client ещё не были инициализированы (main() их создаёт после
-    # старта uvicorn) — эндпоинт не отражал вообще ничего о реальном состоянии
-    # процесса. Проверка ниже — только in-memory (bot/client is not None), БЕЗ сетевых
-    # вызовов к Telegram/Gemini/OpenRouter/Upstash: healthcheck обязан быть дешёвым и
-    # быстрым, а не полноценной диагностикой (для неё уже есть /diag).
+    # Только in-memory готовность (bot/client), без сети — healthcheck обязан быть дешёвым.
     import bot
     ready = bot.bot is not None and bot.client is not None
     return {"status": "ok" if ready else "starting", "ready": ready}
 
 @app.get("/admin_keys")
 async def get_admin_keys(request: Request) -> dict[str, str]:
-    """Отдаёт полные значения WEBHOOK_SECRET/ADMIN_PANEL_KEY по запросу — единственный
-    легитимный способ их узнать без печати в логах при каждом старте (см. критическую
-    находку код-ревью: полные значения, печатавшиеся в лог на каждом рестарте, могли
-    случайно попасть в скриншот/чат наравне с остальными логами). Доступ гейтится САМИМ
-    BOT_TOKEN (заголовок Authorization: Bearer <BOT_TOKEN>, см. _check_bot_token_auth —
-    ИСПРАВЛЕНО при повторном код-ревью: раньше токен передавался через query-параметр
-    ?bot_token=..., что попадало в access-логи/историю браузера, см. комментарий там же),
-    а не производным от него ADMIN_PANEL_KEY — иначе получился бы замкнутый круг: чтобы
-    узнать ADMIN_PANEL_KEY, нужен был бы ADMIN_PANEL_KEY.
-    BOT_TOKEN и так уже известен владельцу напрямую (из секретов HF Spaces/@BotFather),
-    его не нужно доставать из логов бота."""
+    """Полные секреты только по Bearer BOT_TOKEN (не ADMIN_PANEL_KEY — иначе круг); раньше светились в логах."""
     if not _check_bot_token_auth(request):
         return {"error": "forbidden — missing or invalid Authorization: Bearer <BOT_TOKEN> header"}
     import bot
@@ -147,30 +118,13 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
     targets = {
         "telegram_api": "https://api.telegram.org",
         "telegram_file_api": "https://api.telegram.org/bot" + (bot_token[:6] if bot_token else "x") + "/getMe",
-        # Раньше здесь был захардкожен URL одного из старых пробных воркеров
-        # ("my-tg-proxy...") — /diag проверял чужой, забытый от прошлых экспериментов
-        # адрес вместо РЕАЛЬНО настроенного прокси. Из-за этого диагностика однажды
-        # ввела в заблуждение: показала "всё ок", хотя реально используемый
-        # TELEGRAM_API_BASE_URL был недоступен, а проверялся вообще другой воркер.
-        # Теперь проверяем именно то значение, которое бот реально использует для
-        # вызовов Telegram API — если сменить прокси через env, /diag сразу тестирует
-        # актуальный адрес без правки кода.
+        # Проверяем реально настроенный прокси, а не забытый хардкод: иначе "всё ок" при мёртвом адресе.
         "configured_tg_proxy": bot.TELEGRAM_API_BASE_URL + "/bot" + (bot_token[:6] if bot_token else "x") + "/getMe",
         "cloudflare_dot_com": "https://www.cloudflare.com",
-        # Голый апекс-домен workers.dev (без поддомена) сам по себе может не отвечать
-        # даже когда конкретные *.workers.dev поддомены (включая ваш прокси) работают
-        # нормально — это ненадёжный сигнал "заблокирован ли workers.dev вообще",
-        # ориентируйтесь в первую очередь на configured_tg_proxy выше (он теперь
-        # бьёт в реалистичный путь /bot.../getMe, а не в голый корень домена —
-        # голый корень у самого Telegram может отвечать медленно/зависать, даже
-        # когда реальные вызовы API через прокси работают быстро и штатно).
+        # Голый workers.dev — ненадёжный сигнал; смотреть на configured_tg_proxy.
         "cloudflare_workers_dev_root": "https://workers.dev",
         "deno_deploy": "https://deno.com",
-        # ponytail: netlify/render/railway/fly.io/supabase/vercel убраны — ни один из
-        # этих хостингов проектом не используется (Vercel-прокси заброшен и никогда не
-        # работал, см. историю проекта), проверка их доступности не даёт полезного
-        # сигнала. cloudflare/deno оставлены — реально задействованы (workers.dev как
-        # исторически пробовавшийся вариант прокси, deno.com — текущий активный).
+        # Лишние хостинги убраны: сигнал нужен только по реально используемым (workers/deno).
         "google_generic": "https://www.google.com",
         "gemini_api": "https://generativelanguage.googleapis.com",
         "huggingface": "https://huggingface.co",
@@ -214,16 +168,7 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
 
 @app.get("/export_state")
 async def export_state(request: Request) -> dict[str, Any]:
-    """Полный дамп состояния всех чатов + квот одним JSON — на случай ручного бэкапа.
-
-    НАЙДЕНО ПРИ АУДИТЕ ТЕХДОЛГА: без Upstash состояние живёт на эфемерном диске
-    контейнера (обнуляется на каждом редеплое); с Upstash — на бесплатном тире без
-    какой-либо резервной копии (256 МБ / 500k команд/мес, архивируется через 30 дней
-    простоя). Полноценная автоматическая репликация в отдельное облако — отдельная
-    инфраструктурная задача с собственными учётными данными, которую нельзя завести
-    из кода бота. Это — минимальная практичная замена: владелец может вызвать этот
-    эндпоинт по расписанию (curl + cron/GitHub Actions на своей стороне) и держать
-    файл в любом месте на своё усмотрение. Гейтится ADMIN_PANEL_KEY, как /diag."""
+    """Ручной бэкап для cron: эфемерный диск и тир Upstash без реплики; гейт ADMIN_PANEL_KEY."""
     if not _check_admin_key(request):
         return {"error": "forbidden — missing or invalid Authorization: Bearer <ADMIN_PANEL_KEY> header"}
     import bot

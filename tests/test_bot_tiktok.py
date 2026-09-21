@@ -788,11 +788,7 @@ def test_fetch_tikwm_media_data_throttles_between_requests():
 
 
 def test_fetch_tikwm_media_data_sends_referer_and_origin_headers():
-    # ИСПРАВЛЕНО (отладка 12 августа 2026): даже с корректным URL и корректным
-    # троттлингом TikWM продолжал отвечать 403 с пустым телом — Referer/Origin,
-    # имитирующие вызов со страницы самого tikwm.com, добавлены как best-effort
-    # попытка обхода анти-скрейпинг проверки (см. докстринг _fetch_tikwm_media_data).
-    # Исходные заголовки (например User-Agent от вызывающего кода) не должны теряться.
+    # 12.08.2026: TikWM отвечал 403 даже с троттлингом — Referer/Origin под страницу tikwm.com (best-effort); исходные заголовки не теряем.
     resp = _FakeTikwmApiResponse(status=200, json_body={"code": 0, "data": {"play": "x"}})
     session = _FakeTikwmApiSession([resp])
     asyncio.run(bot._fetch_tikwm_media_data(session, "https://www.tiktok.com/@u/video/7", {"User-Agent": "test-ua"}))

@@ -25,13 +25,7 @@ from lumen_media import (
 log = logging.getLogger("bot")
 
 async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None = None, retries: int = 1) -> tuple[bytes, str]:
-    # Один ретрай с короткой паузой — раньше здесь не было НИКАКОГО повторного
-    # обращения (в отличие от _tg_call, у которого есть свой параметр retries),
-    # поэтому одна-единственная транзиентная заминка прокси (не-JSON/обрыв ровно
-    # на getMe/getFile, см. _looks_like_proxy_garbage) насовсем валила скачивание
-    # медиа. Именно эта функция стояла за инцидентом "[media] Download media failed
-    # ... NOT_FOUND" в логах этой сессии — единичный сбой прокси не должен означать
-    # "пользователь прислал фото/видео, а бот его просто не увидел".
+    # Один ретрай getFile/скачивания: единичный сбой прокси иначе слепил бота ("NOT_FOUND" в логах).
     import bot
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
