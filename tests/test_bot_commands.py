@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
 import bot
+import lumen_chat_state
 import lumen_limits
 import pytest
 import time
@@ -53,6 +54,50 @@ def test_cmd_logs_flushes_the_listeners_real_handlers_not_root():
     finally:
         bot.OWNER_ID = original_owner
         bot._LOG_LISTENER = original_listener
+
+
+def test_cmd_stats_hides_idle_models_and_shows_totals():
+    # Проф-вид /stats: нули по мёртвым моделям не мусорят, у каждого провайдера итог и остаток лимита.
+    chat_id = 999811
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777001)
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    original_owner = bot.OWNER_ID
+    original_tg_call = bot._tg_call
+    real_quota = dict(bot.GLOBAL_QUOTA)
+    bot.OWNER_ID = 777001
+    bot._tg_call = fake_tg_call
+    bot.GLOBAL_QUOTA.clear()
+    bot.GLOBAL_QUOTA.update({
+        "gemini": {
+            "gemini-3.6-flash": {"used": 3, "exhausted_at": None},
+            "gemini-dead-model": {"used": 0, "exhausted_at": None},
+        },
+        "openrouter": {"nvidia/x:free": {"used": 5, "exhausted_at": None}},
+        "groq": {},
+        "quota_day": bot._current_quota_day(),
+    })
+    try:
+        asyncio.run(bot.cmd_stats(incoming))
+        text = sent["text"]
+        assert "gemini-3.6-flash: 3" in text
+        assert "gemini-dead-model" not in text
+        assert "без обращений" in text
+        assert "Σ: 3" in text
+        assert "Σ: 5 / 50 (осталось 45)" in text
+        assert "Σ: 0 / 1000 (осталось 1000)" in text
+    finally:
+        bot.OWNER_ID = original_owner
+        bot._tg_call = original_tg_call
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.chat_state.pop(chat_id, None)
+        lumen_chat_state.chat_state.pop(chat_id, None)
 
 
 def test_match_trigger_prefix_finds_draw_trigger():
