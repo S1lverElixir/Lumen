@@ -375,7 +375,8 @@ async def _send_tiktok_single_video(
 async def handle_tiktok(message: Message, url: str) -> None:
     import bot
     if bot.is_guest_message(message):
-         await bot._answer_guest_text(message, f"Ссылка на TikTok распознана: {url}")
+         # Гостю файл не отдать (answerGuestQuery — только текст): зовём в личку вместо заглушки.
+         await bot._answer_guest_text(message, bot._t(message.chat.id, "tiktok_guest_dm_hint"))
          return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "tiktok_processing"))
     try:
