@@ -1202,6 +1202,51 @@ def test_send_tiktok_music_keeps_one_word_track_title():
     assert sent.get("performer") == "Imagine Dragons"
 
 
+def test_send_tiktok_music_retries_without_thumbnail_on_failure():
+    # Жирная обложка роняет send_audio целиком — повторяем без неё, трек важнее картинки.
+    import lumen_tiktok_flow
+    incoming = _FakeIncomingMessage(999455)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(language_code="ru")
+    attempts = []
+
+    class _FlakyAudioBot:
+        async def send_audio(self, **kwargs):
+            attempts.append(kwargs)
+            if kwargs.get("thumbnail") is not None:
+                raise RuntimeError("thumbnail too big")
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None):
+        return b"fake-bytes"
+
+    def fake_write_tags(path, title, artist, cover):
+        pass
+
+    media_data = {
+        "music": "https://tikwm.com/song.mp3",
+        "music_info": {"title": "Song", "author": "Auth", "cover": "https://tikwm.com/cover.jpg"},
+        "author": {"nickname": "Nick", "unique_id": "@nick"},
+    }
+    original_download = bot._download_url_bin
+    original_write_tags = bot._write_mp3_tags
+    original_bot = bot.bot
+    bot._download_url_bin = fake_download
+    bot._write_mp3_tags = fake_write_tags
+    bot.bot = _FlakyAudioBot()
+    try:
+        asyncio.run(lumen_tiktok_flow._send_tiktok_music(None, media_data, incoming, "Nick", {}))
+        assert len(attempts) == 2
+        assert attempts[0].get("thumbnail") is not None
+        assert attempts[1].get("thumbnail") is None
+        assert attempts[1].get("title") == "Song"
+    finally:
+        bot._download_url_bin = original_download
+        bot._write_mp3_tags = original_write_tags
+        bot.bot = original_bot
+        bot.chat_state.pop(999455, None)
+
+
 def test_single_video_status_deleted_after_music():
     # Статус живёт и во время скачивания музыки тоже — сносится только после неё, а не до.
     import lumen_tiktok_flow
