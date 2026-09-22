@@ -70,7 +70,7 @@ def test_error_status_returns_none_when_no_code_found():
 
 def test_gemini_error_msg_rate_limit():
     # РЕГРЕССИЯ (аудит техдолга): раньше здесь проверялось "модель через /model" —
-    # команда /model давно удалена (см. README, "Автоматический выбор модели"),
+    # команда /model давно удалена (см. README, "Automatic model routing"),
     # и подсказывать её в тексте ошибки было прямой ошибкой для пользователя.
     # _gemini_error_msg/_or_error_msg теперь используют общие provider-neutral
     # шаблоны (см. _MODEL_ERROR_MESSAGES) без упоминания несуществующих команд.

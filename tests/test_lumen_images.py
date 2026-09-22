@@ -1,7 +1,7 @@
 """
 test_lumen_images.py — юнит-тесты на lumen_images.py: автоматический выбор модели
 генерации изображений по содержимому промпта (_pick_image_model), заменивший ручной
-выбор через убранную команду /imgmodel (см. README, "Автоматический выбор модели").
+выбор через убранную команду /imgmodel (см. README, "Automatic model routing").
 
 lumen_images.py не зависит от Telegram/рантайм-состояния бота (тот же принцип, что и
 у lumen_formatting.py/lumen_router_config.py — см. их тестовые файлы), поэтому

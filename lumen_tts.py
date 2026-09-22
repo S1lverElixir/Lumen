@@ -1,5 +1,5 @@
 """
-lumen_tts.py — TTS: Fish Audio S2.1 Pro (free, через OpenRouter) с резервом на Gemini TTS, плюс pcm_to_wav.
+lumen_tts.py — TTS: Gemini TTS (ветка Fish Audio S2.1 Pro отключена флагом — зеркало снято с free-каталога 17.09.2026), плюс pcm_to_wav.
 
 Вынесено из bot.py (аудит техдолга). Внешнее состояние (сессия, ключи, клиент, квота, классификация ошибок) не дублируется — принимается параметрами и callback'ами; bot.py держит тонкие обёртки с теми же именами, интерфейс и тесты не изменились.
 """
@@ -32,7 +32,7 @@ def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sam
     return wav_buf.getvalue()
 
 
-# ── Fish Audio S2.1 Pro (free) — пробуется первой: у Gemini TTS всего 10 запросов/сутки на модель, у Fish заявленного потолка нет. При неудаче — тихий откат на Gemini TTS.
+# ── Fish Audio S2.1 Pro (free) — ОТКЛЮЧЁН флагом FISH_AUDIO_ENABLED (см. inline_tts): сейчас всегда идёт Gemini TTS. Ветка оставлена — если Fish вернут free-доступ, достаточно вернуть True.
 
 async def _fish_audio_tts_bytes(
     session: aiohttp.ClientSession, text: str, *,
@@ -102,7 +102,7 @@ async def _gemini_tts_bytes(
     on_model_exhausted: Callable[[str], None],
     on_model_success: Callable[[str], None],
 ) -> tuple[bytes, str, str]:
-    """Gemini TTS (резерв после Fish Audio): возвращает (pcm_bytes, mime_type, used_model) или бросает исключение. Состояние передаётся параметрами (см. докстринг модуля); расход пишется в GLOBAL_QUOTA — у TTS всего 10 запросов/сутки на модель."""
+    """Gemini TTS (основной: Fish Audio отключён флагом): возвращает (pcm_bytes, mime_type, used_model) или бросает исключение. Состояние передаётся параметрами (см. докстринг модуля); расход пишется в GLOBAL_QUOTA — у TTS всего 10 запросов/сутки на модель."""
     def call_tts(model_name: str):
         contents = [
             types.Content(
