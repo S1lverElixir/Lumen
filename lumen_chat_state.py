@@ -581,3 +581,65 @@ def _record_quota_usage(provider: str, model_id: str) -> None:
     e["used"] = int(e.get("used") or 0) + 1
     e["exhausted_at"] = None
     bot.mark_quota_dirty()
+
+# Сколько свежих сообщений точно не трогаем при обрезке (остальное уходит в саммари).
+HISTORY_SUMMARIZE_KEEP = 80
+# Вход саммаризатора режем, чтобы саммари не съело квоту целиком на километровом чате.
+_HISTORY_SUMMARY_INPUT_MAX_CHARS = 6000
+
+async def _trim_history(history: list[dict[str, Any]]) -> None:
+    """Обрезка истории с саммари: старшие сообщения сверх HISTORY_SUMMARIZE_KEEP сжимаются
+    одним вызовом дешёвой модели (Groq, резерв — голова OpenRouter), свежие остаются как есть.
+    При любой неудаче (нет ключей, ошибка API, пустое саммари) — старая молчаливая обрезка до лимита."""
+    import bot
+    if len(history) <= bot.SHARED_HISTORY_MAX_LEN:
+        return
+    recent = history[-HISTORY_SUMMARIZE_KEEP:]
+    old = history[:-HISTORY_SUMMARIZE_KEEP]
+    lines = []
+    for item in old:
+        cont = item.get("content") if isinstance(item, dict) else None
+        txt = bot._or_extract_text(cont) if isinstance(cont, (dict, list)) else str(cont or "").strip()
+        if txt:
+            role = str(item.get("role", "user")) if isinstance(item, dict) else "user"
+            lines.append(f"{role}: {txt}")
+    digest_input = "\n".join(lines)[:_HISTORY_SUMMARY_INPUT_MAX_CHARS]
+    summary = await _summarize_text(digest_input) if digest_input.strip() else ""
+    if summary:
+        history[:] = [{"role": "user", "content": "[Ранее в диалоге]: " + summary}] + recent
+    else:
+        history[:] = history[-bot.SHARED_HISTORY_MAX_LEN:]
+
+async def _summarize_text(text: str) -> str:
+    """Одно саммари дешёвой моделью. Пустая строка при любой неудаче — вызывающий код режет по-старому."""
+    import bot
+    messages = [
+        {"role": "system", "content": "Summarize the conversation below briefly (5-8 sentences), in the conversation's own language. Facts and open questions only, no preamble."},
+        {"role": "user", "content": text},
+    ]
+    payload = {"messages": messages, "temperature": 0.2, "max_tokens": 400, "stream": False}
+    candidates: list[tuple[str, str, str]] = []
+    if bot.GROQ_API_KEY:
+        from lumen_router_config import _GROQ_LIGHT_ORDER
+        candidates = [("groq", _GROQ_LIGHT_ORDER[0], "chat/completions")]
+    if bot.OPENROUTER_API_KEY:
+        from lumen_router_config import _OR_LIGHT_ORDER
+        candidates.append(("openrouter", _OR_LIGHT_ORDER[0], "chat/completions"))
+    for provider, model, path in candidates:
+        try:
+            payload["model"] = model
+            if provider == "groq":
+                resp = await bot._groq_request(path, "POST", json_body=payload)
+            else:
+                resp = await bot._or_request(path, "POST", json_body=payload)
+            choices = resp.get("choices") or []
+            answer = ""
+            if choices:
+                answer = bot._or_extract_text(choices[0].get("message") or "").strip()
+            if answer:
+                bot._record_quota_usage(provider, model)
+                return answer
+        except Exception as exc:
+            log.warning("[history] Summarization via %s/%s failed, trying next: %s", provider, model, exc)
+            continue
+    return ""

@@ -428,6 +428,7 @@ from lumen_chat_state import (
     _quota_entry,
     _mark_quota_exhausted,
     _record_quota_usage,
+    _trim_history,
 )
 
 # Простой трекер для rate limiting и очередь кнопок-уточнений живут в
@@ -783,6 +784,7 @@ __all__ = [
     "_is_privileged_in_chat",
     "_mark_quota_exhausted",
     "_record_quota_usage",
+    "_trim_history",
     "PICK_TTL_SEC",
     "_pending_picks",
     "_purge_expired_picks",

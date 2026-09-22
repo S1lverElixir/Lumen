@@ -258,8 +258,8 @@ async def _run_streaming_reply(
                 await bot._tg_call(sent_messages[-1].edit_text, final_answer, parse_mode=None, call_timeout=15.0)
                 hist.append({"role": "user", "content": _history_user_text(user_text)})
                 hist.append({"role": "assistant", "content": final_answer})
-                if len(hist) > bot.SHARED_HISTORY_MAX_LEN:
-                    del hist[:-bot.SHARED_HISTORY_MAX_LEN]
+                # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
+                await bot._trim_history(hist)
                 ctx.clear()
                 bot._record_quota_usage(provider, model_id)
                 return final_answer, None

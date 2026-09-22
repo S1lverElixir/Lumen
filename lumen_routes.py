@@ -313,8 +313,8 @@ async def ask_openrouter_multimodal(
 
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": answer})
-    if len(history) > bot.SHARED_HISTORY_MAX_LEN:
-         del history[:-bot.SHARED_HISTORY_MAX_LEN]
+    # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
+    await bot._trim_history(history)
     ctx.clear()
     bot._record_quota_usage("openrouter", model_trial)
     return answer
@@ -594,8 +594,8 @@ async def ask_gemini(
 
     hist.append({"role": "user", "content": _history_user_text(user_text)})
     hist.append({"role": "assistant", "content": ans})
-    if len(hist) > bot.SHARED_HISTORY_MAX_LEN:
-         del hist[:-bot.SHARED_HISTORY_MAX_LEN]
+    # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
+    await bot._trim_history(hist)
     ctx.clear()
     bot._record_quota_usage("gemini", curr_model_id)
     return ans

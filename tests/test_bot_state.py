@@ -532,6 +532,74 @@ def test_history_user_text_strips_one_shot_service_note():
     assert bot._history_user_text("обычный вопрос") == "обычный вопрос"
 
 
+def _make_long_history(n=105):
+    return [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"сообщение {i}"}
+        for i in range(n)
+    ]
+
+
+def test_trim_history_short_is_untouched(monkeypatch):
+    # Короткая история — ни саммари, ни сетевых вызовов вообще.
+    async def must_not_be_called(*args, **kwargs):
+        raise AssertionError("no LLM call for short history")
+
+    monkeypatch.setattr(bot, "_groq_request", must_not_be_called)
+    monkeypatch.setattr(bot, "_or_request", must_not_be_called)
+    history = _make_long_history(50)
+    asyncio.run(bot._trim_history(history))
+    assert len(history) == 50
+    assert history[0]["content"] == "сообщение 0"
+
+
+def test_trim_history_summarizes_old_keeps_recent(monkeypatch):
+    # Переполнение: старое сжимается в первую запись с пометкой, свежие 80 — как были.
+    async def fake_groq_request(path, method="GET", *, json_body=None):
+        assert json_body["model"] == "qwen/qwen3.8-27b"
+        return {"choices": [{"message": {"content": "Обсуждали погоду и котов."}}]}
+
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model: None)
+    history = _make_long_history(105)
+    asyncio.run(bot._trim_history(history))
+    assert len(history) == 81
+    assert history[0]["content"].startswith("[Ранее в диалоге]: ")
+    assert "погоду" in history[0]["content"]
+    assert history[1]["content"] == "сообщение 25"
+    assert history[-1]["content"] == "сообщение 104"
+
+
+def test_trim_history_falls_back_to_plain_cut_on_failure(monkeypatch):
+    # Саммаризатор упал — режем по-старому, ответ не ломается.
+    async def failing_request(*args, **kwargs):
+        raise bot.GroqAPIError("overloaded", status_code=503)
+
+    monkeypatch.setattr(bot, "_groq_request", failing_request)
+    monkeypatch.setattr(bot, "_or_request", failing_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
+    history = _make_long_history(105)
+    asyncio.run(bot._trim_history(history))
+    assert len(history) == 100
+    assert history[0]["content"] == "сообщение 5"
+
+
+def test_trim_history_without_keys_cuts_plainly(monkeypatch):
+    # Нет ключей — даже не пробуем сеть, сразу старая обрезка.
+    async def must_not_be_called(*args, **kwargs):
+        raise AssertionError("no LLM call without keys")
+
+    monkeypatch.setattr(bot, "_groq_request", must_not_be_called)
+    monkeypatch.setattr(bot, "_or_request", must_not_be_called)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "")
+    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "")
+    history = _make_long_history(105)
+    asyncio.run(bot._trim_history(history))
+    assert len(history) == 100
+    assert history[0]["content"] == "сообщение 5"
+
+
 def test_looks_like_media_reference_true_for_explicit_media_nouns():
     assert bot._looks_like_media_reference("что на фото") is True
     assert bot._looks_like_media_reference("опиши это видео") is True
