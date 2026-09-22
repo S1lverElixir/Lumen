@@ -84,6 +84,19 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
               # Именованный трек или "оригинальный" с названием — реальное название важнее подписи; очищенный остаток — если был префикс.
               cleaned_title = residual_title if (mentions_generic_phrase and residual_title) else raw_music_title
               performer_name = raw_music_author
+              # TikWM иногда привозит поля перевёрнутыми (прод 22.09.2026: в title лежал юзернейм
+              # автора видео, в author — название трека; по той же ссылке в другой раз — наоборот).
+              # Чиним очевидный случай: название без единого пробела совпало с хендлом автора видео,
+              # а в "авторе" — фраза с пробелами. Однословный настоящий трек под правило не попадает:
+              # он не равен хендлу автора.
+              _title_handle = cleaned_title.strip().lower().lstrip("@")
+              _known_handles = {h for h in (author_uniq_clean.lower(), author_nick.lower()) if h}
+              if _title_handle in _known_handles and re.search(r"\s", performer_name or ""):
+                   log.info(
+                        "[tiktok-music][diag] Swapped music title/author from TikWM (title=%r looked like author handle, author=%r looked like a title) — unswapping.",
+                        cleaned_title, performer_name,
+                   )
+                   cleaned_title, performer_name = performer_name, author_uniq_clean or author_nick or performer_name
 
          # достаём обложку трека
          cover_url = music_info.get("cover") or music_info.get("avatar") or media_data.get("author", {}).get("avatar")

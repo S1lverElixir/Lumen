@@ -1146,6 +1146,62 @@ def test_send_tiktok_music_passes_audio_duration():
         bot.chat_state.pop(999452, None)
 
 
+def _run_music_capturing_audio(media_data, chat_id=999454):
+    import lumen_tiktok_flow
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(language_code="ru")
+    sent = {}
+
+    class _AudioBot:
+        async def send_audio(self, **kwargs):
+            sent.update(kwargs)
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None):
+        return b"fake-bytes"
+
+    def fake_write_tags(path, title, artist, cover):
+        pass
+
+    original_download = bot._download_url_bin
+    original_write_tags = bot._write_mp3_tags
+    original_bot = bot.bot
+    bot._download_url_bin = fake_download
+    bot._write_mp3_tags = fake_write_tags
+    bot.bot = _AudioBot()
+    try:
+        asyncio.run(lumen_tiktok_flow._send_tiktok_music(None, media_data, incoming, "Nick", {}))
+    finally:
+        bot._download_url_bin = original_download
+        bot._write_mp3_tags = original_write_tags
+        bot.bot = original_bot
+        bot.chat_state.pop(chat_id, None)
+    return sent
+
+
+def test_send_tiktok_music_unswaps_tikwm_title_author():
+    # Прод 22.09.2026: TikWM иногда кладёт юзернейм в title, а название трека — в author.
+    sent = _run_music_capturing_audio({
+        "music": "https://tikwm.com/song.mp3",
+        "music_info": {"title": "milka_kicm12", "author": "Миля, ты че творишь"},
+        "author": {"nickname": "Milka", "unique_id": "milka_kicm12"},
+    })
+    assert sent.get("title") == "Миля, ты че творишь"
+    assert sent.get("performer") == "milka_kicm12"
+
+
+def test_send_tiktok_music_keeps_one_word_track_title():
+    # Однословный настоящий трек НЕ равен хендлу автора — не трогаем.
+    sent = _run_music_capturing_audio({
+        "music": "https://tikwm.com/song.mp3",
+        "music_info": {"title": "Believer", "author": "Imagine Dragons"},
+        "author": {"nickname": "Other", "unique_id": "other_user"},
+    })
+    assert sent.get("title") == "Believer"
+    assert sent.get("performer") == "Imagine Dragons"
+
+
 def test_single_video_status_deleted_after_music():
     # Статус живёт и во время скачивания музыки тоже — сносится только после неё, а не до.
     import lumen_tiktok_flow
