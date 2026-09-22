@@ -355,7 +355,8 @@ def test_handle_tiktok_guest_gets_dm_hint_not_placeholder():
         asyncio.run(bot.handle_tiktok(incoming, "https://vt.tiktok.com/xxxxx/"))
         assert len(answered) == 1
         assert "распознана" not in answered[0]
-        assert "личн" in answered[0].lower()
+        # Дефолтный язык чата — английский: сверяем с ключом дословно.
+        assert answered[0] == bot._t(999503, "tiktok_guest_dm_hint")
     finally:
         bot._answer_guest_text = original
         bot.chat_state.pop(999503, None)
