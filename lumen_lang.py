@@ -508,7 +508,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "Can't download the sound separately via its page link — neither TikWM nor TikTok itself give this bot the needed data for that link kind. Please send a link to any video with this sound — the bot will send the sound along with it.",
         "es": "No se puede descargar el sonido por separado con el enlace a su página — ni TikWM ni el propio TikTok dan a este bot los datos necesarios para ese tipo de enlace. Envía, por favor, un enlace a cualquier video con este sonido — el bot enviará el sonido junto con él.",
         "kk": "Дыбысты оның парақшасының сілтемесі арқылы жеке жүктеу мүмкін емес — мұндай сілтеме түріне TikWM де, TikTok-тың өзі де бұл ботқа қажетті деректерді бермейді. Осы дыбысы бар кез келген видеоға сілтеме жіберші — бот дыбысты онымен бірге жібереді.",
-        "ru": "Скачать звук отдельно по ссылке на его страницу не получится — ни TikWM, ни сам TikTok не отдают нужные данные по такому виду ссылки этому боту. Пришлите, пожалуйста, ссылку на любое видео с этим звуком — бот пришлёт звук вместе с ним.",
+        "ru": "Скачать звук отдельно по ссылке на его страницу не получится — ни TikWM, ни сам TikTok не отдают нужные данные по такому виду ссылки этому боту. Пришли, пожалуйста, ссылку на любое видео с этим звуком — бот пришлёт звук вместе с ним.",
         "uk": "Завантажити звук окремо за посиланням на його сторінку не вийде — ні TikWM, ні сам TikTok не віддають потрібні дані за таким видом посилання цьому боту. Надішли, будь ласка, посилання на будь-яке відео з цим звуком — бот надішле звук разом із ним.",
     },
     "tiktok_dl_hd": {
@@ -540,7 +540,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "This TikTok video is too big to send — the Telegram Bot API limits file uploads to 50 MB. Try downloading this video another way.",
         "es": "Este video de TikTok es demasiado grande para enviarlo — la API de bots de Telegram limita la subida de archivos a 50 MB. Intenta descargar este video de otra forma.",
         "kk": "Бұл TikTok видеосы жіберу үшін тым үлкен — Telegram Bot API файл жүктеуді 50 МБ-мен шектейді. Видеоны басқа жолмен жүктеп көр.",
-        "ru": "Это видео из TikTok слишком большое для отправки — Telegram Bot API ограничивает загрузку файлов 50 МБ. Попробуйте скачать это видео другим способом.",
+        "ru": "Это видео из TikTok слишком большое для отправки — Telegram Bot API ограничивает загрузку файлов 50 МБ. Попробуй скачать это видео другим способом.",
         "uk": "Це відео з TikTok занадто велике для надсилання — Telegram Bot API обмежує завантаження файлів 50 МБ. Спробуй завантажити це відео іншим способом.",
     },
     "tiktok_no_media": {

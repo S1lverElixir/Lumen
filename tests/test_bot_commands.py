@@ -671,3 +671,14 @@ def test_command_locales_excludes_filipino_without_iso_639_1_code():
     # двухбуквенные ISO 639-1 коды, которых у филиппинского нет).
     assert "fil" not in bot.COMMAND_LOCALES
     assert set(bot.COMMAND_LOCALES) == (set(bot.SUPPORTED_LANGS) - {bot.DEFAULT_LANG, "fil"})
+
+
+def test_ru_system_messages_use_informal_ty():
+    # Стиль бота — на "ты" везде: формальное "вы" в русских строках — баг стиля.
+    import lumen_lang
+    too_big = lumen_lang.STRINGS["tiktok_too_big"]["ru"]
+    assert "Попробуй скачать" in too_big
+    assert "Попробуйте" not in too_big
+    no_sep = lumen_lang.STRINGS["tiktok_sound_no_separate"]["ru"]
+    assert "Пришли, пожалуйста" in no_sep
+    assert "Пришлите" not in no_sep
