@@ -379,7 +379,9 @@ def test_send_tiktok_music_truly_generic_original_sound_uses_localized_label():
     }
     title, artist = _run_send_tiktok_music(media_data, language_code="ru")
     assert title == "Оригинальный звук"
-    assert artist == "videoposter"
+    # Исполнитель — автор ЗВУКА из music_info (прод 22.09.2026: звук переиспользуют чужие
+    # посты, автор видео тут ни при чём).
+    assert artist == "SomeArtist"
 
 
 def test_send_tiktok_music_generic_original_sound_with_only_video_author_suffix():
@@ -1200,6 +1202,31 @@ def test_send_tiktok_music_keeps_one_word_track_title():
     })
     assert sent.get("title") == "Believer"
     assert sent.get("performer") == "Imagine Dragons"
+
+
+def test_send_tiktok_music_truly_unnamed_sound_gets_localized_label():
+    # Прод 22.09.2026 ([tiktok-music][diag]): raw 'original sound - account2525101295' при
+    # author 'account2525101295' — хендл автора звука в заголовке БЕЗЫМЯННОГО звука, а не
+    # название. Раньше остаток считался названием и в ТГ уезжало title=performer=хендл.
+    sent = _run_music_capturing_audio({
+        "music": "https://tikwm.com/song.mp3",
+        "music_info": {"title": "original sound - account2525101295", "author": "account2525101295"},
+        "author": {"nickname": "VideoPoster", "unique_id": "videoposter"},
+    })
+    assert sent.get("title") == "Оригинальный звук"
+    assert sent.get("performer") == "account2525101295"
+
+
+def test_send_tiktok_music_named_track_keeping_artist_in_title():
+    # Именованный трек, где автор упомянут в заголовке, — остаётся названием, хендл автора
+    # вырезается только как довесок, а не целиком.
+    sent = _run_music_capturing_audio({
+        "music": "https://tikwm.com/song.mp3",
+        "music_info": {"title": "Night Call - Kavinsky", "author": "Kavinsky"},
+        "author": {"nickname": "VideoPoster", "unique_id": "videoposter"},
+    })
+    assert sent.get("title") == "Night Call"
+    assert sent.get("performer") == "Kavinsky"
 
 
 def test_send_tiktok_music_retries_without_thumbnail_on_failure():

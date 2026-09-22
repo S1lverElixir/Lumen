@@ -64,6 +64,12 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
               residual_title = re.sub(re.escape(author_nick), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
          if author_uniq_clean:
               residual_title = re.sub(re.escape(author_uniq_clean), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
+         # Хендл АВТОРА ЗВУКА тоже вырезаем (прод 22.09.2026, [tiktok-music][diag]:
+         # raw 'original sound - account2525101295' — TikTok подставляет хендл автора звука
+         # в заголовок ДЕЙСТВИТЕЛЬНО безымянного звука; иначе остаток считался "настоящим
+         # названием" и в ТГ уезжало title=performer=хендл вместо локализованной подписи.
+         if raw_music_author:
+              residual_title = re.sub(re.escape(raw_music_author), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
          is_original_sound = mentions_generic_phrase and not residual_title
          # language_code получателя — в диагн. лог: при жалобе "подпись не на моём языке" иначе не проверить, что пришло от Telegram.
          sender_language_code = message.from_user.language_code if message.from_user else None
@@ -77,13 +83,18 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          )
 
          if is_original_sound:
-               # в исполнителях — юзернейм без @. Безымянный звук подменяем переводом на язык ОТПРАВИТЕЛЯ ссылки (raw зависит от языка автора видео, связи TikTok не даёт).
-               performer_name = author_uniq_clean if author_uniq_clean else raw_music_author
+               # в исполнителях — автор ЗВУКА (не видео: звук переиспользуют чужие посты).
+               performer_name = raw_music_author or author_uniq_clean
                cleaned_title = _original_sound_label(sender_language_code, bot._chat_lang(message.chat.id))
          else:
               # Именованный трек или "оригинальный" с названием — реальное название важнее подписи; очищенный остаток — если был префикс.
               cleaned_title = residual_title if (mentions_generic_phrase and residual_title) else raw_music_title
               performer_name = raw_music_author
+              # "Название - Автор" в одном поле: автор едет отдельно в performer, из названия хвостом (иначе дублируется дважды).
+              if raw_music_author:
+                   _stripped = re.sub(r"\s+[–—-]\s+" + re.escape(raw_music_author) + r"\s*$", "", cleaned_title, flags=re.IGNORECASE).strip()
+                   if _stripped:
+                        cleaned_title = _stripped
               # TikWM иногда привозит поля перевёрнутыми (прод 22.09.2026: в title лежал юзернейм
               # автора видео, в author — название трека; по той же ссылке в другой раз — наоборот).
               # Чиним очевидный случай: название без единого пробела совпало с хендлом автора видео,
