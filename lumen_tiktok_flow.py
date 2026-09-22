@@ -119,15 +119,30 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          # Слэш и управляющие из чужого названия — в "_" (AUD-E-005),
          # иначе multipart-имя файла битое.
          safe_title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", cleaned_title[:60]).strip() or "track"
-         await bot.bot.send_audio(
-              chat_id=message.chat.id,
-              audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
-              title=cleaned_title,
-              performer=performer_name,
-              duration=music_duration if music_duration > 0 else None,
-              thumbnail=thumbnail_file,
-              reply_to_message_id=message.message_id
-         )
+         try:
+              await bot.bot.send_audio(
+                   chat_id=message.chat.id,
+                   audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
+                   title=cleaned_title,
+                   performer=performer_name,
+                   duration=music_duration if music_duration > 0 else None,
+                   thumbnail=thumbnail_file,
+                   reply_to_message_id=message.message_id
+              )
+         except Exception as send_exc:
+              if thumbnail_file is None:
+                   raise
+              # Обложка с TikWM бывает жирной — Telegram режет отправку целиком, и трек не приходит
+              # вообще молча. Повторяем без обложки: музыка важнее картинки.
+              log.warning("[tiktok] send_audio with thumbnail failed, retrying without: %s", send_exc)
+              await bot.bot.send_audio(
+                   chat_id=message.chat.id,
+                   audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
+                   title=cleaned_title,
+                   performer=performer_name,
+                   duration=music_duration if music_duration > 0 else None,
+                   reply_to_message_id=message.message_id
+              )
     except Exception as e:
          log.warning("[tiktok] failed to send music: %s", e)
 
