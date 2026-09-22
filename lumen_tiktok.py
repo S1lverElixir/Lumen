@@ -315,6 +315,26 @@ async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: flo
         raise
 
 
+async def _probe_audio_duration(path: str) -> int:
+    """Длительность аудиофайла в секундах (для send_audio — без неё Telegram показывает 0:00). 0 при любой неудаче."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await _communicate_process(proc, timeout=15)
+        raw = stdout.decode(errors="replace").strip().splitlines()
+        if raw and raw[0] and raw[0] != "N/A":
+            return max(1, round(float(raw[0])))
+    except Exception as e:
+        log.warning("[ffmpeg] Audio probe failed: %s", e)
+    return 0
+
+
 async def _probe_video_dimensions(path: str) -> tuple[int, int, int]:
     """Возвращает (duration, width, height): без них Telegram показывает видео "сырым файлом" 0:00 (TikTok не всегда ставит faststart)."""
     try:

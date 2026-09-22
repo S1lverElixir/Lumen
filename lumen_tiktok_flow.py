@@ -101,6 +101,7 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
 
          # вшиваем метаданные и обложку в MP3 перед отправкой — чтобы теги видели и другие плееры
          tagged_music_bytes = music_bytes
+         music_duration = 0
          try:
               with tempfile.TemporaryDirectory() as tmp_dir:
                    tmp_mp3_path = os.path.join(tmp_dir, "music.mp3")
@@ -110,6 +111,8 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
                    if os.path.exists(tmp_mp3_path) and os.path.getsize(tmp_mp3_path) > 0:
                         with open(tmp_mp3_path, "rb") as f:
                              tagged_music_bytes = f.read()
+                        # Длительность — явно: без неё Telegram показывает 0:00 (та же история, что была с видео).
+                        music_duration = await bot._probe_audio_duration(tmp_mp3_path)
          except Exception as tag_err:
               log.warning("[tiktok] failed to write embedded tags to MP3: %s", tag_err)
 
@@ -117,10 +120,11 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          # иначе multipart-имя файла битое.
          safe_title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", cleaned_title[:60]).strip() or "track"
          await bot.bot.send_audio(
-               chat_id=message.chat.id,
-               audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
+              chat_id=message.chat.id,
+              audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
               title=cleaned_title,
               performer=performer_name,
+              duration=music_duration if music_duration > 0 else None,
               thumbnail=thumbnail_file,
               reply_to_message_id=message.message_id
          )
@@ -166,10 +170,11 @@ async def _try_send_tiktok_slideshow(
     if images and isinstance(images, list):
           # TikTok разрешает до 35 слайдов, Telegram — 10 за вызов: берём весь пост и шлём несколькими группами.
          images_to_fetch = images[:bot.TIKTOK_SLIDESHOW_MAX_ITEMS]
-         status_text = f"Скачиваю слайдшоу TikTok ({len(images_to_fetch)} слайдов)"
-         if len(images) > len(images_to_fetch):
-              status_text += f" — показаны первые {len(images_to_fetch)} из {len(images)}"
-         await bot._edit_message_quietly(status, status_text)
+         # Статус слайдшоу — через переводы (был захардкожен по-русски).
+         await bot._edit_message_quietly(status, bot._t(
+             message.chat.id, "tiktok_dl_slideshow",
+             shown=len(images_to_fetch), total=len(images),
+         ))
           # Качаем слайды параллельно gather; конкурентность режем семафором, чтобы не занимать весь пул сессии.
          fetch_urls = _slideshow_slide_urls(media_data, images_to_fetch)
 
@@ -217,7 +222,7 @@ async def _try_send_tiktok_slideshow(
               else:
                    media_items.append(InputMediaPhoto(media=BufferedInputFile(item_bytes, filename=f"photo_{idx}.jpg")))
          if media_items:
-              await bot._delete_message_quietly(status)
+              # Статус держим до конца (включая музыку ниже) — иначе человек висит в тишине, пока качается трек.
               if len(media_items) == 1:
                     # Один уцелевший слайд — обычным send_photo/send_video: media group требует минимум 2.
                    only_item = media_items[0]
@@ -243,6 +248,7 @@ async def _try_send_tiktok_slideshow(
                               # Пауза между группами — против анти-флуда.
                              await asyncio.sleep(0.3)
               await _send_tiktok_music(session, media_data, message, author, headers)
+              await bot._delete_message_quietly(status)
               return True
     return False
 
@@ -315,8 +321,8 @@ async def _send_tiktok_single_video(
                    )
                    continue
 
-              await bot._delete_message_quietly(status)
               await _send_tiktok_music(session, media_data, message, author, headers)
+              await bot._delete_message_quietly(status)
               return
 
          if hit_size_limit:

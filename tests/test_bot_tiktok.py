@@ -1087,3 +1087,131 @@ def test_communicate_process_propagates_communicate_failure():
 
     asyncio.run(run())
 
+
+def test_slideshow_status_uses_localized_key():
+    # Статус слайдшоу был захардкожен по-русски — теперь ключ tiktok_dl_slideshow с плейсхолдерами.
+    text = bot._t(999451, "tiktok_dl_slideshow", shown=35, total=40)
+    assert "35/40" in text
+    try:
+        assert "слайдов" in text or "slideshow" in text.lower() or "Слайдшоу" in text
+    finally:
+        bot.chat_state.pop(999451, None)
+
+
+def test_send_tiktok_music_passes_audio_duration():
+    # Без явной длительности Telegram показывает 0:00 — пробинг обязан доезжать до send_audio.
+    import lumen_tiktok_flow
+
+    incoming = _FakeIncomingMessage(999452)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(language_code="ru")
+    sent = {}
+
+    class _AudioBot:
+        async def send_audio(self, **kwargs):
+            sent.update(kwargs)
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None):
+        return b"fake-bytes"
+
+    async def fake_probe(path):
+        return 42
+
+    def fake_write_tags(path, title, artist, cover):
+        pass
+
+    media_data = {
+        "music": "https://tikwm.com/song.mp3",
+        "music_info": {"title": "Song", "author": "Auth"},
+        "author": {"nickname": "Nick", "unique_id": "@nick"},
+    }
+    original_download = bot._download_url_bin
+    original_write_tags = bot._write_mp3_tags
+    original_probe = bot._probe_audio_duration
+    original_bot = bot.bot
+    bot._download_url_bin = fake_download
+    bot._write_mp3_tags = fake_write_tags
+    bot._probe_audio_duration = fake_probe
+    bot.bot = _AudioBot()
+    try:
+        asyncio.run(lumen_tiktok_flow._send_tiktok_music(None, media_data, incoming, "Nick", {}))
+        assert sent.get("duration") == 42
+        assert sent.get("title") == "Song"
+    finally:
+        bot._download_url_bin = original_download
+        bot._write_mp3_tags = original_write_tags
+        bot._probe_audio_duration = original_probe
+        bot.bot = original_bot
+        bot.chat_state.pop(999452, None)
+
+
+def test_single_video_status_deleted_after_music():
+    # Статус живёт и во время скачивания музыки тоже — сносится только после неё, а не до.
+    import lumen_tiktok_flow
+
+    tikwm_json = {
+        "code": 0,
+        "data": {
+            "play": "https://tikwm.com/sd.mp4", "size": 1000,
+            "author": {"nickname": "TestAuthor"},
+        },
+    }
+    incoming = _FakeIncomingMessage(999453)
+    incoming.message_id = 1
+    fake_bot = _FakeTikTokBot()
+    events = []
+
+    async def fake_get_http_session():
+        return _FakeTikTokSession(tikwm_json)
+
+    async def fake_resolve(session, url):
+        return url
+
+    async def fake_download_url_bin(session, url, headers=None):
+        return b"\x00" * 100
+
+    async def fake_probe_dims(path):
+        return 0, 0, 0
+
+    async def fake_thumb(path, duration):
+        return None
+
+    async def rec_music(*args, **kwargs):
+        events.append("music")
+        return None
+
+    async def rec_delete(message):
+        events.append("delete")
+        return True
+
+    original_get_session = bot._get_http_session
+    original_resolve = bot._resolve_tiktok_short
+    original_download = bot._download_url_bin
+    original_probe = bot._probe_video_dimensions
+    original_thumb = bot._generate_video_thumbnail
+    original_bot = bot.bot
+    original_delete = bot._delete_message_quietly
+    original_music = lumen_tiktok_flow._send_tiktok_music
+    bot._get_http_session = fake_get_http_session
+    bot._resolve_tiktok_short = fake_resolve
+    bot._download_url_bin = fake_download_url_bin
+    bot._probe_video_dimensions = fake_probe_dims
+    bot._generate_video_thumbnail = fake_thumb
+    bot.bot = fake_bot
+    bot._delete_message_quietly = rec_delete
+    lumen_tiktok_flow._send_tiktok_music = rec_music
+    try:
+        asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/123"))
+        assert events == ["music", "delete"]
+        assert len(fake_bot.sent_videos) == 1
+    finally:
+        bot._get_http_session = original_get_session
+        bot._resolve_tiktok_short = original_resolve
+        bot._download_url_bin = original_download
+        bot._probe_video_dimensions = original_probe
+        bot._generate_video_thumbnail = original_thumb
+        bot.bot = original_bot
+        bot._delete_message_quietly = original_delete
+        lumen_tiktok_flow._send_tiktok_music = original_music
+
