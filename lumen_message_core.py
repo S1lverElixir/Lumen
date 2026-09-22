@@ -59,6 +59,7 @@ async def _process_media_group_buffers(mgid: str) -> None:
     MAX_ALBUM_EXTRA = 9  # первое уходит как основное, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу)
     album_state = bot.get_state(main_msg.chat.id)
     album_user_id = main_msg.from_user.id if main_msg.from_user else None
+    targets: list[tuple[str, str, Any]] = []
     for m in messages[1:1 + MAX_ALBUM_EXTRA]:
         src = _msg_media_source(m)
         if not src:
@@ -66,7 +67,10 @@ async def _process_media_group_buffers(mgid: str) -> None:
         fid, mime, _ = _media_file_id_and_mime(src)
         if not fid:
             continue
-        fetched = await bot._fetch_media(fid, mime)
+        targets.append((fid, mime, src))
+    # Качаем параллельно, а не по очереди: альбом из 9 фото иначе ждал бы до ~10-20с последовательных скачиваний.
+    fetched_list = await asyncio.gather(*(bot._fetch_media(fid, mime) for fid, mime, _ in targets))
+    for (fid, mime, src), fetched in zip(targets, fetched_list):
         if fetched:
             extra_media.append(fetched)
             # Регрессия: файлы альбома пишем в recent_media_ids, иначе "что на втором фото" не найдёт их.
