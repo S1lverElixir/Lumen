@@ -484,6 +484,54 @@ def test_process_media_group_buffers_records_extra_photos_to_recent_media():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_process_media_group_buffers_fetches_extras_in_parallel_keeping_order():
+    # Альбом качается параллельно: медленное первое фото не должно задерживать остальные,
+    # а порядок вложений обязан совпасть с порядком сообщений.
+    chat_id = 999961
+    user = SimpleNamespace(id=778)
+
+    def _photo_msg(file_id):
+        photo = SimpleNamespace(file_id=file_id, mime_type=None, file_name=None)
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE), from_user=user,
+            media_group_id="mg2", text=None, caption=None, reply_to_message=None,
+            photo=[photo], video=None, animation=None, video_note=None,
+            voice=None, audio=None, document=None, sticker=None,
+        )
+
+    msgs = [_photo_msg(f"file_{i}") for i in range(5)]
+    captured = {}
+    concurrent = 0
+    max_concurrent = 0
+
+    async def fake_fetch_media(file_id, mime):
+        nonlocal concurrent, max_concurrent
+        concurrent += 1
+        max_concurrent = max(max_concurrent, concurrent)
+        try:
+            await asyncio.sleep(0.01)
+            return (file_id.encode(), "image/jpeg")
+        finally:
+            concurrent -= 1
+
+    async def fake_handle_core(message, extra_media=None):
+        captured["extra"] = extra_media
+
+    original_fetch, original_core = bot._fetch_media, bot._handle_message_core
+    bot._fetch_media = fake_fetch_media
+    bot._handle_message_core = fake_handle_core
+    bot._mg_buffers["mg2"] = msgs
+    try:
+        asyncio.run(bot._process_media_group_buffers("mg2"))
+        # Все 4 доп. фото качались одновременно, а не по очереди.
+        assert max_concurrent == 4
+        assert [b for b, _ in captured["extra"]] == [b"file_1", b"file_2", b"file_3", b"file_4"]
+    finally:
+        bot._fetch_media = original_fetch
+        bot._handle_message_core = original_core
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_media_question_without_file_gets_no_file_notice(rate_guard_setup, monkeypatch):
     # Прод-кейс 17.09.2026: "что на фото?" без файла — модель выдумала описание
     # несуществующего скриншота. Раз резолвинг ничего не нашёл, этот факт едет
