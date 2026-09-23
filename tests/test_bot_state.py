@@ -737,6 +737,31 @@ def test_voice_message_falls_back_to_gemini_audio_on_transcribe_failure(rate_gua
     bot.chat_state.pop(123, None)
 
 
+def test_mixed_album_with_video_slide_routes_to_gemini(rate_guard_setup, monkeypatch):
+    # Ревью ветки: смотрели только первое вложение — фото+видео уходило image-маршрутом и видео терялось.
+    message = rate_guard_setup()
+    message.text = ""
+    captured = {}
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return None, "", "photo.jpg", (b"pic", "image/jpeg")
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["route"] = route
+        captured["media"] = kwargs.get("media")
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+    asyncio.run(bot._handle_message_core(
+        message, extra_media=[(b"vid", "video/mp4")],
+    ))
+    assert captured["route"][0][0] == "gemini"
+    assert len(captured["media"]) == 2
+    bot.chat_state.pop(123, None)
+
+
 def test_unfetchable_attachment_gets_honest_error_not_silence(rate_guard_setup, monkeypatch):
     # Вложение есть, а скачать не вышло — честная ошибка вместо "Слушаю" в пустоту (прод 23.09.2026).
     message = rate_guard_setup()

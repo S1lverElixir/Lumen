@@ -101,12 +101,26 @@ def test_looks_like_freshness_query_detects_english():
     assert lumen_router_config._looks_like_freshness_query("just chatting about life") is False
 
 
+def test_looks_like_freshness_query_ignores_substrings():
+    # Ревью ветки: голый now ловил know/snow — высокочастотные ложняки на обычной болтовне.
+    assert lumen_router_config._looks_like_freshness_query("I know kung fu") is False
+    assert lumen_router_config._looks_like_freshness_query("snow here") is False
+    assert lumen_router_config._looks_like_freshness_query("groundbreaking discovery") is False
+
+
 def test_looks_like_heavy_query_detects_english():
     # Внешний аудит: "write a Python parser" пролетал в light-ветку.
     assert lumen_router_config._looks_like_heavy_query("write a Python parser for csv") is True
     assert lumen_router_config._looks_like_heavy_query("fix this bug, it crashes on empty input") is True
     assert lumen_router_config._looks_like_heavy_query("compare iphone and samsung") is True
     assert lumen_router_config._looks_like_heavy_query("just saying hello") is False
+
+
+def test_looks_like_heavy_query_ignores_substrings_and_handles_plurals():
+    # Ревью ветки: prove ловил improve, solve — resolve; "write two scripts" пролетал мимо.
+    assert lumen_router_config._looks_like_heavy_query("please improve my text") is False
+    assert lumen_router_config._looks_like_heavy_query("lets resolve this conflict") is False
+    assert lumen_router_config._looks_like_heavy_query("write two scripts for backup") is True
 
 
 def test_build_route_youtube_link_forces_gemini_only():

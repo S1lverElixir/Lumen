@@ -219,6 +219,11 @@ def test_match_trigger_prefix_english_triggers():
     assert bot._match_trigger_prefix("how are you", bot.TTS_TRIGGER_PREFIXES) is None
 
 
+def test_match_trigger_prefix_rejects_draw_idiom():
+    # Ревью ветки: "draw some" ловил идиому "draw conclusions".
+    assert bot._match_trigger_prefix("draw some conclusions here", bot.DRAW_TRIGGER_PREFIXES) is None
+
+
 def test_tts_trigger_this_with_reply_voices_replied_message(rate_guard_setup):
     # Регрессия (сентябрь 2026): "озвучь это" в ответ на сообщение озвучивало
     # само слово "это" — остаток после триггера считался содержанием.

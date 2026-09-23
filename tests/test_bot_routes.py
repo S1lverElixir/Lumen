@@ -832,6 +832,21 @@ def test_ask_openrouter_multimodal_skips_video_slides_for_gemini():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_ask_openrouter_multimodal_rejects_video_only_album():
+    # Только видео без картинок — нечего слать в OpenRouter: ошибка уводит маршрут в Gemini.
+    chat_id = 999413
+    original_key = bot.OPENROUTER_API_KEY
+    bot.OPENROUTER_API_KEY = "fake-key"
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(bot.ask_openrouter_multimodal(
+                chat_id, "что это?", [(b"vid", "video/mp4")], "a.mp4", model_chain=["m"],
+            ))
+    finally:
+        bot.OPENROUTER_API_KEY = original_key
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_route_error_reply_text_youtube_takes_priority_over_exception_type():
     exc = bot.OpenRouterAPIError("boom", status_code=500)
     text = bot._route_error_reply_text(exc, "gemini-3.6-flash", youtube_url_to_analyze="https://youtu.be/x")

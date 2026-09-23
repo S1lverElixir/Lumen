@@ -84,7 +84,7 @@ async def _groq_request(path: str, method: str = "GET", *, json_body: dict | Non
         raise
     except Exception as exc:
         exc_str = str(exc) or repr(exc) or exc.__class__.__name__
-        if bot.GROQ_API_KEY:
+        if bot.GROQ_API_KEY and len(bot.GROQ_API_KEY) > 8:
             exc_str = exc_str.replace(bot.GROQ_API_KEY, "<KEY>")
         raise bot.GroqAPIError(f"Groq network error: {exc_str}") from exc
 
@@ -118,7 +118,7 @@ async def _or_request(path: str, method: str = "GET", *, json_body: dict | None 
         # str(exc) у таймаутов часто пуст — берём repr/имя класса, иначе в логах пустая строка.
         exc_str = str(exc) or repr(exc) or exc.__class__.__name__
         # Вычищаем OPENROUTER_API_KEY из текста ошибок (defense-in-depth: обычно ключ только в заголовке, но прокси может процитировать заголовки).
-        if bot.OPENROUTER_API_KEY:
+        if bot.OPENROUTER_API_KEY and len(bot.OPENROUTER_API_KEY) > 8:
             exc_str = exc_str.replace(bot.OPENROUTER_API_KEY, "<KEY>")
         raise bot.OpenRouterAPIError(f"OpenRouter network error: {exc_str}") from exc
 
@@ -346,7 +346,7 @@ async def ask_openrouter_multimodal(
     for raw_bytes, mime in media_items[:10]:
         # Видео-слайды альбомов сюда не ходят (OpenRouter принимает только картинки) —
         # их забирает Gemini-ветка; раньше они просто молча отваливались вместе со 2-9 фото.
-        if not mime.startswith("image/"):
+        if not (mime or "").startswith("image/"):
             continue
         b64 = base64.b64encode(raw_bytes).decode("utf-8")
         parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
@@ -776,7 +776,7 @@ async def _run_route(
             tried_stream_model, tried_stream_provider = head_model, "groq"
             reusable_placeholder = placeholder
 
-    is_video_or_audio = bool(media) and not media[0][1].startswith("image/")
+    is_video_or_audio = bool(media) and any(not (m[1] or "").startswith("image/") for m in media)
     last_exc: Exception | None = None
     for provider in provider_order:
         ids = list(groups.get(provider) or [])

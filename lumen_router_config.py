@@ -403,11 +403,12 @@ _HEAVY_QUERY_RE = re.compile(
     r"|многошагов\w*|пошагов\w*\s+(инструкц\w*|план\w*)"
     r"|архитектур\w*|алгоритм\w*"
     # EN-набор (найдено внешним аудитом: heavy-детект был почти весь русский).
-    r"|write\s+(a\s+|an\s+|the\s+)?(\w+\s+)?(code|function|script|program|class|sql|regex|test|parser|bot|website|app)\b"
+    # Границы слов обязательны: голый prove ловил improve, solve — resolve (ревью ветки).
+    r"|write\s+(a\s+|an\s+|the\s+)?(\w+\s+)?(code|function\w*|script\w*|program\w*|class\w*|sql|regex|test\w*|parser\w*|bot|website\w*|app\w*)\b"
     r"|generate\s+code|fix\s+(this\s+|that\s+)?(code|bug|error|issue)\b|refactor\w*|optimiz\w*|debug"
     r"|explain\s+(code|error)|code\s+review|algorithm|architecture"
     r"|write\s+(an?\s+)?(essay|article|report|paper|thesis|cv|resume)\b"
-    r"|compar(e|ison)|prove|proof|solve|equation",
+    r"|compar(e|ison)|\bprove\b|\bproof\b|\bsolve\b|equation",
     re.IGNORECASE,
 )
 
@@ -441,9 +442,10 @@ _FRESHNESS_QUERY_RE = re.compile(
     r"|в\s+эт(ом|ой)\s+(году|месяце|неделе)"
     r"|\b202[6-9]\b"
     # EN-набор (найдено внешним аудитом: детект был только русским при DEFAULT_LANG=en
-    # и 25 языках; ложные срабатывания так же дёшевы).
-    r"|now|today|current\w*|latest|recent\w*|breaking"
-    r"|news|weather|forecast|price\w*|cost\w*|how\s+much|exchange|score\w*|schedule"
+    # и 25 языках; ложные срабатывания так же дёшевы). Границы слов обязательны:
+    # голый now ловил know/snow (ревью ветки).
+    r"|\bnow\b|\btoday\b|current\w*|latest|recent\w*|\bbreaking\b"
+    r"|\bnews\b|weather|forecast|price\w*|\bcost\w*|how\s+much|exchange|\bscore\w*|schedule"
     r"|who\s+is\s+(now|currently|the\s+(president|ceo|prime\s+minister|mayor))"
     r"|best\s+(to\s+buy|buy)|should\s+i\s+buy|worth\s+buying",
     re.IGNORECASE,

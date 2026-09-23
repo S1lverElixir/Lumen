@@ -50,7 +50,7 @@ DRAW_TRIGGER_PREFIXES = [
     "сгенери картинку", "сгенери изображение", "можешь нарисовать", "можешь нарисовать мне",
     # EN: /start обещает "draw a cat" — чиним (найдено внешним аудитом: был только русский).
     "generate an image", "generate me an image", "create an image", "draw a picture",
-    "draw me", "draw an", "draw a", "draw some", "paint me", "paint", "sketch",
+    "draw me", "draw an", "draw a", "paint me", "paint", "sketch",
 ]
 # "хочу картинку" не триггер: путается с показом/редактурой. Длинные фразы выше коротких, иначе вернётся первое совпадение.
 TTS_TRIGGER_PREFIXES = [

@@ -86,7 +86,7 @@ async def _fish_audio_tts_bytes(
     except Exception as exc:
         # Ключ из текста ошибок вычищаем (тот же defense-in-depth, что у _or_request/_groq_request).
         exc_str = str(exc) or repr(exc) or exc.__class__.__name__
-        if api_key:
+        if api_key and len(api_key) > 8:
             exc_str = exc_str.replace(api_key, "<KEY>")
         log.warning("[tts] Fish Audio request failed, falling back to Gemini TTS: %s", exc_str)
         return None

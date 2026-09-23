@@ -34,10 +34,16 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
     if user_id not in user_rate_limits and len(user_rate_limits) >= MAX_RATE_LIMIT_KEYS:
         _cleanup_rate_limit_dict()
         # Чистка сносит только протухших: при флуде свежими ID словарь рос бы без потолка.
-        # Добиваем жёстко — самых давно молчавших (найдено внешним аудитом).
-        while len(user_rate_limits) >= MAX_RATE_LIMIT_KEYS:
-            oldest = min(user_rate_limits, key=lambda uid: user_rate_limits[uid][-1] if user_rate_limits[uid] else 0)
-            user_rate_limits.pop(oldest, None)
+        # Добиваем жёстко — самых давно молчавших (найдено внешним аудитом). Сносим с запасом
+        # (до 90% потолка), чтобы не сканировать весь словарь на каждый новый ID (ревью ветки).
+        if len(user_rate_limits) >= MAX_RATE_LIMIT_KEYS:
+            ordered = sorted(
+                user_rate_limits,
+                key=lambda uid: user_rate_limits[uid][-1] if user_rate_limits[uid] else 0,
+            )
+            drop = len(ordered) - int(MAX_RATE_LIMIT_KEYS * 0.9) + 1
+            for uid in ordered[:drop]:
+                user_rate_limits.pop(uid, None)
     timestamps = user_rate_limits.setdefault(user_id, [])
     while timestamps and now - timestamps[0] > RATE_LIMIT_WINDOW_SEC:
         timestamps.pop(0)

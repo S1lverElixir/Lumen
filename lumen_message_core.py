@@ -305,6 +305,13 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
          pass
 
     media_mime = media_tuple[1] if media_tuple else None
+    # Смешанный альбом (фото + видео-слайды): достаточно одного видео — весь набор едет
+    # в Gemini-ветку, иначе видео-слайды молча терялись (ревью ветки: смотрели только media[0]).
+    if media_mime and media_mime.startswith("image/") and extra_media:
+        for _, extra_mime in extra_media:
+            if not (extra_mime or "").startswith("image/"):
+                media_mime = extra_mime
+                break
     is_heavy = _looks_like_heavy_query(clean_prompt)
     needs_freshness = _looks_like_freshness_query(clean_prompt)
     route = _build_route(
