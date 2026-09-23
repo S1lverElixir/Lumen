@@ -277,6 +277,11 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
          clean_prompt = "Подробно перескажи и опиши содержание этого YouTube-видео."
 
     if not clean_prompt and not media_tuple and not youtube_url_to_analyze:
+         src = _msg_media_source(message)
+         if src is not None and type(src).__name__ != "Sticker":
+              # Вложение было, но скачать/распознать не вышло — честно говорим, а не "Слушаю" в пустоту.
+              await bot._safe_reply(message, bot._model_error_text("fallback", bot._chat_lang(message.chat.id)))
+              return
          if mentioned:
               await bot._tg_call(message.reply, bot._t(message.chat.id, "status_listening"))
          return

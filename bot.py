@@ -1169,6 +1169,14 @@ async def handle_message(message: Message) -> None:
     is_private = message.chat.type == ChatType.PRIVATE if message.chat else True
     is_guest = is_guest_message(message)
     mentioned = message_mentions_bot(message)
+    # Входящее медиа логируем всегда: молчаливый дроп таких сообщений (прод 23.09.2026 — войс
+    # в личке обработан за 0 мс без следа) иначе не диагностировать вообще.
+    _in_src = _msg_media_source(message)
+    if _in_src is not None:
+        log.info(
+            "[in] media message: chat=%s kind=%s has_text=%s",
+            chat_id, type(_in_src).__name__, bool(message.text or message.caption),
+        )
 
     # Если бот не упомянут в группе, это просто контекст — обрабатываем без локов и ожидания
     if not is_private and not is_guest and not mentioned:

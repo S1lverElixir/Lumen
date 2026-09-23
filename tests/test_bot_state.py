@@ -615,6 +615,51 @@ def test_voice_message_falls_back_to_gemini_audio_on_transcribe_failure(rate_gua
     bot.chat_state.pop(123, None)
 
 
+def test_unfetchable_attachment_gets_honest_error_not_silence(rate_guard_setup, monkeypatch):
+    # Вложение есть, а скачать не вышло — честная ошибка вместо "Слушаю" в пустоту (прод 23.09.2026).
+    message = rate_guard_setup()
+    message.text = ""
+    message.photo = [SimpleNamespace(file_id="dead", mime_type=None, file_name=None)]
+    replied = []
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return None, "", "", None
+
+    async def fake_safe_reply(message, text, **kwargs):
+        replied.append(text)
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    asyncio.run(bot._handle_message_core(message))
+    assert len(replied) == 1
+    assert "Слушаю" not in replied[0]
+    bot.chat_state.pop(123, None)
+
+
+def test_sticker_without_text_keeps_old_listening_behavior(rate_guard_setup, monkeypatch):
+    # Стикер — не ошибка скачивания: прежнее поведение без изменений.
+    message = rate_guard_setup()
+    message.text = ""
+    Sticker = type("Sticker", (), {})
+    message.sticker = Sticker()
+    called = []
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return None, "", "", None
+
+    async def fake_tg_call(method, *args, **kwargs):
+        called.append(args[0] if args else "")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "message_mentions_bot", lambda message: True)
+    asyncio.run(bot._handle_message_core(message))
+    # Дефолтный язык чата — английский, сверяем с ключом дословно.
+    assert called == [bot._t(123, "status_listening")]
+    bot.chat_state.pop(123, None)
+
+
 def test_ordinary_question_gets_no_file_notice(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "столица Венгрии?"
