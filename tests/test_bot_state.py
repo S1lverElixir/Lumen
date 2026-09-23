@@ -655,7 +655,8 @@ def test_sticker_without_text_keeps_old_listening_behavior(rate_guard_setup, mon
     monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
     monkeypatch.setattr(bot, "message_mentions_bot", lambda message: True)
     asyncio.run(bot._handle_message_core(message))
-    assert any("Слушаю" in str(c) for c in called)
+    # Дефолтный язык чата — английский, сверяем с ключом дословно.
+    assert called == [bot._t(123, "status_listening")]
     bot.chat_state.pop(123, None)
 
 
