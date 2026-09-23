@@ -113,9 +113,8 @@ DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 # Вынесено из bot.py — второй источник правды об именах TTS-моделей.
 GEMINI_TTS_MODELS: list[str] = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
 
-# Fish free — только до 31.08.2026 (fish.audio/blog); истечение проверяем ежесуточно, тот же цикл что и временные модели.
+# Fish free — только до 31.08.2026 (fish.audio/blog); зеркала больше нет в живом каталоге.
 FISH_AUDIO_TTS_MODEL = "fish-audio/s2.1-pro-free:free"
-FISH_AUDIO_FREE_TIER_EXPIRY = date(2026, 8, 31)
 # ОТКЛЮЧЕНО (аудит моделей, 17 сентября 2026): зеркала fish-audio/s2.1-pro-free:free
 # больше нет в живом каталоге OpenRouter (публичный /models API — ни одного
 # fish-слага среди 24 бесплатных), а блог fish.audio/blog/s2-1-pro-free-api так и
@@ -125,21 +124,6 @@ FISH_AUDIO_FREE_TIER_EXPIRY = date(2026, 8, 31)
 # озвучку). Сама функция _fish_audio_tts_bytes и этот флаг оставлены (не удалены):
 # если Fish снова откроют free-доступ — достаточно вернуть True одной строкой.
 FISH_AUDIO_ENABLED = False
-
-_FISH_EXPIRY_WARNED = False
-
-def _check_fish_audio_tts_expiry() -> None:
-    # Варним раз за процесс: после 31.08.2026 условие истинно навсегда.
-    global _FISH_EXPIRY_WARNED
-    if _FISH_EXPIRY_WARNED:
-        return
-    today = date.today()
-    if today > FISH_AUDIO_FREE_TIER_EXPIRY:
-        _FISH_EXPIRY_WARNED = True
-        log.warning(
-            '[tts] The advertised free-tier access to %s expired on %s (today is %s) — check fish.audio/blog/s2-1-pro-free-api in case it was extended again, and update FISH_AUDIO_FREE_TIER_EXPIRY. If access is really gone, _fish_audio_tts_bytes in bot.py already falls back to Gemini TTS silently on any failure — nothing breaks functionally, but the wasted failing requests are worth removing.',
-            FISH_AUDIO_TTS_MODEL, FISH_AUDIO_FREE_TIER_EXPIRY.isoformat(), today.isoformat(),
-        )
 
 def _check_unconfirmed_model_quotas() -> None:
     """Напоминаем про модели с quota_unconfirmed: квота/grounding ещё не подтверждены по дашборду."""

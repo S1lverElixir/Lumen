@@ -394,6 +394,7 @@ from lumen_chat_state import (
     _chat_storage_path,
     _save_chat_to_storage,
     _delete_chat_storage,
+    _save_chat_payload,
     QuotaEntry,
     GLOBAL_QUOTA,
     _QUOTA_CHECK_THROTTLE_SEC,
@@ -403,6 +404,8 @@ from lumen_chat_state import (
     save_global_quota,
     _restore_single_chat,
     _save_chat_index,
+    _save_chat_index_payload,
+    _save_quota_payload,
     _dirty_chat_ids,
     _pending_chat_deletions,
     _last_quota_check_monotonic,
@@ -534,7 +537,6 @@ from lumen_router_config import (
     GEMINI_TTS_MODELS,
     FISH_AUDIO_TTS_MODEL,
     FISH_AUDIO_ENABLED,
-    _check_fish_audio_tts_expiry,
     _looks_like_heavy_query,
     _looks_like_freshness_query,
     _build_route,
@@ -751,11 +753,14 @@ __all__ = [
     "_chat_storage_path",
     "_save_chat_to_storage",
     "_delete_chat_storage",
+    "_save_chat_payload",
     "QuotaEntry",
     "_QUOTA_CHECK_THROTTLE_SEC",
     "load_global_quota",
     "_restore_single_chat",
     "_save_chat_index",
+    "_save_chat_index_payload",
+    "_save_quota_payload",
     "_save_chat_to_storage_limited",
     "_delete_chat_storage_limited",
     "_mark_new_chat_id",
@@ -1198,7 +1203,6 @@ async def _webhook_startup() -> None:
     log.info("Bot startup: webhook mode.")
     _check_temporary_free_models_expiry()
     _check_unconfirmed_model_quotas()
-    _check_fish_audio_tts_expiry()
     _check_scheduled_removals_due()
     # запросы ДО того, как Telegram попробует провалидировать доступность
     # /webhook при регистрации через setWebhook.
@@ -1326,7 +1330,6 @@ async def _webhook_startup() -> None:
             _last_daily_check_date = today
             _check_temporary_free_models_expiry()
             _check_unconfirmed_model_quotas()
-            _check_fish_audio_tts_expiry()
             _check_scheduled_removals_due()
             await _probe_or_model_liveness()
 

@@ -267,6 +267,22 @@ def _save_chat_index() -> None:
     except Exception as exc:
         log.warning("[state] Saving chat index failed: %s", exc)
 
+def _save_chat_index_payload(payload: str) -> None:
+    """Только блокирующая запись готового снапшота индекса — для to_thread."""
+    import bot
+    try:
+        bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, payload)
+    except Exception as exc:
+        log.warning("[state] Saving chat index failed: %s", exc)
+
+def _save_quota_payload(payload: str) -> None:
+    """Только блокирующая запись готового снапшота квоты — для to_thread."""
+    import bot
+    try:
+        bot._storage_write_text("lumen:global_quota", GLOBAL_QUOTA_FILE, payload)
+    except Exception as exc:
+        log.warning("[quota] Failed to save global quota: %s", exc)
+
 # Раньше save_state_to_disk()/save_global_quota() вызывались синхронно почти на
 # каждое сообщение прямо внутри асинхронных обработчиков — блокирующий json.dump
 # на полном chat_state (до 5000 чатов) блокировал event loop для ВСЕХ чатов сразу,
@@ -288,7 +304,24 @@ _state_flush_semaphore = asyncio.Semaphore(STATE_FLUSH_CONCURRENCY)
 async def _save_chat_to_storage_limited(chat_id: int, state: dict[str, Any]) -> bool:
     import bot
     async with _state_flush_semaphore:
-        return await asyncio.to_thread(bot._save_chat_to_storage, chat_id, state)
+        # Снапшот JSON — ЗДЕСЬ, а не в потоке: dumps без await атомарен для loop'а,
+        # а живой state в to_thread могли мутировать между итерациями (битый снапшот).
+        try:
+            payload = json.dumps(bot._serialize_chat_state(state), ensure_ascii=False)
+        except Exception as exc:
+            log.warning("[state] Saving chat %s failed: %s", chat_id, exc)
+            return False
+        return await asyncio.to_thread(bot._save_chat_payload, chat_id, payload)
+
+def _save_chat_payload(chat_id: int, payload: str) -> bool:
+    """Только блокирующая запись готового снапшота (см. выше) — для to_thread."""
+    import bot
+    try:
+        bot._storage_write_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id), payload)
+        return True
+    except Exception as exc:
+        log.warning("[state] Saving chat %s failed: %s", chat_id, exc)
+        return False
 
 async def _delete_chat_storage_limited(chat_id: int) -> bool:
     import bot
@@ -365,10 +398,13 @@ async def _flush_dirty_state_once() -> None:
                 )
         if _index_dirty:
             _index_dirty = False
-            await asyncio.to_thread(bot._save_chat_index)
+            # Снапшот ключей — здесь (см. комментарий у _save_chat_to_storage_limited).
+            index_payload = json.dumps(sorted(chat_state.keys()))
+            await asyncio.to_thread(bot._save_chat_index_payload, index_payload)
         if _quota_dirty:
             _quota_dirty = False
-            await asyncio.to_thread(bot.save_global_quota)
+            quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
+            await asyncio.to_thread(bot._save_quota_payload, quota_payload)
     except Exception as exc:
         log.warning('[state] Periodic state flush failed: %s', exc)
 

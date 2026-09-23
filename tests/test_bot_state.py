@@ -319,11 +319,11 @@ def test_flush_dirty_state_once_requeues_failed_saves():
     lumen_chat_state._index_dirty = False
     lumen_chat_state._quota_dirty = False
 
-    def fake_save(cid, state):
+    def fake_save(cid, payload):
         return cid != fail_chat  # успех для ok_chat, неудача для fail_chat
 
-    with patch("bot._save_chat_to_storage", side_effect=fake_save), \
-         patch("bot._save_chat_index"), patch("bot.save_global_quota"):
+    with patch("bot._save_chat_payload", side_effect=fake_save), \
+         patch("bot._save_chat_index_payload"), patch("bot._save_quota_payload"):
         try:
             asyncio.run(bot._flush_dirty_state_once())
             # Успешно сохранённый чат должен быть убран из очереди...
@@ -349,7 +349,7 @@ def test_flush_dirty_state_once_requeues_failed_deletes():
         return cid != fail_chat
 
     with patch("bot._delete_chat_storage", side_effect=fake_delete), \
-         patch("bot._save_chat_index"), patch("bot.save_global_quota"):
+         patch("bot._save_chat_index_payload"), patch("bot._save_quota_payload"):
         try:
             asyncio.run(bot._flush_dirty_state_once())
             assert ok_chat not in bot._pending_chat_deletions
@@ -357,6 +357,23 @@ def test_flush_dirty_state_once_requeues_failed_deletes():
         finally:
             bot._pending_chat_deletions.discard(ok_chat)
             bot._pending_chat_deletions.discard(fail_chat)
+
+
+def test_save_chat_to_storage_limited_snapshots_before_thread():
+    # Гонка сериализации: JSON-снапшот строится в loop (без await гонки нет),
+    # в поток едет уже готовая строка — живой словарь туда не передаётся.
+    import json
+    captured = {}
+
+    def fake_write(cid, payload):
+        captured["payload"] = payload
+        return True
+
+    with patch("bot._serialize_chat_state", return_value={"marker": 1}), \
+         patch("bot._save_chat_payload", side_effect=fake_write):
+        ok = asyncio.run(bot._save_chat_to_storage_limited(999705, {"history": []}))
+        assert ok is True
+        assert json.loads(captured["payload"]) == {"marker": 1}
 
 
 def test_sentry_scrub_secrets_redacts_known_tokens():

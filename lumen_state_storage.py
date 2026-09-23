@@ -38,7 +38,7 @@ import logging
 import urllib.parse
 import urllib.request as _urllib_request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -183,4 +183,4 @@ def _current_quota_day() -> str:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
     except Exception:
-        return datetime.utcnow().date().isoformat()
+        return datetime.now(timezone.utc).date().isoformat()

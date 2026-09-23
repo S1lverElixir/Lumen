@@ -473,10 +473,12 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                 # Модель сломала собственный вызов инструмента — повторяем БЕЗ инструментов (ответ своими знаниями вместо ошибки).
                 try:
                     retry_gconfig = gconfig.model_copy(update={"tools": None}) if gconfig is not None else None
-                    retry_fut = asyncio.to_thread(
-                        bot.client.models.generate_content, model=model_id, contents=call_contents, config=retry_gconfig
+                    # Async-клиент, а не to_thread: wait_for тогда реально отменяет зависший
+                    # запрос (поток to_thread отменить нельзя — он бы жил дальше в фоне).
+                    retry_resp = await asyncio.wait_for(
+                        bot.client.aio.models.generate_content(model=model_id, contents=call_contents, config=retry_gconfig),
+                        timeout=bot.TELEGRAM_AI_TIMEOUT,
                     )
-                    retry_resp = await asyncio.wait_for(retry_fut, timeout=bot.TELEGRAM_AI_TIMEOUT)
                     retry_text = getattr(retry_resp, "text", "") or ""
                     if retry_text.strip():
                         ans = retry_text
@@ -538,8 +540,12 @@ async def ask_gemini(
 
         attempt_start = time.monotonic()
         try:
-            fut = asyncio.to_thread(bot.client.models.generate_content, model=curr_model_id, contents=call_contents, config=gconfig)
-            resp = await asyncio.wait_for(fut, timeout=bot.ROUTE_MODEL_TIMEOUT_SEC)
+            # Async-клиент, а не to_thread: wait_for тогда реально отменяет зависший
+            # запрос (поток to_thread отменить нельзя — он бы жил дальше в фоне).
+            resp = await asyncio.wait_for(
+                bot.client.aio.models.generate_content(model=curr_model_id, contents=call_contents, config=gconfig),
+                timeout=bot.ROUTE_MODEL_TIMEOUT_SEC,
+            )
             ans = await bot._extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig)
             ans = ans.strip()
             if not ans:

@@ -3,6 +3,7 @@ test_bot_routes.py — Маршрутизация LLM: классификаци�
 
 Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
 """
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 import asyncio
 import bot
@@ -147,7 +148,7 @@ def test_ask_gemini_happy_path_returns_text_and_updates_history():
         return _FakeGeminiResponse(text="Привет! Чем могу помочь?")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
     try:
@@ -172,7 +173,7 @@ def test_ask_gemini_scrubs_identity_leak_before_storing_history():
         return _FakeGeminiResponse(text="Я работаю на базе Gemini от Google, а не Lumen.")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
     try:
@@ -269,7 +270,7 @@ def test_shared_history_between_gemini_and_openrouter():
         return _FakeGeminiResponse(text="Ответ от Gemini")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
 
@@ -311,7 +312,7 @@ def test_ask_gemini_retries_without_tools_on_malformed_function_call():
         return _FakeGeminiResponse(text="Ответ без инструментов")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
     try:
@@ -383,7 +384,7 @@ def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
         return extracts.pop(0)
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.return_value = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(return_value=MagicMock())
     monkeypatch.setattr(bot, "_extract_gemini_answer_text", fake_extract)
     original_client = bot.client
     bot.client = fake_client
@@ -611,7 +612,7 @@ def test_ask_gemini_falls_back_to_next_model_on_quota_exhausted():
         return _FakeGeminiResponse(text="Ответ от второй модели")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
     bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.6-flash", None)
@@ -637,7 +638,7 @@ def test_ask_gemini_raises_all_models_exhausted_when_entire_chain_429s():
         raise _QuotaExc("resource_exhausted")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
     try:
@@ -663,7 +664,7 @@ def test_ask_gemini_falls_back_to_next_model_on_timeout():
         return _FakeGeminiResponse(text="Ответ от второй модели")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
     bot.ROUTE_MODEL_TIMEOUT_SEC = 0.05
@@ -688,7 +689,7 @@ def test_ask_gemini_falls_back_to_next_model_on_generic_error():
         return _FakeGeminiResponse(text="Ответ от второй модели")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
     try:
@@ -707,7 +708,7 @@ def test_ask_gemini_raises_when_route_budget_exceeded():
         raise RuntimeError("internal error 500")
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     original_client = bot.client
     bot.client = fake_client
     try:
