@@ -56,6 +56,42 @@ def test_cmd_logs_flushes_the_listeners_real_handlers_not_root():
         bot._LOG_LISTENER = original_listener
 
 
+def test_cmd_stats_counts_only_recently_active_chats():
+    # "Активных" — с активностью за 24ч: молчащий год чат в счёт не идёт, но виден в "всего".
+    chat_id = 999812
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777002)
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    original_owner = bot.OWNER_ID
+    original_tg_call = bot._tg_call
+    real_quota = dict(bot.GLOBAL_QUOTA)
+    real_states = dict(bot.chat_state)
+    now = time.monotonic()
+    bot.OWNER_ID = 777002
+    bot._tg_call = fake_tg_call
+    bot.GLOBAL_QUOTA.clear()
+    bot.GLOBAL_QUOTA.update({"quota_day": bot._current_quota_day()})
+    bot.chat_state.clear()
+    bot.chat_state.update({
+        111: {"history": [], "last_activity": now - 3600},
+        222: {"history": [], "last_activity": now - 25 * 3600},
+    })
+    try:
+        asyncio.run(bot.cmd_stats(incoming))
+        assert "Активных чатов (24ч): 1 (всего: 2)" in sent["text"]
+    finally:
+        bot.OWNER_ID = original_owner
+        bot._tg_call = original_tg_call
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.chat_state.clear()
+        bot.chat_state.update(real_states)
+    # Проф-вид /stats: нули по мёртвым моделям не мусорят, у каждого провайдера итог и остаток лимита.
 def test_cmd_stats_hides_idle_models_and_shows_totals():
     # Проф-вид /stats: нули по мёртвым моделям не мусорят, у каждого провайдера итог и остаток лимита.
     chat_id = 999811

@@ -419,6 +419,12 @@ async def cmd_stats(message: Message) -> None:
     bot._reset_quota_if_new_day()
 
     total_chats = len(bot.chat_state)
+    # "Активные" — с живой активностью за сутки, а не все записи в памяти (те копятся до пруна на 5000).
+    _active_cutoff = time.monotonic() - 24 * 3600
+    active_chats = sum(
+        1 for s in bot.chat_state.values()
+        if isinstance(s, dict) and s.get("last_activity", 0) >= _active_cutoff
+    )
     uptime_sec = int(time.monotonic() - bot._PROCESS_START_MONOTONIC)
     uptime_str = f"{uptime_sec // 3600}ч {(uptime_sec % 3600) // 60}м"
 
@@ -459,7 +465,7 @@ async def cmd_stats(message: Message) -> None:
 
     text = (
         f"<b>Статистика Lumen</b>\n\n"
-        f"Активных чатов: {total_chats}\n"
+        f"Активных чатов (24ч): {active_chats} (всего: {total_chats})\n"
         f"Аптайм процесса: {uptime_str}\n"
         f"Счётчики квоты за сутки: {quota_day} (America/Los_Angeles, сбрасываются автоматически)\n\n"
         f"<b>Gemini — запросов по моделям:</b>\n{gemini_text}\n\n"
