@@ -262,6 +262,30 @@ def test_normalize_bullet_markers_does_not_touch_table_separator_row():
     assert lumen_formatting._normalize_bullet_markers(text) == text
 
 
+def test_split_inline_bullets_splits_long_run_into_lines():
+    # Прод 22.09.2026: модель написала весь список сравнения в один абзац через "•".
+    items = ["пункт %d с развёрнутым текстом для набора длины абзаца" % i for i in range(5)]
+    text = "Вот моменты сравнения характеристик: " + " • ".join(items)
+    assert len(text) >= 200
+    result = lumen_formatting._split_inline_bullets(text)
+    lines = result.split("\n")
+    assert lines[0] == "Вот моменты сравнения характеристик: " + items[0]
+    assert lines[1:] == ["• " + item for item in items[1:]]
+
+
+def test_split_inline_bullets_ignores_short_prose():
+    # Короткие "чай • кофе" и два разделителя — обычная проза, не список.
+    assert lumen_formatting._split_inline_bullets("На выбор чай • кофе • сок.") == "На выбор чай • кофе • сок."
+    assert lumen_formatting._split_inline_bullets("Плюсы • минусы") == "Плюсы • минусы"
+
+
+def test_md_to_html_splits_inline_bullets_end_to_end():
+    items = ["тезис номер %d с подробным раскрытием мысли" % i for i in range(4)]
+    text = "Итоги сравнения моделей: " + " • ".join(items)
+    result = lumen_formatting._md_to_html(text)
+    assert result.count("\n• ") == 3
+
+
 def test_md_to_html_full_pipeline_converts_bullet_list_with_bold():
     text = "* **Возмездие:** аргумент про справедливость\n* **Сдерживание:** снижает преступность"
     result = lumen_formatting._md_to_html(text)

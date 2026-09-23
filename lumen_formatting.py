@@ -122,6 +122,24 @@ _BULLET_MARKER_RE = re.compile(r"^([ \t]*)[-*][ \t]+", re.MULTILINE)
 def _normalize_bullet_markers(text: str) -> str:
     return _BULLET_MARKER_RE.sub(lambda m: m.group(1) + "• ", text)
 
+# Слипшиеся в один абзац буллеты ("• A ... • B ... • C", прод 22.09.2026: модель
+# написала весь список сравнения в одну строку) — разносим по строкам. Только
+# длинные абзацы с 3+ разделителями: короткие "чай • кофе" — обычная проза, не трогаем.
+_INLINE_BULLETS_MIN_SEPS = 3
+_INLINE_BULLETS_MIN_LEN = 200
+
+def _split_inline_bullets(text: str) -> str:
+    out = []
+    for line in text.split("\n"):
+        if len(line) >= _INLINE_BULLETS_MIN_LEN and line.count(" • ") >= _INLINE_BULLETS_MIN_SEPS:
+            head, *items = line.split(" • ")
+            # Первый кусок — вводная фраза ("Вот моменты:"), дальше — пункты.
+            out.append(head.rstrip())
+            out.extend("• " + item.strip() for item in items if item.strip())
+        else:
+            out.append(line)
+    return "\n".join(out)
+
 # ── Markdown-заголовки "#"/"##"/"###" → **жирный текст** ────────────────────
 # Регрессия 18.08.2026: модели пишут ### вопреки промпту. Режем ATX по CommonMark (решётки + пробел), C#/#tag не трогаем.
 _HEADER_MARKER_RE = re.compile(r"^[ \t]*#{1,6}[ \t]+(.*)$", re.MULTILINE)
@@ -196,9 +214,10 @@ def _md_to_html(text: str) -> str:
          ДО LaTeX/таблиц/списков/markdown, иначе обратные слэши и "|"/"-" внутри
          реального кода (regex, пути Windows, побитовое ИЛИ) были бы испорчены.
       1.3. LaTeX → юникод (_scrub_latex) — код уже вынесен шагом 1.
-      1.4. Маркеры списков "-"/"* " → "•" (_normalize_bullet_markers) — ДО таблиц,
-           чтобы строка-разделитель таблицы ("|---|---|") успела обработаться первой
-           и не была принята за маркер списка.
+       1.4. Маркеры списков "-"/"* " → "•" (_normalize_bullet_markers) — ДО таблиц,
+            чтобы строка-разделитель таблицы ("|---|---|") успела обработаться первой
+            и не была принята за маркер списка.
+       1.405. Слипшиеся "• A • B" в одном абзаце → по строкам (_split_inline_bullets).
       1.45. Markdown-цитаты "> " → сентинелы \x00BQS\x00/\x00BQE\x00 (_convert_
             blockquotes) — сентинелы, не сразу <blockquote>, т.к. Phase 2 экранировал
             бы буквальный тег; настоящий тег подставляется после Phase 3 (см. ниже).
@@ -259,6 +278,10 @@ def _md_to_html(text: str) -> str:
     # markers выше) — ДО таблиц и ДО Phase 3, чтобы не путаться с "**bold**" и
     # чтобы строка-разделитель таблицы ("|---|---|") успела обработаться первой.
     text = _normalize_bullet_markers(text)
+
+    # ── Phase 1.405: слипшиеся "• A • B" в одном абзаце → по строкам (см.
+    # _split_inline_bullets выше) — после нормализации маркеров, до таблиц/escape.
+    text = _split_inline_bullets(text)
 
     # ── Phase 1.41: markdown-заголовки "#"/"##"/"###" → **жирный текст** (см.
     # _normalize_headers выше) — после списков, до HTML-экранирования и до Phase 3
