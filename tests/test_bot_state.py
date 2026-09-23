@@ -561,6 +561,59 @@ def test_media_question_without_file_gets_no_file_notice(rate_guard_setup, monke
     assert "не выдумывай" in prompt.lower()
 
 
+def test_voice_message_transcribed_into_normal_routing(rate_guard_setup, monkeypatch):
+    # Войс: транскрибация уходит в общий роутинг как текст, аудио дальше не едет.
+    message = rate_guard_setup()
+    message.text = ""
+    captured = {}
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return None, "", "", (b"ogg-bytes", "audio/ogg")
+
+    async def fake_transcribe(audio_bytes, chat_id):
+        assert audio_bytes == b"ogg-bytes"
+        return "текст из войса"
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        captured["media"] = kwargs.get("media")
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    monkeypatch.setattr(bot, "_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+    asyncio.run(bot._handle_message_core(message))
+    assert "текст из войса" in captured["prompt"]
+    assert captured["media"] is None
+    bot.chat_state.pop(123, None)
+
+
+def test_voice_message_falls_back_to_gemini_audio_on_transcribe_failure(rate_guard_setup, monkeypatch):
+    # Whisper упал — войс идёт прежним путём (аудио в Gemini), а не в пустоту.
+    message = rate_guard_setup()
+    message.text = ""
+    captured = {}
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return None, "", "", (b"ogg-bytes", "audio/ogg")
+
+    async def fake_transcribe(audio_bytes, chat_id):
+        return None
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["media"] = kwargs.get("media")
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    monkeypatch.setattr(bot, "_transcribe_audio", fake_transcribe)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+    asyncio.run(bot._handle_message_core(message))
+    assert captured["media"] == [(b"ogg-bytes", "audio/ogg")]
+    bot.chat_state.pop(123, None)
+
+
 def test_ordinary_question_gets_no_file_notice(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "столица Венгрии?"

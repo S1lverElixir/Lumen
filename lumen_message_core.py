@@ -262,6 +262,16 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         message, state, clean_prompt, is_private=is_private,
     )
 
+    # Голос/аудио: сначала дешёвая транскрибация — дальше текст идёт общим роутингом по
+    # сценарию (тяжесть/свежесть определяются по сказанному). Не вышло — падает в прежний
+    # путь: аудио напрямую в Gemini (см. is_video_or_audio_media в роутере).
+    if media_tuple and media_tuple[1].startswith("audio/"):
+        transcript = await bot._transcribe_audio(media_tuple[0], message.chat.id)
+        if transcript:
+            marked = "[Расшифровка голосового]: " + transcript
+            clean_prompt = (clean_prompt + "\n" + marked).strip() if clean_prompt else marked
+            media_tuple = None
+
     if media_tuple and not clean_prompt:
          clean_prompt = _ensure_prompt_text(None, media_tuple[1])
     if youtube_url_to_analyze and not clean_prompt:

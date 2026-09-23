@@ -15,7 +15,7 @@ This document goes one level deeper than the main [README](../README.md) into ho
 Routing is fully automatic: the router builds a fresh candidate list for every message:
 
 - **A YouTube or website link** → Gemini only. It's the only provider that can read page content (`url_context`) or analyze a video by URL.
-- **A video or audio attachment** → Gemini only. OpenRouter's multimodal models only accept images as base64.
+- **A video or audio attachment** → video goes to Gemini only (OpenRouter's multimodal models only accept images as base64). Voice/audio is first transcribed cheaply (Groq Whisper) and the text joins the normal routing below; if transcription fails or is unavailable, the audio goes to Gemini as before.
 - **An image attachment, no live-info need** → free OpenRouter vision models first, Gemini as a reserve.
 - **Needs current information** (a lightweight keyword heuristic: "now," "today," "price," "who is currently...") → Gemini, prioritizing the models with a real search-grounding quota, then OpenRouter as a reserve, Groq last (knowledge-only answer if both are down).
 - **Plain text, no attachments, no freshness need** (the most common case) → Groq first (1000 free requests/day: Qwen, then gpt-oss), then OpenRouter. Heavier requests (code, multi-step reasoning, caught by another lightweight heuristic) get routed to the stronger free OpenRouter models first.

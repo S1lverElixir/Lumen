@@ -245,6 +245,8 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Groq — прямой провайдер лёгкого текста (калибровка 21.09.2026): 1000 запросов/день против 50 у OpenRouter.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+# Голосовые длиннее не транскрибируем (Whisper API всё равно режет 25 МБ) — такие идут прежним путём через Gemini-аудио.
+VOICE_TRANSCRIBE_MAX_BYTES = int(os.getenv("VOICE_TRANSCRIBE_MAX_BYTES", str(10 * 1024 * 1024)))
 # Раньше у OpenRouter был свой отдельный лимит истории (30), меньший, чем у Gemini
 # (100) — при переключении провайдера (/provider или /model) ощущалось резкое
 # "обнуление" контекста разговора. Теперь история ОБЩАЯ (см. state["history"] в
@@ -713,6 +715,7 @@ __all__ = [
     "ask_openrouter_text",
     "ask_openrouter_multimodal",
     "ask_groq_text",
+    "_transcribe_audio",
     "_gemini_history_contents",
     "_build_gemma_identity_contents",
     "_build_gemini_call_config",
@@ -945,6 +948,7 @@ from lumen_routes import (
     ask_openrouter_text,
     ask_openrouter_multimodal,
     ask_groq_text,
+    _transcribe_audio,
     _gemini_history_contents,
     _build_gemma_identity_contents,
     _build_gemini_call_config,

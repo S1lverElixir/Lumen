@@ -1020,3 +1020,65 @@ def test_route_error_reply_text_maps_groq_error():
     assert "Rate limit reached" not in text
     assert text.strip() != ""
 
+
+def _fake_groq_audio_session(response_json, status=200):
+    class _FakeResp:
+        def __init__(self):
+            self.status = status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def read(self):
+            return b"{}"
+
+        async def json(self, content_type=None):
+            return response_json
+
+    class _FakeSession:
+        def post(self, *args, **kwargs):
+            return _FakeResp()
+
+    async def fake_get_http_session():
+        return _FakeSession()
+
+    return fake_get_http_session
+
+
+def test_transcribe_audio_success_records_quota(monkeypatch):
+    # Groq Whisper отдал текст — пишем расход groq/whisper и возвращаем текст.
+    monkeypatch.setattr(bot, "_get_http_session", _fake_groq_audio_session({"text": "  привет мир  "}))
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    recorded = {}
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model: recorded.setdefault("v", (provider, model)))
+    assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", 123)) == "привет мир"
+    assert recorded["v"] == ("groq", "whisper-large-v3-turbo")
+
+
+def test_transcribe_audio_empty_result_is_none(monkeypatch):
+    # Пустая расшифровка — как неудача: вызывающий код идёт прежним путём.
+    monkeypatch.setattr(bot, "_get_http_session", _fake_groq_audio_session({"text": "   "}))
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", 123)) is None
+
+
+def test_transcribe_audio_no_key_or_oversize_skips_network(monkeypatch):
+    async def must_not_be_called():
+        raise AssertionError("no network without key or for oversize audio")
+
+    monkeypatch.setattr(bot, "_get_http_session", must_not_be_called)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "")
+    assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", 123)) is None
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "VOICE_TRANSCRIBE_MAX_BYTES", 4)
+    assert asyncio.run(bot._transcribe_audio(b"too-big-bytes", 123)) is None
+
+
+def test_transcribe_audio_http_error_is_none(monkeypatch):
+    monkeypatch.setattr(bot, "_get_http_session", _fake_groq_audio_session({}, status=503))
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", 123)) is None
+

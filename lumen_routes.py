@@ -281,6 +281,46 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     bot._record_quota_usage("groq", model_trial)
     return answer
 
+async def _transcribe_audio(audio_bytes: bytes, chat_id: int) -> str | None:
+    """Голос/аудио в текст через Groq Whisper (дешевле Gemini-квоты на порядок). None при
+    любой неудаче — вызывающий код молча идёт прежним путём (аудио напрямую в Gemini)."""
+    import bot
+    if not bot.GROQ_API_KEY or not audio_bytes:
+        return None
+    if len(audio_bytes) > bot.VOICE_TRANSCRIBE_MAX_BYTES:
+        log.warning("[groq] Voice message too big for transcription (%d bytes), leaving to Gemini.", len(audio_bytes))
+        return None
+    lang = bot._chat_lang(chat_id)
+    form = aiohttp.FormData()
+    form.add_field("file", audio_bytes, filename="voice.ogg", content_type="audio/ogg")
+    form.add_field("model", "whisper-large-v3-turbo")
+    if isinstance(lang, str) and len(lang) == 2:
+        form.add_field("language", lang)
+    try:
+        session = await bot._get_http_session()
+        async with session.post(
+            f"{bot.GROQ_BASE_URL}/audio/transcriptions",
+            headers={"Authorization": f"Bearer {bot.GROQ_API_KEY}"},
+            data=form,
+            timeout=aiohttp.ClientTimeout(total=bot.ROUTE_MODEL_TIMEOUT_SEC, connect=10.0),
+        ) as resp:
+            if resp.status >= 400:
+                body = await resp.read()
+                log.warning("[groq] Whisper HTTP %s: %r", resp.status, body[:200])
+                return None
+            data = await resp.json(content_type=None)
+    except Exception as exc:
+        exc_str = str(exc) or repr(exc) or exc.__class__.__name__
+        if bot.GROQ_API_KEY:
+            exc_str = exc_str.replace(bot.GROQ_API_KEY, "<KEY>")
+        log.warning("[groq] Whisper request failed: %s", exc_str)
+        return None
+    text = (data.get("text") or "").strip() if isinstance(data, dict) else ""
+    if not text:
+        return None
+    bot._record_quota_usage("groq", "whisper-large-v3-turbo")
+    return text
+
 async def ask_openrouter_multimodal(
     chat_id: int, user_text: str, media_tuple: tuple[bytes, str], media_filename: str,
     model_chain: list[str], *, deadline: float | None = None,

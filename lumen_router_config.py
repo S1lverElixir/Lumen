@@ -180,6 +180,7 @@ _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
     "inclusionai/ling-3.0-flash-fin:free",
     "inclusionai/ling-3.0-flash-vl:free",
     "liquid/lfm-2.5-2.6b:free",
+    "qwen/qwen3.8-27b:free",
     "gemini-3.8-flash",
     "openrouter/free",
     # Groq-ID без :free-суффикса — те же семейства, что выше через OpenRouter; дословно в ответе им тоже не место.
@@ -320,6 +321,9 @@ _OR_LIGHT_ORDER: list[str] = [
     "inclusionai/ling-3.0-flash-sante:free",
     "inclusionai/ling-3.0-flash-fin:free",
     "liquid/lfm-2.5-2.6b:free",
+    # Аудит 21.09.2026 (живой каталог): qwen3.8-27b:free — то же семейство, что калиброванный
+    # Groq-Qwen, но другой эндпоинт: некалиброван, поэтому после проверенных, перед резервом.
+    "qwen/qwen3.8-27b:free",
     "openrouter/free",
 ]
 
