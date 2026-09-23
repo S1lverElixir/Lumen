@@ -126,7 +126,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
         else:
             # Сырой текст провайдера пользователю не показываем — generic-текст.
             user_err = bot._t(cid, "draw_err_generic")
-        await bot._edit_message_quietly(status, user_err)
+        # Статус уже снесён выше (перед send_photo): если правка не прошла — дублируем реплаем,
+        # иначе пользователь не увидит вообще ничего (найдено внешним аудитом).
+        if not await bot._edit_message_quietly(status, user_err):
+            await bot._safe_reply(message, user_err)
 
 
 async def cmd_draw(message: Message) -> None:
@@ -259,7 +262,9 @@ async def inline_tts(message: Message, text: str) -> None:
             user_err = bot._t(cid, "tts_err_exhausted")
         else:
             user_err = bot._t(cid, "tts_err_generic")
-        await bot._edit_message_quietly(status, user_err)
+        # Статус уже снесён выше (перед send_voice): если правка не прошла — дублируем реплаем.
+        if not await bot._edit_message_quietly(status, user_err):
+            await bot._safe_reply(message, user_err)
 
 async def cmd_tts(message: Message) -> None:
     import bot

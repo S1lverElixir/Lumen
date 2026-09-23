@@ -352,6 +352,10 @@ ROUTE_MODEL_TIMEOUT_SEC = float(os.getenv("ROUTE_MODEL_TIMEOUT_SEC", "22"))
 # попытки прекращаются и пользователь получает честное "сейчас всё перегружено"
 # вместо тихого зависания.
 ROUTE_TOTAL_BUDGET_SEC = float(os.getenv("ROUTE_TOTAL_BUDGET_SEC", "40"))
+# HISTORY_SUMMARY_BUDGET_SEC — потолок саммаризации истории: без него два висящих
+# backend-вызова подряд (Groq + OpenRouter по ROUTE_MODEL_TIMEOUT_SEC каждый) держали бы
+# lock чата десятки секунд ПОСЛЕ готового ответа (найдено внешним аудитом).
+HISTORY_SUMMARY_BUDGET_SEC = float(os.getenv("HISTORY_SUMMARY_BUDGET_SEC", "30"))
 # Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
 DRAW_TOTAL_BUDGET_SEC = float(os.getenv("DRAW_TOTAL_BUDGET_SEC", "120"))
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного

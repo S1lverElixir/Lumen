@@ -401,7 +401,13 @@ _HEAVY_QUERY_RE = re.compile(
     r"|реши\s+(задач\w*|уравнени\w*|систем\w*)"
     r"|составь\s+(план|таблиц\w*|список\s+из)"
     r"|многошагов\w*|пошагов\w*\s+(инструкц\w*|план\w*)"
-    r"|архитектур\w*|алгоритм\w*",
+    r"|архитектур\w*|алгоритм\w*"
+    # EN-набор (найдено внешним аудитом: heavy-детект был почти весь русский).
+    r"|write\s+(a\s+|an\s+|the\s+)?(\w+\s+)?(code|function|script|program|class|sql|regex|test|parser|bot|website|app)\b"
+    r"|generate\s+code|fix\s+(this\s+|that\s+)?(code|bug|error|issue)\b|refactor\w*|optimiz\w*|debug"
+    r"|explain\s+(code|error)|code\s+review|algorithm|architecture"
+    r"|write\s+(an?\s+)?(essay|article|report|paper|thesis|cv|resume)\b"
+    r"|compar(e|ison)|prove|proof|solve|equation",
     re.IGNORECASE,
 )
 
@@ -433,7 +439,13 @@ _FRESHNESS_QUERY_RE = re.compile(
     r"|кто\s+(сейчас|является|президент|премьер|глава|ceo|мэр)"
     r"|результат\w*\s+(матч\w*|игр\w*|выбор\w*)"
     r"|в\s+эт(ом|ой)\s+(году|месяце|неделе)"
-    r"|\b202[6-9]\b",
+    r"|\b202[6-9]\b"
+    # EN-набор (найдено внешним аудитом: детект был только русским при DEFAULT_LANG=en
+    # и 25 языках; ложные срабатывания так же дёшевы).
+    r"|now|today|current\w*|latest|recent\w*|breaking"
+    r"|news|weather|forecast|price\w*|cost\w*|how\s+much|exchange|score\w*|schedule"
+    r"|who\s+is\s+(now|currently|the\s+(president|ceo|prime\s+minister|mayor))"
+    r"|best\s+(to\s+buy|buy)|should\s+i\s+buy|worth\s+buying",
     re.IGNORECASE,
 )
 

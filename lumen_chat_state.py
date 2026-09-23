@@ -179,7 +179,7 @@ def _reset_quota_if_new_day() -> None:
     if GLOBAL_QUOTA.get("quota_day") == today:
         return
     had_previous = GLOBAL_QUOTA.get("quota_day") is not None
-    for provider in ("gemini", "openrouter"):
+    for provider in ("gemini", "openrouter", "groq"):
         for entry in GLOBAL_QUOTA.get(provider, {}).values():
             if isinstance(entry, dict):
                 entry["used"] = 0
@@ -201,6 +201,8 @@ def load_global_quota() -> None:
                 GLOBAL_QUOTA["gemini"] = loaded["gemini"]
             if "openrouter" in loaded:
                 GLOBAL_QUOTA["openrouter"] = loaded["openrouter"]
+            if "groq" in loaded:
+                GLOBAL_QUOTA["groq"] = loaded["groq"]
             if "quota_day" in loaded:
                 GLOBAL_QUOTA["quota_day"] = loaded["quota_day"]
     except Exception as exc:
@@ -267,21 +269,25 @@ def _save_chat_index() -> None:
     except Exception as exc:
         log.warning("[state] Saving chat index failed: %s", exc)
 
-def _save_chat_index_payload(payload: str) -> None:
-    """Только блокирующая запись готового снапшота индекса — для to_thread."""
+def _save_chat_index_payload(payload: str) -> bool:
+    """Только блокирующая запись готового снапшота индекса — для to_thread. True/False для повтора."""
     import bot
     try:
         bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, payload)
+        return True
     except Exception as exc:
         log.warning("[state] Saving chat index failed: %s", exc)
+        return False
 
-def _save_quota_payload(payload: str) -> None:
-    """Только блокирующая запись готового снапшота квоты — для to_thread."""
+def _save_quota_payload(payload: str) -> bool:
+    """Только блокирующая запись готового снапшота квоты — для to_thread. True/False для повтора."""
     import bot
     try:
         bot._storage_write_text("lumen:global_quota", GLOBAL_QUOTA_FILE, payload)
+        return True
     except Exception as exc:
         log.warning("[quota] Failed to save global quota: %s", exc)
+        return False
 
 # Раньше save_state_to_disk()/save_global_quota() вызывались синхронно почти на
 # каждое сообщение прямо внутри асинхронных обработчиков — блокирующий json.dump
@@ -397,14 +403,16 @@ async def _flush_dirty_state_once() -> None:
                     len(failed_ids), ", ".join(str(c) for c in sorted(failed_ids)),
                 )
         if _index_dirty:
-            _index_dirty = False
+            # Флаг сбрасываем только после подтверждённой записи — иначе упавший индекс
+            # молча терялся бы до следующей мутации (найдено внешним аудитом).
             # Снапшот ключей — здесь (см. комментарий у _save_chat_to_storage_limited).
             index_payload = json.dumps(sorted(chat_state.keys()))
-            await asyncio.to_thread(bot._save_chat_index_payload, index_payload)
+            if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
+                _index_dirty = False
         if _quota_dirty:
-            _quota_dirty = False
             quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
-            await asyncio.to_thread(bot._save_quota_payload, quota_payload)
+            if await asyncio.to_thread(bot._save_quota_payload, quota_payload):
+                _quota_dirty = False
     except Exception as exc:
         log.warning('[state] Periodic state flush failed: %s', exc)
 
@@ -451,29 +459,32 @@ def load_state_from_disk() -> None:
             chat_ids = json.loads(index_raw)
         except Exception as exc:
             log.warning('[state] Failed to parse chat index: %s', exc)
-            chat_ids = []
-        loaded_count = 0
-        for chat_id_raw in chat_ids:
-            try:
-                cid = int(chat_id_raw)
-            except Exception:
-                continue
-            try:
-                raw = bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
-            except Exception as exc:
-                log.warning('[state] Failed to read chat %s: %s', cid, exc)
-                continue
-            if not raw:
-                continue
-            try:
-                s = json.loads(raw)
-            except Exception as exc:
-                log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
-                continue
-            bot._restore_single_chat(cid, s)
-            loaded_count += 1
-        log.info("[state] Restored states for %d chats (per-chat storage).", loaded_count)
-        return
+            chat_ids = None
+        if isinstance(chat_ids, list):
+            loaded_count = 0
+            for chat_id_raw in chat_ids:
+                try:
+                    cid = int(chat_id_raw)
+                except Exception:
+                    continue
+                try:
+                    raw = bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
+                except Exception as exc:
+                    log.warning('[state] Failed to read chat %s: %s', cid, exc)
+                    continue
+                if not raw:
+                    continue
+                try:
+                    s = json.loads(raw)
+                except Exception as exc:
+                    log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
+                    continue
+                bot._restore_single_chat(cid, s)
+                loaded_count += 1
+            log.info("[state] Restored states for %d chats (per-chat storage).", loaded_count)
+            return
+        # Индекс битый, но per-chat файлы могут быть целы — пробуем legacy-блоб:
+        # лучше старые данные, чем пустые чаты (найдено внешним аудитом).
 
     # ── Legacy-формат (единый блоб на все чаты, старый ключ "lumen:chat_state") ──
     # Индекса ещё нет — значит бот ещё ни разу не сохранял состояние в новом
@@ -640,7 +651,14 @@ async def _trim_history(history: list[dict[str, Any]]) -> None:
             role = str(item.get("role", "user")) if isinstance(item, dict) else "user"
             lines.append(f"{role}: {txt}")
     digest_input = "\n".join(lines)[:_HISTORY_SUMMARY_INPUT_MAX_CHARS]
-    summary = await _summarize_text(digest_input) if digest_input.strip() else ""
+    summary = ""
+    if digest_input.strip():
+        try:
+            summary = await asyncio.wait_for(
+                _summarize_text(digest_input), timeout=bot.HISTORY_SUMMARY_BUDGET_SEC,
+            )
+        except Exception as exc:
+            log.warning("[history] Summarization over budget/failed, plain cut: %s", exc)
     if summary:
         history[:] = [{"role": "user", "content": "[Ранее в диалоге]: " + summary}] + recent
     else:

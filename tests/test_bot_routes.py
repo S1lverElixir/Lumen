@@ -399,7 +399,7 @@ def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
 def test_run_route_streams_openrouter_when_route_head_is_openrouter():
     chat_id = 999305
 
-    async def fake_or_stream(cid, prompt, message, model_id):
+    async def fake_or_stream(cid, prompt, message, model_id, deadline=None):
         return "Стримленный ответ от OpenRouter", None
 
     async def must_not_be_called(*args, **kwargs):
@@ -422,7 +422,7 @@ def test_run_route_streams_openrouter_when_route_head_is_openrouter():
 def test_run_route_falls_back_from_failed_openrouter_stream_to_non_streaming():
     chat_id = 999306
 
-    async def fake_or_stream_fail(cid, prompt, message, model_id):
+    async def fake_or_stream_fail(cid, prompt, message, model_id, deadline=None):
         return None, None  # ранний сбой без плейсхолдера (например, message.reply сам не удался)
 
     calls = []
@@ -452,7 +452,7 @@ def test_run_route_tries_groq_head_with_stream_fallback_to_text():
     # Groq-подключение 21.09.2026: голова-groq стримится через _try_groq_streaming, при раннем сбое — обычный ask_groq_text без пере-пробы упавшей модели.
     chat_id = 999703
 
-    async def fake_groq_stream_fail(cid, prompt, message, model_id):
+    async def fake_groq_stream_fail(cid, prompt, message, model_id, deadline=None):
         return None, None
 
     calls = []
@@ -485,7 +485,7 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
     chat_id = 999307
     placeholder = _FakeSentMessage()
 
-    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id):
+    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None):
         return None, placeholder
 
     async def fake_or_text(cid, prompt, model_chain, deadline=None):
@@ -513,7 +513,7 @@ def test_run_route_deletes_orphaned_placeholder_when_whole_route_fails():
     chat_id = 999308
     placeholder = _FakeSentMessage()
 
-    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id):
+    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None):
         return None, placeholder
 
     async def failing_or_text(*args, **kwargs):
@@ -778,6 +778,57 @@ def test_ask_openrouter_multimodal_empty_model_chain_fallback_is_current_vision_
         assert calls[0] == [bot._OR_VISION_ORDER[0]]
     finally:
         bot._or_chat_completion_with_fallback = original
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_ask_openrouter_multimodal_sends_all_album_images_not_just_first():
+    # Внешний аудит: уходила только первая фотография альбома, остальные 2–9 молча терялись.
+    chat_id = 999411
+    captured = {}
+
+    async def fake_or_request(path, method="GET", *, json_body=None):
+        captured["messages"] = json_body["messages"]
+        return {"choices": [{"message": {"content": "вижу три фото"}}]}
+
+    original_request = bot._or_request
+    original_key = bot.OPENROUTER_API_KEY
+    bot._or_request = fake_or_request
+    bot.OPENROUTER_API_KEY = "fake-key"
+    try:
+        media = [(b"one", "image/jpeg"), (b"two", "image/png"), (b"three", "image/jpeg")]
+        answer = asyncio.run(bot.ask_openrouter_multimodal(chat_id, "что на фото?", media, "a.jpg", model_chain=["m"]))
+        assert answer == "вижу три фото"
+        user_msg = captured["messages"][-1]
+        images = [p for p in user_msg["content"] if isinstance(p, dict) and p.get("type") == "image_url"]
+        assert len(images) == 3
+    finally:
+        bot._or_request = original_request
+        bot.OPENROUTER_API_KEY = original_key
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_ask_openrouter_multimodal_skips_video_slides_for_gemini():
+    # Видео-слайды OpenRouter не принимает — их забирает Gemini-ветка, сюда едут только картинки.
+    chat_id = 999412
+    captured = {}
+
+    async def fake_or_request(path, method="GET", *, json_body=None):
+        captured["messages"] = json_body["messages"]
+        return {"choices": [{"message": {"content": "вижу фото"}}]}
+
+    original_request = bot._or_request
+    original_key = bot.OPENROUTER_API_KEY
+    bot._or_request = fake_or_request
+    bot.OPENROUTER_API_KEY = "fake-key"
+    try:
+        media = [(b"vid", "video/mp4"), (b"pic", "image/jpeg")]
+        asyncio.run(bot.ask_openrouter_multimodal(chat_id, "что это?", media, "a.jpg", model_chain=["m"]))
+        user_msg = captured["messages"][-1]
+        images = [p for p in user_msg["content"] if isinstance(p, dict) and p.get("type") == "image_url"]
+        assert len(images) == 1
+    finally:
+        bot._or_request = original_request
+        bot.OPENROUTER_API_KEY = original_key
         bot.chat_state.pop(chat_id, None)
 
 

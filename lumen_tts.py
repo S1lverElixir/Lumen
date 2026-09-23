@@ -84,7 +84,11 @@ async def _fish_audio_tts_bytes(
                 if audio_piece:
                     chunks_b64.append(audio_piece)
     except Exception as exc:
-        log.warning("[tts] Fish Audio request failed, falling back to Gemini TTS: %s", exc)
+        # Ключ из текста ошибок вычищаем (тот же defense-in-depth, что у _or_request/_groq_request).
+        exc_str = str(exc) or repr(exc) or exc.__class__.__name__
+        if api_key:
+            exc_str = exc_str.replace(api_key, "<KEY>")
+        log.warning("[tts] Fish Audio request failed, falling back to Gemini TTS: %s", exc_str)
         return None
     if not chunks_b64:
         log.warning('[tts] Fish Audio: stream ended without a single audio chunk (response format may have changed) — falling back to Gemini TTS.')

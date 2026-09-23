@@ -18,13 +18,18 @@ on:
     - cron: "0 3 * * *"  # 03:00 UTC ежедневно
   workflow_dispatch:      # + ручной запуск по требованию
 
+# Два одновременных запуска (шедул + ручной) толкались бы в один бранч backup-репо.
+concurrency:
+  group: state-backup
+  cancel-in-progress: false
+
 jobs:
   backup:
     runs-on: ubuntu-latest
     steps:
       - name: Fetch /export_state
         run: |
-          curl -sf --retry 3 \
+          curl -sf --retry 3 --max-time 120 \
             -H "Authorization: Bearer ${{ secrets.ADMIN_PANEL_KEY }}" \
             "https://${{ secrets.SPACE_HOST }}/export_state" \
             -o export_state.json

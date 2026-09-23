@@ -164,7 +164,7 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         task.cancel()
         results[tasks[task]] = {"error": "diag budget exceeded", "elapsed_sec": diag_budget, "ok": False}
     with contextlib.suppress(Exception):
-        await asyncio.gather(*pending)
+        await asyncio.gather(*pending, return_exceptions=True)
     return {"diagnostics": results, "telegram_api_base_configured": bot.TELEGRAM_API_BASE_URL}
 
 @app.get("/export_state")

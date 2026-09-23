@@ -53,6 +53,16 @@ async def _process_media_group_buffers(mgid: str) -> None:
     bot._mg_tasks.pop(mgid, None)
     if not messages:
          return
+    # Альбом идёт под тем же per-chat lock, что обычные сообщения: иначе фоновый таск
+    # и свежий вопрос гоняются за history/ctx одного чата (найдено внешним аудитом).
+    main_msg = messages[0]
+    lock = bot.get_chat_lock(main_msg.chat.id if main_msg.chat else 0)
+    async with lock:
+        await _process_media_group_buffers_locked(messages)
+
+async def _process_media_group_buffers_locked(messages: list) -> None:
+    """Тело обработки альбома под per-chat lock (см. выше)."""
+    import bot
     # Первое сообщение альбома с caption — основное, остальные файлы отдаём модели как доп. вложения.
     main_msg = messages[0]
     extra_media: list[tuple[bytes, str]] = []
@@ -81,8 +91,9 @@ def _record_passive_group_context(message: Message, state: dict[str, Any], t: st
     """Фон группы без упоминания: только контекст и медиа в state, без ответа."""
     import bot
     if t.strip():
-        username = message.from_user.username or message.from_user.first_name or "User"
-        state["ctx"].append(f"@{username}: {t.strip()}")
+        _sender = message.from_user or {}
+        _username = getattr(_sender, "username", None) or getattr(_sender, "first_name", None) or "User"
+        state["ctx"].append(f"@{_username}: {t.strip()}")
     bot._save_media_to_history(_msg_media_source(message), state, message.from_user.id if message.from_user else None)
     bot.mark_state_dirty(message.chat.id)
 

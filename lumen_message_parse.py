@@ -48,6 +48,9 @@ DRAW_TRIGGER_PREFIXES = [
     "создай изображение", "создай мне изображение", "нарисуй картинку", "нарисуй изображение",
     "нарисуй мне", "нарисуй", "нарисуйте", "изобрази картинку", "изобрази", "нарисуй-ка",
     "сгенери картинку", "сгенери изображение", "можешь нарисовать", "можешь нарисовать мне",
+    # EN: /start обещает "draw a cat" — чиним (найдено внешним аудитом: был только русский).
+    "generate an image", "generate me an image", "create an image", "draw a picture",
+    "draw me", "draw an", "draw a", "draw some", "paint me", "paint", "sketch",
 ]
 # "хочу картинку" не триггер: путается с показом/редактурой. Длинные фразы выше коротких, иначе вернётся первое совпадение.
 TTS_TRIGGER_PREFIXES = [
@@ -60,6 +63,9 @@ TTS_TRIGGER_PREFIXES = [
     "зачитай текст", "зачитай", "зачитайте текст", "зачитайте",
     "прочитай вслух", "прочти вслух", "прочтите вслух", "прочтите", "прочти",
     "сделай аудио", "сделай голосовое", "запиши голосовое",
+    # EN: /start обещает "read this out loud" (найдено внешним аудитом).
+    "read this out loud", "read it out loud", "read out loud", "read aloud",
+    "voice this", "voice it", "speak this", "say this aloud", "narrate this",
 ]
 
 def _match_trigger_prefix(text_lower: str, prefixes: list[str]) -> str | None:

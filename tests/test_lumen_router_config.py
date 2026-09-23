@@ -92,6 +92,23 @@ def test_looks_like_heavy_query_detects_bare_compare():
     assert lumen_router_config._looks_like_heavy_query("сравни iphone и samsung") is True
 
 
+def test_looks_like_freshness_query_detects_english():
+    # Внешний аудит: детект свежести был только русским при DEFAULT_LANG=en —
+    # "latest news" уходило слабым моделям без поиска.
+    assert lumen_router_config._looks_like_freshness_query("What is the latest news about NVIDIA?") is True
+    assert lumen_router_config._looks_like_freshness_query("weather in Berlin today") is True
+    assert lumen_router_config._looks_like_freshness_query("how much does it cost") is True
+    assert lumen_router_config._looks_like_freshness_query("just chatting about life") is False
+
+
+def test_looks_like_heavy_query_detects_english():
+    # Внешний аудит: "write a Python parser" пролетал в light-ветку.
+    assert lumen_router_config._looks_like_heavy_query("write a Python parser for csv") is True
+    assert lumen_router_config._looks_like_heavy_query("fix this bug, it crashes on empty input") is True
+    assert lumen_router_config._looks_like_heavy_query("compare iphone and samsung") is True
+    assert lumen_router_config._looks_like_heavy_query("just saying hello") is False
+
+
 def test_build_route_youtube_link_forces_gemini_only():
     route = lumen_router_config._build_route(needs_youtube=True, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
     assert all(p == "gemini" for p, _ in route)

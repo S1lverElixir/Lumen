@@ -359,6 +359,83 @@ def test_flush_dirty_state_once_requeues_failed_deletes():
             bot._pending_chat_deletions.discard(fail_chat)
 
 
+def test_flush_dirty_state_once_keeps_dirty_index_and_quota_on_write_failure():
+    # Внешний аудит: флаги сбрасывались ДО подтверждённой записи — упавший индекс/квота
+    # молча терялись до следующей мутации. Теперь флаг живёт до успеха.
+    bot._dirty_chat_ids.clear()
+    bot._pending_chat_deletions.clear()
+    lumen_chat_state._index_dirty = True
+    lumen_chat_state._quota_dirty = True
+    try:
+        with patch("bot._save_chat_index_payload", return_value=False), \
+             patch("bot._save_quota_payload", return_value=False):
+            asyncio.run(bot._flush_dirty_state_once())
+            assert lumen_chat_state._index_dirty is True
+            assert lumen_chat_state._quota_dirty is True
+        with patch("bot._save_chat_index_payload", return_value=True), \
+             patch("bot._save_quota_payload", return_value=True):
+            asyncio.run(bot._flush_dirty_state_once())
+            assert lumen_chat_state._index_dirty is False
+            assert lumen_chat_state._quota_dirty is False
+    finally:
+        lumen_chat_state._index_dirty = False
+        lumen_chat_state._quota_dirty = False
+
+
+def test_load_state_falls_back_to_legacy_blob_on_corrupt_index():
+    # Внешний аудит: битый индекс обнулял восстановление, хотя per-chat файлы целы.
+    import json
+    legacy = {"4242": {"history": [{"role": "user", "content": "привет"}], "lang": "ru"}}
+
+    def fake_read(key, path):
+        if "index" in str(key).lower() or str(path).endswith("index.json"):
+            return "not-json{{{"
+        if key == "lumen:chat_state":
+            return json.dumps(legacy)
+        return None
+
+    with patch("bot._storage_read_text", side_effect=fake_read):
+        was_dirty = set(bot._dirty_chat_ids)
+        try:
+            bot.load_state_from_disk()
+            assert bot.chat_state[4242]["history"] == [{"role": "user", "content": "привет"}]
+        finally:
+            bot.chat_state.pop(4242, None)
+            bot._dirty_chat_ids.clear()
+            bot._dirty_chat_ids.update(was_dirty)
+            lumen_chat_state._index_dirty = False
+
+
+def test_load_global_quota_restores_groq():
+    # Внешний аудит: groq-счётчики сохранялись, но при загрузке терялись.
+    import json
+    payload = json.dumps({"gemini": {}, "openrouter": {}, "groq": {"qwen/qwen3.8-27b": {"used": 4, "exhausted_at": None}}, "quota_day": bot._current_quota_day()})
+    real = dict(bot.GLOBAL_QUOTA)
+    with patch("bot._storage_read_text", return_value=payload):
+        try:
+            bot.load_global_quota()
+            assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["used"] == 4
+        finally:
+            bot.GLOBAL_QUOTA.clear()
+            bot.GLOBAL_QUOTA.update(real)
+
+
+def test_trim_history_plain_cuts_when_summarizer_over_budget(monkeypatch):
+    # Внешний аудит: саммаризация держала lock чата мимо бюджета — теперь колпак, дальше plain cut.
+    async def hanging_summarize(text):
+        await asyncio.sleep(3600)
+        return "never"
+
+    monkeypatch.setattr(lumen_chat_state, "_summarize_text", hanging_summarize)
+    monkeypatch.setattr(bot, "HISTORY_SUMMARY_BUDGET_SEC", 0.05)
+    history = [{"role": "user", "content": f"m{i}"} for i in range(105)]
+    started = time.monotonic()
+    asyncio.run(bot._trim_history(history))
+    assert time.monotonic() - started < 5
+    assert len(history) == 100
+    assert history[0]["content"] == "m5"
+
+
 def test_save_chat_to_storage_limited_snapshots_before_thread():
     # Гонка сериализации: JSON-снапшот строится в loop (без await гонки нет),
     # в поток едет уже готовая строка — живой словарь туда не передаётся.
@@ -498,6 +575,51 @@ def test_process_media_group_buffers_records_extra_photos_to_recent_media():
     finally:
         bot._fetch_media = original_fetch
         bot._handle_message_core = original_core
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_process_media_group_buffers_holds_chat_lock():
+    # Внешний аудит: фоновый таск альбома и свежий вопрос гонялись за history/ctx без лока.
+    chat_id = 999962
+    user = SimpleNamespace(id=779)
+    photo = SimpleNamespace(file_id="file_X", mime_type=None, file_name=None)
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE), from_user=user,
+        media_group_id="mg3", text=None, caption=None, reply_to_message=None,
+        photo=[photo], video=None, animation=None, video_note=None,
+        voice=None, audio=None, document=None, sticker=None,
+    )
+    held_during_core = {}
+
+    class _RecLock:
+        def __init__(self):
+            self.held = False
+
+        async def __aenter__(self):
+            self.held = True
+            return self
+
+        async def __aexit__(self, *args):
+            self.held = False
+            return False
+
+    rec_lock = _RecLock()
+
+    async def fake_handle_core(message, extra_media=None):
+        held_during_core["held"] = rec_lock.held
+
+    original_fetch, original_core, original_lock = bot._fetch_media, bot._handle_message_core, bot.get_chat_lock
+    bot._fetch_media = lambda file_id, mime: asyncio.sleep(0, result=(b"x", "image/jpeg"))
+    bot._handle_message_core = fake_handle_core
+    bot.get_chat_lock = lambda cid: rec_lock
+    bot._mg_buffers["mg3"] = [msg]
+    try:
+        asyncio.run(bot._process_media_group_buffers("mg3"))
+        assert held_during_core.get("held") is True
+    finally:
+        bot._fetch_media = original_fetch
+        bot._handle_message_core = original_core
+        bot.get_chat_lock = original_lock
         bot.chat_state.pop(chat_id, None)
 
 
@@ -665,6 +787,31 @@ def test_ordinary_question_gets_no_file_notice(rate_guard_setup, monkeypatch):
     message.text = "столица Венгрии?"
     prompt = _run_core_capturing_prompt(message, monkeypatch)
     assert "[Служебная пометка" not in prompt
+
+
+def test_rate_limit_dict_has_hard_cap_on_fresh_flood(monkeypatch):
+    # Внешний аудит: чистка сносила только протухших — флуд свежими ID растил словарь без потолка.
+    import time as _time
+    import lumen_limits
+    monkeypatch.setattr(lumen_limits, "MAX_RATE_LIMIT_KEYS", 5)
+    lumen_limits.user_rate_limits.clear()
+    try:
+        now = _time.time()
+        for uid in range(1, 20):
+            lumen_limits.user_rate_limits[uid] = [now]
+        assert bot._check_and_register_rate_limit(999) is False
+        assert len(lumen_limits.user_rate_limits) <= 5
+        assert 999 in lumen_limits.user_rate_limits
+    finally:
+        lumen_limits.user_rate_limits.clear()
+
+
+def test_passive_group_context_survives_missing_from_user():
+    # Пост от имени канала без from_user — не роняет запись фона (внешний аудит).
+    state = {"history": [], "ctx": __import__("collections").deque(), "recent_media_ids": {}}
+    message = SimpleNamespace(chat=SimpleNamespace(id=777), from_user=None, text="привет всем")
+    bot._record_passive_group_context(message, state, "привет всем")
+    assert any("привет всем" in line for line in state["ctx"])
 
 
 def test_message_core_sends_typing_indicator(rate_guard_setup, monkeypatch):
@@ -882,6 +1029,7 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
     try:
         bot.GLOBAL_QUOTA["gemini"] = {"gemini-2.5-flash": {"used": 106, "remaining": 0, "limit": 1500, "exhausted_at": 12345.0}}
         bot.GLOBAL_QUOTA["openrouter"] = {"some-model:free": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None}}
+        bot.GLOBAL_QUOTA["groq"] = {"qwen/qwen3.8-27b": {"used": 9, "exhausted_at": 12345.0}}
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"  # заведомо "вчерашний" день
         lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
 
@@ -890,10 +1038,14 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["used"] == 0
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["exhausted_at"] is None
         assert bot.GLOBAL_QUOTA["openrouter"]["some-model:free"]["used"] == 0
+        # Groq сбрасывается вместе с остальными (внешний аудит: провайдер забыли в цикле сброса/загрузки).
+        assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["used"] == 0
+        assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["exhausted_at"] is None
         assert bot.GLOBAL_QUOTA["quota_day"] == bot._current_quota_day()
     finally:
         bot.GLOBAL_QUOTA["gemini"] = original_quota["gemini"]
         bot.GLOBAL_QUOTA["openrouter"] = original_quota["openrouter"]
+        bot.GLOBAL_QUOTA.pop("groq", None)
         bot.GLOBAL_QUOTA["quota_day"] = original_quota["quota_day"]
         lumen_chat_state._last_quota_check_monotonic = original_throttle
 

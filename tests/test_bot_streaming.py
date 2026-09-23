@@ -318,6 +318,50 @@ def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
+def test_streaming_respects_route_deadline():
+    # Внешний аудит: капающий по куску стрим жил мимо ROUTE_TOTAL_BUDGET_SEC и держал lock.
+    chat_id = 999309
+
+    async def slow_drip_pieces():
+        yield "начало"
+        await asyncio.sleep(3600)
+        yield "никогда"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
+            piece_agen=slow_drip_pieces(), deadline=time.monotonic() - 1.0,
+        ))
+        # Бюджет уже прошёл: либо плейсхолдер дальше, либо финал с пометкой — но не вечное ожидание.
+        assert placeholder is not None or answer is not None
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_rate_limit_marks_model_exhausted():
+    # Внешний аудит: 429 до первого куска помечает модель исчерпанной, как обычный путь.
+    chat_id = 999310
+
+    async def pieces_429():
+        raise bot.OpenRouterAPIError("Rate limit reached", status_code=429)
+        yield ""
+
+    incoming = _FakeIncomingMessage(chat_id)
+    real_quota = dict(bot.GLOBAL_QUOTA)
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="z:free",
+            piece_agen=pieces_429(),
+        ))
+        assert answer is None
+        assert bot.GLOBAL_QUOTA["openrouter"]["z:free"]["exhausted_at"] is not None
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     # Юнит-тест самого тикера: первый кадр только после _DOTS_START_AFTER_SEC,
     # дальше по кадру каждые _DOTS_TICK_SEC; отмена — штатная остановка.

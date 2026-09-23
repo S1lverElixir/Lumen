@@ -331,13 +331,27 @@ async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int) -> str 
     return text
 
 async def ask_openrouter_multimodal(
-    chat_id: int, user_text: str, media_tuple: tuple[bytes, str], media_filename: str,
+    chat_id: int, user_text: str, media_tuple: tuple[bytes, str] | list[tuple[bytes, str]], media_filename: str,
     model_chain: list[str], *, deadline: float | None = None,
 ) -> str:
+    """Альбом для OpenRouter: все картинки одним сообщением (content-блоки image_url подряд) —
+    раньше уходила только первая, остальные 2–9 молча терялись (найдено внешним аудитом)."""
     import bot
     state = bot.get_state(chat_id)
-    b64 = base64.b64encode(media_tuple[0]).decode("utf-8")
-    img_url = f"data:{media_tuple[1]};base64,{b64}"
+    if isinstance(media_tuple, tuple) and media_tuple and isinstance(media_tuple[0], bytes):
+        media_items = [media_tuple]
+    else:
+        media_items = list(media_tuple) if media_tuple else []
+    parts: list[dict] = []
+    for raw_bytes, mime in media_items[:10]:
+        # Видео-слайды альбомов сюда не ходят (OpenRouter принимает только картинки) —
+        # их забирает Gemini-ветка; раньше они просто молча отваливались вместе со 2-9 фото.
+        if not mime.startswith("image/"):
+            continue
+        b64 = base64.b64encode(raw_bytes).decode("utf-8")
+        parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    if not parts:
+        raise RuntimeError("No images for OpenRouter multimodal (video goes to Gemini)")
 
     ctx = state.get("ctx", deque())
     full_text = user_text
@@ -354,7 +368,7 @@ async def ask_openrouter_multimodal(
         "role": "user",
         "content": [
             {"type": "text", "text": full_text},
-            {"type": "image_url", "image_url": {"url": img_url}}
+            *parts,
         ]
     })
 
@@ -741,21 +755,21 @@ async def _run_route(
     if allow_stream and route:
         head_model = route[0][1]
         if first_provider == "gemini" and GEMINI_MODELS.get(head_model, {}).get("stream", True):
-            streamed, placeholder = await bot._try_gemini_streaming(chat_id, ai_prompt, message, head_model)
+            streamed, placeholder = await bot._try_gemini_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (gemini:%s)', chat_id, head_model)
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "gemini"
             reusable_placeholder = placeholder
         elif first_provider == "openrouter":
-            streamed, placeholder = await bot._try_openrouter_streaming(chat_id, ai_prompt, message, head_model)
+            streamed, placeholder = await bot._try_openrouter_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (openrouter:%s)', chat_id, head_model)
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "openrouter"
             reusable_placeholder = placeholder
         elif first_provider == "groq":
-            streamed, placeholder = await bot._try_groq_streaming(chat_id, ai_prompt, message, head_model)
+            streamed, placeholder = await bot._try_groq_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (groq:%s)', chat_id, head_model)
                 return streamed, True
@@ -782,7 +796,7 @@ async def _run_route(
             elif provider == "groq":
                 ans = await bot.ask_groq_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
             elif media:
-                ans = await bot.ask_openrouter_multimodal(chat_id, ai_prompt, media[0], media_filename, model_chain=ids, deadline=deadline)
+                ans = await bot.ask_openrouter_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline)
             else:
                 ans = await bot.ask_openrouter_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
 

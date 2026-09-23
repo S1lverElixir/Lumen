@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import asyncio
 import bot
 import lumen_chat_state
+import lumen_commands
 import lumen_limits
 import pytest
 import time
@@ -208,6 +209,16 @@ def test_match_trigger_prefix_requires_word_boundary_and_polite_forms():
     assert bot._match_trigger_prefix("нарисуйте кота", bot.DRAW_TRIGGER_PREFIXES) == "нарисуйте"
 
 
+def test_match_trigger_prefix_english_triggers():
+    # Внешний аудит: /start обещает "draw a cat"/"read this out loud", а триггеры были только русские.
+    assert bot._match_trigger_prefix("draw a cat on the beach", bot.DRAW_TRIGGER_PREFIXES) == "draw a"
+    assert bot._match_trigger_prefix("generate an image of a castle", bot.DRAW_TRIGGER_PREFIXES) == "generate an image"
+    assert bot._match_trigger_prefix("read this out loud please", bot.TTS_TRIGGER_PREFIXES) == "read this out loud"
+    assert bot._match_trigger_prefix("voice this message", bot.TTS_TRIGGER_PREFIXES) == "voice this"
+    assert bot._match_trigger_prefix("how are you", bot.DRAW_TRIGGER_PREFIXES) is None
+    assert bot._match_trigger_prefix("how are you", bot.TTS_TRIGGER_PREFIXES) is None
+
+
 def test_tts_trigger_this_with_reply_voices_replied_message(rate_guard_setup):
     # Регрессия (сентябрь 2026): "озвучь это" в ответ на сообщение озвучивало
     # само слово "это" — остаток после триггера считался содержанием.
@@ -216,6 +227,70 @@ def test_tts_trigger_this_with_reply_voices_replied_message(rate_guard_setup):
     message.reply_to_message = SimpleNamespace(text="текст из реплая", caption=None)
     asyncio.run(bot._handle_message_core(message))
     bot.inline_tts.assert_awaited_once_with(message, "текст из реплая")
+
+
+def test_draw_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypatch):
+    # Внешний аудит: статус снесён до send_photo, правка после падения билась в пустоту.
+    message = rate_guard_setup()
+    message.text = "/draw cat"
+    replied = []
+
+    async def fake_tg_call(method, *args, **kwargs):
+        return SimpleNamespace()
+
+    async def fake_edit_quietly(msg, text, **kwargs):
+        return False
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replied.append(text)
+
+    async def failing_generate(session, model_id, prompt):
+        raise RuntimeError("all image generation models unavailable")
+
+    async def fake_get_http_session():
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit_quietly)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", failing_generate)
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+    # Фикстура rate_guard_setup глушит пайплайны AsyncMock — возвращаем настоящий.
+    monkeypatch.setattr(bot, "inline_draw", lumen_commands.inline_draw)
+    asyncio.run(bot.cmd_draw(message))
+    assert len(replied) == 1
+    # Дефолтный язык чата — английский, сверяем смысл, а не конкретный текст.
+    assert "unavailable" in replied[0].lower() or "fail" in replied[0].lower()
+    bot.chat_state.pop(123, None)
+
+
+def test_tts_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypatch):
+    # То же для озвучки: send_voice упал — пользователь всё равно видит ошибку.
+    message = rate_guard_setup()
+    message.text = "/tts привет"
+    replied = []
+
+    async def fake_tg_call(method, *args, **kwargs):
+        return SimpleNamespace()
+
+    async def fake_edit_quietly(msg, text, **kwargs):
+        return False
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replied.append(text)
+
+    async def failing_synth(text):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit_quietly)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    monkeypatch.setattr(bot, "_gemini_tts_bytes", failing_synth)
+    # Фикстура rate_guard_setup глушит пайплайны AsyncMock — возвращаем настоящий.
+    monkeypatch.setattr(bot, "inline_tts", lumen_commands.inline_tts)
+    asyncio.run(bot.cmd_tts(message))
+    assert len(replied) == 1
+    bot.chat_state.pop(123, None)
 
 
 def test_draw_trigger_this_with_reply_draws_replied_message(rate_guard_setup):
