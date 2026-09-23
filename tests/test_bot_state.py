@@ -570,8 +570,9 @@ def test_voice_message_transcribed_into_normal_routing(rate_guard_setup, monkeyp
     async def fake_resolve(message, state, clean_prompt, *, is_private):
         return None, "", "", (b"ogg-bytes", "audio/ogg")
 
-    async def fake_transcribe(audio_bytes, chat_id):
+    async def fake_transcribe(audio_bytes, mime, chat_id):
         assert audio_bytes == b"ogg-bytes"
+        assert mime == "audio/ogg"
         return "текст из войса"
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -598,7 +599,7 @@ def test_voice_message_falls_back_to_gemini_audio_on_transcribe_failure(rate_gua
     async def fake_resolve(message, state, clean_prompt, *, is_private):
         return None, "", "", (b"ogg-bytes", "audio/ogg")
 
-    async def fake_transcribe(audio_bytes, chat_id):
+    async def fake_transcribe(audio_bytes, mime, chat_id):
         return None
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):

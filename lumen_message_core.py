@@ -266,10 +266,9 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # сценарию (тяжесть/свежесть определяются по сказанному). Не вышло — падает в прежний
     # путь: аудио напрямую в Gemini (см. is_video_or_audio_media в роутере).
     if media_tuple and media_tuple[1].startswith("audio/"):
-        transcript = await bot._transcribe_audio(media_tuple[0], message.chat.id)
+        transcript = await bot._transcribe_audio(media_tuple[0], media_tuple[1], message.chat.id)
         if transcript:
-            marked = "[Расшифровка голосового]: " + transcript
-            clean_prompt = (clean_prompt + "\n" + marked).strip() if clean_prompt else marked
+            clean_prompt = (clean_prompt + "\n" + transcript).strip() if clean_prompt else transcript
             media_tuple = None
 
     if media_tuple and not clean_prompt:

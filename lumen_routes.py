@@ -42,6 +42,9 @@ from lumen_router_config import (
 )
 from lumen_security import _scrub_identity_leak
 
+# Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
+_TRANSCRIPT_MAX_CHARS = 4000
+
 log = logging.getLogger("bot")
 
 class OpenRouterAPIError(RuntimeError):
@@ -281,18 +284,21 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     bot._record_quota_usage("groq", model_trial)
     return answer
 
-async def _transcribe_audio(audio_bytes: bytes, chat_id: int) -> str | None:
+async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int) -> str | None:
     """Голос/аудио в текст через Groq Whisper (дешевле Gemini-квоты на порядок). None при
     любой неудаче — вызывающий код молча идёт прежним путём (аудио напрямую в Gemini)."""
     import bot
+    from lumen_media import _mime_suffix
     if not bot.GROQ_API_KEY or not audio_bytes:
         return None
     if len(audio_bytes) > bot.VOICE_TRANSCRIBE_MAX_BYTES:
         log.warning("[groq] Voice message too big for transcription (%d bytes), leaving to Gemini.", len(audio_bytes))
         return None
     lang = bot._chat_lang(chat_id)
+    suffix = _mime_suffix(mime) or ".ogg"
+    filename = "voice" + suffix
     form = aiohttp.FormData()
-    form.add_field("file", audio_bytes, filename="voice.ogg", content_type="audio/ogg")
+    form.add_field("file", audio_bytes, filename=filename, content_type=mime or "audio/ogg")
     form.add_field("model", "whisper-large-v3-turbo")
     if isinstance(lang, str) and len(lang) == 2:
         form.add_field("language", lang)
@@ -318,6 +324,9 @@ async def _transcribe_audio(audio_bytes: bytes, chat_id: int) -> str | None:
     text = (data.get("text") or "").strip() if isinstance(data, dict) else ""
     if not text:
         return None
+    # Длинный войс без обрезки упёрся бы в лимиты моделей ниже по маршруту.
+    if len(text) > _TRANSCRIPT_MAX_CHARS:
+        text = text[:_TRANSCRIPT_MAX_CHARS].rstrip() + "…"
     bot._record_quota_usage("groq", "whisper-large-v3-turbo")
     return text
 
