@@ -578,16 +578,20 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer()
         return
-    # Pop сразу: повторный тап не плодит второй ответ (чужая кнопка "сгорает" — владелец переспросит текстом).
-    rec = bot._pending_picks.pop(token, None)
+    # Сначала все проверки по записи, удаление — только перед делом: чужой тап
+    # или кривой индекс больше не сжигают кнопку владельца. Атомарность та же,
+    # что у прежнего pop-first: всё синхронно до первого await ниже.
+    rec = bot._pending_picks.get(token)
     # Язык для служебных реплик: из записи (если есть), иначе из чата кнопки.
     _qchat = query.message.chat.id if query.message and query.message.chat else None
     rec_lang = (rec or {}).get("lang") or bot._chat_lang(_qchat)
     if rec is None or rec["expires"] < time.monotonic():
         if rec is not None and query.message is not None:
             # Протухший, но известный выбор — молча выдаём свежие кнопки вместо
-            # стены "протухло, пиши текстом". Токен уже popped: второй такой тап
-            # упрётся в rec None ниже и честно покажет pick_expired. Один ресенд.
+            # стены "протухло, пиши текстом". Старый токен забираем явно (выше
+            # теперь get, а не pop). Второй такой тап упрётся в rec None ниже
+            # и честно покажет pick_expired. Один ресенд.
+            bot._pending_picks.pop(token, None)
             _purge_expired_picks()
             _enforce_pending_picks_cap()
             fresh = secrets.token_hex(4)
@@ -625,6 +629,8 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
         return
+    # Все проверки пройдены — только теперь забираем токен (см. комментарий у get выше).
+    bot._pending_picks.pop(token, None)
     choice = options[idx]
     with contextlib.suppress(Exception):
         await query.answer()

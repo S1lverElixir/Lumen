@@ -1055,6 +1055,35 @@ def test_download_url_bin_refuses_non_http_scheme_without_fetching():
     assert asyncio.run(lumen_tiktok._download_url_bin(session, "ftp://evil.example/x.mp4")) is None
 
 
+def test_host_resolves_to_public_blocks_internal_addresses():
+    # SSRF-гард: литералы проверяются без DNS, всё непубличное режем.
+    assert lumen_tiktok._host_resolves_to_public("8.8.8.8") is True
+    assert lumen_tiktok._host_resolves_to_public("127.0.0.1") is False
+    assert lumen_tiktok._host_resolves_to_public("10.0.0.5") is False
+    assert lumen_tiktok._host_resolves_to_public("192.168.1.20") is False
+    assert lumen_tiktok._host_resolves_to_public("169.254.169.254") is False
+    assert lumen_tiktok._host_resolves_to_public("::1") is False
+    assert lumen_tiktok._host_resolves_to_public("localhost") is False
+    assert lumen_tiktok._host_resolves_to_public("") is False
+    assert lumen_tiktok._host_resolves_to_public(None) is False
+
+
+def test_download_url_bin_refuses_internal_ips_without_fetching():
+    # Тот же гард сквозно: до session.get дело не доходит вообще.
+    class _ExplodingSession:
+        def get(self, *args, **kwargs):
+            raise AssertionError("no fetch must happen for internal IPs")
+
+    session = _ExplodingSession()
+    for url in (
+        "http://127.0.0.1/evil.mp4",
+        "http://10.1.2.3/evil.mp4",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://[::1]/evil.mp4",
+    ):
+        assert asyncio.run(lumen_tiktok._download_url_bin(session, url)) is None
+
+
 def test_download_url_bin_returns_none_on_non_200_status():
     resp = _FakeDownloadResponse([b"error page"], status=404)
     session = _FakeDownloadSession(resp)

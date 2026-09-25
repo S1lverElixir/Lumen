@@ -694,6 +694,31 @@ def test_pick_callback_wrong_user_rejected(monkeypatch):
         bot._pending_picks.clear()
 
 
+def test_pick_callback_foreign_tap_does_not_burn_token(monkeypatch):
+    # Регрессия: pop до проверки владельца сжигал кнопку — чужак одним тапом
+    # лишал владельца выбора. Теперь чужой тап отклоняется, свой после — работает.
+    bot._pending_picks.clear()
+    bot._pending_picks["dd44ee55"] = {
+        "chat_id": 777, "user_id": 111, "scenario": "film",
+        "original": "посоветуй фильм", "expires": time.monotonic() + 300,
+        "lang": "ru",
+    }
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    try:
+        q_foreign = _make_pick_query("pick:dd44ee55:0", user_id=999)
+        asyncio.run(bot.handle_pick_callback(q_foreign))
+        assert any(alert is True for _, alert in q_foreign.answered)
+        assert "dd44ee55" in bot._pending_picks
+        q_owner = _make_pick_query("pick:dd44ee55:2")
+        asyncio.run(bot.handle_pick_callback(q_owner))
+        assert "Триллер" in q_owner.message.edits[0][0]
+        fake_core.assert_awaited_once()
+        assert "dd44ee55" not in bot._pending_picks
+    finally:
+        bot._pending_picks.clear()
+
+
 def test_pick_callback_bad_data_answered_quietly():
     for data in ("pick:", "pick:tok:notanint"):
         q = _make_pick_query(data)

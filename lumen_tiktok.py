@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import os
 import re
+import socket
 import tempfile
 import time
 import urllib.parse
@@ -250,11 +252,45 @@ def _write_mp3_tags(path: str, title: str, artist: str, cover: bytes | None) -> 
 TIKTOK_DOWNLOAD_MAX_BYTES = int(os.getenv("TIKTOK_DOWNLOAD_MAX_BYTES", str(75 * 1024 * 1024)))
 
 
+# ── SSRF-гард для _download_url_bin ──
+# Скомпрометированная выдача TikWM могла бы подсунуть внутренний адрес
+# (localhost, metadata-IP облака 169.254.169.254 и т.п.) — сервер сам сходил бы
+# внутрь своей сети. Литералы проверяем без DNS, хосты — через резолв
+# (fail-closed: не резолвится — не качаем). Известное ограничение: TOCTOU между
+# резолвом и коннектом (DNS-rebinding) лечится только на уровне коннектора;
+# для нашей угрозы (прямой внутренний адрес в JSON) предпроверки достаточно.
+def _host_resolves_to_public(host: str | None) -> bool:
+    if not host:
+        return False
+    host = host.strip().strip("[]").lower()
+    if host == "localhost":
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError):
+        return False
+    addrs = {info[4][0] for info in infos}
+    if not addrs:
+        return False
+    try:
+        return all(ipaddress.ip_address(a).is_global for a in addrs)
+    except ValueError:
+        return False
+
+
 async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: dict | None = None) -> bytes | None:
-    # URL — из JSON чужого сервиса (TikWM): качаем только http(s) (AUD-D-003).
+    # URL — из JSON чужого сервиса (TikWM): качаем только http(s) (AUD-D-003)
+    # и только с публичных адресов (SSRF-гард ниже).
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme not in ("http", "https"):
         log.warning("[download] Refusing non-HTTP(S) URL (scheme=%r).", scheme)
+        return None
+    if not _host_resolves_to_public(urllib.parse.urlsplit(url).hostname):
+        log.warning("[download] Refusing non-public host for URL %r.", url)
         return None
     if headers is None:
         headers = {
@@ -265,6 +301,13 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
     try:
         async with session.get(url, headers=headers, timeout=60) as resp:
             if resp.status != 200:
+                return None
+            # Редирект мог увести на внутренний адрес уже после предпроверки —
+            # сверяем конечный хост тоже. У тестовых заглушек .url нет — их пропускаем.
+            final_url = getattr(resp, "url", None)
+            final_host = urllib.parse.urlsplit(str(final_url)).hostname if final_url is not None else None
+            if final_host is not None and not _host_resolves_to_public(final_host):
+                log.warning("[download] Refusing redirect to non-public host %r.", final_host)
                 return None
             # Content-Length — быстрый отказ ДО скачивания (сервер может соврать/не прислать — ниже та же проверка потоково по факту).
             content_length = resp.headers.get("Content-Length")
