@@ -703,6 +703,17 @@ def test_pick_callback_ignores_foreign_callbacks():
     assert q.answered == []
 
 
+def test_callback_handlers_have_data_prefix_filters():
+    # Регрессия 25.09.2026: handle_lang_callback висел первым БЕЗ фильтра и по
+    # правилу first match wins съедал вообще все callback_query — кнопки pick
+    # рисовались, но нажатия до handle_pick_callback не доходили никогда.
+    handlers = bot.dp.callback_query.handlers
+    by_fn = {h.callback.__name__: h for h in handlers}
+    assert "handle_lang_callback" in by_fn and "handle_pick_callback" in by_fn
+    assert by_fn["handle_lang_callback"].filters, "lang handler must not be a catch-all"
+    assert by_fn["handle_pick_callback"].filters, "pick handler must not be a catch-all"
+
+
 def test_expired_picks_purged_on_new_pick(rate_guard_setup, monkeypatch):
     bot._pending_picks.clear()
     bot._pending_picks["old"] = {

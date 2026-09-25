@@ -286,6 +286,51 @@ def test_md_to_html_splits_inline_bullets_end_to_end():
     assert result.count("\n• ") == 3
 
 
+def test_split_inline_numbered_splits_glued_sky_answer():
+    # Прод 25.09.2026: модель написала "1. ... 2. ... 3. ..." одним абзацем.
+    text = (
+        "1. Рэлеевское рассеяние — молекулы воздуха рассеивают солнечный свет. "
+        "2. Зависимость от длины волны — короткие волны рассеиваются сильнее. "
+        "3. Восприятие глаза — глаз чувствительнее к синему цвету неба."
+    )
+    lines = lumen_formatting._split_inline_numbered(text).split("\n")
+    assert len(lines) == 3
+    assert lines[0].startswith("1. ") and lines[1].startswith("2. ") and lines[2].startswith("3. ")
+
+
+def test_split_inline_numbered_keeps_intro_on_own_line():
+    text = "Причины такие: 1. Первая причина с длинным пояснением текста. 2. Вторая причина с длинным пояснением текста. 3. Третья причина с длинным пояснением текста."
+    lines = lumen_formatting._split_inline_numbered(text).split("\n")
+    assert lines[0] == "Причины такие:"
+    assert [l[:2] for l in lines[1:]] == ["1.", "2.", "3."]
+
+
+def test_split_inline_numbered_ignores_prose_and_versions():
+    # Два пункта без третьего, годы/версии, отсылка "пункты 1. и 2." — не списки.
+    assert lumen_formatting._split_inline_numbered("1. Да 2. Нет") == "1. Да 2. Нет"
+    assert lumen_formatting._split_inline_numbered("Версия 3.5 вышла в 1995 году.") == "Версия 3.5 вышла в 1995 году."
+    assert lumen_formatting._split_inline_numbered("Смотри пункты 1. и 2. ниже.") == "Смотри пункты 1. и 2. ниже."
+    code = "```\n1. Первый шаг алгоритма. 2. Второй шаг алгоритма. 3. Третий шаг алгоритма.\n```"
+    assert "1. Первый шаг алгоритма. 2." in lumen_formatting._md_to_html(code)
+
+
+def test_md_to_html_splits_inline_numbered_end_to_end():
+    text = "1. Пункт первый с достаточным пояснением для проверки. 2. Пункт второй с достаточным пояснением для проверки. 3. Пункт третий с достаточным пояснением для проверки."
+    result = lumen_formatting._md_to_html(text)
+    assert "\n2. " in result and "\n3. " in result
+
+
+def test_md_to_rich_html_splits_inline_lists_end_to_end():
+    # Rich-путь раньше не разносил слипшееся вообще (прод 25.09.2026: мелодрамы и вердикт одной строкой).
+    bullets = "Вот несколько хороших мелодрамм: " + " • ".join(
+        ["фильм номер %d с тёплым и подробным описанием сюжета" % i for i in range(4)]
+    )
+    assert "\n• " in lumen_formatting._md_to_rich_html(bullets)
+    numbered = "1. Пункт первый с достаточным пояснением для проверки. 2. Пункт второй с достаточным пояснением для проверки. 3. Пункт третий с достаточным пояснением для проверки."
+    rich = lumen_formatting._md_to_rich_html(numbered)
+    assert "\n2. " in rich and "\n3. " in rich
+
+
 def test_md_to_html_full_pipeline_converts_bullet_list_with_bold():
     text = "* **Возмездие:** аргумент про справедливость\n* **Сдерживание:** снижает преступность"
     result = lumen_formatting._md_to_html(text)

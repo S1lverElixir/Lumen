@@ -140,6 +140,34 @@ def _split_inline_bullets(text: str) -> str:
             out.append(line)
     return "\n".join(out)
 
+# Слипшиеся в один абзац нумерованные пункты ("1. ... 2. ... 3. ...", прод
+# 25.09.2026: модель написала все 3 причины голубого неба одной строкой) —
+# разносим по строкам. Строго: последовательность с 1, 3+ пункта, каждый
+# содержательный — иначе дробим прозу вида "смотри пункты 1. и 2. ниже".
+_INLINE_NUMBERED_MIN_ITEMS = 3
+_INLINE_NUMBERED_MIN_ITEM_LEN = 12
+_NUMBERED_MARKER_RE = re.compile(r"(?<!\d)(\d{1,3})\. ")
+
+def _split_inline_numbered(text: str) -> str:
+    out = []
+    for line in text.split("\n"):
+        markers = [(m.start(), int(m.group(1))) for m in _NUMBERED_MARKER_RE.finditer(line)]
+        if (
+            len(markers) >= _INLINE_NUMBERED_MIN_ITEMS
+            and [num for _, num in markers] == list(range(1, len(markers) + 1))
+        ):
+            bounds = [pos for pos, _ in markers] + [len(line)]
+            items = [line[bounds[i]:bounds[i + 1]].strip() for i in range(len(markers))]
+            if all(len(it) >= _INLINE_NUMBERED_MIN_ITEM_LEN for it in items):
+                # Вводная фраза до "1." ("Причины:") — отдельной строкой, как у буллетов.
+                head = line[:bounds[0]].rstrip()
+                if head:
+                    out.append(head)
+                out.extend(items)
+                continue
+        out.append(line)
+    return "\n".join(out)
+
 # ── Markdown-заголовки "#"/"##"/"###" → **жирный текст** ────────────────────
 # Регрессия 18.08.2026: модели пишут ### вопреки промпту. Режем ATX по CommonMark (решётки + пробел), C#/#tag не трогаем.
 _HEADER_MARKER_RE = re.compile(r"^[ \t]*#{1,6}[ \t]+(.*)$", re.MULTILINE)
@@ -218,6 +246,7 @@ def _md_to_html(text: str) -> str:
             чтобы строка-разделитель таблицы ("|---|---|") успела обработаться первой
             и не была принята за маркер списка.
        1.405. Слипшиеся "• A • B" в одном абзаце → по строкам (_split_inline_bullets).
+       1.406. Слипшиеся "1. A 2. B 3. C" в одном абзаце → по строкам (_split_inline_numbered).
       1.45. Markdown-цитаты "> " → сентинелы \x00BQS\x00/\x00BQE\x00 (_convert_
             blockquotes) — сентинелы, не сразу <blockquote>, т.к. Phase 2 экранировал
             бы буквальный тег; настоящий тег подставляется после Phase 3 (см. ниже).
@@ -282,6 +311,11 @@ def _md_to_html(text: str) -> str:
     # ── Phase 1.405: слипшиеся "• A • B" в одном абзаце → по строкам (см.
     # _split_inline_bullets выше) — после нормализации маркеров, до таблиц/escape.
     text = _split_inline_bullets(text)
+
+    # ── Phase 1.406: слипшиеся "1. A 2. B 3. C" в одном абзаце → по строкам
+    # (см. _split_inline_numbered выше) — код уже вынесен шагом 1, нумерация
+    # версий/дат ("3.5", "1995.") под правило не попадает (нужна цепочка с 1).
+    text = _split_inline_numbered(text)
 
     # ── Phase 1.41: markdown-заголовки "#"/"##"/"###" → **жирный текст** (см.
     # _normalize_headers выше) — после списков, до HTML-экранирования и до Phase 3
@@ -462,6 +496,10 @@ def _md_to_rich_html(text: str) -> str:
     text = "\n".join(out)
 
     text = _normalize_bullet_markers(text)
+    # Та же разноска слипшихся списков, что в обычном пути (Phase 1.405/1.406):
+    # иначе стрим (HTML) и финал (rich) одного ответа выглядят по-разному.
+    text = _split_inline_bullets(text)
+    text = _split_inline_numbered(text)
     text = _convert_blockquotes(text)
 
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")

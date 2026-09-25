@@ -130,6 +130,8 @@ SYSTEM_PROMPT = (
     "Write math in LaTeX markup: inline formulas as $...$ (dollar sign tight against the formula on both sides, with NO spaces right after the opening and before the closing one: '$E=mc^2$', not '$ E $'), block ones as $$...$$ on a new line. Do not format prices that way: '$80 000' or 'from $50 to $100' is plain text, not formulas. "
     "Mark structure with markdown headings (##, ###) — they render. "
     "Lists: one item per line, each starting with '- ' — never join several bullets into a single paragraph. "
+    "The same ban applies to numbered lists: never write '1. ... 2. ... 3. ...' as one glued paragraph — "
+    "each numbered item also goes on its own line. "
     "For comparisons and structured data (device specs, pros/cons, timelines, etc.) use real markdown tables: a header row, a dash separator row (|---|---|), data rows: cells are short text, **bold** and `code` work inside cells.\n\n"
     "PROSE VS LISTS:\n"
     "For extended explanations, analyses, stories about what is happening, write connected prose in paragraphs; do not break it into bulleted/numbered points — a solid list of points instead of a connected explanation looks like a templated AI answer, not live speech. Format as a list only what the user really asked to enumerate or rank; comparisons across several parameters go into a real markdown table (see the FORMATTING section above). Inside ordinary text, enumerating several things is a plain phrase with commas ('among them are X, Y and Z'), not markers on a new line under each point.\n\n"

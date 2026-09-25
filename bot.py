@@ -33,7 +33,7 @@ import urllib.request as _urllib_request
 import aiohttp
 import sentry_sdk
 import uvicorn
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import Command
@@ -1125,10 +1125,10 @@ dp.message.register(cmd_draw, Command("draw"))
 dp.message.register(cmd_tts, Command("tts"))
 dp.message.register(cmd_reset, Command("reset"))
 dp.message.register(cmd_lang, Command("lang"))
-dp.callback_query.register(handle_lang_callback)
+dp.callback_query.register(handle_lang_callback, F.data.startswith("lang:"))
 dp.message.register(cmd_logs, Command("logs"))
 dp.message.register(cmd_stats, Command("stats"))
-dp.callback_query.register(handle_pick_callback)
+dp.callback_query.register(handle_pick_callback, F.data.startswith("pick:"))
 
 
 # ─────────────────── автоматический выбор модели (роутер) ───────────────────
