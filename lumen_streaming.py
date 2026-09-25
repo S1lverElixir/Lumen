@@ -368,6 +368,10 @@ async def _run_streaming_reply(
                 final_text = chunks[-1] if chunks else full_text
                 note = bot._t(message.chat.id, "stream_note_interrupted")
                 await bot._tg_call(sent_messages[-1].edit_text, _md_to_html(final_text + note), parse_mode=ParseMode.HTML, call_timeout=15.0)
+            # Частичный ответ уже показан и ляжет в историю ниже — запоминаем, что
+            # его оборвало: слово «продолжи» добьёт с места обрыва (_continue_after_interrupt).
+            state["interrupted"] = True
+            bot.mark_state_dirty(chat_id)
     finally:
         aclose = getattr(piece_agen, "aclose", None)
         if aclose is not None:

@@ -705,6 +705,53 @@ def test_media_question_without_file_gets_no_file_notice(rate_guard_setup, monke
     assert "не выдумывай" in prompt.lower()
 
 
+def _continue_state():
+    from collections import deque
+    return {
+        "history": [
+            {"role": "user", "content": "объясни фотосинтез"},
+            {"role": "assistant", "content": "Фотосинтез — это частично…"},
+        ],
+        "ctx": deque(),
+        "interrupted": True,
+    }
+
+
+def test_continue_after_interrupt_matches_only_bare_request():
+    from lumen_message_core import _continue_after_interrupt
+    state = _continue_state()
+    for text in ("продолжи", "Продолжи!", "продолжай", "дальше", "continue", "Продолжи, пожалуйста"):
+        out = _continue_after_interrupt(state, text)
+        assert out is not None and out.startswith("объясни фотосинтез"), text
+        assert "места обрыва" in out
+    for text in ("продолжи писать код", "а продолжи", "продолжение следует", "что дальше делать"):
+        assert _continue_after_interrupt(state, text) is None, text
+
+
+def test_continue_after_interrupt_needs_flag_and_pair():
+    from lumen_message_core import _continue_after_interrupt
+    assert _continue_after_interrupt({"history": []}, "продолжи") is None
+    no_flag = _continue_state()
+    no_flag.pop("interrupted")
+    assert _continue_after_interrupt(no_flag, "продолжи") is None
+    broken = {"history": [{"role": "assistant", "content": "хвост без вопроса"}], "interrupted": True}
+    assert _continue_after_interrupt(broken, "продолжи") is None
+
+
+def test_continue_rewrites_prompt_and_clears_flag(rate_guard_setup, monkeypatch):
+    # Сквозной: «продолжи» превращается в исходный вопрос с пометкой, флаг гаснет успехом.
+    # Сначала фикстура (её get_state→{}), потом своё состояние — иначе порядок monkeypatch не тот.
+    message = rate_guard_setup()
+    state = _continue_state()
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    message.text = "продолжи"
+    prompt = _run_core_capturing_prompt(message, monkeypatch)
+    assert prompt.startswith("объясни фотосинтез")
+    assert "места обрыва" in prompt
+    assert "interrupted" not in state
+    bot.chat_state.pop(123, None)
+
+
 def test_voice_message_transcribed_into_normal_routing(rate_guard_setup, monkeypatch):
     # Войс: транскрибация уходит в общий роутинг как текст, аудио дальше не едет.
     message = rate_guard_setup()

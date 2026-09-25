@@ -124,6 +124,34 @@ def _rate_limit_key_for_message(message: Message) -> int:
     return sender_chat.id if sender_chat else message.chat.id
 
 
+_CONTINUE_RE = re.compile(
+    r"^(продолжи(ть)?|продолжай|дальше|договори|continue)\s*,?\s*(пожалуйста)?\s*[.!…]*$",
+    re.IGNORECASE,
+)
+
+_CONTINUE_INSTRUCTION = (
+    "\n\n[Продолжи оборванный ответ с места обрыва, не повторяя уже сказанное. / "
+    "Continue the interrupted answer from the cut point without repeating what was already said.]"
+)
+
+def _continue_after_interrupt(state: dict, clean_prompt: str) -> str | None:
+    """«продолжи» после оборванного стрима: исходный вопрос + пометка продолжить
+    с места обрыва. Частичный ответ уже лежит в истории — модель его видит,
+    дублировать его в промт не нужно. Без флага обрыва или без пары
+    вопрос-ответ в хвосте истории — None (обычный путь)."""
+    if not _CONTINUE_RE.match((clean_prompt or "").strip()):
+        return None
+    hist = state.get("history") or []
+    if (
+        state.get("interrupted")
+        and len(hist) >= 2
+        and isinstance(hist[-1], dict) and hist[-1].get("role") == "assistant" and (hist[-1].get("content") or "").strip()
+        and isinstance(hist[-2], dict) and hist[-2].get("role") == "user" and (hist[-2].get("content") or "").strip()
+    ):
+        return hist[-2]["content"].strip() + _CONTINUE_INSTRUCTION
+    return None
+
+
 async def _reject_rate_limited_message(message: Message) -> bool:
     import bot
     if not bot._check_and_register_rate_limit(bot._rate_limit_key_for_message(message)):
@@ -233,6 +261,15 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
 
     lower_prompt = clean_prompt.lower().strip()
 
+    # «продолжи» после оборванного стрима: подменяем промт исходным вопросом с
+    # пометкой (частичный ответ уже в истории). Кнопки-уточнения при добивке не
+    # показываем — вопрос уже задан, гадать нечего.
+    continued_prompt = _continue_after_interrupt(state, clean_prompt)
+    is_continuation = continued_prompt is not None
+    if is_continuation:
+        clean_prompt = continued_prompt
+        lower_prompt = clean_prompt.lower().strip()
+
     matched_draw_trigger = _match_trigger_prefix(lower_prompt, DRAW_TRIGGER_PREFIXES)
     matched_tts_trigger = _match_trigger_prefix(lower_prompt, TTS_TRIGGER_PREFIXES)
 
@@ -269,7 +306,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # вместо гадания модели — вопрос с вариантами. _pick_resolved ставят только
     # колбэки (см. handle_pick_callback): дополненный текст всё ещё матчится
     # детектором, без флага ушёл бы в кнопки по кругу.
-    if bot.PICK_BUTTONS_ENABLED and not getattr(message, "_pick_resolved", False):
+    if bot.PICK_BUTTONS_ENABLED and not is_continuation and not getattr(message, "_pick_resolved", False):
         pick_scenario = match_pick_request(lower_prompt)
         if pick_scenario:
             await bot._send_pick_question(message, pick_scenario, clean_prompt)
@@ -352,6 +389,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         )
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
+        # Успешный ответ закрывает флаг обрыва (добивка тоже считается успехом).
+        state.pop("interrupted", None)
         bot.mark_state_dirty(message.chat.id)
     except Exception as exc:
         if isinstance(exc, (bot.GeminiAllModelsExhaustedError, bot.RouteBudgetExceededError)):
