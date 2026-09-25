@@ -328,6 +328,29 @@ def test_ask_gemini_retries_without_tools_on_malformed_function_call():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_extract_gemini_answer_skips_retry_when_route_budget_spent():
+    # Повтор после битого вызова не ждёт полные TELEGRAM_AI_TIMEOUT поверх
+    # истраченного бюджета — иначе маршрут держит lock чата за ROUTE_TOTAL_BUDGET_SEC.
+    async def must_not_run(*, model, contents, config=None):
+        raise AssertionError("retry must not run on spent budget")
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=must_not_run)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="MALFORMED_FUNCTION_CALL")])
+        started = time.monotonic()
+        ans = asyncio.run(bot._extract_gemini_answer_text(
+            resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
+            deadline=time.monotonic() - 1.0,
+        ))
+        assert time.monotonic() - started < 5
+        assert "MALFORMED_FUNCTION_CALL" in ans
+    finally:
+        bot.client = original_client
+
+
 def test_run_route_reorders_slow_head_down(monkeypatch):
     # Интеграция reorder в _run_route: модель с измеренными 100с уходит вниз,
     # ask вызывается уже с переупорядоченной цепочкой.
@@ -380,7 +403,7 @@ def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
     chat_id = 999304
     extracts = ["", "хороший ответ"]
 
-    async def fake_extract(resp, *, model_id, call_contents, gconfig):
+    async def fake_extract(resp, *, model_id, call_contents, gconfig, deadline=None):
         return extracts.pop(0)
 
     fake_client = MagicMock()
@@ -1114,14 +1137,28 @@ def _fake_groq_audio_session(response_json, status=200):
     return fake_get_http_session
 
 
-def test_transcribe_audio_success_records_quota(monkeypatch):
-    # Groq Whisper отдал текст — пишем расход groq/whisper и возвращаем текст.
+def test_transcribe_audio_success_does_not_pollute_quota(monkeypatch):
+    # Служебный вызов — в квоту не пишем: /stats и триггеры exhausted только про ответы людям.
     monkeypatch.setattr(bot, "_get_http_session", _fake_groq_audio_session({"text": "  привет мир  "}))
     monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
-    recorded = {}
-    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model: recorded.setdefault("v", (provider, model)))
-    assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123)) == "привет мир"
-    assert recorded["v"] == ("groq", "whisper-large-v3-turbo")
+    bot.GLOBAL_QUOTA.setdefault("groq", {}).pop("whisper-large-v3-turbo", None)
+    try:
+        assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123)) == "привет мир"
+        assert "whisper-large-v3-turbo" not in bot.GLOBAL_QUOTA.get("groq", {})
+    finally:
+        bot.GLOBAL_QUOTA.get("groq", {}).pop("whisper-large-v3-turbo", None)
+
+
+def test_record_quota_usage_service_flag_skips_counter():
+    # Обычный вызов считает, служебный — нет (саммари/транскрибация).
+    bot.GLOBAL_QUOTA.setdefault("groq", {}).pop("svc-probe-model", None)
+    try:
+        bot._record_quota_usage("groq", "svc-probe-model", service=True)
+        assert "svc-probe-model" not in bot.GLOBAL_QUOTA.get("groq", {})
+        bot._record_quota_usage("groq", "svc-probe-model")
+        assert bot.GLOBAL_QUOTA["groq"]["svc-probe-model"]["used"] >= 1
+    finally:
+        bot.GLOBAL_QUOTA.get("groq", {}).pop("svc-probe-model", None)
 
 
 def test_transcribe_audio_empty_result_is_none(monkeypatch):

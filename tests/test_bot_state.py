@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 import asyncio
 import bot
+import contextlib
 import json
 import logging
 import lumen_chat_state
@@ -623,6 +624,27 @@ def test_process_media_group_buffers_holds_chat_lock():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_process_media_group_buffers_cleanup_on_cancel():
+    # Отмена во сне (рестарт/дренаж) — записи буфера и задачи уходят, а не висят вечно.
+    bot._mg_buffers["mgcancel"] = ["m1"]
+
+    async def run():
+        task = asyncio.ensure_future(bot._process_media_group_buffers("mgcancel"))
+        bot._mg_tasks["mgcancel"] = task
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(run())
+        assert "mgcancel" not in bot._mg_buffers
+        assert "mgcancel" not in bot._mg_tasks
+    finally:
+        bot._mg_buffers.pop("mgcancel", None)
+        bot._mg_tasks.pop("mgcancel", None)
+
+
 def test_process_media_group_buffers_fetches_extras_in_parallel_keeping_order():
     # Альбом качается параллельно: медленное первое фото не должно задерживать остальные,
     # а порядок вложений обязан совпасть с порядком сообщений.
@@ -896,7 +918,7 @@ def test_trim_history_summarizes_old_keeps_recent(monkeypatch):
 
     monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
     monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model: None)
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
     history = _make_long_history(105)
     asyncio.run(bot._trim_history(history))
     assert len(history) == 81

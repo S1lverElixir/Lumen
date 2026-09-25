@@ -622,8 +622,13 @@ def _mark_quota_exhausted(provider: str, model_id: str) -> None:
     e["exhausted_at"] = time.time()
     bot.mark_quota_dirty()
 
-def _record_quota_usage(provider: str, model_id: str) -> None:
+def _record_quota_usage(provider: str, model_id: str, *, service: bool = False) -> None:
+    """Служебные вызовы (саммари истории, транскрибация — service=True) в квоту
+    не пишем: иначе /stats врёт, а триггеры exhausted срабатывают не на ответы людям."""
     import bot
+    if service:
+        log.debug("[quota] Service call %s/%s not counted.", provider, model_id)
+        return
     e = bot._quota_entry(provider, model_id)
     e["used"] = int(e.get("used") or 0) + 1
     e["exhausted_at"] = None
@@ -691,7 +696,7 @@ async def _summarize_text(text: str) -> str:
             if choices:
                 answer = bot._or_extract_text(choices[0].get("message") or "").strip()
             if answer:
-                bot._record_quota_usage(provider, model)
+                bot._record_quota_usage(provider, model, service=True)
                 return answer
         except Exception as exc:
             log.warning("[history] Summarization via %s/%s failed, trying next: %s", provider, model, exc)

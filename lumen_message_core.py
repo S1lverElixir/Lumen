@@ -48,9 +48,15 @@ log = logging.getLogger("bot")
 
 async def _process_media_group_buffers(mgid: str) -> None:
     import bot
-    await asyncio.sleep(0.8)
-    messages = bot._mg_buffers.pop(mgid, [])
-    bot._mg_tasks.pop(mgid, None)
+    messages: list = []
+    try:
+        await asyncio.sleep(0.8)
+    finally:
+        # Отмена во сне — запись обязана уйти, иначе висит вечно. Чужую (новую)
+        # задачу под тем же mgid не трогаем — сверяемся, что это мы.
+        messages = bot._mg_buffers.pop(mgid, []) or []
+        if bot._mg_tasks.get(mgid) is asyncio.current_task():
+            bot._mg_tasks.pop(mgid, None)
     if not messages:
          return
     # Альбом идёт под тем же per-chat lock, что обычные сообщения: иначе фоновый таск

@@ -327,7 +327,7 @@ async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int) -> str 
     # Длинный войс без обрезки упёрся бы в лимиты моделей ниже по маршруту.
     if len(text) > _TRANSCRIPT_MAX_CHARS:
         text = text[:_TRANSCRIPT_MAX_CHARS].rstrip() + "…"
-    bot._record_quota_usage("groq", "whisper-large-v3-turbo")
+    bot._record_quota_usage("groq", "whisper-large-v3-turbo", service=True)
     return text
 
 async def ask_openrouter_multimodal(
@@ -494,7 +494,7 @@ def _build_gemini_call_config(model_id: str, contents: list[types.Content]) -> t
 
     return call_contents, gconfig
 
-async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents: list, gconfig) -> str:
+async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents: list, gconfig, deadline: float | None = None) -> str:
     """Текст ответа Gemini: сначала resp.text, иначе разбор candidates/parts вручную (включая повтор БЕЗ инструментов при MALFORMED_FUNCTION_CALL)."""
     import bot
     ans = ""
@@ -538,11 +538,18 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                     retry_gconfig = gconfig.model_copy(update={"tools": None}) if gconfig is not None else None
                     # Async-клиент, а не to_thread: wait_for тогда реально отменяет зависший
                     # запрос (поток to_thread отменить нельзя — он бы жил дальше в фоне).
-                    retry_resp = await asyncio.wait_for(
-                        bot.client.aio.models.generate_content(model=model_id, contents=call_contents, config=retry_gconfig),
-                        timeout=bot.TELEGRAM_AI_TIMEOUT,
-                    )
-                    retry_text = getattr(retry_resp, "text", "") or ""
+                    # Повтор тоже влезет в бюджет маршрута: полный TELEGRAM_AI_TIMEOUT
+                    # поверх истраченного держал бы lock чата за ROUTE_TOTAL_BUDGET_SEC.
+                    retry_timeout = bot.TELEGRAM_AI_TIMEOUT
+                    if deadline is not None:
+                        retry_timeout = min(retry_timeout, max(0.0, deadline - time.monotonic()))
+                    retry_resp = None
+                    if retry_timeout > 0:
+                        retry_resp = await asyncio.wait_for(
+                            bot.client.aio.models.generate_content(model=model_id, contents=call_contents, config=retry_gconfig),
+                            timeout=retry_timeout,
+                        )
+                    retry_text = getattr(retry_resp, "text", "") or "" if retry_resp is not None else ""
                     if retry_text.strip():
                         ans = retry_text
                         log.warning("[gemini] Model %s had MALFORMED_FUNCTION_CALL, retried without tools successfully.", model_id)
@@ -609,7 +616,7 @@ async def ask_gemini(
                 bot.client.aio.models.generate_content(model=curr_model_id, contents=call_contents, config=gconfig),
                 timeout=bot.ROUTE_MODEL_TIMEOUT_SEC,
             )
-            ans = await bot._extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig)
+            ans = await bot._extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
             ans = ans.strip()
             if not ans:
                 # Пустой ответ — пробуем следующую модель (прод 17.09.2026: юзер увидел буквальное "Empty response").
