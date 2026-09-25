@@ -6,6 +6,7 @@ test_bot_tts.py — TTS: Fish Audio SSE и inline_tts (квоты, фолбэк 
 from unittest.mock import MagicMock
 import asyncio
 import base64
+from types import SimpleNamespace
 import bot
 from tests.bot_test_helpers import (
     _FakeIncomingMessage,
@@ -196,4 +197,100 @@ def test_fish_audio_tts_bytes_returns_none_on_empty_stream():
     finally:
         bot._get_http_session = original_get_session
         bot.OPENROUTER_API_KEY = original_key
+
+
+class _CountingVoiceBot(_FakeVoiceBot):
+    def __init__(self):
+        super().__init__()
+        self.voices = []
+
+    async def send_voice(self, **kwargs):
+        self.voices.append(kwargs)
+        return SimpleNamespace()
+
+
+def _wav_client():
+    fake_wav_bytes = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 64
+
+    def fake_generate_content(*, model, contents, config=None):
+        return _fake_tts_response(fake_wav_bytes)
+
+    fake_client = MagicMock()
+    fake_client.models.generate_content.side_effect = fake_generate_content
+    return fake_client
+
+
+def test_split_tts_chunks_short_text_unchanged():
+    from lumen_commands import _split_tts_chunks
+    assert _split_tts_chunks("Привет, мир", 800) == ["Привет, мир"]
+    assert _split_tts_chunks("   ", 800) == []
+
+
+def test_split_tts_chunks_packs_sentences_within_limit():
+    from lumen_commands import _split_tts_chunks
+    s1 = "Первое предложение про котиков. "
+    s2 = "Второе предложение про погоду за окном. "
+    s3 = "Третье предложение про смысл жизни и всё такое."
+    chunks = _split_tts_chunks(s1 + s2 + s3, 80)
+    assert all(len(c) <= 80 for c in chunks)
+    assert len(chunks) == 2
+    assert chunks[0].startswith("Первое") and "Второе" in chunks[0]
+    assert chunks[1].startswith("Третье")
+
+
+def test_split_tts_chunks_hard_cuts_single_long_sentence():
+    from lumen_commands import _split_tts_chunks
+    long_single = "Слово " * 200
+    chunks = _split_tts_chunks(long_single.strip(), 800)
+    assert all(len(c) <= 800 for c in chunks)
+    assert len(chunks) >= 2
+
+
+def test_inline_tts_sends_long_text_in_parts():
+    # Длинный текст бьём на части вместо отказа: два голосовых, первый в ответ.
+    from lumen_commands import TTS_MAX_PARTS
+    assert TTS_MAX_PARTS >= 2
+    limit = bot.TTS_MAX_CHARS
+    part = "Предложение номер раз про интересные вещи. "
+    text = part * ((limit // len(part)) + 2)
+    assert len(text) > limit
+
+    incoming = _FakeIncomingMessage(999804)
+    incoming.message_id = 12348
+
+    original_client = bot.client
+    original_bot = bot.bot
+    bot.client = _wav_client()
+    counting = _CountingVoiceBot()
+    bot.bot = counting
+    try:
+        asyncio.run(bot.inline_tts(incoming, text))
+        assert len(counting.voices) == 2
+        assert counting.voices[0].get("reply_to_message_id") == 12348
+        assert counting.voices[1].get("reply_to_message_id") is None
+    finally:
+        bot.client = original_client
+        bot.bot = original_bot
+
+
+def test_inline_tts_refuses_beyond_parts_cap_without_sending():
+    from lumen_commands import TTS_MAX_PARTS
+    limit = bot.TTS_MAX_CHARS
+    text = "Слово " * ((limit * TTS_MAX_PARTS) // 6 + 10)
+
+    incoming = _FakeIncomingMessage(999805)
+    incoming.message_id = 12349
+
+    original_client = bot.client
+    original_bot = bot.bot
+    bot.client = _wav_client()
+    counting = _CountingVoiceBot()
+    bot.bot = counting
+    try:
+        asyncio.run(bot.inline_tts(incoming, text))
+        assert counting.voices == []
+        assert len(incoming.sent) >= 1  # текст tts_too_long ушёл
+    finally:
+        bot.client = original_client
+        bot.bot = original_bot
 

@@ -362,6 +362,10 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones():
     assert "/reset" in text
     assert "/lang" in text
     assert "/imgmodel" not in text
+    # Онбординг: живые примеры вместо голой простыни (чат 1 — дефолт en).
+    assert "Try right now" in text
+    from lumen_lang import t as _lang_t_direct
+    assert "Попробуй прямо сейчас" in _lang_t_direct("ru", "start_text")
 
 
 def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
@@ -701,6 +705,39 @@ def test_pick_callback_ignores_foreign_callbacks():
     q = _make_pick_query("something-else-entirely")
     asyncio.run(bot.handle_pick_callback(q))
     assert q.answered == []
+
+
+def test_pick_callback_expired_known_token_reissues_buttons_once(monkeypatch):
+    # Протухший, но известный выбор — свежие кнопки вместо стены (один ресенд:
+    # токен уже popped, следующий тап упрётся в rec None и покажет expired).
+    bot._pending_picks.clear()
+    bot._pending_picks["oldtok12"] = {
+        "chat_id": 777, "user_id": 111, "scenario": "film",
+        "original": "посоветуй фильм", "expires": time.monotonic() - 1,
+        "lang": "ru",
+    }
+    q = _make_pick_query("pick:oldtok12:1")
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    try:
+        asyncio.run(bot.handle_pick_callback(q))
+        assert len(q.message.edits) == 1
+        assert "oldtok12" not in bot._pending_picks
+        assert len(bot._pending_picks) == 1
+        fresh = next(iter(bot._pending_picks))
+        assert fresh != "oldtok12"
+        # Свежие кнопки идут обычным путём до конца.
+        q2 = _make_pick_query(f"pick:{fresh}:2")
+        asyncio.run(bot.handle_pick_callback(q2))
+        assert "Триллер" in q2.message.edits[0][0]
+        fake_core.assert_awaited_once()
+        # А вот теперь токен и правда сгорел — дальше честное expired.
+        q3 = _make_pick_query(f"pick:{fresh}:0")
+        asyncio.run(bot.handle_pick_callback(q3))
+        assert any("expired" in (text or "").lower() or "протух" in (text or "").lower() for text, _ in q3.answered)
+        fake_core.assert_awaited_once()
+    finally:
+        bot._pending_picks.clear()
 
 
 def test_callback_handlers_have_data_prefix_filters():

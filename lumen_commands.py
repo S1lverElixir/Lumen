@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import secrets
 import tempfile
 import time
@@ -170,88 +171,129 @@ async def _gemini_tts_bytes(text: str) -> tuple[bytes, str, str]:
     )
 
 
+# Длинную озвучку бьём на части вместо отказа: кап частей — чтобы вставка
+# целой статьи не сожгла дневную квоту TTS и не спамила десятками голосовых.
+TTS_MAX_PARTS = 5
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…\n])\s+")
+
+def _split_tts_chunks(text: str, limit: int) -> list[str]:
+    """Режем текст на куски ≤ limit по границам предложений; одиночное
+    предложение длиннее лимита — жёстко. Пустой вход — пустой список."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    cur = ""
+    for piece in [p for p in _SENTENCE_SPLIT_RE.split(text) if p]:
+        while len(piece) > limit:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(piece[:limit])
+            piece = piece[limit:]
+        if not piece:
+            continue
+        cand = (cur + " " + piece).strip()
+        if len(cand) <= limit:
+            cur = cand
+        else:
+            if cur:
+                chunks.append(cur)
+            cur = piece
+    if cur:
+        chunks.append(cur)
+    return chunks or [text[:limit]]
+
+
+async def _synthesize_tts_voice(text: str) -> tuple[bytes, str, int]:
+    """Синтез + ffmpeg-конвертация одного куска в OGG/Opus. Тело прежнего
+    inline_tts без смены логики — чанки идут тем же путём, что одиночный текст."""
+    import bot
+    # Fish снят с free-каталога (17.09.2026) — пропускаем мёртвую попытку, ветка оставлена (см. флаг).
+    fish_bytes = await bot._fish_audio_tts_bytes(text) if bot.FISH_AUDIO_ENABLED else None
+    if fish_bytes is not None:
+        pcm_bytes, mime_type, used_tts_model = fish_bytes, "audio/mp3", bot.FISH_AUDIO_TTS_MODEL
+        bot._record_quota_usage("openrouter", bot.FISH_AUDIO_TTS_MODEL)
+    else:
+        pcm_bytes, mime_type, used_tts_model = await bot._gemini_tts_bytes(text)
+    log.info('[tts] Synthesis received from %s, mime_type=%s, bytes=%d', used_tts_model, mime_type, len(pcm_bytes))
+
+    # определяем формат исходника
+    if mime_type.startswith("audio/mp3") or mime_type.startswith("audio/mpeg") or pcm_bytes.startswith(b'ID3') or pcm_bytes.startswith(b'\xff\xfb'):
+        src_ext = ".mp3"
+        raw_audio = pcm_bytes
+    elif pcm_bytes.startswith(b'RIFF') or "wav" in mime_type:
+        src_ext = ".wav"
+        raw_audio = pcm_bytes
+    else:
+        # сырой PCM сначала оборачиваем в WAV
+        src_ext = ".wav"
+        raw_audio = pcm_to_wav(pcm_bytes, sample_rate=24000)
+
+    # send_voice без ffmpeg-конвертации показал бы 0:00.
+    final_audio = raw_audio
+    final_filename = "speech.ogg"
+    voice_duration = 0
+    try:
+        with tempfile.TemporaryDirectory() as tdir:
+            src_path = os.path.join(tdir, f"tts_src{src_ext}")
+            dst_path = os.path.join(tdir, "tts_out.ogg")
+            with open(src_path, "wb") as fh:
+                fh.write(raw_audio)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", src_path,
+                "-c:a", "libopus", "-b:a", "64k", "-vbr", "on",
+                dst_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await _communicate_process(proc, timeout=30)
+            if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
+                with open(dst_path, "rb") as fh:
+                    final_audio = fh.read()
+                # ffprobe — получаем длительность для Telegram (без неё показывает 0:00)
+                try:
+                    probe = await asyncio.create_subprocess_exec(
+                        "ffprobe", "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1",
+                        dst_path,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    probe_out, _ = await _communicate_process(probe, timeout=10)
+                    raw_dur = probe_out.decode().strip()
+                    voice_duration = max(1, round(float(raw_dur))) if raw_dur else 0
+                except Exception as probe_exc:
+                    log.warning("[tts] ffprobe failed: %s", probe_exc)
+                log.info("[tts] OGG/Opus: %d bytes, duration: %ds", len(final_audio), voice_duration)
+            else:
+                log.warning("[tts] ffmpeg OGG conversion failed, falling back to raw audio")
+                final_filename = f"speech{src_ext}"
+    except Exception as conv_exc:
+        log.warning("[tts] ffmpeg conversion error: %s", conv_exc)
+        final_filename = f"speech{src_ext}"
+    return final_audio, final_filename, voice_duration
+
+
 async def inline_tts(message: Message, text: str) -> None:
     import bot
-    if len(text) > bot.TTS_MAX_CHARS:
+    chunks = _split_tts_chunks(text, bot.TTS_MAX_CHARS)
+    if not chunks:
+        return
+    if len(chunks) > TTS_MAX_PARTS:
         await bot._safe_reply(
             message,
-            bot._t(message.chat.id, "tts_too_long", limit=bot.TTS_MAX_CHARS, length=len(text)),
+            bot._t(message.chat.id, "tts_too_long", limit=bot.TTS_MAX_CHARS * TTS_MAX_PARTS, length=len(text)),
         )
         return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_voicing"))
     try:
-        # Fish снят с free-каталога (17.09.2026) — пропускаем мёртвую попытку, ветка оставлена (см. флаг).
-        fish_bytes = await bot._fish_audio_tts_bytes(text) if bot.FISH_AUDIO_ENABLED else None
-        if fish_bytes is not None:
-            pcm_bytes, mime_type, used_tts_model = fish_bytes, "audio/mp3", bot.FISH_AUDIO_TTS_MODEL
-            bot._record_quota_usage("openrouter", bot.FISH_AUDIO_TTS_MODEL)
-        else:
-            pcm_bytes, mime_type, used_tts_model = await bot._gemini_tts_bytes(text)
-        log.info('[tts] Synthesis received from %s, mime_type=%s, bytes=%d', used_tts_model, mime_type, len(pcm_bytes))
-
-        # определяем формат исходника
-        if mime_type.startswith("audio/mp3") or mime_type.startswith("audio/mpeg") or pcm_bytes.startswith(b'ID3') or pcm_bytes.startswith(b'\xff\xfb'):
-            src_ext = ".mp3"
-            raw_audio = pcm_bytes
-        elif pcm_bytes.startswith(b'RIFF') or "wav" in mime_type:
-            src_ext = ".wav"
-            raw_audio = pcm_bytes
-        else:
-            # сырой PCM сначала оборачиваем в WAV
-            src_ext = ".wav"
-            raw_audio = pcm_to_wav(pcm_bytes, sample_rate=24000)
-
-        # send_voice без ffmpeg-конвертации показал бы 0:00.
-        final_audio = raw_audio
-        final_filename = "speech.ogg"
-        voice_duration = 0
-        try:
-            with tempfile.TemporaryDirectory() as tdir:
-                src_path = os.path.join(tdir, f"tts_src{src_ext}")
-                dst_path = os.path.join(tdir, "tts_out.ogg")
-                with open(src_path, "wb") as fh:
-                    fh.write(raw_audio)
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-i", src_path,
-                    "-c:a", "libopus", "-b:a", "64k", "-vbr", "on",
-                    dst_path,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await _communicate_process(proc, timeout=30)
-                if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
-                    with open(dst_path, "rb") as fh:
-                        final_audio = fh.read()
-                    # ffprobe — получаем длительность для Telegram (без неё показывает 0:00)
-                    try:
-                        probe = await asyncio.create_subprocess_exec(
-                            "ffprobe", "-v", "error",
-                            "-show_entries", "format=duration",
-                            "-of", "default=noprint_wrappers=1:nokey=1",
-                            dst_path,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.DEVNULL,
-                        )
-                        probe_out, _ = await _communicate_process(probe, timeout=10)
-                        raw_dur = probe_out.decode().strip()
-                        voice_duration = max(1, round(float(raw_dur))) if raw_dur else 0
-                    except Exception as probe_exc:
-                        log.warning("[tts] ffprobe failed: %s", probe_exc)
-                    log.info("[tts] OGG/Opus: %d bytes, duration: %ds", len(final_audio), voice_duration)
-                else:
-                    log.warning("[tts] ffmpeg OGG conversion failed, falling back to raw audio")
-                    final_filename = f"speech{src_ext}"
-        except Exception as conv_exc:
-            log.warning("[tts] ffmpeg conversion error: %s", conv_exc)
-            final_filename = f"speech{src_ext}"
-
-        await bot._delete_message_quietly(status)
-        await bot.bot.send_voice(
-            chat_id=message.chat.id,
-            voice=BufferedInputFile(final_audio, filename=final_filename),
-            duration=voice_duration if voice_duration > 0 else None,
-            reply_to_message_id=message.message_id
-        )
+        # Весь синтез ДО отправки: упавший кусок — одна ошибка вместо рваного "пол-ответа + ошибка".
+        voices = [await _synthesize_tts_voice(chunk) for chunk in chunks]
     except Exception as exc:
         log.exception("TTS synthesis failed:")
         # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
@@ -265,6 +307,15 @@ async def inline_tts(message: Message, text: str) -> None:
         # Статус уже снесён выше (перед send_voice): если правка не прошла — дублируем реплаем.
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
+        return
+    await bot._delete_message_quietly(status)
+    for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
+        await bot.bot.send_voice(
+            chat_id=message.chat.id,
+            voice=BufferedInputFile(final_audio, filename=final_filename),
+            duration=voice_duration if voice_duration > 0 else None,
+            reply_to_message_id=message.message_id if i == 0 else None,
+        )
 
 async def cmd_tts(message: Message) -> None:
     import bot
@@ -278,7 +329,7 @@ async def cmd_tts(message: Message) -> None:
 
 
 async def cmd_reset(message: Message) -> None:
-    """Сброс истории чата. Скрыта из меню (как /logs). Личка — всем, группа — админам/владельцу."""
+    """Сброс истории чата. В меню. Личка — всем, группа — админам/владельцу."""
     import bot
     requester_id = message.from_user.id if message.from_user else None
     if not await bot._is_privileged_in_chat(message.chat.type, message.chat.id, requester_id):
@@ -510,7 +561,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
 
 
 async def handle_pick_callback(query: CallbackQuery) -> None:
-    """Кнопки-уточнения: чужие/протухшие отклоняем, выбор дописываем к запросу и гоним обычным путём (_handle_message_core)."""
+    """Кнопки-уточнения: чужие отклоняем, протухшие известные перевыпускаем разок, выбор дописываем к запросу и гоним обычным путём (_handle_message_core)."""
     import bot
     data = query.data or ""
     if not data.startswith("pick:"):
@@ -533,6 +584,35 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     _qchat = query.message.chat.id if query.message and query.message.chat else None
     rec_lang = (rec or {}).get("lang") or bot._chat_lang(_qchat)
     if rec is None or rec["expires"] < time.monotonic():
+        if rec is not None and query.message is not None:
+            # Протухший, но известный выбор — молча выдаём свежие кнопки вместо
+            # стены "протухло, пиши текстом". Токен уже popped: второй такой тап
+            # упрётся в rec None ниже и честно покажет pick_expired. Один ресенд.
+            _purge_expired_picks()
+            _enforce_pending_picks_cap()
+            fresh = secrets.token_hex(4)
+            bot._pending_picks[fresh] = {
+                "chat_id": rec.get("chat_id"),
+                "user_id": rec.get("user_id"),
+                "scenario": rec.get("scenario", ""),
+                "original": rec.get("original", ""),
+                "expires": time.monotonic() + bot.PICK_TTL_SEC,
+                "lang": rec_lang,
+            }
+            _rq, _ropts, _tpl = pick_texts(rec_lang, rec.get("scenario", ""))
+            with contextlib.suppress(Exception):
+                await query.answer()
+            with contextlib.suppress(Exception):
+                await bot._tg_call(
+                    query.message.edit_text,
+                    _rq + bot._t(rec.get("chat_id"), "pick_suffix"),
+                    parse_mode=None, call_timeout=15.0,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=opt, callback_data=f"pick:{fresh}:{i}")]
+                        for i, opt in enumerate(_ropts)
+                    ]),
+                )
+            return
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(rec_lang, "pick_expired"), show_alert=False)
         return

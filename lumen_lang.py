@@ -150,7 +150,8 @@ STRINGS: dict[str, dict[str, str]] = {
             "You can also draw and voice just with words, no commands — e.g. “draw a cat” or “read this out loud”.\n\n"
             "<b>TikTok</b>\n"
             "Send a link — I'll download video or photos without watermarks.\n\n"
-            "Ask anything — I'm listening."
+            "Ask anything — I'm listening.\n\n"
+            "Try right now: “who are you?”, send a photo with “what's in it?”, or “recommend a movie”."
         ),
         "es": (
             "<b>Lumen</b>\n\n"
@@ -189,7 +190,8 @@ STRINGS: dict[str, dict[str, str]] = {
             "Рисовать и озвучивать можно и просто словами, без команд — например «нарисуй кота» или «озвучь это».\n\n"
             "<b>TikTok</b>\n"
             "Пришли ссылку — скачаю видео или фото без водяных знаков.\n\n"
-            "Спрашивай что угодно — я слушаю."
+            "Спрашивай что угодно — я слушаю.\n\n"
+            "Попробуй прямо сейчас: «кто ты?», пришли фото с вопросом «что на нём?», кинь ссылку на TikTok."
         ),
         "uk": (
             "<b>Lumen</b>\n\n"
