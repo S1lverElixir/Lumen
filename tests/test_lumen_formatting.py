@@ -277,6 +277,21 @@ def test_split_inline_bullets_ignores_short_prose():
     # Короткие "чай • кофе" и два разделителя — обычная проза, не список.
     assert lumen_formatting._split_inline_bullets("На выбор чай • кофе • сок.") == "На выбор чай • кофе • сок."
     assert lumen_formatting._split_inline_bullets("Плюсы • минусы") == "Плюсы • минусы"
+    assert lumen_formatting._split_inline_bullets("На выбор чай • кофе.") == "На выбор чай • кофе."
+
+
+def test_split_inline_bullets_splits_three_item_prod_answer():
+    # Прод 26.09.2026: ровно 3 пункта (2 разделителя) — самый частый живой случай,
+    # со старым порогом 3 не ловился вообще (ответы про небо и мелодрамы).
+    text = (
+        "• Рассеяние Рэлея: мелкие частицы в атмосфере рассеивают коротковолновый свет. "
+        "• Солнечный спектр: солнце излучает больше синего света днём и ночью. "
+        "• Отсутствие поглощения: газы атмосферы почти не поглощают синий свет."
+    )
+    assert len(text) >= 200
+    lines = lumen_formatting._split_inline_bullets(text).split("\n")
+    assert len(lines) == 3
+    assert all(line.startswith("• ") for line in lines)
 
 
 def test_md_to_html_splits_inline_bullets_end_to_end():
@@ -329,6 +344,17 @@ def test_md_to_rich_html_splits_inline_lists_end_to_end():
     numbered = "1. Пункт первый с достаточным пояснением для проверки. 2. Пункт второй с достаточным пояснением для проверки. 3. Пункт третий с достаточным пояснением для проверки."
     rich = lumen_formatting._md_to_rich_html(numbered)
     assert "\n2. " in rich and "\n3. " in rich
+
+
+def test_md_to_rich_html_splits_three_bullets_prod_movies():
+    # Прод 26.09.2026: ответ про мелодрамы — 3 пункта склеились, rich-путь молчал.
+    text = (
+        "• Амелі (2001): французская камедыя-фэнтэзі пра маладых, якія бачаць свет у яркіх фарбах. "
+        "• Падынгтан (2014): лёгкі сямейны фільм пра мілога мядзведзя, які шукае новы дом у Лондане. "
+        "• Crazy Rich Asians (2018): вясёлая рамантычная камедыя пра кітайскую эліту, поўная колеру і музыкі."
+    )
+    assert len(text) >= 200
+    assert "\n• " in lumen_formatting._md_to_rich_html(text)
 
 
 def test_md_to_html_full_pipeline_converts_bullet_list_with_bold():
