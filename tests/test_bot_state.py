@@ -631,6 +631,45 @@ def test_process_media_group_buffers_holds_chat_lock():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_prune_old_chats_never_drops_a_chat_with_held_lock():
+    # Регрессия (аудит 26.09.2026): чат с ЗАНЯТЫМ локом вытеснялся из памяти
+    # вместе с локом — идущий маршрут писал в отвязанный state, а следующее
+    # сообщение создавало новый лок: два параллельных ответа и порча истории.
+    import asyncio as _asyncio
+    import lumen_chat_state as lcs
+
+    busy_id, idle_id = 999801, 999802
+    orig_target = lcs.PRUNED_CHAT_TARGET
+    orig_states = dict(lcs.chat_state)
+    lcs.PRUNED_CHAT_TARGET = 0
+    lcs.chat_state.clear()
+    lcs.chat_state.update({
+        busy_id: {"last_activity": 0.0, "history": []},
+        idle_id: {"last_activity": 1.0, "history": []},
+    })
+    real_lock = asyncio.Lock()
+    lcs._pending_chat_deletions.discard(busy_id)
+    lcs._pending_chat_deletions.discard(idle_id)
+    original_locks = bot._chat_locks
+    bot._chat_locks = {busy_id: real_lock, idle_id: asyncio.Lock()}
+    try:
+        async def run():
+            await real_lock.acquire()
+            bot._prune_old_chats()
+        _asyncio.run(run())
+        assert busy_id in lcs.chat_state, "чат с занятым локом вытеснять нельзя"
+        assert idle_id not in lcs.chat_state
+        assert busy_id not in lcs._pending_chat_deletions
+        assert idle_id in lcs._pending_chat_deletions
+    finally:
+        bot._chat_locks = original_locks
+        lcs.PRUNED_CHAT_TARGET = orig_target
+        lcs.chat_state.clear()
+        lcs.chat_state.update(orig_states)
+        lcs._pending_chat_deletions.discard(busy_id)
+        lcs._pending_chat_deletions.discard(idle_id)
+
+
 def test_process_media_group_buffers_cleanup_on_cancel():
     # Отмена во сне (рестарт/дренаж) — записи буфера и задачи уходят, а не висят вечно.
     bot._mg_buffers["mgcancel"] = ["m1"]

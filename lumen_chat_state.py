@@ -551,16 +551,26 @@ def _t(chat_id: int | None, key: str, **kwargs: Any) -> str:
 def _prune_old_chats() -> None:
     import bot
     sorted_ids = sorted(chat_state.keys(), key=lambda cid: chat_state[cid].get("last_activity", 0))
-    to_remove = len(chat_state) - PRUNED_CHAT_TARGET
-    removed_ids = sorted_ids[:to_remove]
+    # Лок ЗАНЯТ = в чате идёт ответ. Такой чат вытеснять нельзя: идущий маршрут
+    # продолжал бы писать в отвязанный state, а следующее сообщение создало бы
+    # новый лок — два параллельных ответа в одном чате и порча истории
+    # (аудит 26.09.2026). Такой чат просто не попадает в выборку.
+    def _is_busy(cid: int) -> bool:
+        lock = bot._chat_locks.get(cid)
+        return lock is not None and lock.locked()
+
+    removable = [cid for cid in sorted_ids if not _is_busy(cid)]
+    to_remove = max(0, len(removable) - PRUNED_CHAT_TARGET)
+    removed_ids = removable[:to_remove]
     for cid in removed_ids:
         chat_state.pop(cid, None)
         bot._chat_locks.pop(cid, None)
     # Вытесненные чаты должны реально исчезнуть из хранилища (иначе их собственные
-    # ключи/файлы бесхозно копятся навсегда) — ставим в очередь на удаление,
+    # ключи/файлы бесхозно копятся вечно) — ставим в очередь на удаление,
     # обрабатывается в _flush_dirty_state вместе с обычным сбросом.
     _pending_chat_deletions.update(removed_ids)
-    bot.mark_state_dirty()
+    if removed_ids:
+        bot.mark_state_dirty()
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
     import bot

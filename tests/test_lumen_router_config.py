@@ -638,3 +638,50 @@ def test_fish_audio_disabled_after_free_tier_gone():
     # Зеркало снято с бесплатного каталога OpenRouter — первая попытка в inline_tts
     # пропускается флагом, сама функция оставлена для тестов/возврата.
     assert lumen_router_config.FISH_AUDIO_ENABLED is False
+
+
+# ─────────────── исчерпавшая квота больше не тратит попытку (аудит 26.09.2026) ───────────────
+
+def test_or_route_skips_models_marked_exhausted():
+    import bot
+    bot.GLOBAL_QUOTA.setdefault("openrouter", {})["probe/exhausted:free"] = {"used": 0, "exhausted_at": 123.0}
+    try:
+        route = lumen_router_config._or_route(["probe/exhausted:free", "nvidia/nemotron-3.5-lightning:free"])
+        assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free"]
+    finally:
+        bot.GLOBAL_QUOTA["openrouter"].pop("probe/exhausted:free", None)
+
+
+def test_gemini_and_groq_routes_skip_exhausted_models():
+    import bot
+    bot.GLOBAL_QUOTA.setdefault("gemini", {})["gemini-probe-dead"] = {"used": 0, "exhausted_at": 123.0}
+    bot.GLOBAL_QUOTA.setdefault("groq", {})["qwen/probe-dead"] = {"used": 0, "exhausted_at": 123.0}
+    try:
+        assert [m for _, m in lumen_router_config._gemini_route(["gemini-probe-dead", "gemini-3.8-flash"])] == ["gemini-3.8-flash"]
+        assert [m for _, m in lumen_router_config._groq_route(["qwen/probe-dead", "qwen/qwen3.8-27b"])] == ["qwen/qwen3.8-27b"]
+    finally:
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-probe-dead", None)
+        bot.GLOBAL_QUOTA["groq"].pop("qwen/probe-dead", None)
+
+
+def test_route_never_becomes_empty_when_all_models_exhausted():
+    # Пустой маршрут = мгновенный отказ вместо внятного сообщения о лимите,
+    # поэтому последний вариант оставляем.
+    import bot
+    bot.GLOBAL_QUOTA.setdefault("openrouter", {})["probe/all-dead:free"] = {"used": 0, "exhausted_at": 123.0}
+    try:
+        assert lumen_router_config._or_route(["probe/all-dead:free"]) == [("openrouter", "probe/all-dead:free")]
+    finally:
+        bot.GLOBAL_QUOTA["openrouter"].pop("probe/all-dead:free", None)
+
+
+def test_successful_usage_clears_exhausted_mark():
+    # Метка снимается успешным ответом, иначе после сброса суток или починки
+    # провайдера модель навсегда выпадала бы из роутинга.
+    import bot
+    bot.GLOBAL_QUOTA.setdefault("openrouter", {})["probe/recover:free"] = {"used": 3, "exhausted_at": 123.0}
+    try:
+        bot._record_quota_usage("openrouter", "probe/recover:free")
+        assert [m for _, m in lumen_router_config._or_route(["probe/recover:free"])] == ["probe/recover:free"]
+    finally:
+        bot.GLOBAL_QUOTA["openrouter"].pop("probe/recover:free", None)

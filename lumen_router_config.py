@@ -291,13 +291,34 @@ def _check_scheduled_removals_due() -> None:
                 model_id, removal_date.isoformat(), today.isoformat(),
             )
 
+def _is_quota_exhausted(provider: str, model_id: str) -> bool:
+    """Помечена ли модель как исчерпавшая квоту (метка _mark_quota_exhausted после 429).
+    Раньше роутер её не читал: каждое сообщение снова упиралось в 429 заведомо мёртвой
+    модели и тратило ROUTE_MODEL_TIMEOUT_SEC попытки (аудит 26.09.2026). Сброс —
+    смена суток (_reset_quota_if_new_day) либо успешный ответ, который чистит метку."""
+    try:
+        import bot
+        sub = bot.GLOBAL_QUOTA.get(provider) or {}
+        entry = sub.get(model_id) or {}
+        return bool(entry.get("exhausted_at"))
+    except Exception:
+        return False
+
+def _skip_exhausted(provider: str, models: list[str]) -> list[str]:
+    """Выкидывает модели с меткой «квота исчерпана», но НИКОГДА не оставляет список
+    пустым: пустой маршрут означал бы «упасть сразу», а один заведомо мёртвый
+    вариант всё ещё даёт пользователю честное сообщение о лимите (аудит 26.09.2026)."""
+    alive = [m for m in models if not _is_quota_exhausted(provider, m)]
+    return alive or list(models)
+
 def _or_route(models: list[str]) -> list[tuple[str, str]]:
     """Превращает список ID моделей OpenRouter в список (provider, model_id) для
-    маршрута, попутно исключая модели из _ROUTER_EXCLUDED_OR_MODELS."""
-    return [("openrouter", m) for m in models if m not in _ROUTER_EXCLUDED_OR_MODELS]
+    маршрута, попутно исключая модели из _ROUTER_EXCLUDED_OR_MODELS и уже помеченные
+    как исчерпавшие квоту (иначе они каждый раз съедали бы попытку до 429)."""
+    return [("openrouter", m) for m in _skip_exhausted("openrouter", models) if m not in _ROUTER_EXCLUDED_OR_MODELS]
 
 def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
-    return [("gemini", m) for m in models]
+    return [("gemini", m) for m in _skip_exhausted("gemini", models)]
 
 # ── Groq (прямой провайдер, не через OpenRouter) ──
 # Калибровка русского живьём 21.09.2026 (4 пробы на модель через API с VPN): Qwen отвечает чисто и по делу, gpt-oss-120b тоже верен, но представляется ChatGPT от OpenAI (ловит фильтр утечек) и тратит 30-70 reasoning-токенов на ответ — они едят минутный бюджет. Поэтому Qwen голова, gpt-oss второй. Лимиты free-плана по офиц. доке: 30 RPM / 1000 RPD / 8K TPM / 200K TPD на модель.
@@ -308,7 +329,7 @@ _GROQ_LIGHT_ORDER: list[str] = [
 ]
 
 def _groq_route(models: list[str]) -> list[tuple[str, str]]:
-    return [("groq", m) for m in models]
+    return [("groq", m) for m in _skip_exhausted("groq", models)]
 
 
 # ── "Лёгкие" запросы — САМЫЙ ЧАСТЫЙ маршрут, целиком OpenRouter (квоту Gemini не трогаем).
