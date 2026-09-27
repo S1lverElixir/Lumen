@@ -584,7 +584,46 @@ def test_setup_logging_uses_bot_logger_name_not_dunder_main():
     assert bot.log.name == "bot"
 
 
-def test_process_media_group_buffers_records_extra_photos_to_recent_media():
+def test_process_media_group_buffers_skips_download_when_rate_limited(monkeypatch):
+    # Регрессия (аудит 26.09.2026): файлы альбома качались ДО проверки лимита —
+    # перелимиченный пользователь (или случайный альбом в группе) всё равно
+    # съедал трафик прокси и память на девяти файлах.
+    chat_id = 999963
+    user = SimpleNamespace(id=780)
+    photo = SimpleNamespace(file_id="file_SKIP", mime_type=None, file_name=None)
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE), from_user=user,
+        media_group_id="mgskip", text=None, caption=None, reply_to_message=None,
+        photo=[photo], video=None, animation=None, video_note=None,
+        voice=None, audio=None, document=None, sticker=None,
+    )
+    downloaded = []
+    handled = []
+
+    async def fake_fetch(file_id, mime):
+        downloaded.append(file_id)
+        return (b"x", "image/jpeg")
+
+    async def fake_core(message, extra_media=None):
+        handled.append(extra_media)
+
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=True))
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    bot._mg_buffers["mgskip"] = [msg]
+    try:
+        asyncio.run(bot._process_media_group_buffers("mgskip"))
+        assert downloaded == [], "файлы не должны качаться сверх лимита"
+        assert handled == []
+    finally:
+        bot._mg_buffers.pop("mgskip", None)
+        bot._mg_tasks.pop("mgskip", None)
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_process_media_group_buffers_records_extra_photos_to_recent_media(monkeypatch):
+    # Альбом проверяет лимит ДО скачивания (аудит 26.09.2026) — здесь лимит не срабатывает.
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
     chat_id = 999960
     user = SimpleNamespace(id=777)
 
@@ -620,7 +659,9 @@ def test_process_media_group_buffers_records_extra_photos_to_recent_media():
         bot.chat_state.pop(chat_id, None)
 
 
-def test_process_media_group_buffers_holds_chat_lock():
+def test_process_media_group_buffers_holds_chat_lock(monkeypatch):
+    # Внешний аудит: фоновый таск альбома и свежий вопрос гонялись за history/ctx без лока.
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
     # Внешний аудит: фоновый таск альбома и свежий вопрос гонялись за history/ctx без лока.
     chat_id = 999962
     user = SimpleNamespace(id=779)
@@ -792,7 +833,9 @@ def test_process_media_group_buffers_cleanup_on_cancel():
         bot._mg_tasks.pop("mgcancel", None)
 
 
-def test_process_media_group_buffers_fetches_extras_in_parallel_keeping_order():
+def test_process_media_group_buffers_fetches_extras_in_parallel_keeping_order(monkeypatch):
+    # Скачивание осталось параллельным (после проверки лимита, до обработки).
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
     # Альбом качается параллельно: медленное первое фото не должно задерживать остальные,
     # а порядок вложений обязан совпасть с порядком сообщений.
     chat_id = 999961

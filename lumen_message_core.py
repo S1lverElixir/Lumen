@@ -83,6 +83,12 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     import bot
     # Первое сообщение альбома с caption — основное, остальные файлы отдаём модели как доп. вложения.
     main_msg = messages[0]
+    # Лимит пользователя проверяем ДО скачивания файлов: раньше альбом из 9 фото
+    # грузился целиком даже в группе без упоминания бота и для уже отклонённого по
+    # лимиту автора — трафик прокси и память расходовались впустую (аудит 26.09.2026).
+    # Сам ответ "слишком часто" отправляет _reject_rate_limited_message.
+    if await bot._reject_rate_limited_message(main_msg):
+        return
     extra_media: list[tuple[bytes, str]] = []
     MAX_ALBUM_EXTRA = 9  # первое уходит как основное, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу)
     album_state = bot.get_state(main_msg.chat.id)
@@ -228,19 +234,23 @@ async def _resolve_incoming_media(
 
 async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
     import bot
-    state = bot.get_state(message.chat.id)
     t = message.text or message.caption or ""
     is_private = message.chat.type == ChatType.PRIVATE
     is_guest = bot.is_guest_message(message)
     mentioned = bot.message_mentions_bot(message)
 
     if bot._should_only_record_passively(message, t, is_private=is_private, is_guest=is_guest, mentioned=mentioned):
-        bot._record_passive_group_context(message, state, t)
+        # Пассивный фон — единственное место, где состояние нужно ДО лимита.
+        bot._record_passive_group_context(message, bot.get_state(message.chat.id), t)
         return
 
-    # Начинаем обработку активного запроса с проверкой rate limit
+    # Лимит проверяем ДО get_state: раньше отклонённое по лимиту сообщение всё равно
+    # заводило запись чата (и переписывало индекс), раздувая состояние и вытесняя
+    # реальные чаты (аудит 26.09.2026).
     if await bot._reject_rate_limited_message(message):
         return
+
+    state = bot.get_state(message.chat.id)
 
     # Проверка на ссылки загрузки (TikTok — сразу всегда, даже в группах без упоминания)
 

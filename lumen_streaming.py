@@ -301,8 +301,11 @@ async def _run_streaming_reply(
                     final_answer = full_text.strip()
                     hist.append({"role": "user", "content": _history_user_text(user_text)})
                     hist.append({"role": "assistant", "content": final_answer})
-                    if len(hist) > bot.SHARED_HISTORY_MAX_LEN:
-                        del hist[:-bot.SHARED_HISTORY_MAX_LEN]
+                    # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез:
+                    # раньше здесь стояло del hist[:-SHARED_HISTORY_MAX_LEN], из-за чего
+                    # саммаризация истории работала только в нестриминговых путях — то
+                    # есть в самом частом сценарии (аудит 26.09.2026).
+                    await bot._trim_history(hist)
                     ctx.clear()
                     bot._record_quota_usage(provider, model_id)
                     return final_answer, None
@@ -399,8 +402,8 @@ async def _run_streaming_reply(
     final_answer = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
     hist.append({"role": "user", "content": _history_user_text(user_text)})
     hist.append({"role": "assistant", "content": final_answer})
-    if len(hist) > bot.SHARED_HISTORY_MAX_LEN:
-        del hist[:-bot.SHARED_HISTORY_MAX_LEN]
+    # Тот же _trim_history, что в нестриминговых путях (см. комментарий выше).
+    await bot._trim_history(hist)
     ctx.clear()
     bot._record_quota_usage(provider, model_id)
     return final_answer, None

@@ -44,6 +44,11 @@ log = logging.getLogger("bot")
 
 async def cmd_start(message: Message) -> None:
     import bot
+    # Лимит и здесь: хендлер зарегистрирован раньше общего catch-all, поэтому
+    # сообщение до _reject_rate_limited_message не доходило — спамер получал
+    # бесконечные ответы в группе, расходуя прокси-трафик (аудит 26.09.2026).
+    if await bot._reject_rate_limited_message(message):
+        return
     await bot._tg_call(
         message.reply,
         bot._t(message.chat.id, "start_text"),

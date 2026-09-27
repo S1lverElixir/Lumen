@@ -14,7 +14,10 @@ Telegram/Gemini/OpenRouter/рантайм-состояния бота, поэт�
 Запуск:
     pytest test_lumen_formatting.py -v
 """
+import inspect
+
 import lumen_formatting
+import lumen_streaming
 
 
 
@@ -344,6 +347,60 @@ def test_md_to_rich_html_splits_inline_lists_end_to_end():
     numbered = "1. Пункт первый с достаточным пояснением для проверки. 2. Пункт второй с достаточным пояснением для проверки. 3. Пункт третий с достаточным пояснением для проверки."
     rich = lumen_formatting._md_to_rich_html(numbered)
     assert "\n2. " in rich and "\n3. " in rich
+
+
+def test_md_to_rich_html_scrubs_stray_latex_like_the_plain_path():
+    # Регрессия (аудит 26.09.2026): rich-путь оставлял сырой LaTeX вне разделителей
+    # ("\frac", "\alpha\times"), обычный переводил в юникод — один и тот же ответ
+    # выглядел по-разному в стриме и в финале.
+    b = chr(92)
+    html = lumen_formatting._md_to_html(f"S = {b}frac{{1}}{{2}}{b}pi r^2 and {b}alpha{b}times{b}beta")
+    rich = lumen_formatting._md_to_rich_html(f"S = {b}frac{{1}}{{2}}{b}pi r^2 and {b}alpha{b}times{b}beta")
+    assert html == rich
+    assert b not in rich, "сырые слэши в финальном сообщении — провал промта"
+    assert "1/2" in rich and "α" in rich
+
+
+def test_md_to_rich_html_keeps_delimited_math_untouched():
+    # $...$ уходит в <tg-math> как есть (это единственное намеренное отличие rich
+    # от обычного пути, где та же формула становится юникодом).
+    rich = lumen_formatting._md_to_rich_html("скорость $x^2$ тут")
+    assert "<tg-math>x^2</tg-math>" in rich
+
+
+def test_render_paths_parity_on_shared_cases():
+    # Параметрический тест на паритет двух путей рендера (обычный HTML и rich):
+    # расходиться могут только заголовки ($x$ → <tg-math>), всё остальное обязано
+    # совпадать, иначе стрим и финальное сообщение показывают разное.
+    b = chr(92)
+    shared = [
+        "Просто текст без разметки",
+        "**жирно** и *курсив* и `код`",
+        "- пункт один" + "\n" + "- пункт два",
+        "1. раз" + "\n" + "2. два",
+        "> цитата тут",
+        "текст с <b>сырым html</b>",
+        f"S = {b}pi r^2 и {b}sqrt{{9}}",
+        "список: " + " • ".join(f"пункт {i} с текстом подлиннее" for i in range(4)),
+    ]
+    for case in shared:
+        assert lumen_formatting._md_to_html(case) == lumen_formatting._md_to_rich_html(case), case
+
+
+def test_render_paths_differ_only_for_headings():
+    # Заголовки — единственное намеренное расхождение: rich умеет <h3>, обычный
+    # путь отдаёт <b>. Проверяем, что это всё, что разъезжается.
+    assert lumen_formatting._md_to_html("## Title") == "<b>Title</b>"
+    assert lumen_formatting._md_to_rich_html("## Title") == "<h3>Title</h3>"
+
+
+def test_streaming_history_uses_summarizing_trim():
+    # Стриминговый путь резал историю голым del, из-за чего саммаризация старого
+    # работала только в нестриминговых ветках (аудит 26.09.2026).
+    src = inspect.getsource(lumen_streaming._run_streaming_reply)
+    code_lines = [ln for ln in src.splitlines() if not ln.strip().startswith("#")]
+    assert any("_trim_history" in ln for ln in code_lines)
+    assert not any("hist[:-" in ln for ln in code_lines), "в стриминге остался молчаливый срез истории"
 
 
 def test_md_to_rich_html_splits_three_bullets_prod_movies():

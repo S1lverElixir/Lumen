@@ -345,7 +345,24 @@ def test_imgmodel_command_and_callback_removed():
     assert not hasattr(bot, "_hf_model_catalog")
 
 
-def test_cmd_start_mentions_every_current_command_and_not_removed_ones():
+def test_cmd_start_respects_rate_limit(monkeypatch):
+    # Регрессия (аудит 26.09.2026): /start шёл мимо лимита, потому что его хендлер
+    # стоит раньше общего catch-all — в группе спамер получал ответ на каждый вызов.
+    called = {}
+
+    class _FakeStartMessage:
+        chat = SimpleNamespace(id=2, type=bot.ChatType.PRIVATE)
+
+        async def reply(self, text, **kwargs):
+            called["text"] = text
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=True))
+    asyncio.run(bot.cmd_start(_FakeStartMessage()))
+    assert called == {}
+
+
+def test_cmd_start_mentions_every_current_command_and_not_removed_ones(monkeypatch):
     captured = {}
 
     class _FakeStartMessage:
@@ -355,6 +372,8 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones():
             captured["text"] = text
             return SimpleNamespace()
 
+    # /start теперь под лимитом (иначе спамер в группе гонял ответы без ограничения).
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
     asyncio.run(bot.cmd_start(_FakeStartMessage()))
     text = captured["text"]
     assert "/draw" in text
