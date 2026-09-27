@@ -7,6 +7,7 @@ test_lumen_router_config.py — юнит-тесты на lumen_router_config.py:
 (_check_temporary_free_models_expiry) и неподтверждённых квот
 (_check_unconfirmed_model_quotas).
 
+
 Часть разбиения test_bot_helpers.py по модулям — см. test_lumen_formatting.py про общий
 принцип. lumen_router_config.py — чистые данные и функции принятия решения о маршруте без
 единого обращения к Telegram/Gemini/OpenRouter API, поэтому тестируется здесь напрямую
@@ -638,6 +639,15 @@ def test_fish_audio_disabled_after_free_tier_gone():
     # Зеркало снято с бесплатного каталога OpenRouter — первая попытка в inline_tts
     # пропускается флагом, сама функция оставлена для тестов/возврата.
     assert lumen_router_config.FISH_AUDIO_ENABLED is False
+
+
+def test_registry_and_default_chain_have_no_silent_aliases():
+    # Аудит 26.09.2026: GEMINI_DEFAULT_CHAIN был АЛИАСОМ GEMINI_HEAVY_CHAIN (тот же
+    # объект списка), а "openrouter/free" дублировался в реестре.
+    assert lumen_router_config.GEMINI_DEFAULT_CHAIN is not lumen_router_config.GEMINI_HEAVY_CHAIN
+    assert lumen_router_config.GEMINI_DEFAULT_CHAIN == lumen_router_config.GEMINI_HEAVY_CHAIN
+    registry = lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+    assert len(registry) == len(set(registry)), "в реестре моделей есть дубли"
 
 
 # ─────────────── исчерпавшая квота больше не тратит попытку (аудит 26.09.2026) ───────────────

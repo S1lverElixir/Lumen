@@ -175,24 +175,34 @@ async def _probe_or_model_liveness() -> None:
                     list_name, model_id, kind, txt[:200],
                 )
 
-async def _or_chat_completion_with_fallback(
+async def _chat_completion_chain(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
-    deadline: float | None = None,
+    request_fn, provider: str, deadline: float | None = None,
 ) -> tuple[str, str]:
-    """Общий fallback-цикл по цепочке OpenRouter (раньше дублировался в ask_openrouter_text/multimodal). Ровно одна попытка на модель — ретраи одной модели при массовой нестабильности замедляли весь маршрут. Возвращает (answer, used_model); иначе последнее исключение или RouteBudgetExceededError."""
+    """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (OpenRouter и Groq).
+
+    Ровно одна попытка на модель — ретраи одной модели при массовой нестабильности
+    замедляли весь маршрут. Раньше этот цикл жил в двух копиях (_or_chat_completion_
+    with_fallback и прямо в ask_groq_text), и копия для Groq молча разошлась с
+    оригиналом (аудит 26.09.2026). Возвращает (answer, used_model); иначе последнее
+    исключение или RouteBudgetExceededError.
+
+    Аккаунтный лимит OpenRouter (free-моделей на сутки) обрывает цепочку сразу —
+    это осталось в обёртке _or_chat_completion_with_fallback, потому что у Groq
+    лимит скоупный на модель, и обрыв там означал бы лишний отказ."""
     import bot
     last_exc: Exception | None = None
     tried: list[str] = []
     for model_trial in trial_models:
         if deadline is not None and time.monotonic() > deadline:
-            log.warning('[or] Route time budget exhausted before model %s. Tried: %s', model_trial, ", ".join(tried) or "none")
+            log.warning('[%s] Route time budget exhausted before model %s. Tried: %s', provider, model_trial, ", ".join(tried) or "none")
             raise bot.RouteBudgetExceededError(tried)
         tried.append(model_trial)
         messages[0]["content"] = bot.get_system_prompt(model_trial)
         attempt_start = time.monotonic()
         try:
             payload = {"model": model_trial, "messages": messages, "stream": False}
-            resp = await bot._or_request("chat/completions", "POST", json_body=payload, deadline=deadline)
+            resp = await request_fn(payload, deadline)
             choices = resp.get("choices") or []
             answer = ""
             if choices:
@@ -202,24 +212,46 @@ async def _or_chat_completion_with_fallback(
                 # Пустой ответ — повод попробовать следующую модель (прод 17.09.2026: юзер дважды увидел "Empty response").
                 raise RuntimeError(f"Model {model_trial} returned an empty response")
 
-            answer = _scrub_identity_leak(answer, source=f"or_chat_completion:{model_trial}")
-            log.info('[or] Successful response from model %s (primary=%s, models tried: %d)', model_trial, primary_model_id, len(tried))
-            _record_model_latency(_model_speed_key("openrouter", model_trial), total_sec=time.monotonic() - attempt_start)
+            answer = _scrub_identity_leak(answer, source=f"{provider}_chat_completion:{model_trial}")
+            log.info('[%s] Successful response from model %s (primary=%s, models tried: %d)', provider, model_trial, primary_model_id, len(tried))
+            _record_model_latency(_model_speed_key(provider, model_trial), total_sec=time.monotonic() - attempt_start)
             return answer, model_trial
+        except bot.RouteBudgetExceededError:
+            raise
         except Exception as exc:
             last_exc = exc
-            err_text = str(exc).lower()
-            if bot._is_account_wide_or_rate_limit(err_text):
-                log.warning(
-                    '[or] Detected an account-wide OpenRouter limit (free-models-per-day) on model %s — stopping the remaining candidates in the chain, they would fail with the same error anyway.',
-                    model_trial,
-                )
-                raise
-            log.warning("[or] Model %s failed: %s. Switching to next candidate...", model_trial, str(last_exc) or last_exc.__class__.__name__)
+            log.warning("[%s] Model %s failed: %s. Switching to next candidate...", provider, model_trial, str(last_exc) or last_exc.__class__.__name__)
 
     if last_exc:
         raise last_exc
     raise RuntimeError("No candidate model returned an answer.")
+
+
+async def _or_chat_completion_with_fallback(
+    messages: list[dict], trial_models: list[str], primary_model_id: str, *,
+    deadline: float | None = None,
+) -> tuple[str, str]:
+    """Fallback-цикл по цепочке OpenRouter поверх общего _chat_completion_chain. Аккаунтный
+    лимит free-моделей/сутки обрывает остаток цепочки сразу — они упали бы тем же
+    ответом, просто потратив по попытке на модель."""
+    import bot
+
+    async def _request(payload: dict, dl: float | None):
+        try:
+            return await bot._or_request("chat/completions", "POST", json_body=payload, deadline=dl)
+        except bot.OpenRouterAPIError as exc:
+            if bot._is_account_wide_or_rate_limit((str(exc) or exc.__class__.__name__).lower()):
+                log.warning(
+                    '[or] Detected an account-wide OpenRouter limit (free-models-per-day) on model %s — stopping the remaining candidates in the chain, they would fail with the same error anyway.',
+                    payload.get("model"),
+                )
+                raise
+            raise
+
+    return await _chat_completion_chain(
+        messages, trial_models, primary_model_id,
+        request_fn=_request, provider="openrouter", deadline=deadline,
+    )
 
 async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
     import bot
@@ -255,35 +287,16 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     primary_model_id = trial_models[0]
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, primary_model_id)
 
-    last_exc: Exception | None = None
-    tried: list[str] = []
-    for model_trial in trial_models:
-        if deadline is not None and time.monotonic() > deadline:
-            log.warning('[groq] Route time budget exhausted before model %s. Tried: %s', model_trial, ", ".join(tried) or "none")
-            raise bot.RouteBudgetExceededError(tried)
-        tried.append(model_trial)
-        messages[0]["content"] = bot.get_system_prompt(model_trial)
-        attempt_start = time.monotonic()
-        try:
-            payload = {"model": model_trial, "messages": messages, "stream": False}
-            resp = await bot._groq_request("chat/completions", "POST", json_body=payload, deadline=deadline)
-            choices = resp.get("choices") or []
-            answer = ""
-            if choices:
-                answer = bot._or_extract_text(choices[0].get("message") or "")
-            answer = answer.strip()
-            if not answer:
-                # Пустой ответ — повод попробовать следующую модель (тот же прод-кейс 17.09.2026, что у OR/Gemini).
-                raise RuntimeError(f"Model {model_trial} returned an empty response")
-            answer = _scrub_identity_leak(answer, source=f"groq_chat_completion:{model_trial}")
-            log.info('[groq] Successful response from model %s (primary=%s, models tried: %d)', model_trial, primary_model_id, len(tried))
-            _record_model_latency(_model_speed_key("groq", model_trial), total_sec=time.monotonic() - attempt_start)
-            break
-        except Exception as exc:
-            last_exc = exc
-            log.warning("[groq] Model %s failed: %s. Switching to next candidate...", model_trial, str(last_exc) or last_exc.__class__.__name__)
-    else:
-        raise last_exc or RuntimeError("No candidate model returned an answer.")
+    async def _request(payload: dict, dl: float | None):
+        return await bot._groq_request("chat/completions", "POST", json_body=payload, deadline=dl)
+
+    # Тот же общий цикл, что у OpenRouter (раньше здесь была его копия, которая
+    # молча разошлась с оригиналом — аудит 26.09.2026). Исключения и
+    # RouteBudgetExceededError пробрасываются наверх тем же путём.
+    answer, model_trial = await _chat_completion_chain(
+        messages, trial_models, primary_model_id,
+        request_fn=_request, provider="groq", deadline=deadline,
+    )
 
     # В историю — чистый текст пользователя, как у остальных провайдеров.
     history.append({"role": "user", "content": user_text})

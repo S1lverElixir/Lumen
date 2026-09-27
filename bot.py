@@ -398,8 +398,9 @@ TG_MAX_LEN = 4096
 # Upload-ботов Telegram режет 50 МБ — слишком большие варианты качества пропускаем до скачивания.
 TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 # Слайдшоу TikTok — до 35 штук, media group — по 10: шлём весь пост несколькими вызовами.
+# Величина самого чанка живёт в lumen_tiktok.TELEGRAM_MEDIA_GROUP_CHUNK (единственный
+# источник правды; дубль здесь был мёртвым — аудит 26.09.2026).
 TIKTOK_SLIDESHOW_MAX_ITEMS = 35
-TELEGRAM_MEDIA_GROUP_CHUNK = 10
 # Лимит ffprobe/ffmpeg-процессов: без него слайдшоу кладёт CPU контейнера (ревью 28.08.2026).
 TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = _env_number("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", 4, cast=int, min_value=1)
 _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)

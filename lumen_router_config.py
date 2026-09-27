@@ -182,7 +182,6 @@ _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
     "liquid/lfm-2.5-2.6b:free",
     "qwen/qwen3.8-27b:free",
     "gemini-3.8-flash",
-    "openrouter/free",
     # Groq-ID без :free-суффикса — те же семейства, что выше через OpenRouter; дословно в ответе им тоже не место.
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b",
@@ -400,7 +399,9 @@ GEMINI_SEARCH_CHAIN: list[str] = [
     "gemini-3-flash-preview",
 ]
 # Дефолт для прямых вызовов ask_gemini без явной цепочки (например, из тестов).
-GEMINI_DEFAULT_CHAIN: list[str] = GEMINI_HEAVY_CHAIN
+# Копия, а не тот же объект: раньше GEMINI_DEFAULT_CHAIN был АЛИАСОМ GEMINI_HEAVY_CHAIN,
+# и любая правка цепочки по умолчанию молча меняла тяжёлую (аудит 26.09.2026).
+GEMINI_DEFAULT_CHAIN: list[str] = list(GEMINI_HEAVY_CHAIN)
 # Сайты по ссылке и YouTube умеют только "полноценные" (не no_system/Gemma) модели.
 GEMINI_LINK_CHAIN: list[str] = [m for m in GEMINI_HEAVY_CHAIN if not GEMINI_MODELS.get(m, {}).get("no_system")]
 GEMINI_LINK_SEARCH_CHAIN: list[str] = [m for m in GEMINI_SEARCH_CHAIN if not GEMINI_MODELS.get(m, {}).get("no_system")]

@@ -1118,6 +1118,42 @@ def test_ask_groq_text_falls_back_to_next_model(monkeypatch):
     assert seen == ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
 
 
+def test_ask_groq_text_raises_last_error_when_whole_chain_fails(monkeypatch):
+    # Ветка «вся цепочка Groq упала» не была покрыта ни одним тестом (аудит 26.09.2026),
+    # и именно её выполнял общий цикл после объединения двух копий.
+    from collections import deque
+    chat_id = 999703
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+
+    async def failing_groq_request(path, method="GET", *, json_body=None, deadline=None):
+        raise bot.GroqAPIError("overloaded", status_code=503)
+
+    monkeypatch.setattr(bot, "_groq_request", failing_groq_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
+    with pytest.raises(bot.GroqAPIError):
+        asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]))
+
+
+def test_shared_chain_raises_budget_error_without_second_attempt(monkeypatch):
+    # Общий цикл не должен тратить вторую попытку, если бюджет маршрута истёк.
+    from collections import deque
+    chat_id = 999704
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+    seen = []
+
+    async def slow_request(path, method="GET", *, json_body=None, deadline=None):
+        seen.append(json_body["model"])
+        await asyncio.sleep(5)
+        return {"choices": []}
+
+    monkeypatch.setattr(bot, "_groq_request", slow_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    with pytest.raises(bot.RouteBudgetExceededError):
+        asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["m1", "m2"], deadline=time.monotonic() + 0.2))
+    assert seen == ["m1"]
+
+
 def test_groq_request_requires_key(monkeypatch):
     # Без GROQ_API_KEY — понятная ошибка, а не сетевой вызов в никуда.
     monkeypatch.setattr(bot, "GROQ_API_KEY", "")

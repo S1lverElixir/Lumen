@@ -203,11 +203,6 @@ _INJECTION_PROBE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_INJECTION_PROBE_REPLY = (
-    "Свою настройку и инструкции я не раскрываю и не обсуждаю в таком формате. "
-    "Если у тебя обычный вопрос — задавай, с радостью помогу."
-)
-
 def _looks_like_injection_probe(text: str) -> bool:
     """Чистая функция — тестируется отдельно от _handle_message_core."""
     return bool(text) and bool(_INJECTION_PROBE_RE.search(text))

@@ -307,6 +307,75 @@ def test_openrouter_stream_pieces_raises_on_midstream_error_chunk():
         bot.OPENROUTER_API_KEY = original_key
 
 
+def test_sse_parsers_share_one_implementation():
+    # Две копии разбора SSE по 45 строк разъезжались (у Groq ветки с ошибками вообще
+    # не были покрыты) — теперь один общий _sse_pieces на оба провайдера.
+    import inspect
+    import lumen_streaming
+    src = inspect.getsource(lumen_streaming)
+    assert src.count("async def _sse_pieces(") == 1
+    for fn in (lumen_streaming._openrouter_stream_pieces, lumen_streaming._groq_stream_pieces):
+        fn_src = inspect.getsource(fn)
+        assert "delta" not in fn_src, "разбор чанков должен жить в _sse_pieces"
+        assert "_sse_pieces" in fn_src
+
+
+def test_groq_stream_pieces_raises_on_http_error_status():
+    # У Groq раньше не было теста на HTTP>=400 (ветка-копия без покрытия, аудит 26.09.2026).
+    fake_resp = _FakeSSEResponse([], status=500)
+    fake_session = _FakeSessionForSSE(fake_resp)
+
+    async def fake_get_http_session():
+        return fake_session
+
+    original_get_session = bot._get_http_session
+    original_key = bot.GROQ_API_KEY
+    bot._get_http_session = fake_get_http_session
+    bot.GROQ_API_KEY = "fake-key"
+    try:
+        async def collect():
+            async for _ in bot._groq_stream_pieces("qwen/qwen3.8-27b", []):
+                pass
+        with pytest.raises(bot.GroqAPIError):
+            asyncio.run(collect())
+    finally:
+        bot._get_http_session = original_get_session
+        bot.GROQ_API_KEY = original_key
+
+
+def test_groq_stream_pieces_raises_on_midstream_error_chunk():
+    # Та же midstream-ошибка, что у OpenRouter, но в копии Groq её не ловили.
+    lines = [
+        'data: {"choices":[{"delta":{"content":"Начало"}}]}\n'.encode("utf-8"),
+        'data: {"error":{"message":"Provider returned error","code":503}}\n'.encode("utf-8"),
+    ]
+    fake_resp = _FakeSSEResponse(lines)
+    fake_session = _FakeSessionForSSE(fake_resp)
+
+    async def fake_get_http_session():
+        return fake_session
+
+    original_get_session = bot._get_http_session
+    original_key = bot.GROQ_API_KEY
+    bot._get_http_session = fake_get_http_session
+    bot.GROQ_API_KEY = "fake-key"
+    try:
+        collected = []
+
+        async def collect_partial():
+            agen = bot._groq_stream_pieces("qwen/qwen3.8-27b", [{"role": "user", "content": "hi"}])
+            async for piece in agen:
+                collected.append(piece)
+
+        with pytest.raises(bot.GroqAPIError) as exc_info:
+            asyncio.run(collect_partial())
+        assert collected == ["Начало"]
+        assert exc_info.value.status_code == 503
+    finally:
+        bot._get_http_session = original_get_session
+        bot.GROQ_API_KEY = original_key
+
+
 def test_try_openrouter_streaming_happy_path_accumulates_and_finalizes():
     chat_id = 999105
 
