@@ -151,10 +151,12 @@ def _is_gemini_daily_quota(text: str) -> bool:
     """Суточная квота Gemini против минутного лимита запросов. Оба приходят как 429,
     но запирать модель до утра можно только за первый: минутный лимит у Google сыпется
     на любом всплеске (враждебное ревью 27.09.2026). Тексты ошибок — по документации
-    Google (RESOURCE_EXHAUSTED с "per day"/"daily limit")."""
+    Google (RESOURCE_EXHAUSTED с "per day"/"daily limit"). Отдельно ловим слитное
+    PerDay из имён метрик вида GenerateRequestsPerDayPerProjectPerModel — иначе
+    настоящая суточная квота выглядела бы минутным всплеском."""
     low = text.lower()
     return any(tok in low for tok in (
-        "per day", "per_day", "daily limit", "daily quota", "quota exceeded for the day",
+        "per day", "per_day", "perday", "daily limit", "daily quota", "quota exceeded for the day",
     ))
 
 async def _probe_or_model_liveness() -> None:
@@ -577,9 +579,9 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
         if not ans and tool_calls:
             ans = "[Tool call: " + "; ".join(tool_calls) + "]"
         elif not ans and reasons:
+            retry_skipped_for_budget = False
             if any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
                 # Модель сломала собственный вызов инструмента — повторяем БЕЗ инструментов (ответ своими знаниями вместо ошибки).
-                retry_skipped_for_budget = False
                 try:
                     retry_gconfig = gconfig.model_copy(update={"tools": None}) if gconfig is not None else None
                     # Async-клиент, а не to_thread: wait_for тогда реально отменяет зависший

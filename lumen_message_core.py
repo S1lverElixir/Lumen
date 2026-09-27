@@ -188,7 +188,9 @@ async def _reject_rate_limited_message(message: Message) -> bool:
     import bot
     if not bot._check_and_register_rate_limit(bot._rate_limit_key_for_message(message)):
         return False
-    await bot._tg_call(message.reply, bot._t(message.chat.id, "rate_limited"))
+    # Ответ без создания чата: обычный _t через _chat_lang заводил бы запись даже
+    # отклонённому сообщению. Язык уже существующего чата подхватывается так же.
+    await bot._tg_call(message.reply, bot._t_no_create(message.chat.id, "rate_limited"))
     return True
 
 

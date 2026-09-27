@@ -168,11 +168,19 @@ async def _gemini_tts_bytes(text: str) -> tuple[bytes, str, str]:
         return bot._classify_model_error(bot._error_status(e, err_txt), err_txt) == "rate_limit"
 
     # TTS пишется в провайдер "gemini" — модели видны в /stats рядом с остальными.
+    # Различаем суточную квоту и минутный всплеск так же, как текстовый маршрут:
+    # иначе один 429 убирал бы TTS-модель из квоты до полуночи.
+    def _is_daily_quota(e: Exception) -> bool:
+        err_txt = bot._error_text(e).strip() or e.__class__.__name__
+        return bot._is_gemini_daily_quota(err_txt)
+
     return await _lumen_gemini_tts_bytes(
         bot.client, text, tts_models=bot.GEMINI_TTS_MODELS,
         is_rate_limit_error=_is_rate_limit,
         on_model_exhausted=lambda mname: bot._mark_quota_exhausted("gemini", mname),
         on_model_success=lambda mname: bot._record_quota_usage("gemini", mname),
+        is_daily_quota_error=_is_daily_quota,
+        on_model_rate_limited=lambda mname: bot._mark_rate_limited("gemini", mname),
         request_timeout_sec=bot.TTS_SYNTH_TIMEOUT_SEC,
     )
 

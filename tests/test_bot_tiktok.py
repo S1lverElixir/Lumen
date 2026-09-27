@@ -26,6 +26,29 @@ from tests.bot_test_helpers import (
 )
 
 
+class _RedirectDownloadResponse:
+    def __init__(self, status, headers=None):
+        self.status = status
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _RedirectDownloadSession:
+    def __init__(self, mapping):
+        self._mapping = mapping
+        self.requested = []
+
+    def get(self, url, *args, **kwargs):
+        assert kwargs.get("allow_redirects") is False, "редиректы обязаны проверяться вручную"
+        self.requested.append(url)
+        return self._mapping[url]
+
+
 def test_tiktok_video_candidates_prefers_hd_first():
     media_data = {
         "play": "https://tikwm.com/sd.mp4", "size": 1000,
@@ -1089,6 +1112,31 @@ def test_download_url_bin_returns_none_on_non_200_status():
     session = _FakeDownloadSession(resp)
     result = asyncio.run(lumen_tiktok._download_url_bin(session, "https://tikwm.com/missing.jpg"))
     assert result is None
+
+
+def test_download_url_bin_follows_only_public_redirect_hops():
+    # Редирект проверяется до запроса: публичный следующий хоп качаем, а цепочка
+    # фиксируется в запросах. Раньше клиент шёл по редиректам сам, и проверка
+    # конечного хоста происходила уже после контакта с ним.
+    mapping = {
+        "http://8.8.8.8/start.jpg": _RedirectDownloadResponse(302, {"Location": "http://8.8.4.4/final.jpg"}),
+        "http://8.8.4.4/final.jpg": _FakeDownloadResponse([b"ok"]),
+    }
+    session = _RedirectDownloadSession(mapping)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "http://8.8.8.8/start.jpg"))
+    assert result == b"ok"
+    assert session.requested == ["http://8.8.8.8/start.jpg", "http://8.8.4.4/final.jpg"]
+
+
+def test_download_url_bin_refuses_internal_redirect_before_fetching_it():
+    # Внутренний адрес в Location обязан останавливать цепочку до запроса к нему.
+    mapping = {
+        "http://8.8.8.8/start.jpg": _RedirectDownloadResponse(302, {"Location": "http://127.0.0.1/evil.mp4"}),
+    }
+    session = _RedirectDownloadSession(mapping)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "http://8.8.8.8/start.jpg"))
+    assert result is None
+    assert session.requested == ["http://8.8.8.8/start.jpg"]
 
 
 def test_communicate_process_returns_output_on_success():

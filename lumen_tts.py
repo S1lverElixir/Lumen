@@ -105,6 +105,8 @@ async def _gemini_tts_bytes(
     is_rate_limit_error: Callable[[Exception], bool],
     on_model_exhausted: Callable[[str], None],
     on_model_success: Callable[[str], None],
+    is_daily_quota_error: Callable[[Exception], bool] | None = None,
+    on_model_rate_limited: Callable[[str], None] | None = None,
     request_timeout_sec: float = 60.0,
 ) -> tuple[bytes, str, str]:
     """Gemini TTS (основной: Fish Audio отключён флагом): возвращает (pcm_bytes, mime_type, used_model) или бросает исключение. Состояние передаётся параметрами (см. докстринг модуля); расход пишется в GLOBAL_QUOTA — у TTS всего 10 запросов/сутки на модель.
@@ -149,7 +151,18 @@ async def _gemini_tts_bytes(
             log.warning("[tts] Failed with model %s: %s", mname, e)
             last_exc = e
             if is_rate_limit_error(e):
-                on_model_exhausted(mname)
+                # Минутный всплеск — короткая остывка, а не суточная метка: иначе один
+                # 429 убирал бы TTS-модель до полуночи, как раньше было у текстового
+                # маршрута (враждебное ревью 27.09.2026). Вызывающий код без новых
+                # колбэков сохраняет прежнее поведение.
+                if (
+                    is_daily_quota_error is not None
+                    and on_model_rate_limited is not None
+                    and not is_daily_quota_error(e)
+                ):
+                    on_model_rate_limited(mname)
+                else:
+                    on_model_exhausted(mname)
             continue
 
     if not resp:

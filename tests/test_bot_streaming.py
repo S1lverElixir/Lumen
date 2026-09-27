@@ -488,7 +488,6 @@ def _streaming_rate_limit_quotas(chat_id, model_id, error_text):
         raise bot.OpenRouterAPIError(error_text, status_code=429)
         yield ""
     incoming = _FakeIncomingMessage(chat_id)
-    real_quota = dict(bot.GLOBAL_QUOTA)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
             chat_id, "Привет!", incoming, provider="openrouter", model_id=model_id,
@@ -497,29 +496,39 @@ def _streaming_rate_limit_quotas(chat_id, model_id, error_text):
         assert answer is None
         return dict(bot.GLOBAL_QUOTA["openrouter"][model_id])
     finally:
-        bot.GLOBAL_QUOTA.clear()
-        bot.GLOBAL_QUOTA.update(real_quota)
         bot.chat_state.pop(chat_id, None)
 
 
 def test_streaming_daily_rate_limit_marks_model_exhausted():
     # Суточный лимит аккаунта помечает модель до утра — как и раньше.
-    entry = _streaming_rate_limit_quotas(999310, "z:free", "free-models-per-day limit reached")
-    assert entry["exhausted_at"] is not None
-    assert not entry.get("cooldown_until")
+    try:
+        entry = _streaming_rate_limit_quotas(999310, "z:free", "free-models-per-day limit reached")
+        assert entry["exhausted_at"] is not None
+        assert not entry.get("cooldown_until")
+    finally:
+        bot.GLOBAL_QUOTA.get("openrouter", {}).pop("z:free", None)
 
 
 def test_streaming_burst_rate_limit_only_cools_down():
     # Регрессия (враждебное ревью 27.09.2026): минутный всплеск 429 ставил суточную
     # метку, и модель выпадала из роута до полуночи — снять метку было нечем, потому
     # что заведомо мёртвую модель не зовут. Теперь это короткая остывка.
-    entry = _streaming_rate_limit_quotas(999311, "y:free", "Rate limit reached")
-    assert entry["exhausted_at"] is None
-    assert entry["cooldown_until"] > time.time()
-    assert lumen_router_config._is_quota_exhausted("openrouter", "y:free") is True
-    # По истечении остывки модель возвращается в роут сама, без смены суток.
-    bot.GLOBAL_QUOTA["openrouter"]["y:free"]["cooldown_until"] = time.time() - 1.0
-    assert lumen_router_config._is_quota_exhausted("openrouter", "y:free") is False
+    provider = bot.GLOBAL_QUOTA.setdefault("openrouter", {})
+    had_model = "y:free" in provider
+    old_model = dict(provider.get("y:free", {}))
+    try:
+        entry = _streaming_rate_limit_quotas(999311, "y:free", "Rate limit reached")
+        assert entry["exhausted_at"] is None
+        assert entry["cooldown_until"] > time.time()
+        assert lumen_router_config._is_quota_exhausted("openrouter", "y:free") is True
+        # По истечении остывки модель возвращается в роут сама, без смены суток.
+        provider["y:free"]["cooldown_until"] = time.time() - 1.0
+        assert lumen_router_config._is_quota_exhausted("openrouter", "y:free") is False
+    finally:
+        if had_model:
+            provider["y:free"] = old_model
+        else:
+            provider.pop("y:free", None)
 
 
 def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):

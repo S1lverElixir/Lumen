@@ -546,9 +546,27 @@ def _chat_lang(chat_id: int | None) -> str:
         return DEFAULT_LANG
 
 def _t(chat_id: int | None, key: str, **kwargs: Any) -> str:
-    """Системная строка key на языке чата (см. lumen_lang.py)."""
+    """Локализованная реплика key на языке чата (см. lumen_lang.py)."""
     import bot
     return _lang_t(bot._chat_lang(chat_id), key, **kwargs)
+
+
+def _peek_chat_lang(chat_id: int | None) -> str:
+    """Язык чата без создания записи состояния. Нужен отказам до get_state:
+    обычный _chat_lang через get_state заводил бы чат даже отклонённому по лимиту
+    сообщению — и перенос проверки лимита выше get_state не давал эффекта."""
+    try:
+        if chat_id is None:
+            return DEFAULT_LANG
+        entry = chat_state.get(chat_id) or {}
+        return normalize_lang(entry.get("lang", DEFAULT_LANG))
+    except Exception:
+        return DEFAULT_LANG
+
+
+def _t_no_create(chat_id: int | None, key: str, **kwargs: Any) -> str:
+    """Та же локализация, что _t, но без побочных эффектов для хранилища."""
+    return _lang_t(_peek_chat_lang(chat_id), key, **kwargs)
 
 def _prune_old_chats() -> None:
     import bot

@@ -290,6 +290,28 @@ def _host_resolves_to_public(host: str | None) -> bool:
         return False
 
 
+# Редиректы проверяем вручную, а не доверяем клиенту: aiohttp с allow_redirects=True
+# уже сходил бы на следующий хоп до нашей проверки конечного хоста. Каждый адрес
+# из цепочки Location обязан пройти ту же схему и SSRF-проверку, что стартовый URL.
+_DOWNLOAD_MAX_REDIRECTS = 5
+_DOWNLOAD_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+
+def _checked_redirect_url(current_url: str, location: str | None) -> str | None:
+    if not location:
+        log.warning("[download] Redirect without a Location header for %r.", current_url)
+        return None
+    next_url = urllib.parse.urljoin(current_url, location)
+    parts = urllib.parse.urlsplit(next_url)
+    if parts.scheme.lower() not in ("http", "https"):
+        log.warning("[download] Refusing redirect to non-HTTP(S) URL %r.", next_url)
+        return None
+    if not _host_resolves_to_public(parts.hostname):
+        log.warning("[download] Refusing redirect to non-public host %r.", next_url)
+        return None
+    return next_url
+
+
 async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: dict | None = None) -> bytes | None:
     # URL — из JSON чужого сервиса (TikWM): качаем только http(s) (AUD-D-003)
     # и только с публичных адресов (SSRF-гард ниже).
@@ -307,34 +329,45 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
         }
     try:
-        async with session.get(url, headers=headers, timeout=60) as resp:
-            if resp.status != 200:
-                return None
-            # Редирект мог увести на внутренний адрес уже после предпроверки —
-            # сверяем конечный хост тоже. У тестовых заглушек .url нет — их пропускаем.
-            final_url = getattr(resp, "url", None)
-            final_host = urllib.parse.urlsplit(str(final_url)).hostname if final_url is not None else None
-            if final_host is not None and not _host_resolves_to_public(final_host):
-                log.warning("[download] Refusing redirect to non-public host %r.", final_host)
-                return None
-            # Content-Length — быстрый отказ ДО скачивания (сервер может соврать/не прислать — ниже та же проверка потоково по факту).
-            content_length = resp.headers.get("Content-Length")
-            if content_length is not None:
-                try:
-                    if int(content_length) > TIKTOK_DOWNLOAD_MAX_BYTES:
-                        log.warning("[download] Refusing to download %s: Content-Length %s exceeds the %d byte cap.", url, content_length, TIKTOK_DOWNLOAD_MAX_BYTES)
+        current_url = url
+        for _ in range(_DOWNLOAD_MAX_REDIRECTS + 1):
+            async with session.get(current_url, headers=headers, timeout=60, allow_redirects=False) as resp:
+                if resp.status in _DOWNLOAD_REDIRECT_STATUSES:
+                    next_url = _checked_redirect_url(current_url, resp.headers.get("Location"))
+                    if next_url is None:
                         return None
-                except ValueError:
-                    pass
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in resp.content.iter_chunked(65536):
-                total += len(chunk)
-                if total > TIKTOK_DOWNLOAD_MAX_BYTES:
-                    log.warning("[download] Aborting download of %s: exceeded the %d byte cap mid-stream.", url, TIKTOK_DOWNLOAD_MAX_BYTES)
+                    current_url = next_url
+                    continue
+                if resp.status != 200:
                     return None
-                chunks.append(chunk)
-            return b"".join(chunks)
+                # Тестовые заглушки могут не иметь .url; у настоящего ответа с
+                # выключенными автор редиректами это текущий URL, а каждый хоп уже
+                # проверен выше. Проверку оставляем как последний рубеж.
+                final_url = getattr(resp, "url", None)
+                final_host = urllib.parse.urlsplit(str(final_url)).hostname if final_url is not None else None
+                if final_host is not None and not _host_resolves_to_public(final_host):
+                    log.warning("[download] Refusing redirect to non-public host %r.", final_host)
+                    return None
+                # Content-Length — быстрый отказ ДО скачивания (сервер может соврать/не прислать — ниже та же проверка потоково по факту).
+                content_length = resp.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        if int(content_length) > TIKTOK_DOWNLOAD_MAX_BYTES:
+                            log.warning("[download] Refusing to download %s: Content-Length %s exceeds the %d byte cap.", current_url, content_length, TIKTOK_DOWNLOAD_MAX_BYTES)
+                            return None
+                    except ValueError:
+                        pass
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.content.iter_chunked(65536):
+                    total += len(chunk)
+                    if total > TIKTOK_DOWNLOAD_MAX_BYTES:
+                        log.warning("[download] Aborting download of %s: exceeded the %d byte cap mid-stream.", current_url, TIKTOK_DOWNLOAD_MAX_BYTES)
+                        return None
+                    chunks.append(chunk)
+                return b"".join(chunks)
+        log.warning("[download] Too many redirects for %r.", url)
+        return None
     except Exception as e:
         log.warning("[download] Failed to download URL: %s", e)
     return None

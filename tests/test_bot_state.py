@@ -1542,6 +1542,35 @@ def test_check_and_register_rate_limit_noop_for_missing_user_id():
     assert bot._check_and_register_rate_limit(0) is False
 
 
+def test_reject_rate_limited_message_does_not_create_chat_state(monkeypatch):
+    # Отклонённое по лимиту сообщение не должно заводить запись чата: раньше ответ
+    # строился через _t/_chat_lang/get_state и сводил на нет проверку лимита до
+    # get_state. Язык уже существующего чата при этом сохраняется.
+    chat_id, user_id = 999952, 999953
+    now = time.time()
+    bot.user_rate_limits[user_id] = [now] * 5
+    bot.chat_state.pop(chat_id, None)
+    replies = []
+
+    async def fake_tg_call(method, *args, **kwargs):
+        replies.append(args[0] if args else None)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id),
+        from_user=SimpleNamespace(id=user_id),
+        reply=SimpleNamespace(),
+    )
+    try:
+        assert asyncio.run(bot._reject_rate_limited_message(msg)) is True
+        assert replies and replies[0]
+        assert chat_id not in bot.chat_state
+    finally:
+        bot.user_rate_limits.pop(user_id, None)
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_rate_limit_key_for_message_uses_from_user_when_present():
     msg = SimpleNamespace(
         from_user=SimpleNamespace(id=555), sender_chat=None,

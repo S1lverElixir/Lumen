@@ -355,6 +355,17 @@ def test_extract_gemini_answer_skips_retry_when_route_budget_spent():
         bot.client = original_client
 
 
+def test_extract_gemini_answer_reports_non_malformed_block_without_retry_state():
+    # Пустой ответ с причиной без MALFORMED_FUNCTION_CALL не должен падать из-за
+    # неинициализированного флага пропуска ретрая. Раньше правка оставляла переменную
+    # только внутри MALFORMED-ветки и такой ответ давал UnboundLocalError.
+    resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="SAFETY")])
+    ans = asyncio.run(bot._extract_gemini_answer_text(
+        resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
+    ))
+    assert "SAFETY" in ans
+
+
 def test_run_route_reorders_slow_head_down(monkeypatch):
     # Интеграция reorder в _run_route: модель с измеренными 100с уходит вниз,
     # ask вызывается уже с переупорядоченной цепочкой.
@@ -463,6 +474,18 @@ def test_gemini_spent_budget_does_not_pretend_blocked(monkeypatch):
         assert ans == "", "пустой ответ должен уводить маршрут на следующую модель"
     finally:
         bot.client = original_client
+
+
+def test_is_gemini_daily_quota_recognizes_google_per_day_metric():
+    # Google пишет суточную квоту слитно в имени метрики
+    # (GenerateRequestsPerDayPerProjectPerModel) — без токена perday она
+    # выглядела бы минутным всплеском и получала бы короткую остывку.
+    assert bot._is_gemini_daily_quota(
+        "Quota exceeded for quota metric 'GenerateRequestsPerDayPerProjectPerModel'"
+    ) is True
+    assert bot._is_gemini_daily_quota(
+        "RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'GenerateRequestsPerProjectPerModel'"
+    ) is False
 
 
 def test_or_chain_stops_on_account_wide_limit(monkeypatch):
