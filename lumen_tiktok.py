@@ -249,7 +249,15 @@ def _write_mp3_tags(path: str, title: str, artist: str, cover: bytes | None) -> 
 
 # ── ffmpeg и скачивание бинарных URL ──
 # Лимит размера (аудит 04.09.2026): слайды качаются до 35 параллельно — читаем потоково с капом.рвём свыше лимита.
-TIKTOK_DOWNLOAD_MAX_BYTES = int(os.getenv("TIKTOK_DOWNLOAD_MAX_BYTES", str(75 * 1024 * 1024)))
+# Число из окружения — через bot._env_number (мусор в переменной не должен ронять
+# старт; отложенный импорт, потому что bot.py импортирует этот модуль).
+def _env_number_or_default(name: str, default: int) -> int:
+    try:
+        import bot
+        return int(bot._env_number(name, default, cast=int, min_value=1024))
+    except Exception:
+        return default
+TIKTOK_DOWNLOAD_MAX_BYTES = _env_number_or_default("TIKTOK_DOWNLOAD_MAX_BYTES", 75 * 1024 * 1024)
 
 
 # ── SSRF-гард для _download_url_bin ──

@@ -264,6 +264,47 @@ def test_upstash_get_parses_result_field():
         bot.UPSTASH_REDIS_REST_TOKEN = ""
 
 
+def test_upstash_delete_hits_del_endpoint():
+    # Ветка use_upstash=True (_storage_delete_text) и _upstash_delete не были
+    # проверены ни одним тестом, хотя это весь прод-бэкенд (аудит 26.09.2026).
+    import lumen_state_storage as lss
+    calls = []
+    with patch.object(lss, "_upstash_request", side_effect=lambda url, token, path, **kw: calls.append((path, kw))):
+        lss._upstash_delete("https://fake", "tok", "lumen:chat:42")
+    assert calls == [("del/lumen%3Achat%3A42", {"method": "POST"})]
+
+
+def test_storage_write_read_delete_use_upstash_branch(tmp_path):
+    # Тот же пробел: ветки use_upstash=True в _storage_write_text/_storage_read_text/
+    # _storage_delete_text шли мимо тестов. Проверяем, что они реально дергают
+    # Upstash и НЕ трогают локальные файлы.
+    import lumen_state_storage as lss
+    cfg = lss.StorageConfig(
+        use_upstash=True, upstash_url="https://fake", upstash_token="tok", chats_dir=tmp_path,
+    )
+    seen = {}
+
+    def fake_set(url, token, key, value):
+        seen["set"] = (url, token, key, value)
+
+    def fake_get(url, token, key):
+        seen["get"] = (url, token, key)
+        return '{"history": []}'
+
+    def fake_delete(url, token, key):
+        seen["delete"] = (url, token, key)
+
+    path = tmp_path / "1.json"
+    with patch.object(lss, "_upstash_set", fake_set), patch.object(lss, "_upstash_get", fake_get), patch.object(lss, "_upstash_delete", fake_delete):
+        lss._storage_write_text(cfg, "lumen:chat:1", path, '{"a": 1}')
+        assert lss._storage_read_text(cfg, "lumen:chat:1", path) == '{"history": []}'
+        lss._storage_delete_text(cfg, "lumen:chat:1", path)
+    assert seen["set"] == ("https://fake", "tok", "lumen:chat:1", '{"a": 1}')
+    assert seen["get"] == ("https://fake", "tok", "lumen:chat:1")
+    assert seen["delete"] == ("https://fake", "tok", "lumen:chat:1")
+    assert not path.exists(), "Upstash-ветка не должна создавать локальные файлы"
+
+
 def test_save_chat_to_storage_returns_true_on_success(tmp_path):
     # Регрессия на найденный при код-ревью баг (см. test_flush_dirty_state_once_*
     # ниже): функция теперь ДОЛЖНА сигнализировать успех/неудачу вызывающему коду,
@@ -629,6 +670,66 @@ def test_process_media_group_buffers_holds_chat_lock():
         bot._handle_message_core = original_core
         bot.get_chat_lock = original_lock
         bot.chat_state.pop(chat_id, None)
+
+
+def test_env_number_falls_back_on_garbage_and_keeps_valid(monkeypatch, caplog):
+    # Регрессия (аудит 26.09.2026): опечатка в HF Variable (пустое значение или
+    # "22s") роняла бот на старте голым ValueError. Теперь — дефолт + WARNING.
+    import logging
+    monkeypatch.setenv("LUMEN_PROBE_NUM", "22s")
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        assert bot._env_number("LUMEN_PROBE_NUM", 22, min_value=1) == 22
+    assert any("LUMEN_PROBE_NUM" in r.getMessage() for r in caplog.records)
+
+    monkeypatch.setenv("LUMEN_PROBE_NUM", "5")
+    assert bot._env_number("LUMEN_PROBE_NUM", 22, min_value=1) == 5
+
+    monkeypatch.setenv("LUMEN_PROBE_NUM", "  ")
+    assert bot._env_number("LUMEN_PROBE_NUM", 22, min_value=1) == 22
+
+    monkeypatch.setenv("LUMEN_PROBE_NUM", "-3")
+    assert bot._env_number("LUMEN_PROBE_NUM", 22, min_value=1) == 22
+
+    monkeypatch.delenv("LUMEN_PROBE_NUM", raising=False)
+    assert bot._env_number("LUMEN_PROBE_NUM", 22, min_value=1) == 22
+    assert bot._env_number("LUMEN_PROBE_NUM", 7, cast=int, min_value=1) == 7
+
+
+def test_flush_state_now_writes_everything_on_shutdown(tmp_path):
+    # _flush_state_now (финальный синхронный сброс при остановке) не был покрыт
+    # ни одним тестом: именно он спасает несохранённые изменения между последним
+    # тиком и остановкой контейнера (аудит 26.09.2026).
+    import lumen_chat_state as lcs
+    chat_id = 999701
+    original_chats_dir = lcs._CHATS_DIR
+    lcs._CHATS_DIR = tmp_path
+    written = []
+    original_write = bot._storage_write_text
+    original_save = bot._save_chat_to_storage
+    original_delete = bot._delete_chat_storage
+    bot._storage_write_text = lambda key, path, text: written.append((key, text)) or True
+    bot._save_chat_to_storage = lambda cid, state: written.append((f"chat:{cid}", "")) or True
+    bot._delete_chat_storage = lambda cid: written.append((f"delete:{cid}", "")) or True
+    lcs.chat_state[chat_id] = {"history": [{"role": "user", "content": "hi"}], "last_activity": 0.0}
+    lcs._dirty_chat_ids.add(chat_id)
+    lcs._pending_chat_deletions.add(999999)
+    lcs._index_dirty = True
+    try:
+        bot._flush_state_now()
+        keys = [k for k, _ in written]
+        assert f"chat:{chat_id}" in keys, "грязный чат должен сохраниться при остановке"
+        assert "delete:999999" in keys, "очередь удалений должна быть применена"
+        assert "lumen:chat_index" in keys or any("chat_index" in k for k in keys), "индекс должен сохраниться"
+        assert 999999 not in lcs._pending_chat_deletions
+        assert chat_id not in lcs._dirty_chat_ids
+    finally:
+        bot._storage_write_text = original_write
+        bot._save_chat_to_storage = original_save
+        bot._delete_chat_storage = original_delete
+        lcs._CHATS_DIR = original_chats_dir
+        lcs.chat_state.pop(chat_id, None)
+        lcs._pending_chat_deletions.discard(999999)
+        lcs._index_dirty = False
 
 
 def test_prune_old_chats_never_drops_a_chat_with_held_lock():

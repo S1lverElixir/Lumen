@@ -7,14 +7,23 @@ lumen_limits.py — скользящее окно rate limit и очередь �
 """
 from __future__ import annotations
 
-import os
 import time
 from typing import Any
 
-# Простой трекер для rate limiting
-RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "5"))
-RATE_LIMIT_WINDOW_SEC = float(os.getenv("RATE_LIMIT_WINDOW_SEC", "30"))
-MAX_RATE_LIMIT_KEYS = int(os.getenv("MAX_RATE_LIMIT_KEYS", "20000"))
+# Простой трекер для rate limiting.
+# Числа читаем через bot._env_number (импорт отложенный: bot импортирует этот
+# модуль) — опечатка в переменной окружения не должна ронять бот на старте
+# (аудит 26.09.2026).
+def _env_number(name: str, default: float | int, *, cast: type = float, min_value: float | None = None) -> float | int:
+    try:
+        import bot
+        return bot._env_number(name, default, cast=cast, min_value=min_value)
+    except Exception:
+        return cast(default)
+
+RATE_LIMIT_MAX_REQUESTS = _env_number("RATE_LIMIT_MAX_REQUESTS", 5, cast=int, min_value=1)
+RATE_LIMIT_WINDOW_SEC = _env_number("RATE_LIMIT_WINDOW_SEC", 30, min_value=1)
+MAX_RATE_LIMIT_KEYS = _env_number("MAX_RATE_LIMIT_KEYS", 20000, cast=int, min_value=100)
 user_rate_limits: dict[int, list[float]] = {}
 
 
@@ -53,8 +62,8 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
     return False
 
 
-PICK_TTL_SEC = float(os.getenv("PICK_TTL_SEC", "300"))
-MAX_PENDING_PICKS = int(os.getenv("MAX_PENDING_PICKS", "500"))
+PICK_TTL_SEC = _env_number("PICK_TTL_SEC", 300, min_value=1)
+MAX_PENDING_PICKS = _env_number("MAX_PENDING_PICKS", 500, cast=int, min_value=1)
 # Только в памяти: после рестарта кнопки честно протухают, это штатно.
 _pending_picks: dict[str, dict[str, Any]] = {}
 

@@ -235,6 +235,29 @@ def _tikwm_proxy_candidates() -> list[str]:
     return candidates
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
+
+def _env_number(name: str, default: float | int, *, cast: type = float, min_value: float | None = None) -> float | int:
+    """Число из переменной окружения с внятной диагностикой.
+
+    Раньше все таймауты и лимиты читались голым int()/float(): опечатка в HF
+    Variable (например ROUTE_MODEL_TIMEOUT_SEC=22s или пустое значение) давала
+    голый ValueError на старте — то есть crashloop с невнятным логом вместо
+    понятного сообщения. Теперь мусор и выход за нижнюю границу заменяются
+    дефолтом с WARNING (бот продолжает работать), а не падают (аудит 26.09.2026).
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return cast(default)
+    try:
+        value = cast(str(raw).strip())
+    except (TypeError, ValueError):
+        log.warning("[setup] %s=%r is not a number — using default %s", name, raw, default)
+        return cast(default)
+    if min_value is not None and value < min_value:
+        log.warning("[setup] %s=%s is below the allowed minimum %s — using default %s", name, value, min_value, default)
+        return cast(default)
+    return value
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_KEY") or "").strip()
 # Referer пересчитываем в try_setup, если владелец не задал его явно: иначе t.me остался бы со заглушкой.
@@ -246,7 +269,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 # Голосовые длиннее не транскрибируем (Whisper API всё равно режет 25 МБ) — такие идут прежним путём через Gemini-аудио.
-VOICE_TRANSCRIBE_MAX_BYTES = int(os.getenv("VOICE_TRANSCRIBE_MAX_BYTES", str(10 * 1024 * 1024)))
+VOICE_TRANSCRIBE_MAX_BYTES = _env_number("VOICE_TRANSCRIBE_MAX_BYTES", 10 * 1024 * 1024, cast=int, min_value=1024)
 # Раньше у OpenRouter был свой отдельный лимит истории (30), меньший, чем у Gemini
 # (100) — при переключении провайдера (/provider или /model) ощущалось резкое
 # "обнуление" контекста разговора. Теперь история ОБЩАЯ (см. state["history"] в
@@ -284,16 +307,16 @@ for env_name in ("OWNER_ID", "BOT_OWNER_ID", "ADMIN_ID", "TELEGRAM_OWNER_ID"):
         OWNER_ID = int(val)
         break
 
-TELEGRAM_REQUEST_TIMEOUT = float(os.getenv("TELEGRAM_REQUEST_TIMEOUT", "45"))
-TELEGRAM_AI_TIMEOUT = float(os.getenv("TELEGRAM_AI_TIMEOUT", "45"))
-TELEGRAM_MEDIA_TIMEOUT = float(os.getenv("TELEGRAM_MEDIA_TIMEOUT", "25"))
+TELEGRAM_REQUEST_TIMEOUT = _env_number("TELEGRAM_REQUEST_TIMEOUT", 45, min_value=1)
+TELEGRAM_AI_TIMEOUT = _env_number("TELEGRAM_AI_TIMEOUT", 45, min_value=1)
+TELEGRAM_MEDIA_TIMEOUT = _env_number("TELEGRAM_MEDIA_TIMEOUT", 25, min_value=1)
 # Раньше было захардкожено как 15.0 прямо внутри _download_telegram_file_bytes —
 # несогласованно с остальными таймаутами, которые все конфигурируются через env.
-TELEGRAM_GET_FILE_TIMEOUT = float(os.getenv("TELEGRAM_GET_FILE_TIMEOUT", "15"))
+TELEGRAM_GET_FILE_TIMEOUT = _env_number("TELEGRAM_GET_FILE_TIMEOUT", 15, min_value=1)
 # Cooldown после HTML-мусора от прокси вместо JSON: без него десятки вызовов/сек валят лавину WARNING (см. _tg_call).
-TELEGRAM_PROXY_COOLDOWN_SEC = float(os.getenv("TELEGRAM_PROXY_COOLDOWN_SEC", "20"))
+TELEGRAM_PROXY_COOLDOWN_SEC = _env_number("TELEGRAM_PROXY_COOLDOWN_SEC", 20, min_value=0)
 # Лимит ожидания следующего куска для любого провайдера: зависший стрим иначе держит лок чата бесконечно.
-STREAM_CHUNK_TIMEOUT_SEC = float(os.getenv("STREAM_CHUNK_TIMEOUT_SEC", "30"))
+STREAM_CHUNK_TIMEOUT_SEC = _env_number("STREAM_CHUNK_TIMEOUT_SEC", 30, min_value=1)
 # ── Паттерн "живой печати" при стриминге (см. lumen_typing_pace.py и
 # _run_streaming_reply ниже) ── Раньше во время стрима сообщение показывало РОВНО
 # то, что успело накопиться с последнего edit_text — если бэкенд (особенно у
@@ -310,9 +333,9 @@ STREAM_CHUNK_TIMEOUT_SEC = float(os.getenv("STREAM_CHUNK_TIMEOUT_SEC", "30"))
 # показан ещё не весь (см. catchup_reveal_steps) — произведение двух этих чисел
 # ограничивает МАКСИМАЛЬНУЮ добавленную задержку сверху реальной скорости ответа,
 # независимо от длины текста и точности оценки скорости.
-STREAM_EDIT_MIN_INTERVAL_SEC = float(os.getenv("STREAM_EDIT_MIN_INTERVAL_SEC", "1.2"))
-STREAM_TYPING_TICK_SEC = float(os.getenv("STREAM_TYPING_TICK_SEC", "0.5"))
-STREAM_TYPING_MAX_CATCHUP_TICKS = int(os.getenv("STREAM_TYPING_MAX_CATCHUP_TICKS", "6"))
+STREAM_EDIT_MIN_INTERVAL_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_SEC", 1.2, min_value=0)
+STREAM_TYPING_TICK_SEC = _env_number("STREAM_TYPING_TICK_SEC", 0.5, min_value=0)
+STREAM_TYPING_MAX_CATCHUP_TICKS = _env_number("STREAM_TYPING_MAX_CATCHUP_TICKS", 6, cast=int, min_value=0)
 # FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска стрима (см.
 # lumen_model_speed.first_chunk_limit_sec): обычно-быстрая модель, зависшая
 # разово, бросается рано (12–25с вместо полных 30). Честная оговорка: предел
@@ -320,7 +343,7 @@ STREAM_TYPING_MAX_CATCHUP_TICKS = int(os.getenv("STREAM_TYPING_MAX_CATCHUP_TICKS
 # стоит STREAM_CHUNK_TIMEOUT_SEC на каждый кусок, включая первый, и для
 # обычно-медленной модели первым сработает именно он. Итоговый предел первого
 # куска — всегда минимум из двух.
-FIRST_CHUNK_TIMEOUT_SEC = float(os.getenv("FIRST_CHUNK_TIMEOUT_SEC", "12"))
+FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 12, min_value=1)
 # Анимация ожидания ("бегущие точки") в плейсхолдере, пока не пришёл первый
 # кусок стрима: первые полсекунды висит статичное "…" (дешевле, чем дёргать
 # API ради мгновенных ответов — их анимация вообще не касается), дальше —
@@ -338,16 +361,16 @@ _DOTS_FRAMES = (".", "..", "…")
 RICH_MESSAGES_ENABLED = os.getenv("RICH_MESSAGES_ENABLED", "1") == "1"
 # Лимит длины текста для /tts — без него пользователь мог отправить огромный
 # текст, что вызывало бы очень долгий прогон Gemini TTS + ffmpeg на один запрос.
-TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "800"))
+TTS_MAX_CHARS = _env_number("TTS_MAX_CHARS", 800, cast=int, min_value=1)
 # Потолок одного синтеза TTS. Раньше его не было вообще: синхронный вызов Gemini
 # уходил в поток без таймаута и без http_options у клиента, и зависший Google
 # держал лок чата бесконечно (аудит 26.09.2026).
-TTS_SYNTH_TIMEOUT_SEC = float(os.getenv("TTS_SYNTH_TIMEOUT_SEC", "60"))
+TTS_SYNTH_TIMEOUT_SEC = _env_number("TTS_SYNTH_TIMEOUT_SEC", 60, min_value=1)
 _PROCESS_START_MONOTONIC = time.monotonic()
 # ── Тайминги автоматического маршрутизатора моделей (см. секцию "автоматический
 # выбор модели" ниже) ──
 # Без ретраев одной модели: любая ошибка — сразу следующая в маршруте; общий бюджет ROUTE_TOTAL_BUDGET_SEC держит лок чата от минутного зависания.
-ROUTE_MODEL_TIMEOUT_SEC = float(os.getenv("ROUTE_MODEL_TIMEOUT_SEC", "22"))
+ROUTE_MODEL_TIMEOUT_SEC = _env_number("ROUTE_MODEL_TIMEOUT_SEC", 22, min_value=1)
 # ROUTE_TOTAL_BUDGET_SEC — общий бюджет времени на ВЕСЬ маршрут одного сообщения,
 # включая ОБА провайдера (Gemini и OpenRouter), если маршрут предполагает
 # резервный переход между ними. Без этого потолка каскадный сбой сразу у многих
@@ -355,22 +378,22 @@ ROUTE_MODEL_TIMEOUT_SEC = float(os.getenv("ROUTE_MODEL_TIMEOUT_SEC", "22"))
 # время удерживая лок чата (_chat_locks). При превышении бюджета дальнейшие
 # попытки прекращаются и пользователь получает честное "сейчас всё перегружено"
 # вместо тихого зависания.
-ROUTE_TOTAL_BUDGET_SEC = float(os.getenv("ROUTE_TOTAL_BUDGET_SEC", "40"))
+ROUTE_TOTAL_BUDGET_SEC = _env_number("ROUTE_TOTAL_BUDGET_SEC", 40, min_value=1)
 # HISTORY_SUMMARY_BUDGET_SEC — потолок саммаризации истории: без него два висящих
 # backend-вызова подряд (Groq + OpenRouter по ROUTE_MODEL_TIMEOUT_SEC каждый) держали бы
 # lock чата десятки секунд ПОСЛЕ готового ответа (найдено внешним аудитом).
-HISTORY_SUMMARY_BUDGET_SEC = float(os.getenv("HISTORY_SUMMARY_BUDGET_SEC", "30"))
+HISTORY_SUMMARY_BUDGET_SEC = _env_number("HISTORY_SUMMARY_BUDGET_SEC", 30, min_value=1)
 # Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
-DRAW_TOTAL_BUDGET_SEC = float(os.getenv("DRAW_TOTAL_BUDGET_SEC", "120"))
+DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
 # CHAT_LOCK_TIMEOUT_SEC — сколько ждём лок чата, прежде чем ответить «занято».
 # Обязан быть ВЫШЕ самой долгой защищаемой работы: /draw держит лок до
 # DRAW_TOTAL_BUDGET_SEC, поэтому хардкод 45с отдавал «занято» посреди ещё идущей
 # отрисовки, а в pick-кнопках стояло ещё и третье значение — 10с (аудит 26.09.2026).
 # Одно имя на все три места, чтобы значения снова не разъехались.
-CHAT_LOCK_TIMEOUT_SEC = float(os.getenv("CHAT_LOCK_TIMEOUT_SEC", "150"))
+CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 150, min_value=1)
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
 # завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
-INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = float(os.getenv("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", "10"))
+INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = _env_number("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", 10, min_value=0)
 TG_MAX_LEN = 4096
 # Upload-ботов Telegram режет 50 МБ — слишком большие варианты качества пропускаем до скачивания.
 TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
@@ -378,10 +401,10 @@ TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 TIKTOK_SLIDESHOW_MAX_ITEMS = 35
 TELEGRAM_MEDIA_GROUP_CHUNK = 10
 # Лимит ffprobe/ffmpeg-процессов: без него слайдшоу кладёт CPU контейнера (ревью 28.08.2026).
-TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = int(os.getenv("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", "4"))
+TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = _env_number("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", 4, cast=int, min_value=1)
 _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
 # Лимит скачивания слайдов 8: 35 слайдов иначе занимают весь пул сессии (limit=40) и стопорят другие чаты (аудит 04.09.2026).
-TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = int(os.getenv("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", "8"))
+TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = _env_number("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", 8, cast=int, min_value=1)
 _tiktok_slide_download_semaphore = asyncio.Semaphore(TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
 
 # Состояние/квоты/локи живут в lumen_chat_state.py (P2): здесь только реэкспорт
@@ -481,7 +504,7 @@ from lumen_telegram_transport import (
     IPv4AiohttpSession,
 )
 
-TELEGRAM_PROXY_TRIP_THRESHOLD = int(os.getenv("TELEGRAM_PROXY_TRIP_THRESHOLD", "3"))
+TELEGRAM_PROXY_TRIP_THRESHOLD = _env_number("TELEGRAM_PROXY_TRIP_THRESHOLD", 3, cast=int, min_value=1)
 _tg_proxy_breaker = _TelegramProxyCircuitBreaker(cooldown_sec=TELEGRAM_PROXY_COOLDOWN_SEC, trip_threshold=TELEGRAM_PROXY_TRIP_THRESHOLD)
 
 # конвертация markdown в html, утилиты json

@@ -7,8 +7,8 @@ FROM mwader/static-ffmpeg:9.0 AS ffmpeg
 
 # ОБНОВЛЕНО (аудит зависимостей, 16 августа 2026): 3.10 -> 3.13 — requirements.txt
 # и так уже требовали только "Python 3.10+" (не конкретно 3.10), все закреплённые
-# версии зависимостей (aiogram 3.30, google-genai 2.18, fastapi 0.141, uvicorn
-# 0.52 и т.д.) заявляют поддержку вплоть до 3.14 — полный прогон тестового сьюта
+# версии зависимостей (aiogram 3.31, google-genai 2.24, fastapi 0.141, uvicorn
+# 0.53 и т.д.) заявляют поддержку вплоть до 3.14 — полный прогон тестового сьюта
 # под новой версией прошёл без единого изменения кода.
 FROM python:3.13-slim
 
@@ -37,9 +37,11 @@ RUN apt-get update \
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 
+# Без `pip install --upgrade pip`: версии инструмента не зафиксированы, а образ
+# пересобирается с нуля на каждом деплое — такой шаг делает сборку невоспроизводимой
+# ровно в том смысле, ради которого закреплён requirements.txt (аудит 26.09.2026).
 COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip \
-    && pip install -r /app/requirements.txt
+RUN pip install -r /app/requirements.txt
 
 COPY . /app
 

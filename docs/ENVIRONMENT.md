@@ -78,7 +78,10 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `HISTORY_SUMMARY_BUDGET_SEC` | `30s` | Cap for history summarization on overflow; beyond it the history is cut plainly instead of holding the chat lock. |
 | `RICH_MESSAGES_ENABLED` | `1` | Send final answers via `sendRichMessage` (Bot API 10.1+: real tables, headings, math). Any failure falls back to plain HTML automatically; streaming edits always use HTML. Set to `0` (plus restart) to force legacy HTML if rendering breaks on old clients. |
 | `PICK_BUTTONS_ENABLED` | `1` | Show clarifying buttons for short taste requests without details ("посоветуй фильм"). Set to `0` (plus restart) to answer such requests as plain text instead. |
-| `PICK_TTL_SEC` | `300s` | How long pick buttons stay valid. Expired or post-restart taps get a "buttons expired, write in text" notice instead of an answer. |
+| `PICK_TTL_SEC` | `300s` | How long pick buttons stay valid. Expired taps on a still-known request reissue the buttons once; anything older answers with a "buttons expired, write in text" notice. |
+| `MAX_PENDING_PICKS` | `500` | Cap on simultaneously stored pick-button questions; the oldest are dropped past it (memory only, they do not survive a restart). |
+| `MAX_RATE_LIMIT_KEYS` | `20000` | Cap on tracked per-user rate-limit keys; prevents unbounded growth of the in-memory tracker. |
+| `INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC` | `10s` | How long shutdown waits for in-flight update tasks before cancelling the rest. |
 
 ## TikTok downloader
 
@@ -106,6 +109,8 @@ Setup: create a free database at [upstash.com](https://upstash.com), grab the RE
 | `SENTRY_DSN` | — | Enables Sentry error tracking if set. Every event is scrubbed of known secrets (`BOT_TOKEN`, API keys, `WEBHOOK_SECRET`, etc.) before it's sent. |
 | `BOT_LOG_PATH` | `/app/bot.log` | Log file path. Mainly relevant for tests; leave it alone in production. |
 | `LOG_LEVEL` | `INFO` | Standard logging level (`DEBUG`/`INFO`/`WARNING`/...). |
+| `DIAG_TOTAL_BUDGET_SEC` | `25s` | Total budget for the `/diag` network check across all probed hosts, so a hanging host cannot hang the diagnostic. |
+| `ADMIN_SECRET_SEED` | — | Secret seed for deriving `WEBHOOK_SECRET` and `ADMIN_PANEL_KEY`. **Set it.** Without it both keys are derived from `BOT_TOKEN`, so a leaked token also exposes `/export_state` and `/webhook` (the bot logs a warning at startup). Any change here rotates both keys; `WEBHOOK_SECRET` re-registers itself, `ADMIN_PANEL_KEY` is retrieved with `GET /admin_keys` (Bearer `BOT_TOKEN`). |
 
 Sentry setup: create a free Python project at [sentry.io](https://sentry.io) (Developer tier: 5,000 events/month), copy the DSN from the project settings, and add it as a Space secret.
 

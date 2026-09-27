@@ -44,6 +44,13 @@ jobs:
 
       - run: deno test proxy/proxy_test.ts
 
+      # Типы и линт прокси: до этого в CI не проверялось ничего, кроме тестов,
+      # поэтому @ts-ignore на duplex:"half" и опечатки в proxy.ts проходили молча
+      # (аудит 26.09.2026). deno check ловит и типы, и неиспользуемые импорты.
+      - run: deno check proxy/proxy.ts
+
+      - run: deno lint proxy/proxy.ts
+
       # проверка requirements.txt на известные CVE в зафиксированных версиях —
       # requirements-dev.txt (pytest/pyflakes/pip-audit) не сканируем: это
       # dev-инструменты, не попадающие в рантайм-образ (см. Dockerfile/.dockerignore)
