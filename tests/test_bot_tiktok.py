@@ -1143,12 +1143,21 @@ def test_communicate_process_propagates_communicate_failure():
 
 def test_slideshow_status_uses_localized_key():
     # Статус слайдшоу был захардкожен по-русски — теперь ключ tiktok_dl_slideshow с плейсхолдерами.
-    text = bot._t(999451, "tiktok_dl_slideshow", shown=35, total=40)
-    assert "35/40" in text
+    # Проверяем точное равенство строке на языке чата, а не «где-то есть слово
+    # slideshow»: прежняя проверка с or-цепочкой проходила на любом из трёх
+    # вариантов и на самом деле тестировала только английский дефолт (аудит 26.09.2026).
+    from lumen_lang import t as lang_t
+    chat_id = 999451
     try:
-        assert "слайдов" in text or "slideshow" in text.lower() or "Слайдшоу" in text
+        text = bot._t(chat_id, "tiktok_dl_slideshow", shown=35, total=40)
+        assert "35/40" in text
+        assert text == lang_t(bot._chat_lang(chat_id), "tiktok_dl_slideshow", shown=35, total=40)
+        for code in ("ru", "en", "be", "kk"):
+            localized = lang_t(code, "tiktok_dl_slideshow", shown=7, total=9)
+            assert "7/9" in localized, code
+            assert localized != text or code == bot._chat_lang(chat_id)
     finally:
-        bot.chat_state.pop(999451, None)
+        bot.chat_state.pop(chat_id, None)
 
 
 def test_send_tiktok_music_passes_audio_duration():

@@ -1339,6 +1339,13 @@ async def _webhook_startup() -> None:
                 telegram_api_call("setWebhook", {
                     "url": webhook_url,
                     "secret_token": WEBHOOK_SECRET,
+                    # drop_pending_updates=True — ОСОЗНАННОЕ РЕШЕНИЕ владельца
+                    # (27.09.2026), не забытый флаг: при передеплое/сбое Space
+                    # Telegram копит накопленные апдейты, и без сброса бот после
+                    # долгого простоя получил бы пачку старых сообщений и ответил
+                    # на них разом — это и деньги, и тон, и риск. Цена решения —
+                    # сообщения, пришедшие пока бот лежал, теряются. Размен
+                    # владелец осознанно выбрал в сторону квоты.
                     "drop_pending_updates": True,
                     "allowed_updates": ALLOWED_UPDATES,
                 }, request_timeout=15.0),

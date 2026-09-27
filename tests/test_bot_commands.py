@@ -512,10 +512,13 @@ def test_inline_draw_stops_chain_on_service_rate_limit():
     original_hf = bot._pollinations_text_to_image
     bot._pollinations_text_to_image = fake_pollinations_text_to_image_always_429
     try:
-        asyncio.run(bot.inline_draw(incoming, "дикобраз"))
-        assert attempts == [bot._pick_image_model("дикобраз")]
-        status_texts = [text for text, _ in incoming.sent[0].edits]
-        assert any("overloaded" in text for text in status_texts)
+        asyncio.run(bot.inline_draw(incoming, "космическая станция"))
+        # 429 от сервиса обрывает ЦЕПОЧКУ: вторая модель не тратит попытку.
+        assert attempts == [bot._pick_image_model("космическая станция")]
+        # Проверяем ФИНАЛЬНЫЙ текст статуса (то, что реально увидит человек), а не
+        # "хоть где-то в правках есть слово" — раньше тест проходил на любой правке.
+        final_status_text = incoming.sent[0].edits[-1][0]
+        assert final_status_text == bot._t(chat_id, "draw_err_overloaded")
     finally:
         bot._pollinations_text_to_image = original_hf
         bot.chat_state.pop(chat_id, None)
