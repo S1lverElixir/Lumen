@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 import asyncio
 import bot
+import lumen_streaming
 import pytest
 import time
 from tests.bot_test_helpers import (
@@ -18,6 +19,41 @@ from tests.bot_test_helpers import (
     _FakeSentMessage,
     _FakeSessionForSSE,
 )
+
+
+def test_stream_wait_caps_chunk_timeout_by_remaining_budget():
+    # Регрессия (аудит 26.09.2026): кусок стрима ждал STREAM_CHUNK_TIMEOUT_SEC даже
+    # после исчерпания бюджета маршрута — маршрут вылезал за ROUTE_TOTAL_BUDGET_SEC.
+    assert lumen_streaming._stream_wait(bot, None) == bot.STREAM_CHUNK_TIMEOUT_SEC
+    far = time.monotonic() + 300.0
+    assert lumen_streaming._stream_wait(bot, far) == bot.STREAM_CHUNK_TIMEOUT_SEC
+    near = time.monotonic() + 3.0
+    assert 0 < lumen_streaming._stream_wait(bot, near) <= 3.0
+    # Истёкший бюджет — быстрый отказ, а не ожидание в 30с.
+    assert lumen_streaming._stream_wait(bot, time.monotonic() - 10.0) <= 0.5
+
+
+def test_gemini_stream_handshake_has_timeout():
+    # Рукопожатие generate_content_stream шло вовсе без wait_for: зависший Google
+    # держал лок чата. Проверяем, что попытка подвисает и поднимает TimeoutError.
+    async def hanging_stream(*, model, contents, config=None):
+        await asyncio.sleep(30)
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = hanging_stream
+    original_client = bot.client
+    original_cap = bot.STREAM_CHUNK_TIMEOUT_SEC
+    bot.client = fake_client
+    bot.STREAM_CHUNK_TIMEOUT_SEC = 0.2
+    try:
+        async def _drain():
+            async for _ in lumen_streaming._gemini_stream_pieces("m", [], None):
+                pass
+        with pytest.raises(asyncio.TimeoutError):
+            asyncio.run(_drain())
+    finally:
+        bot.client = original_client
+        bot.STREAM_CHUNK_TIMEOUT_SEC = original_cap
 
 
 def test_try_gemini_streaming_happy_path_accumulates_and_finalizes():
@@ -274,7 +310,7 @@ def test_openrouter_stream_pieces_raises_on_midstream_error_chunk():
 def test_try_openrouter_streaming_happy_path_accumulates_and_finalizes():
     chat_id = 999105
 
-    async def fake_stream_pieces(model_id, messages):
+    async def fake_stream_pieces(model_id, messages, *, deadline=None):
         for piece in ["Привет", ", как ", "дела?"]:
             yield piece
 
@@ -453,7 +489,7 @@ def test_streaming_reveal_follows_arrival_pace_not_full_dump():
 def test_try_openrouter_streaming_returns_none_on_early_failure():
     chat_id = 999106
 
-    async def fake_stream_pieces_raises(model_id, messages):
+    async def fake_stream_pieces_raises(model_id, messages, *, deadline=None):
         raise RuntimeError("boom before any content")
         yield ""  # делает функцию async-генератором (недостижимо)
 

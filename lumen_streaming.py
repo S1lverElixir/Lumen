@@ -9,6 +9,7 @@ import json
 import logging
 import time
 from collections import deque
+from typing import Any
 import aiohttp
 from aiogram.enums import ParseMode
 from aiogram.types import Message
@@ -75,15 +76,31 @@ async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, fir
             with contextlib.suppress(Exception):
                 await aclose()
 
-async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig):
-    """Куски от Gemini (тонкая обёртка над generate_content_stream). Таймаут на каждый кусок — подвисший стрим не держит лок чата. Telegram-логика — общая в _run_streaming_reply."""
+def _remaining_budget(deadline: float | None) -> float:
+    """Сколько секунд осталось до бюджета маршрута (float('inf') — потолка нет)."""
+    if deadline is None:
+        return float("inf")
+    return max(0.0, deadline - time.monotonic())
+
+def _stream_wait(bot: Any, deadline: float | None) -> float:
+    """Таймаут на ОДНУ операцию стрима: не больше межкускового капа и не больше
+    остатка бюджета маршрута. Раньше оба ожидания шли в обход бюджета — рукопо-
+    жатие Gemini вообще без таймаута, а кусок мог ждать STREAM_CHUNK_TIMEOUT_SEC
+    уже после его исчерпания (аудит 26.09.2026)."""
+    return max(0.1, min(bot.STREAM_CHUNK_TIMEOUT_SEC, _remaining_budget(deadline)))
+
+async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig, *, deadline: float | None = None):
+    """Куски от Gemini (тонкая обёртка над generate_content_stream). Таймаут на каждый кусок и на само рукопожатие — подвисший стрим не держит лок чата. Telegram-логика — общая в _run_streaming_reply."""
     import bot
-    stream = await bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig)
+    stream = await asyncio.wait_for(
+        bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig),
+        timeout=_stream_wait(bot, deadline),
+    )
     stream_iter = stream.__aiter__()
     try:
         while True:
             try:
-                chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=bot.STREAM_CHUNK_TIMEOUT_SEC)
+                chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=_stream_wait(bot, deadline))
             except StopAsyncIteration:
                 break
             try:
@@ -98,8 +115,8 @@ async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig):
             with contextlib.suppress(Exception):
                 await aclose()
 
-async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
-    """Куски от OpenRouter: SSE `data: {...}` с финальным `data: [DONE]`, таймаут на строку — тот же STREAM_CHUNK_TIMEOUT_SEC."""
+async def _openrouter_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
+    """Куски от OpenRouter: SSE `data: {...}` с финальным `data: [DONE]`, таймаут на строку — тот же STREAM_CHUNK_TIMEOUT_SEC, но не дольше остатка бюджета маршрута."""
     import bot
     if not bot.OPENROUTER_API_KEY:
         raise bot.OpenRouterAPIError("OPENROUTER_API_KEY is not set")
@@ -119,7 +136,7 @@ async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
         line_iter = resp.content.__aiter__()
         while True:
             try:
-                raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=bot.STREAM_CHUNK_TIMEOUT_SEC)
+                raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=_stream_wait(bot, deadline))
             except StopAsyncIteration:
                 break
             line = raw_line.decode("utf-8", errors="ignore").strip()
@@ -146,8 +163,8 @@ async def _openrouter_stream_pieces(model_id: str, messages: list[dict]):
             if piece:
                 yield piece
 
-async def _groq_stream_pieces(model_id: str, messages: list[dict]):
-    """Куски от Groq: тот же OpenAI-SSE, что у OpenRouter (Groq — OpenAI-совместимый API). Таймаут на строку — STREAM_CHUNK_TIMEOUT_SEC."""
+async def _groq_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
+    """Куски от Groq: тот же OpenAI-SSE, что у OpenRouter (Groq — OpenAI-совместимый API). Таймаут на строку — как у OpenRouter (межкусковый кап, но не дольше бюджета маршрута)."""
     import bot
     if not bot.GROQ_API_KEY:
         raise bot.GroqAPIError("GROQ_API_KEY is not set")
@@ -165,7 +182,7 @@ async def _groq_stream_pieces(model_id: str, messages: list[dict]):
         line_iter = resp.content.__aiter__()
         while True:
             try:
-                raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=bot.STREAM_CHUNK_TIMEOUT_SEC)
+                raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=_stream_wait(bot, deadline))
             except StopAsyncIteration:
                 break
             line = raw_line.decode("utf-8", errors="ignore").strip()
@@ -396,7 +413,7 @@ async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, 
         return None, None
     contents = await bot._build_gemini_turn_contents(chat_id, user_text)
     call_contents, gconfig = bot._build_gemini_call_config(model_id, contents)
-    piece_agen = _gemini_stream_pieces(model_id, call_contents, gconfig)
+    piece_agen = _gemini_stream_pieces(model_id, call_contents, gconfig, deadline=deadline)
     return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline)
 
 async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None) -> tuple[str | None, Message | None]:
@@ -404,7 +421,7 @@ async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Messa
     import bot
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
     # Генератор — через bot.: тесты подменяют bot._openrouter_stream_pieces фейком.
-    piece_agen = bot._openrouter_stream_pieces(model_id, messages)
+    piece_agen = bot._openrouter_stream_pieces(model_id, messages, deadline=deadline)
     return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline)
 
 async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None) -> tuple[str | None, Message | None]:
@@ -412,5 +429,5 @@ async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, mo
     import bot
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
     # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
-    piece_agen = bot._groq_stream_pieces(model_id, messages)
+    piece_agen = bot._groq_stream_pieces(model_id, messages, deadline=deadline)
     return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline)

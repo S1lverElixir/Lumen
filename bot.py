@@ -339,6 +339,10 @@ RICH_MESSAGES_ENABLED = os.getenv("RICH_MESSAGES_ENABLED", "1") == "1"
 # Лимит длины текста для /tts — без него пользователь мог отправить огромный
 # текст, что вызывало бы очень долгий прогон Gemini TTS + ffmpeg на один запрос.
 TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "800"))
+# Потолок одного синтеза TTS. Раньше его не было вообще: синхронный вызов Gemini
+# уходил в поток без таймаута и без http_options у клиента, и зависший Google
+# держал лок чата бесконечно (аудит 26.09.2026).
+TTS_SYNTH_TIMEOUT_SEC = float(os.getenv("TTS_SYNTH_TIMEOUT_SEC", "60"))
 _PROCESS_START_MONOTONIC = time.monotonic()
 # ── Тайминги автоматического маршрутизатора моделей (см. секцию "автоматический
 # выбор модели" ниже) ──
@@ -358,6 +362,12 @@ ROUTE_TOTAL_BUDGET_SEC = float(os.getenv("ROUTE_TOTAL_BUDGET_SEC", "40"))
 HISTORY_SUMMARY_BUDGET_SEC = float(os.getenv("HISTORY_SUMMARY_BUDGET_SEC", "30"))
 # Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
 DRAW_TOTAL_BUDGET_SEC = float(os.getenv("DRAW_TOTAL_BUDGET_SEC", "120"))
+# CHAT_LOCK_TIMEOUT_SEC — сколько ждём лок чата, прежде чем ответить «занято».
+# Обязан быть ВЫШЕ самой долгой защищаемой работы: /draw держит лок до
+# DRAW_TOTAL_BUDGET_SEC, поэтому хардкод 45с отдавал «занято» посреди ещё идущей
+# отрисовки, а в pick-кнопках стояло ещё и третье значение — 10с (аудит 26.09.2026).
+# Одно имя на все три места, чтобы значения снова не разъехались.
+CHAT_LOCK_TIMEOUT_SEC = float(os.getenv("CHAT_LOCK_TIMEOUT_SEC", "150"))
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
 # завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
 INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = float(os.getenv("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", "10"))
@@ -712,6 +722,7 @@ __all__ = [
     "GroqAPIError",
     "_or_request",
     "_groq_request",
+    "_attempt_timeout",
     "_or_extract_text",
     "_is_account_wide_or_rate_limit",
     "_probe_or_model_liveness",
@@ -946,6 +957,7 @@ from lumen_routes import (
     _or_request,
     _groq_request,
     _or_extract_text,
+    _attempt_timeout,
     _is_account_wide_or_rate_limit,
     _probe_or_model_liveness,
     _or_chat_completion_with_fallback,
@@ -1189,7 +1201,7 @@ async def handle_message(message: Message) -> None:
 
     lock = get_chat_lock(chat_id)
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=45.0)
+        await asyncio.wait_for(lock.acquire(), timeout=CHAT_LOCK_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
         with contextlib.suppress(Exception):

@@ -105,19 +105,27 @@ async def _gemini_tts_bytes(
     is_rate_limit_error: Callable[[Exception], bool],
     on_model_exhausted: Callable[[str], None],
     on_model_success: Callable[[str], None],
+    request_timeout_sec: float = 60.0,
 ) -> tuple[bytes, str, str]:
-    """Gemini TTS (основной: Fish Audio отключён флагом): возвращает (pcm_bytes, mime_type, used_model) или бросает исключение. Состояние передаётся параметрами (см. докстринг модуля); расход пишется в GLOBAL_QUOTA — у TTS всего 10 запросов/сутки на модель."""
-    def call_tts(model_name: str):
+    """Gemini TTS (основной: Fish Audio отключён флагом): возвращает (pcm_bytes, mime_type, used_model) или бросает исключение. Состояние передаётся параметрами (см. докстринг модуля); расход пишется в GLOBAL_QUOTA — у TTS всего 10 запросов/сутки на модель.
+
+    Асинхронный клиент + wait_for вместо прежнего asyncio.to_thread: поток с
+    синхронным вызовом не отменяем, поэтому зависший Google держал лок чата
+    бесконечно (аудит 26.09.2026). Плюс http_options с тем же таймаутом —
+    страховка на уровне HTTP, даже если внешний wait_for не сработал.
+    """
+    async def call_tts(model_name: str):
         contents = [
             types.Content(
                 role="user",
                 parts=[types.Part.from_text(text=text)]
             )
         ]
-        return client.models.generate_content(
+        return await client.aio.models.generate_content(
             model=model_name,
             contents=contents,
             config=types.GenerateContentConfig(
+                http_options=types.HttpOptions(timeout=int(request_timeout_sec * 1000)),
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(
@@ -134,7 +142,7 @@ async def _gemini_tts_bytes(
     used_tts_model = None
     for mname in tts_models:
         try:
-            resp = await asyncio.to_thread(call_tts, mname)
+            resp = await asyncio.wait_for(call_tts(mname), timeout=request_timeout_sec)
             used_tts_model = mname
             break
         except Exception as e:

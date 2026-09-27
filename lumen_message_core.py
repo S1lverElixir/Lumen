@@ -61,10 +61,22 @@ async def _process_media_group_buffers(mgid: str) -> None:
          return
     # Альбом идёт под тем же per-chat lock, что обычные сообщения: иначе фоновый таск
     # и свежий вопрос гоняются за history/ctx одного чата (найдено внешним аудитом).
+    # Ожидание лока ограничено (как в основном пути) — раньше `async with lock` ждал
+    # вечно, и альбом мог висеть в фоне дольше любого бюджета (аудит 26.09.2026).
     main_msg = messages[0]
     lock = bot.get_chat_lock(main_msg.chat.id if main_msg.chat else 0)
-    async with lock:
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=bot.CHAT_LOCK_TIMEOUT_SEC)
+    except asyncio.TimeoutError:
+        log.warning("[album] Timeout waiting for lock on chat %s", main_msg.chat.id if main_msg.chat else None)
+        with contextlib.suppress(Exception):
+            await bot._safe_reply(main_msg, bot._t(main_msg.chat.id if main_msg.chat else None, "lock_busy"))
+        return
+    try:
         await _process_media_group_buffers_locked(messages)
+    finally:
+        with contextlib.suppress(Exception):
+            lock.release()
 
 async def _process_media_group_buffers_locked(messages: list) -> None:
     """Тело обработки альбома под per-chat lock (см. выше)."""

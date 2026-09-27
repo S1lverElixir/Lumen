@@ -596,6 +596,13 @@ def test_process_media_group_buffers_holds_chat_lock():
         def __init__(self):
             self.held = False
 
+        async def acquire(self):
+            self.held = True
+            return True
+
+        def release(self):
+            self.held = False
+
         async def __aenter__(self):
             self.held = True
             return self
@@ -959,7 +966,7 @@ def test_trim_history_short_is_untouched(monkeypatch):
 
 def test_trim_history_summarizes_old_keeps_recent(monkeypatch):
     # Переполнение: старое сжимается в первую запись с пометкой, свежие 80 — как были.
-    async def fake_groq_request(path, method="GET", *, json_body=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
         assert json_body["model"] == "qwen/qwen3.8-27b"
         return {"choices": [{"message": {"content": "Обсуждали погоду и котов."}}]}
 

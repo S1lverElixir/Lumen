@@ -382,7 +382,7 @@ def test_or_empty_response_falls_through_to_next_model(monkeypatch):
     # response" — пустой ответ обязан двигать цепочку дальше, а не идти в чат.
     calls = []
 
-    async def fake_or_request(path, method="GET", *, json_body=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         model = json_body["model"]
         calls.append(model)
         if model == "m1:free":
@@ -397,6 +397,46 @@ def test_or_empty_response_falls_through_to_next_model(monkeypatch):
     answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["m1:free", "m2:free"], "m1:free"))
     assert (answer, used) == ("живой ответ", "m2:free")
     assert calls == ["m1:free", "m2:free"]
+
+
+def test_attempt_timeout_caps_by_remaining_route_budget():
+    # Регрессия (аудит 26.09.2026): каждая попытка ждала полные ROUTE_MODEL_TIMEOUT_SEC,
+    # поэтому маршрут держал лок чата до 40+22с вместо заявленных 40с.
+    assert bot._attempt_timeout(bot, None) == bot.ROUTE_MODEL_TIMEOUT_SEC
+    assert bot._attempt_timeout(bot, time.monotonic() + 300.0) == bot.ROUTE_MODEL_TIMEOUT_SEC
+    tight = bot._attempt_timeout(bot, time.monotonic() + 4.0)
+    assert 0.5 <= tight <= 4.0
+    # Истёкший бюджет — быстрый отказ, а не ещё 22с ожидания.
+    assert bot._attempt_timeout(bot, time.monotonic() - 5.0) <= 1.0
+
+
+def test_ask_gemini_attempt_respects_short_budget(monkeypatch):
+    # Короткий бюджет маршрута: основная попытка не должна съесть весь остаток
+    # целиком — иначе ответ приходит после ROUTE_TOTAL_BUDGET_SEC.
+    from collections import deque
+    chat_id = 999208
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+    calls = []
+
+    async def hanging_generate(*, model, contents, config=None):
+        calls.append(model)
+        await asyncio.sleep(10)
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = hanging_generate
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        started = time.monotonic()
+        with pytest.raises(bot.RouteBudgetExceededError):
+            asyncio.run(bot.ask_gemini(chat_id, "привет", model_chain=["m1", "m2"], deadline=time.monotonic() + 0.6))
+        # Попытка обрезалась остатком бюджета, дальше маршрут сразу остановился —
+        # главное, он не ушёл далеко за объявленный бюджет.
+        assert time.monotonic() - started < 8
+        assert calls == ["m1"]
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
 
 
 def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
@@ -744,7 +784,7 @@ def test_ask_gemini_raises_when_route_budget_exceeded():
 
 
 def test_or_chat_completion_with_fallback_switches_model_on_rate_limit():
-    async def fake_or_request(path, method="GET", *, json_body=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         model = json_body["model"]
         if model == "model-a":
             raise bot.OpenRouterAPIError("rate limit exceeded", status_code=429)
@@ -765,7 +805,7 @@ def test_or_chat_completion_with_fallback_switches_model_on_permanent_looking_er
     # Даже "постоянная" на вид ошибка (403 forbidden) не должна обрывать переход
     # к следующей модели — при attempts_per_model=1 переход к следующей модели
     # происходит независимо от классификации (см. комментарий в самой функции).
-    async def fake_or_request(path, method="GET", *, json_body=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         model = json_body["model"]
         if model == "model-a":
             raise bot.OpenRouterAPIError("forbidden", status_code=403)
@@ -809,7 +849,7 @@ def test_ask_openrouter_multimodal_sends_all_album_images_not_just_first():
     chat_id = 999411
     captured = {}
 
-    async def fake_or_request(path, method="GET", *, json_body=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         captured["messages"] = json_body["messages"]
         return {"choices": [{"message": {"content": "вижу три фото"}}]}
 
@@ -835,7 +875,7 @@ def test_ask_openrouter_multimodal_skips_video_slides_for_gemini():
     chat_id = 999412
     captured = {}
 
-    async def fake_or_request(path, method="GET", *, json_body=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         captured["messages"] = json_body["messages"]
         return {"choices": [{"message": {"content": "вижу фото"}}]}
 
@@ -935,7 +975,7 @@ def test_probe_or_model_liveness_warns_on_dead_model_pattern(caplog):
     from datetime import date
     expected_model = bot._OR_LIGHT_ORDER[date.today().timetuple().tm_yday % len(bot._OR_LIGHT_ORDER)]
 
-    async def fake_or_request(path, method="GET", *, json_body=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         model = json_body["model"]
         if model == expected_model:
             raise bot.OpenRouterAPIError("This model is unavailable for free. use another slug", status_code=404)
@@ -962,7 +1002,7 @@ def test_probe_or_model_liveness_rotates_by_day_of_year():
     from datetime import date
     calls = []
 
-    async def fake_or_request(path, method="GET", *, json_body=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         calls.append(json_body["model"])
         return {"choices": [{"message": {"content": "pong"}}]}
 
@@ -986,7 +1026,7 @@ def test_probe_or_model_liveness_rotates_by_day_of_year():
 def test_probe_or_model_liveness_silent_when_all_alive(caplog):
     import logging
 
-    async def fake_or_request(path, method="GET", *, json_body=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         return {"choices": [{"message": {"content": "pong"}}]}
 
     original_request = bot._or_request
@@ -1044,7 +1084,7 @@ def test_ask_groq_text_success_records_groq_quota(monkeypatch):
     chat_id = 999701
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
 
-    async def fake_groq_request(path, method="GET", *, json_body=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
         assert json_body["model"] == "qwen/qwen3.8-27b"
         return {"choices": [{"message": {"content": "Канберра."}}]}
 
@@ -1064,7 +1104,7 @@ def test_ask_groq_text_falls_back_to_next_model(monkeypatch):
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
     seen = []
 
-    async def fake_groq_request(path, method="GET", *, json_body=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
         seen.append(json_body["model"])
         if json_body["model"] == "qwen/qwen3.8-27b":
             raise bot.GroqAPIError("overloaded", status_code=503)

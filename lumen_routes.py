@@ -60,7 +60,16 @@ class GroqAPIError(RuntimeError):
         self.status_code = status_code
         self.payload = payload
 
-async def _groq_request(path: str, method: str = "GET", *, json_body: dict | None = None) -> Any:
+def _attempt_timeout(bot: Any, deadline: float | None) -> float:
+    """Таймаут одной попытки: не больше ROUTE_MODEL_TIMEOUT_SEC и не больше
+    остатка бюджета маршрута. Раньше каждая попытка ждала полные 22с, из-за
+    чего маршрут держал лок чата до 40+22с вместо заявленных 40с (аудит 26.09.2026).
+    Нижняя граница 0.5с: истёкший бюджет должен дать быстрый отказ, а не висеть."""
+    if deadline is None:
+        return bot.ROUTE_MODEL_TIMEOUT_SEC
+    return max(0.5, min(bot.ROUTE_MODEL_TIMEOUT_SEC, deadline - time.monotonic()))
+
+async def _groq_request(path: str, method: str = "GET", *, json_body: dict | None = None, deadline: float | None = None) -> Any:
     """Прямой запрос к Groq (OpenAI-совместимый API) — по образцу _or_request: тот же бюджет попытки, та же вычистка ключа из ошибок."""
     import bot
     if not bot.GROQ_API_KEY:
@@ -73,7 +82,7 @@ async def _groq_request(path: str, method: str = "GET", *, json_body: dict | Non
     try:
         async with session.request(
             method.upper(), url, headers=headers, json=json_body,
-            timeout=aiohttp.ClientTimeout(total=bot.ROUTE_MODEL_TIMEOUT_SEC, connect=10.0)
+            timeout=aiohttp.ClientTimeout(total=_attempt_timeout(bot, deadline), connect=10.0)
         ) as resp:
             if resp.status >= 400:
                 payload = await resp.json(content_type=None)
@@ -88,7 +97,7 @@ async def _groq_request(path: str, method: str = "GET", *, json_body: dict | Non
             exc_str = exc_str.replace(bot.GROQ_API_KEY, "<KEY>")
         raise bot.GroqAPIError(f"Groq network error: {exc_str}") from exc
 
-async def _or_request(path: str, method: str = "GET", *, json_body: dict | None = None) -> Any:
+async def _or_request(path: str, method: str = "GET", *, json_body: dict | None = None, deadline: float | None = None) -> Any:
     import bot
     if not bot.OPENROUTER_API_KEY:
         raise bot.OpenRouterAPIError("OPENROUTER_API_KEY is not set")
@@ -104,8 +113,9 @@ async def _or_request(path: str, method: str = "GET", *, json_body: dict | None 
     try:
         async with session.request(
             method.upper(), url, headers=headers, json=json_body,
-            # Бюджет попытки — ROUTE_MODEL_TIMEOUT_SEC, а не хардкод (иначе модель валилась таймаутом раньше бюджета).
-            timeout=aiohttp.ClientTimeout(total=bot.ROUTE_MODEL_TIMEOUT_SEC, connect=10.0)
+            # Бюджет попытки — ROUTE_MODEL_TIMEOUT_SEC (обрезанный остатком бюджета
+            # маршрута), а не хардкод (иначе модель валилась таймаутом раньше бюджета).
+            timeout=aiohttp.ClientTimeout(total=_attempt_timeout(bot, deadline), connect=10.0)
         ) as resp:
             if resp.status >= 400:
                 payload = await resp.json(content_type=None)
@@ -182,7 +192,7 @@ async def _or_chat_completion_with_fallback(
         attempt_start = time.monotonic()
         try:
             payload = {"model": model_trial, "messages": messages, "stream": False}
-            resp = await bot._or_request("chat/completions", "POST", json_body=payload)
+            resp = await bot._or_request("chat/completions", "POST", json_body=payload, deadline=deadline)
             choices = resp.get("choices") or []
             answer = ""
             if choices:
@@ -256,7 +266,7 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
         attempt_start = time.monotonic()
         try:
             payload = {"model": model_trial, "messages": messages, "stream": False}
-            resp = await bot._groq_request("chat/completions", "POST", json_body=payload)
+            resp = await bot._groq_request("chat/completions", "POST", json_body=payload, deadline=deadline)
             choices = resp.get("choices") or []
             answer = ""
             if choices:
@@ -614,7 +624,7 @@ async def ask_gemini(
             # запрос (поток to_thread отменить нельзя — он бы жил дальше в фоне).
             resp = await asyncio.wait_for(
                 bot.client.aio.models.generate_content(model=curr_model_id, contents=call_contents, config=gconfig),
-                timeout=bot.ROUTE_MODEL_TIMEOUT_SEC,
+                timeout=_attempt_timeout(bot, deadline),
             )
             ans = await bot._extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
             ans = ans.strip()

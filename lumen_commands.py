@@ -168,6 +168,7 @@ async def _gemini_tts_bytes(text: str) -> tuple[bytes, str, str]:
         is_rate_limit_error=_is_rate_limit,
         on_model_exhausted=lambda mname: bot._mark_quota_exhausted("gemini", mname),
         on_model_success=lambda mname: bot._record_quota_usage("gemini", mname),
+        request_timeout_sec=bot.TTS_SYNTH_TIMEOUT_SEC,
     )
 
 
@@ -666,7 +667,9 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     ns._pick_resolved = True
     lock = bot.get_chat_lock(chat.id)
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=10.0)
+        # Тот же лимит лока, что и в основном пути (bot.CHAT_LOCK_TIMEOUT_SEC):
+        # третье значение в 10с отдавало «занято» на любом живом маршруте.
+        await asyncio.wait_for(lock.acquire(), timeout=bot.CHAT_LOCK_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         log.warning("[pick] Timeout waiting for lock on chat %s", chat.id)
         with contextlib.suppress(Exception):

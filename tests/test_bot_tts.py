@@ -3,11 +3,12 @@ test_bot_tts.py — TTS: Fish Audio SSE и inline_tts (квоты, фолбэк 
 
 Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
 """
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 import asyncio
 import base64
 from types import SimpleNamespace
 import bot
+import pytest
 from tests.bot_test_helpers import (
     _FakeIncomingMessage,
     _FakeSSEResponse,
@@ -30,7 +31,9 @@ def test_inline_tts_records_quota_usage_on_success():
         return _fake_tts_response(fake_wav_bytes)
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    # Асинхронный путь (lumen_tts): синхронный вызов в потоке убран — зависший
+    # Google держал лок чата бесконечно (аудит 26.09.2026).
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
 
     incoming = _FakeIncomingMessage(999801)
     incoming.message_id = 12345  # inline_tts использует его для reply_to_message_id
@@ -67,7 +70,9 @@ def test_inline_tts_marks_quota_exhausted_on_rate_limit():
         return _fake_tts_response(fake_wav_bytes)
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    # Асинхронный путь (lumen_tts): синхронный вызов в потоке убран — зависший
+    # Google держал лок чата бесконечно (аудит 26.09.2026).
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
 
     incoming = _FakeIncomingMessage(999802)
     incoming.message_id = 12346
@@ -106,7 +111,9 @@ def test_inline_tts_skips_fish_audio_when_disabled(monkeypatch):
         return _fake_tts_response(fake_wav_bytes)
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    # Асинхронный путь (lumen_tts): синхронный вызов в потоке убран — зависший
+    # Google держал лок чата бесконечно (аудит 26.09.2026).
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
 
     incoming = _FakeIncomingMessage(999803)
     incoming.message_id = 12347
@@ -177,6 +184,67 @@ def test_fish_audio_tts_bytes_returns_none_without_api_key():
         bot.OPENROUTER_API_KEY = original_key
 
 
+def test_gemini_tts_synthesis_has_timeout_and_does_not_use_threads():
+    # Регрессия (аудит 26.09.2026): синхронный вызов в asyncio.to_thread без
+    # таймаута — зависший Google держал лок чата бесконечно и терял поток.
+    import asyncio as _asyncio
+    from lumen_tts import _gemini_tts_bytes as synth
+
+    calls = []
+
+    class _HangingAio:
+        class models:
+            @staticmethod
+            async def generate_content(**kwargs):
+                calls.append(kwargs)
+                await _asyncio.sleep(30)
+
+    client = SimpleNamespace(aio=_HangingAio)
+
+    def never(*args, **kwargs):
+        raise AssertionError("sync client path must not be used")
+
+    client.models = SimpleNamespace(generate_content=never)
+
+    with pytest.raises(Exception):
+        _asyncio.run(synth(
+            client, "текст", tts_models=["m1"],
+            is_rate_limit_error=lambda e: False,
+            on_model_exhausted=lambda m: None,
+            on_model_success=lambda m: None,
+            request_timeout_sec=0.3,
+        ))
+    assert calls, "async client must be used"
+
+
+def test_gemini_tts_passes_http_timeout_to_sdk():
+    # Второй рубеж: таймаут задан и в http_options, даже если внешний wait_for не сработал.
+    import asyncio as _asyncio
+    from lumen_tts import _gemini_tts_bytes as synth
+
+    seen = {}
+
+    def fake_generate_content(*, model, contents, config=None):
+        seen["config"] = config
+        return _fake_tts_response(b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 64)
+
+    class _Aio:
+        class models:
+            @staticmethod
+            async def generate_content(**kwargs):
+                return fake_generate_content(model=kwargs["model"], contents=kwargs["contents"], config=kwargs["config"])
+
+    _asyncio.run(synth(
+        SimpleNamespace(aio=_Aio), "текст", tts_models=["m1"],
+        is_rate_limit_error=lambda e: False,
+        on_model_exhausted=lambda m: None,
+        on_model_success=lambda m: None,
+        request_timeout_sec=7.0,
+    ))
+    http_options = getattr(seen["config"], "http_options", None)
+    assert http_options is not None and http_options.timeout == 7000
+
+
 def test_fish_audio_tts_bytes_returns_none_on_empty_stream():
     # Поток отдал валидный SSE, но ни одного audio-чанка (например, если формат
     # ответа модели когда-нибудь изменится) — должны тихо откатиться на Gemini,
@@ -216,7 +284,9 @@ def _wav_client():
         return _fake_tts_response(fake_wav_bytes)
 
     fake_client = MagicMock()
-    fake_client.models.generate_content.side_effect = fake_generate_content
+    # Асинхронный путь (lumen_tts): синхронный вызов в потоке убран — зависший
+    # Google держал лок чата бесконечно (аудит 26.09.2026).
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     return fake_client
 
 
