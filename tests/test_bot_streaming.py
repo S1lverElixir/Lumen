@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 import asyncio
 import bot
+import lumen_router_config
 import lumen_streaming
 import pytest
 import time
@@ -33,14 +34,33 @@ def test_stream_wait_caps_chunk_timeout_by_remaining_budget():
     assert lumen_streaming._stream_wait(bot, time.monotonic() - 10.0) <= 0.5
 
 
-def test_gemini_stream_handshake_has_timeout():
-    # Рукопожатие generate_content_stream шло вовсе без wait_for: зависший Google
-    # держал лок чата. Проверяем, что попытка подвисает и поднимает TimeoutError.
-    async def hanging_stream(*, model, contents, config=None):
-        await asyncio.sleep(30)
+def _fake_gemini_stream(pieces=None, *, raises=None, hang_sec=0.0):
+    """Мок generate_content_stream по НАСТОЯЩЕМУ контракту google-genai 2.24.0:
+    обычная функция, возвращающая асинхронный генератор (тело SDK — `return
+    stream_generator()`), а НЕ корутина.
 
+    Раньше фейки здесь были `async def ... return gen()`, из-за чего тесты
+    подпирали фиктивное рукопожатие wait_for вокруг вызова: реальный SDK сети
+    в корутине не делает, значит тот таймаут не срабатывал никогда
+    (враждебное ревью 27.09.2026)."""
+    def _stream(*, model, contents, config=None):
+        async def gen():
+            if hang_sec:
+                await asyncio.sleep(hang_sec)
+            if raises is not None:
+                raise raises
+            for piece in (pieces or []):
+                yield SimpleNamespace(text=piece)
+        return gen()
+    return _stream
+
+
+def test_gemini_stream_timeout_covers_a_hanging_first_chunk():
+    # Настоящая защита: сетевое ожидание происходит на __anext__, и его ловит
+    # _stream_wait под каждый кусок. Раньше проверялось только создание корутины —
+    # сценарий, невозможный в проде (см. докстринг _fake_gemini_stream).
     fake_client = MagicMock()
-    fake_client.aio.models.generate_content_stream = hanging_stream
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream(hang_sec=30)
     original_client = bot.client
     original_cap = bot.STREAM_CHUNK_TIMEOUT_SEC
     bot.client = fake_client
@@ -56,14 +76,34 @@ def test_gemini_stream_handshake_has_timeout():
         bot.STREAM_CHUNK_TIMEOUT_SEC = original_cap
 
 
+def test_gemini_stream_call_is_not_awaited():
+    # Контракт SDK: generate_content_stream — обычная функция. Если бы обёртка снова
+    # стала await-ить её, тест падал бы с TypeError, а не проходил вхолостую.
+    calls = []
+
+    def sync_only(*, model, contents, config=None):
+        calls.append(model)
+        async def gen():
+            yield SimpleNamespace(text="ok")
+        return gen()
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = sync_only
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        async def _drain():
+            return [p async for p in lumen_streaming._gemini_stream_pieces("m1", [], None)]
+        assert asyncio.run(_drain()) == ["ok"]
+        assert calls == ["m1"]
+    finally:
+        bot.client = original_client
+
+
 def test_try_gemini_streaming_happy_path_accumulates_and_finalizes():
     chat_id = 999101
 
-    async def fake_stream(*, model, contents, config=None):
-        async def gen():
-            for piece in ["Привет", ", как ", "дела?"]:
-                yield SimpleNamespace(text=piece)
-        return gen()
+    fake_stream = _fake_gemini_stream(["Привет", ", как ", "дела?"])
 
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = fake_stream
@@ -90,11 +130,7 @@ def test_try_gemini_streaming_aborts_on_identity_leak_mid_stream():
     # увидеть утёкший текст на экране ещё до финального завершения потока.
     chat_id = 999104
 
-    async def fake_stream(*, model, contents, config=None):
-        async def gen():
-            for piece in ["Привет! ", "На самом деле я работаю ", "на базе Gemini от Google."]:
-                yield SimpleNamespace(text=piece)
-        return gen()
+    fake_stream = _fake_gemini_stream(["Привет! ", "На самом деле я работаю ", "на базе Gemini от Google."])
 
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = fake_stream
@@ -121,8 +157,7 @@ def test_try_gemini_streaming_aborts_on_identity_leak_mid_stream():
 def test_try_gemini_streaming_returns_none_on_early_failure():
     chat_id = 999102
 
-    async def fake_stream_raises(*, model, contents, config=None):
-        raise RuntimeError("boom before any content")
+    fake_stream_raises = _fake_gemini_stream(raises=RuntimeError("boom before any content"))
 
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = fake_stream_raises
@@ -152,10 +187,7 @@ def test_try_gemini_streaming_failed_continuation_does_not_corrupt_first_message
     chat_id = 999103
     long_piece = "А" * (bot.TG_MAX_LEN + 100)  # гарантированно требует второе сообщение
 
-    async def fake_stream(*, model, contents, config=None):
-        async def gen():
-            yield SimpleNamespace(text=long_piece)
-        return gen()
+    fake_stream = _fake_gemini_stream([long_piece])
 
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = fake_stream
@@ -401,13 +433,18 @@ def test_try_openrouter_streaming_happy_path_accumulates_and_finalizes():
 
 def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
     # Висящий первый кусок — TimeoutError и плейсхолдер дальше по цепочке (раньше предела не было — лок держался до 30с/навсегда).
+    #
+    # Патчим lumen_streaming, а НЕ bot: _run_streaming_reply читает имя из своего
+    # модуля, и прошлый тест патчил bot._model_first_chunk_limit вхолостую — он
+    # честно ждал штатные 25с и проходил, потому что граница была 30с
+    # (враждебное ревью 27.09.2026). Теперь предел жёстче выставленного лимита.
     chat_id = 999301
 
     async def hanging_pieces():
         await asyncio.sleep(3600)
         yield "never arrives"
 
-    monkeypatch.setattr(bot, "_model_first_chunk_limit", lambda key, floor: 0.05)
+    monkeypatch.setattr(lumen_streaming, "_model_first_chunk_limit", lambda key, floor: 0.05)
     incoming = _FakeIncomingMessage(chat_id)
     try:
         started = time.monotonic()
@@ -418,7 +455,9 @@ def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
         elapsed = time.monotonic() - started
         assert answer is None
         assert placeholder is incoming.sent[0]
-        assert elapsed < 30
+        # 0.05с лимита + небольшой запас на ввод-вывод фейков. Прежние 30с
+        # пропускали настоящие 25с ожидания, то есть тест ничего не проверял.
+        assert elapsed < 5, f"тест ждёт настоящего таймаута, а не подменённого: {elapsed:.1f}с"
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -444,27 +483,43 @@ def test_streaming_respects_route_deadline():
         bot.chat_state.pop(chat_id, None)
 
 
-def test_streaming_rate_limit_marks_model_exhausted():
-    # Внешний аудит: 429 до первого куска помечает модель исчерпанной, как обычный путь.
-    chat_id = 999310
-
+def _streaming_rate_limit_quotas(chat_id, model_id, error_text):
     async def pieces_429():
-        raise bot.OpenRouterAPIError("Rate limit reached", status_code=429)
+        raise bot.OpenRouterAPIError(error_text, status_code=429)
         yield ""
-
     incoming = _FakeIncomingMessage(chat_id)
     real_quota = dict(bot.GLOBAL_QUOTA)
     try:
-        answer, placeholder = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="z:free",
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id=model_id,
             piece_agen=pieces_429(),
         ))
         assert answer is None
-        assert bot.GLOBAL_QUOTA["openrouter"]["z:free"]["exhausted_at"] is not None
+        return dict(bot.GLOBAL_QUOTA["openrouter"][model_id])
     finally:
         bot.GLOBAL_QUOTA.clear()
         bot.GLOBAL_QUOTA.update(real_quota)
         bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_daily_rate_limit_marks_model_exhausted():
+    # Суточный лимит аккаунта помечает модель до утра — как и раньше.
+    entry = _streaming_rate_limit_quotas(999310, "z:free", "free-models-per-day limit reached")
+    assert entry["exhausted_at"] is not None
+    assert not entry.get("cooldown_until")
+
+
+def test_streaming_burst_rate_limit_only_cools_down():
+    # Регрессия (враждебное ревью 27.09.2026): минутный всплеск 429 ставил суточную
+    # метку, и модель выпадала из роута до полуночи — снять метку было нечем, потому
+    # что заведомо мёртвую модель не зовут. Теперь это короткая остывка.
+    entry = _streaming_rate_limit_quotas(999311, "y:free", "Rate limit reached")
+    assert entry["exhausted_at"] is None
+    assert entry["cooldown_until"] > time.time()
+    assert lumen_router_config._is_quota_exhausted("openrouter", "y:free") is True
+    # По истечении остывки модель возвращается в роут сама, без смены суток.
+    bot.GLOBAL_QUOTA["openrouter"]["y:free"]["cooldown_until"] = time.time() - 1.0
+    assert lumen_router_config._is_quota_exhausted("openrouter", "y:free") is False
 
 
 def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
@@ -587,10 +642,7 @@ def test_run_streaming_reply_paces_reveal_for_burst_instead_of_dumping_full_text
     # это обычное дело для бесплатных моделей OpenRouter).
     long_text = "Слово " * 80  # ~480 символов одним SSE-куском
 
-    async def fake_stream(*, model, contents, config=None):
-        async def gen():
-            yield SimpleNamespace(text=long_text)
-        return gen()
+    fake_stream = _fake_gemini_stream([long_text])
 
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = fake_stream
@@ -626,11 +678,7 @@ def test_run_streaming_reply_records_observed_speed_on_success():
     pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
     original_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
 
-    async def fake_stream(*, model, contents, config=None):
-        async def gen():
-            for piece in ["Привет", ", мир!"]:
-                yield SimpleNamespace(text=piece)
-        return gen()
+    fake_stream = _fake_gemini_stream(["Привет", ", мир!"])
 
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = fake_stream
@@ -665,10 +713,7 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
 
     long_text = "Буква " * 500  # ~3000 символов, одним куском, ниже TG_MAX_LEN
 
-    async def fake_stream(*, model, contents, config=None):
-        async def gen():
-            yield SimpleNamespace(text=long_text)
-        return gen()
+    fake_stream = _fake_gemini_stream([long_text])
 
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = fake_stream

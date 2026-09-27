@@ -83,10 +83,24 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     import bot
     # Первое сообщение альбома с caption — основное, остальные файлы отдаём модели как доп. вложения.
     main_msg = messages[0]
+    # Альбом в группе без упоминания бота — такой же пассивный фон, как обычное
+    # сообщение: раньше он всё равно тратил слот лимита и качал файлы (враждебное
+    # ревью 27.09.2026). В личке и при прямом обращении альбом обрабатывается как раньше.
+    if main_msg.chat and main_msg.chat.type != ChatType.PRIVATE:
+        t_text = main_msg.text or main_msg.caption or ""
+        if bot._should_only_record_passively(
+            main_msg, t_text,
+            is_private=False,
+            is_guest=bot.is_guest_message(main_msg),
+            mentioned=bot.message_mentions_bot(main_msg),
+        ):
+            bot._record_passive_group_context(main_msg, bot.get_state(main_msg.chat.id), t_text)
+            return
     # Лимит пользователя проверяем ДО скачивания файлов: раньше альбом из 9 фото
     # грузился целиком даже в группе без упоминания бота и для уже отклонённого по
     # лимиту автора — трафик прокси и память расходовались впустую (аудит 26.09.2026).
-    # Сам ответ "слишком часто" отправляет _reject_rate_limited_message.
+    # Слот тут списывается ровно один: handle_message буферизует альбом целиком и в
+    # _handle_message_core не заходит (проверено 27.09.2026).
     if await bot._reject_rate_limited_message(main_msg):
         return
     extra_media: list[tuple[bytes, str]] = []

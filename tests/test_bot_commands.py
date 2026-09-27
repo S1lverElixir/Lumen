@@ -787,6 +787,34 @@ def test_pick_callback_expired_known_token_reissues_buttons_once(monkeypatch):
         bot._pending_picks.clear()
 
 
+def test_pick_callback_stranger_cannot_reissue_expired_pick(monkeypatch):
+    # Регрессия (враждебное ревью 27.09.2026): проверка авторства стояла ПОСЛЕ
+    # перевыпуска кнопок, поэтому чужой тап по протухшей кнопке продлевал чужой
+    # выбор новыми кнопками. Теперь чужак получает отказ и ничего не возникает.
+    bot._pending_picks.clear()
+    bot._pending_picks["oldtok99"] = {
+        "chat_id": 777, "user_id": 111, "scenario": "film",
+        "original": "посоветуй фильм", "expires": time.monotonic() - 1,
+        "lang": "ru",
+    }
+    # user_id=999 — не владелец записи (владелец 111).
+    q = _make_pick_query("pick:oldtok99:1", user_id=999)
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    try:
+        asyncio.run(bot.handle_pick_callback(q))
+        assert q.message.edits == [], "чужим нельзя перевыпускать кнопки"
+        assert len(bot._pending_picks) == 1, "у чужого тапа не должно появляться записей"
+        assert "oldtok99" in bot._pending_picks, "запись владельца остаётся нетронутой"
+        # Реплика берётся языком самой записи (здесь lang="ru"), а не языком чата.
+        from lumen_lang import t as _lang_t
+        expected = _lang_t("ru", "pick_not_yours")
+        assert any(text == expected for text, _ in q.answered), (q.answered, expected)
+        fake_core.assert_not_awaited()
+    finally:
+        bot._pending_picks.clear()
+
+
 def test_pick_callback_ownerless_record_confined_to_its_chat(monkeypatch):
     # Вопрос от поста канала/анонима (from_user пустой): user_id=None, и раньше
     # кнопку мог нажать кто угодно. Теперь выбор живёт только в своём чате.

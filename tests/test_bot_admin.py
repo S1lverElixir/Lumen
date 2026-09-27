@@ -290,12 +290,25 @@ def test_admin_secrets_are_independent_of_bot_token_when_seed_set():
     # РЕГРЕССИЯ (аудит техдолга): раньше WEBHOOK_SECRET/ADMIN_PANEL_KEY выводились
     # ИСКЛЮЧИТЕЛЬНО из BOT_TOKEN — компрометация токена компрометировала оба сразу,
     # и ни один нельзя было ротировать независимо. Теперь можно задать отдельную соль.
+    #
+    # Прежняя версия теста считала sha256 дважды и сравнивала соль саму с собой,
+    # то есть НЕ вызывала код бота и проходила при любой поломке вывода ключей
+    # (враждебное ревью 27.09.2026). Теперь проверяем настоящий инвариант модуля.
     import hashlib
-    seed_a = "seed-one"
-    seed_b = "seed-two"
-    webhook_a = hashlib.sha256(seed_a.encode()).hexdigest()[:32]
-    webhook_b = hashlib.sha256(seed_b.encode()).hexdigest()[:32]
-    assert webhook_a != webhook_b  # разные соли -> разные секреты, как и должно быть
+
+    seed = bot._ADMIN_SECRET_SEED
+    assert seed, "соль обязана быть непустой, иначе ключи предсказуемы"
+    # Ключи — реальные производные текущей соли, а не литералы в тесте.
+    assert bot.WEBHOOK_SECRET == hashlib.sha256(seed.encode()).hexdigest()[:32]
+    assert bot.ADMIN_PANEL_KEY == hashlib.sha256(seed.encode() + b"admin_panel").hexdigest()[:24]
+    # Два ключа не совпадают, и ни один не равен самому токену.
+    assert bot.WEBHOOK_SECRET != bot.ADMIN_PANEL_KEY
+    assert bot.WEBHOOK_SECRET != bot.BOT_TOKEN
+    assert bot.ADMIN_PANEL_KEY != bot.BOT_TOKEN
+    # Соль из ADMIN_SECRET_SEED, когда она задана, — ключи не выводятся из BOT_TOKEN.
+    configured_seed = os.environ.get("ADMIN_SECRET_SEED", "").strip()
+    if configured_seed:
+        assert seed == configured_seed
 
 
 def test_admin_secret_seed_falls_back_to_bot_token_when_unset():

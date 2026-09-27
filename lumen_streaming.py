@@ -84,18 +84,22 @@ def _remaining_budget(deadline: float | None) -> float:
 
 def _stream_wait(bot: Any, deadline: float | None) -> float:
     """Таймаут на ОДНУ операцию стрима: не больше межкускового капа и не больше
-    остатка бюджета маршрута. Раньше оба ожидания шли в обход бюджета — рукопо-
-    жатие Gemini вообще без таймаута, а кусок мог ждать STREAM_CHUNK_TIMEOUT_SEC
-    уже после его исчерпания (аудит 26.09.2026)."""
+    остатка бюджета маршрута. Раньше ожидание шло в обход бюджета, и кусок мог ждать
+    STREAM_CHUNK_TIMEOUT_SEC уже после его исчерпания (аудит 26.09.2026). Значение
+    меньше 0.1с не опускаем: это всё равно мгновенный TimeoutError."""
     return max(0.1, min(bot.STREAM_CHUNK_TIMEOUT_SEC, _remaining_budget(deadline)))
 
 async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig, *, deadline: float | None = None):
-    """Куски от Gemini (тонкая обёртка над generate_content_stream). Таймаут на каждый кусок и на само рукопожатие — подвисший стрим не держит лок чата. Telegram-логика — общая в _run_streaming_reply."""
+    """Куски от Gemini (тонкая обёртка над generate_content_stream).
+
+    Рукопожатия как отдельного шага НЕТ намеренно: generate_content_stream
+    возвращает генератор, не делая сети (проверено по исходнику google-genai
+    2.24.0: тело — `return stream_generator()`), поэтому wait_for вокруг вызова
+    ограничивал только мгновенное создание объекта и никогда не срабатывал —
+    витрина таймаута без защиты (враждебное ревью 27.09.2026). Реальную сетевую
+    жду ловлю ниже: первый кусок идёт через __anext__ под тем же _stream_wait."""
     import bot
-    stream = await asyncio.wait_for(
-        bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig),
-        timeout=_stream_wait(bot, deadline),
-    )
+    stream = bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig)
     stream_iter = stream.__aiter__()
     try:
         while True:
@@ -348,12 +352,17 @@ async def _run_streaming_reply(
 
     except Exception as exc:
         if not full_text.strip():
-            # 429 до первого куска — помечаем модель исчерпанной, как обычный путь
-            # (иначе следующее сообщение снова бьёт в неё головой без отметки в /stats).
+            # 429 до первого куска — отмечаем модель для /stats и ненадолго убираем из
+            # роута. Суточный лимит (free-models-per-day) держим до утра, минутный
+            # всплеск — короткая остывка, иначе всплеск 429 запирал модель до полуночи
+            # (враждебное ревью 27.09.2026).
             try:
                 _txt = bot._error_text(exc).strip() or exc.__class__.__name__
                 if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":
-                    bot._mark_quota_exhausted(provider, model_id)
+                    if bot._is_account_wide_or_rate_limit(_txt.lower()):
+                        bot._mark_quota_exhausted(provider, model_id)
+                    else:
+                        bot._mark_rate_limited(provider, model_id)
             except Exception:
                 pass
             # Плейсхолдер НЕ удаляем — возвращаем для переиспользования (см. докстринг).

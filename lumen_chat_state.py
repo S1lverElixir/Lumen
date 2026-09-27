@@ -136,6 +136,7 @@ def _delete_chat_storage(chat_id: int) -> bool:
 class QuotaEntry(TypedDict):
     used: int
     exhausted_at: float | None
+    cooldown_until: float | None
 
 GLOBAL_QUOTA: dict[str, Any] = {
     "gemini": {},
@@ -184,6 +185,7 @@ def _reset_quota_if_new_day() -> None:
             if isinstance(entry, dict):
                 entry["used"] = 0
                 entry["exhausted_at"] = None
+                entry["cooldown_until"] = None
     GLOBAL_QUOTA["quota_day"] = today
     if had_previous:
         log.info('[quota] New day started (%s) — used/exhausted_at counters reset for all models.', today)
@@ -560,7 +562,11 @@ def _prune_old_chats() -> None:
         return lock is not None and lock.locked()
 
     removable = [cid for cid in sorted_ids if not _is_busy(cid)]
-    to_remove = max(0, len(removable) - PRUNED_CHAT_TARGET)
+    # Потолок памяти считаем от ВСЕГО состояния, а не от выборки removable: иначе
+    # при плотной загрузке (много занятых локами чатов) вытеснять было нечего и чаты
+    # копились выше PRUNED_CHAT_TARGET без ограничения (враждебное ревью 27.09.2026).
+    # Занятые чаты пропускаем — их время придёт в следующих прогонах.
+    to_remove = max(0, len(chat_state) - PRUNED_CHAT_TARGET)
     removed_ids = removable[:to_remove]
     for cid in removed_ids:
         chat_state.pop(cid, None)
@@ -623,13 +629,29 @@ def _quota_entry(provider: str, model_id: str) -> QuotaEntry:
     import bot
     bot._reset_quota_if_new_day()
     sub = GLOBAL_QUOTA.setdefault(provider, {})
-    return sub.setdefault(model_id, {"used": 0, "exhausted_at": None})
+    return sub.setdefault(model_id, {"used": 0, "exhausted_at": None, "cooldown_until": None})
+
+# Сколько модель молчит после МИНУТНОГО 429 (лимит запросов в минуту), прежде чем её
+# снова пробуют. Раньше минутный всплеск ставил метку до полуночи, и модель выпадала
+# из роута на остаток суток (враждебное ревью 27.09.2026): снять метку было нечем,
+# потому что заведомо мёртвую модель не зовут, а успешный ответ чистит метку.
+# 10 минут с большим запасом переживают окно Groq в 30 RPM.
+QUOTA_RATE_LIMIT_COOLDOWN_SEC = 600.0
 
 def _mark_quota_exhausted(provider: str, model_id: str) -> None:
-    """Метка exhausted: used растёт только на успехах, без неё 429 выглядел как 0."""
+    """Суточная метка exhausted: used растёт только на успехах, без неё 429 выглядел как 0."""
     import bot
     e = bot._quota_entry(provider, model_id)
     e["exhausted_at"] = time.time()
+    e["cooldown_until"] = None
+    bot.mark_quota_dirty()
+
+def _mark_rate_limited(provider: str, model_id: str) -> None:
+    """Мин��тный лимит запросов: короткая пауза вместо суточной метки. Модель вернётся
+    в роут сама по истечении QUOTA_RATE_LIMIT_COOLDOWN_SEC — не нужно ждать суток."""
+    import bot
+    e = bot._quota_entry(provider, model_id)
+    e["cooldown_until"] = time.time() + QUOTA_RATE_LIMIT_COOLDOWN_SEC
     bot.mark_quota_dirty()
 
 def _record_quota_usage(provider: str, model_id: str, *, service: bool = False) -> None:
@@ -642,6 +664,7 @@ def _record_quota_usage(provider: str, model_id: str, *, service: bool = False) 
     e = bot._quota_entry(provider, model_id)
     e["used"] = int(e.get("used") or 0) + 1
     e["exhausted_at"] = None
+    e["cooldown_until"] = None
     bot.mark_quota_dirty()
 
 # Сколько свежих сообщений точно не трогаем при обрезке (остальное уходит в саммари).

@@ -386,11 +386,13 @@ HISTORY_SUMMARY_BUDGET_SEC = _env_number("HISTORY_SUMMARY_BUDGET_SEC", 30, min_v
 # Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
 DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
 # CHAT_LOCK_TIMEOUT_SEC — сколько ждём лок чата, прежде чем ответить «занято».
-# Обязан быть ВЫШЕ самой долгой защищаемой работы: /draw держит лок до
-# DRAW_TOTAL_BUDGET_SEC, поэтому хардкод 45с отдавал «занято» посреди ещё идущей
-# отрисовки, а в pick-кнопках стояло ещё и третье значение — 10с (аудит 26.09.2026).
-# Одно имя на все три места, чтобы значения снова не разъехались.
-CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 150, min_value=1)
+# Обратная сторона: пока ждём, юзер видит тишину. Поэтому держим НЕ выше хардкода
+# ожидания пользователя, а лок при этом остаётся защищаемым: работа под локом
+# ограничена собственным бюджетом и всегда try/finally его отпускает
+# (враждебное ревью 27.09.2026: значение 150с молчало почти 2.5 минуты).
+# /draw лок НЕ берёт (его хендлер зарегистрирован раньше общего @dp.message),
+# так что ориентир — озвучка, у неё свой потолок ожидания.
+CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 45, min_value=1)
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
 # завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
 INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = _env_number("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", 10, min_value=0)
@@ -440,6 +442,7 @@ from lumen_chat_state import (
     _QUOTA_CHECK_THROTTLE_SEC,
     _maybe_alert_gemini_exhausted,
     _reset_quota_if_new_day,
+    _mark_rate_limited,
     load_global_quota,
     save_global_quota,
     _restore_single_chat,
@@ -758,6 +761,7 @@ __all__ = [
     "_attempt_timeout",
     "_or_extract_text",
     "_is_account_wide_or_rate_limit",
+    "_is_gemini_daily_quota",
     "_probe_or_model_liveness",
     "_or_chat_completion_with_fallback",
     "ask_openrouter_text",
@@ -840,6 +844,7 @@ __all__ = [
     "_is_owner",
     "_is_privileged_in_chat",
     "_mark_quota_exhausted",
+    "_mark_rate_limited",
     "_record_quota_usage",
     "_trim_history",
     "PICK_TTL_SEC",
@@ -992,6 +997,7 @@ from lumen_routes import (
     _or_extract_text,
     _attempt_timeout,
     _is_account_wide_or_rate_limit,
+    _is_gemini_daily_quota,
     _probe_or_model_liveness,
     _or_chat_completion_with_fallback,
     ask_openrouter_text,

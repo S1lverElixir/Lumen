@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -294,12 +295,17 @@ def _is_quota_exhausted(provider: str, model_id: str) -> bool:
     """Помечена ли модель как исчерпавшая квоту (метка _mark_quota_exhausted после 429).
     Раньше роутер её не читал: каждое сообщение снова упиралось в 429 заведомо мёртвой
     модели и тратило ROUTE_MODEL_TIMEOUT_SEC попытки (аудит 26.09.2026). Сброс —
-    смена суток (_reset_quota_if_new_day) либо успешный ответ, который чистит метку."""
+    смена суток (_reset_quota_if_new_day) либо успешный ответ, который чистит метку.
+    Короткая остывка минутного 429 (_mark_rate_limited) — тоже «пропустить», но она
+    сама истекает, в отличие от суточной метки (враждебное ревью 27.09.2026)."""
     try:
         import bot
         sub = bot.GLOBAL_QUOTA.get(provider) or {}
         entry = sub.get(model_id) or {}
-        return bool(entry.get("exhausted_at"))
+        if entry.get("exhausted_at"):
+            return True
+        cooldown_until = entry.get("cooldown_until")
+        return bool(cooldown_until and cooldown_until > time.time())
     except Exception:
         return False
 

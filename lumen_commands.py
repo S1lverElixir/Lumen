@@ -591,6 +591,23 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     # Язык для служебных реплик: из записи (если есть), иначе из чата кнопки.
     _qchat = query.message.chat.id if query.message and query.message.chat else None
     rec_lang = (rec or {}).get("lang") or bot._chat_lang(_qchat)
+
+    def _is_rec_owner(rec_rec: dict) -> bool:
+        """Чей это выбор. Запись без user_id (пост канала/аноним) принадлежит чату."""
+        owner_id = rec_rec.get("user_id")
+        if owner_id is not None and query.from_user is not None and query.from_user.id != owner_id:
+            return False
+        if owner_id is None and query.message is not None and query.message.chat is not None:
+            return query.message.chat.id == rec_rec.get("chat_id")
+        return True
+
+    if rec is not None and not _is_rec_owner(rec):
+        # Проверка авторства ДО перевыпуска: иначе чужой тап по протухшей кнопке
+        # продлевал бы чужой выбор новыми кнопками (враждебное ревью 27.09.2026).
+        with contextlib.suppress(Exception):
+            await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
+        return
+
     if rec is None or rec["expires"] < time.monotonic():
         if rec is not None and query.message is not None:
             # Протухший, но известный выбор — молча выдаём свежие кнопки вместо

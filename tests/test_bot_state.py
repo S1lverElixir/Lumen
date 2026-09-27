@@ -588,15 +588,23 @@ def test_process_media_group_buffers_skips_download_when_rate_limited(monkeypatc
     # Регрессия (аудит 26.09.2026): файлы альбома качались ДО проверки лимита —
     # перелимиченный пользователь (или случайный альбом в группе) всё равно
     # съедал трафик прокси и память на девяти файлах.
+    #
+    # Кладём В ДВА сообщения: качаются только вторые и далее (messages[1:]), поэтому
+    # с одним сообщением в буфере проверка была вакуумной и проходила всегда
+    # (враждебное ревью 27.09.2026).
     chat_id = 999963
     user = SimpleNamespace(id=780)
-    photo = SimpleNamespace(file_id="file_SKIP", mime_type=None, file_name=None)
-    msg = SimpleNamespace(
-        chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE), from_user=user,
-        media_group_id="mgskip", text=None, caption=None, reply_to_message=None,
-        photo=[photo], video=None, animation=None, video_note=None,
-        voice=None, audio=None, document=None, sticker=None,
-    )
+
+    def _photo_msg(file_id):
+        photo = SimpleNamespace(file_id=file_id, mime_type=None, file_name=None)
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE), from_user=user,
+            media_group_id="mgskip", text=None, caption=None, reply_to_message=None,
+            photo=[photo], video=None, animation=None, video_note=None,
+            voice=None, audio=None, document=None, sticker=None,
+        )
+
+    msg, msg_extra = _photo_msg("file_SKIP"), _photo_msg("file_SKIP_2")
     downloaded = []
     handled = []
 
@@ -610,7 +618,7 @@ def test_process_media_group_buffers_skips_download_when_rate_limited(monkeypatc
     monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
     monkeypatch.setattr(bot, "_handle_message_core", fake_core)
-    bot._mg_buffers["mgskip"] = [msg]
+    bot._mg_buffers["mgskip"] = [msg, msg_extra]
     try:
         asyncio.run(bot._process_media_group_buffers("mgskip"))
         assert downloaded == [], "файлы не должны качаться сверх лимита"
@@ -618,6 +626,53 @@ def test_process_media_group_buffers_skips_download_when_rate_limited(monkeypatc
     finally:
         bot._mg_buffers.pop("mgskip", None)
         bot._mg_tasks.pop("mgskip", None)
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_process_media_group_buffers_ignores_passive_group_album(monkeypatch):
+    # Альбом в группе без упоминания бота — пассивный фон, как и обычное сообщение:
+    # не должен ни тратить слот лимита, ни качать файлы, ни звать модель
+    # (враждебное ревью 27.09.2026).
+    chat_id = 999964
+    user = SimpleNamespace(id=781)
+
+    def _photo_msg(file_id):
+        photo = SimpleNamespace(file_id=file_id, mime_type=None, file_name=None)
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id, type=bot.ChatType.GROUP), from_user=user,
+            media_group_id="mgpassive", text=None, caption=None, reply_to_message=None,
+            photo=[photo], video=None, animation=None, video_note=None,
+            voice=None, audio=None, document=None, sticker=None,
+        )
+
+    msg, msg_extra = _photo_msg("file_P1"), _photo_msg("file_P2")
+    downloaded, handled, limited = [], [], []
+
+    async def fake_fetch(file_id, mime):
+        downloaded.append(file_id)
+        return (b"x", "image/jpeg")
+
+    async def fake_core(message, extra_media=None):
+        handled.append(extra_media)
+
+    async def fake_rate_limit(message):
+        limited.append(message)
+        return False
+
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", fake_rate_limit)
+    monkeypatch.setattr(bot, "_should_only_record_passively", lambda *a, **k: True)
+    monkeypatch.setattr(bot, "_record_passive_group_context", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    bot._mg_buffers["mgpassive"] = [msg, msg_extra]
+    try:
+        asyncio.run(bot._process_media_group_buffers("mgpassive"))
+        assert limited == [], "пассивный альбом не должен списывать слот лимита"
+        assert downloaded == [], "пассивный альбом не должен качать файлы"
+        assert handled == []
+    finally:
+        bot._mg_buffers.pop("mgpassive", None)
+        bot._mg_tasks.pop("mgpassive", None)
         bot.chat_state.pop(chat_id, None)
 
 
@@ -810,6 +865,45 @@ def test_prune_old_chats_never_drops_a_chat_with_held_lock():
         lcs.chat_state.update(orig_states)
         lcs._pending_chat_deletions.discard(busy_id)
         lcs._pending_chat_deletions.discard(idle_id)
+
+
+def test_prune_old_chats_keeps_ceiling_with_mostly_busy_chats():
+    # Регрессия (враждебное ревью 27.09.2026): потолок памяти считался от числа
+    # НЕЗАНЯТЫХ чатов. При частичной загрузке вытеснялось меньше, чем нужно, и
+    # состояние оставалось выше PRUNED_CHAT_TARGET. Занятые чаты трогать нельзя,
+    # но потолок должен достигаться по остальным.
+    import asyncio as _asyncio
+    import lumen_chat_state as lcs
+
+    orig_target = lcs.PRUNED_CHAT_TARGET
+    orig_states = dict(lcs.chat_state)
+    orig_locks = bot._chat_locks
+    lcs.PRUNED_CHAT_TARGET = 2
+    lcs.chat_state.clear()
+    busy_id, busy_id2 = 999815, 999816
+    idle_ids = [999817, 999818, 999819, 999820]
+    all_ids = [busy_id, busy_id2, *idle_ids]
+    lcs.chat_state.update({cid: {"last_activity": float(i), "history": []} for i, cid in enumerate(all_ids)})
+    real_locks = {cid: _asyncio.Lock() for cid in all_ids}
+    bot._chat_locks = real_locks
+    try:
+        async def run():
+            await real_locks[busy_id].acquire()
+            await real_locks[busy_id2].acquire()
+            bot._prune_old_chats()
+        _asyncio.run(run())
+        # Потолок достигнут: остались ровно занятые чаты (их трогать нельзя).
+        assert sorted(lcs.chat_state) == sorted([busy_id, busy_id2]), sorted(lcs.chat_state)
+        assert busy_id in lcs.chat_state and busy_id2 in lcs.chat_state
+        # Вытеснялись самые старые по активности.
+        assert idle_ids[0] not in lcs.chat_state
+    finally:
+        bot._chat_locks = orig_locks
+        lcs.PRUNED_CHAT_TARGET = orig_target
+        lcs.chat_state.clear()
+        lcs.chat_state.update(orig_states)
+        for cid in all_ids:
+            lcs._pending_chat_deletions.discard(cid)
 
 
 def test_process_media_group_buffers_cleanup_on_cancel():
