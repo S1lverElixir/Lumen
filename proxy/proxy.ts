@@ -49,6 +49,11 @@ export const ALLOWED_HOSTS = new Set([
   "tikwm.com",
 ]);
 
+// Кап объявленного тела запроса (аудит 26.09.2026). Telegram сам режет загрузки
+// на 50 МБ, а прокси — общий трафик аккаунта, поэтому верхняя граница взята с
+// запасом под legitimately большие файлы, но не «без предела».
+export const MAX_REQUEST_BODY_BYTES = 100 * 1024 * 1024;
+
 // Заголовки, которые нельзя слепо пробрасывать дальше как есть — Host/Connection
 // в запросе относятся к соединению с ЭТИМ (Deno) сервером, а не с реальным
 // апстримом, апстрим сам выставит правильные. Content-Encoding/Content-Length в
@@ -136,6 +141,15 @@ export async function handleRequest(
   const target = resolveTarget(url.pathname, url.search);
   if (!target.ok) {
     return new Response(target.message, { status: target.status });
+  }
+
+  // Кап тела запроса по объявленному content-length: без него любой, у кого есть
+  // секрет, лил в прокси поток любого размера и съедал общий лимит Deno-аккаунта
+  // (ровно то, от чего прокси и защищает — аудит 26.09.2026). Потоковое тело без
+  // заголовка пропускаем дальше: его уже не обойти, не буферизуя.
+  const declaredLength = Number(req.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
+    return new Response("Request body too large", { status: 413 });
   }
 
   const forwardHeaders = buildForwardHeaders(req.headers);

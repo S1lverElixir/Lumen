@@ -140,9 +140,31 @@ def test_export_state_rejects_missing_or_wrong_key():
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     try:
         result = asyncio.run(bot.export_state(_FakeAdminRequest(headers={"Authorization": "Bearer wrong"})))
-        assert "error" in result
+        # Отказ — честный 401, а не 200 с телом {"error": ...}: иначе брутфорс
+        # ключа отличался от успеха только телом ответа (аудит 26.09.2026).
+        assert result.status_code == 401
+        assert b"error" in result.body
     finally:
         bot.ADMIN_PANEL_KEY = original
+
+
+def test_export_state_logs_denied_attempt(caplog):
+    import logging
+    original = bot.ADMIN_PANEL_KEY
+    bot.ADMIN_PANEL_KEY = "real-admin-key"
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot"):
+            asyncio.run(bot.export_state(_FakeAdminRequest(headers={})))
+        assert any("[admin] Denied GET /export_state" in r.getMessage() for r in caplog.records)
+    finally:
+        bot.ADMIN_PANEL_KEY = original
+
+
+def test_fastapi_schema_endpoints_are_disabled():
+    # Публичная схема на HF Space описывала все эндпоинты бесплатно.
+    assert bot.app.docs_url is None
+    assert bot.app.redoc_url is None
+    assert bot.app.openapi_url is None
 
 
 def test_export_state_rejects_query_param_regression():
@@ -153,7 +175,7 @@ def test_export_state_rejects_query_param_regression():
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     try:
         result = asyncio.run(bot.export_state(_FakeAdminRequest(headers={}, query_params={"key": "real-admin-key"})))
-        assert "error" in result
+        assert result.status_code == 401
     finally:
         bot.ADMIN_PANEL_KEY = original
 

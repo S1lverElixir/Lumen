@@ -12,7 +12,14 @@ on:
 
 jobs:
   sync:
-    if: github.event.workflow_run.conclusion == 'success'
+    # Только пуши в ЭТОТ репозиторий. Без второй проверки пул-реквест из форка с
+    # веткой `main` (дефолтная ветка форка) проходил фильтр branches: [main] выше,
+    # и его merge-коммит уезжал в прод Space с HF_TOKEN и всеми секретами Space
+    # (аудит 26.09.2026).
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -28,5 +35,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
         run: |
+          set -euo pipefail
           git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
           git push hf HEAD:main --force

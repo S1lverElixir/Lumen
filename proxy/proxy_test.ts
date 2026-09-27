@@ -7,6 +7,7 @@
 
 import {
   ALLOWED_HOSTS,
+  MAX_REQUEST_BODY_BYTES,
   PROXY_AUTH_HEADER,
   buildForwardHeaders,
   buildResponseHeaders,
@@ -251,4 +252,43 @@ Deno.test("buildForwardHeaders removes mixed-case proxy secret without mutating 
   const original = new Headers({ "X-LuMeN-PrOxY-SeCrEt": TEST_SECRET });
   assertEquals(buildForwardHeaders(original).has(PROXY_AUTH_HEADER), false);
   assertEquals(original.get(PROXY_AUTH_HEADER), TEST_SECRET);
+});
+
+Deno.test("handleRequest rejects oversized declared body before fetching", async () => {
+  let fetchCalled = false;
+  const fakeFetch: typeof fetch = () => {
+    fetchCalled = true;
+    return Promise.resolve(new Response("unexpected"));
+  };
+  const req = new Request("https://proxy.example/fetch/api.telegram.org/bot123/sendDocument", {
+    method: "POST",
+    headers: {
+      ...AUTH_HEADERS,
+      "content-length": String(MAX_REQUEST_BODY_BYTES + 1),
+    },
+  });
+  const resp = await handleRequest(req, fakeFetch, TEST_SECRET);
+  assertEquals(resp.status, 413);
+  assertEquals(fetchCalled, false);
+});
+
+Deno.test("handleRequest allows body at the cap and unknown-length streams", async () => {
+  const seen: number[] = [];
+  const fakeFetch: typeof fetch = () => {
+    seen.push(1);
+    return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
+  };
+  const atCap = new Request("https://proxy.example/fetch/api.telegram.org/bot123/sendDocument", {
+    method: "POST",
+    headers: { ...AUTH_HEADERS, "content-length": String(MAX_REQUEST_BODY_BYTES) },
+  });
+  assertEquals((await handleRequest(atCap, fakeFetch, TEST_SECRET)).status, 200);
+
+  const streamed = new Request("https://proxy.example/fetch/api.telegram.org/bot123/sendVideo", {
+    method: "POST",
+    headers: { ...AUTH_HEADERS },
+    body: new Uint8Array([1, 2, 3]),
+  });
+  assertEquals((await handleRequest(streamed, fakeFetch, TEST_SECRET)).status, 200);
+  assertEquals(seen.length, 2);
 });

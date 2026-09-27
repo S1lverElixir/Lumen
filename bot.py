@@ -608,6 +608,15 @@ from lumen_admin import (
 
 # ADMIN_SECRET_SEED — независимая соль для секретов (иначе всё выводилось из BOT_TOKEN и ротировалось только с ним). Пустой seed при пустом токене — случайный секрет процесса, а не захардкоженная строка.
 _ADMIN_SECRET_SEED = os.getenv("ADMIN_SECRET_SEED", "").strip() or BOT_TOKEN or secrets.token_hex(32)
+if not os.getenv("ADMIN_SECRET_SEED", "").strip() and BOT_TOKEN:
+    # Не поломка, а громкое предупреждение: ключи сейчас выводятся из токена
+    # бота, поэтому любая утечка токена (логи, сторонний сервис) = выгрузка всех
+    # чатов и подделка апдейтов. Задай ADMIN_SECRET_SEED в HF Space — и выводить
+    # ключи из токена перестанет (аудит 26.09.2026).
+    log.warning(
+        "[setup] ADMIN_SECRET_SEED is not set — WEBHOOK_SECRET/ADMIN_PANEL_KEY are derived from BOT_TOKEN. "
+        "A leaked bot token then exposes /export_state and /webhook. Set ADMIN_SECRET_SEED as an HF Space secret.",
+    )
 WEBHOOK_SECRET = hashlib.sha256(_ADMIN_SECRET_SEED.encode()).hexdigest()[:32]
 ADMIN_PANEL_KEY = hashlib.sha256(_ADMIN_SECRET_SEED.encode() + b"admin_panel").hexdigest()[:24]
 

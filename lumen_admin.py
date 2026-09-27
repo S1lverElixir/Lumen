@@ -26,7 +26,9 @@ from lumen_state_storage import _serialize_chat_state
 
 log = logging.getLogger("bot")
 
-app = FastAPI()
+# Схемы FastAPI выключены намеренно: /docs, /redoc и /openapi.json на публичном
+# Space описывали все эндпоинты и их параметры бесплатно (аудит 26.09.2026).
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 def _check_bearer_token(request: Request, expected: str) -> bool:
     """Только Bearer-заголовок: секрет в URL светится в логах/истории/Referer (CWE-598)."""
@@ -37,6 +39,21 @@ def _check_bearer_token(request: Request, expected: str) -> bool:
 def _check_admin_key(request: Request) -> bool:
     import bot
     return _check_bearer_token(request, bot.ADMIN_PANEL_KEY)
+
+def _log_denied(request: Request, what: str) -> None:
+    """Попытка без верного ключа видна в логах: раньше брутфорс /admin_keys или
+    /export_state не оставлял следов, а ответ был 200 с телом {"error": ...}
+    (аудит 26.09.2026)."""
+    log.warning(
+        '[admin] Denied %s: no valid Authorization: Bearer <key> from %s',
+        what, getattr(getattr(request, "client", None), "host", "?"),
+    )
+
+def _forbidden() -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={"error": "forbidden — missing or invalid Authorization: Bearer <key> header"},
+    )
 
 def _redact_secret(value: str) -> str:
     """Отпечаток: последние символы для сверки между рестартами, воспользоваться нельзя."""
@@ -57,17 +74,19 @@ async def healthcheck() -> dict[str, Any]:
     return {"status": "ok" if ready else "starting", "ready": ready}
 
 @app.get("/admin_keys")
-async def get_admin_keys(request: Request) -> dict[str, str]:
+async def get_admin_keys(request: Request) -> Any:
     """Полные секреты только по Bearer BOT_TOKEN (не ADMIN_PANEL_KEY — иначе круг); раньше светились в логах."""
     if not _check_bot_token_auth(request):
-        return {"error": "forbidden — missing or invalid Authorization: Bearer <BOT_TOKEN> header"}
+        _log_denied(request, "GET /admin_keys")
+        return _forbidden()
     import bot
     return {"webhook_secret": bot.WEBHOOK_SECRET, "admin_panel_key": bot.ADMIN_PANEL_KEY}
 
 @app.get("/webhook_url")
-async def get_webhook_url(request: Request) -> dict[str, str]:
+async def get_webhook_url(request: Request) -> Any:
     if not _check_admin_key(request):
-        return {"error": "forbidden — missing or invalid Authorization: Bearer <ADMIN_PANEL_KEY> header"}
+        _log_denied(request, "GET /webhook_url")
+        return _forbidden()
     space_host = os.getenv("SPACE_HOST", "").strip()
     if not space_host:
         author = os.getenv("SPACE_AUTHOR_NAME", "silverelixir").lower()
@@ -112,7 +131,8 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
     Открой в браузере чтобы увидеть, что реально заблокировано на исходящих
     соединениях из HF Spaces, а что доступно."""
     if not _check_admin_key(request):
-        return {"error": "forbidden — missing or invalid Authorization: Bearer <ADMIN_PANEL_KEY> header"}
+        _log_denied(request, "GET /diag")
+        return _forbidden()
     import bot
     bot_token = bot.BOT_TOKEN
     targets = {
@@ -171,7 +191,8 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
 async def export_state(request: Request) -> dict[str, Any]:
     """Ручной бэкап для cron: эфемерный диск и тир Upstash без реплики; гейт ADMIN_PANEL_KEY."""
     if not _check_admin_key(request):
-        return {"error": "forbidden — missing or invalid Authorization: Bearer <ADMIN_PANEL_KEY> header"}
+        _log_denied(request, "GET /export_state")
+        return _forbidden()
     import bot
     return {
         "exported_at": datetime.now().isoformat(),

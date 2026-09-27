@@ -765,6 +765,32 @@ def test_pick_callback_expired_known_token_reissues_buttons_once(monkeypatch):
         bot._pending_picks.clear()
 
 
+def test_pick_callback_ownerless_record_confined_to_its_chat(monkeypatch):
+    # Вопрос от поста канала/анонима (from_user пустой): user_id=None, и раньше
+    # кнопку мог нажать кто угодно. Теперь выбор живёт только в своём чате.
+    bot._pending_picks.clear()
+    bot._pending_picks["ownrless1"] = {
+        "chat_id": 777, "user_id": None, "scenario": "film",
+        "original": "посоветуй фильм", "expires": time.monotonic() + 300,
+        "lang": "ru",
+    }
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    try:
+        q_other = _make_pick_query("pick:ownrless1:0")
+        q_other.message.chat = SimpleNamespace(id=999, type=bot.ChatType.PRIVATE)
+        asyncio.run(bot.handle_pick_callback(q_other))
+        assert any(alert is True for _, alert in q_other.answered)
+        assert "ownrless1" in bot._pending_picks
+        fake_core.assert_not_awaited()
+        q_own = _make_pick_query("pick:ownrless1:2")
+        asyncio.run(bot.handle_pick_callback(q_own))
+        assert "Триллер" in q_own.message.edits[0][0]
+        fake_core.assert_awaited_once()
+    finally:
+        bot._pending_picks.clear()
+
+
 def test_callback_handlers_have_data_prefix_filters():
     # Регрессия 25.09.2026: handle_lang_callback висел первым БЕЗ фильтра и по
     # правилу first match wins съедал вообще все callback_query — кнопки pick

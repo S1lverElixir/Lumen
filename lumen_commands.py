@@ -630,6 +630,14 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
         return
+    if rec["user_id"] is None and query.message is not None and query.message.chat is not None:
+        # Вопрос задал пост канала или аноним в группе (from_user пустой) — тогда
+        # авторство не по id, а по чату: любой участник чата нажал бы чужую кнопку
+        # и сжёг токен (аудит 26.09.2026). Показываем выбор только в том же чате.
+        if query.message.chat.id != rec.get("chat_id"):
+            with contextlib.suppress(Exception):
+                await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
+            return
     # Все проверки пройдены — только теперь забираем токен (см. комментарий у get выше).
     bot._pending_picks.pop(token, None)
     choice = options[idx]
