@@ -1,0 +1,44 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "opencode": {
+      "models": {
+        "muse-spark-quick": {
+          "modelID": "muse-spark-1.3-contributor-free",
+          "name": "Muse Spark (quick)",
+          "settings": {
+            "reasoningEffort": "minimal"
+          }
+        },
+        "muse-spark-deep": {
+          "modelID": "muse-spark-1.3-contributor-free",
+          "name": "Muse Spark (deep)",
+          "settings": {
+            "reasoningEffort": "xhigh"
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "sentry": {
+        "type": "remote",
+        "url": "https://mcp.sentry.dev/mcp",
+        "enabled": true
+      }
+    }
+  },
+  "agents": {
+    "quick": {
+      "description": "простые задачи: поиск по файлам, мелкие правки, форматирование, простые вопросы",
+      "mode": "subagent",
+      "model": "opencode/muse-spark-quick"
+    },
+    "deep": {
+      "description": "сложные задачи: отладка, архитектура, рефакторинг, неочевидные баги, многошаговый анализ",
+      "mode": "subagent",
+      "model": "opencode/muse-spark-deep"
+    }
+  }
+}
