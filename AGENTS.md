@@ -37,6 +37,14 @@
 - Comments explain why, not what. Keep the dated evidence comments that prevent regressions, but keep them short and move long write-ups to docs/.
 - No filler prose, emojis, or heavy dash use in code, comments, or docs.
 
+## Comments (Russian, short, why-only)
+- Russian only, except structural headers containing identifiers/commands.
+- Explain why (reason, incident date, tradeoff), max 2-3 lines. Never restate what the code does.
+- Dated evidence tags stay short: (prod 17.09.2026: ...), (audit 26.09.2026), (review 27.09.2026).
+- Banned: code paraphrase, filler ("Важно", "Здесь мы", "Следует отметить"), emojis, commented-out code.
+- Add a comment only where non-obvious: magic numbers, regexes, workarounds, ordering constraints, counterintuitive behavior.
+- Module docstring: one line saying what the module does. No extraction history ("вынесено из bot.py").
+
 ## Docs lookup
 - When you need current library docs (aiogram, FastAPI, google-genai, Deno) rather than memory, use the `context7` MCP tools.
 

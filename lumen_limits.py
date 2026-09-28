@@ -1,19 +1,15 @@
 """
-lumen_limits.py — скользящее окно rate limit и очередь кнопок-уточнений.
-
-Вынесено из bot.py (P2 аудита): обе структуры — словари в памяти процесса
-с часовой чисткой/потолками, без зависимости от Telegram/LLM, поэтому живут
-отдельно. bot.py реэкспортирует имена — `bot.X` в тестах не менялся.
+lumen_limits.py. Скользящее окно rate limit и очередь кнопок уточнений.
+Выделено из bot.py (P2 аудита). Хранилища в памяти процесса, без Telegram и LLM.
+bot.py реэкспортирует имена, тесты через bot.X не менялись.
 """
 from __future__ import annotations
 
 import time
 from typing import Any
 
-# Простой трекер для rate limiting.
-# Числа читаем через bot._env_number (импорт отложенный: bot импортирует этот
-# модуль) — опечатка в переменной окружения не должна ронять бот на старте
-# (аудит 26.09.2026).
+# Числа через bot._env_number с отложенным импортом.
+# Опечатка в env не роняет старт (аудит 26.09.2026).
 def _env_number(name: str, default: float | int, *, cast: type = float, min_value: float | None = None) -> float | int:
     try:
         import bot
@@ -28,7 +24,7 @@ user_rate_limits: dict[int, list[float]] = {}
 
 
 def _cleanup_rate_limit_dict() -> None:
-    """Чистка раз в час: скользящее окно оставляло пустые ключи навсегда — медленная утечка."""
+    """Чистка раз в час. Пустые ключи копились навсегда и давали медленную утечку."""
     now = time.time()
     stale = [uid for uid, ts in user_rate_limits.items() if not ts or now - ts[-1] > 3600]
     for uid in stale:
@@ -36,15 +32,14 @@ def _cleanup_rate_limit_dict() -> None:
 
 
 def _check_and_register_rate_limit(user_id: int | None) -> bool:
-    """Окно 5/30с; при отказе метка не пишется — иначе наказание продлевалось бы само."""
+    """Окно 5/30с. При отказе метка не пишется, иначе отказ продлевал бы сам себя."""
     if not user_id:
         return False
     now = time.time()
     if user_id not in user_rate_limits and len(user_rate_limits) >= MAX_RATE_LIMIT_KEYS:
         _cleanup_rate_limit_dict()
-        # Чистка сносит только протухших: при флуде свежими ID словарь рос бы без потолка.
-        # Добиваем жёстко — самых давно молчавших (найдено внешним аудитом). Сносим с запасом
-        # (до 90% потолка), чтобы не сканировать весь словарь на каждый новый ID (ревью ветки).
+        # Чистка убирает только протухших, при флуде свежими ID нужен жесткий снос (аудит).
+        # Сносим до 90 процентов потолка, чтобы не сканировать словарь на каждый новый ID.
         if len(user_rate_limits) >= MAX_RATE_LIMIT_KEYS:
             ordered = sorted(
                 user_rate_limits,
@@ -64,7 +59,7 @@ def _check_and_register_rate_limit(user_id: int | None) -> bool:
 
 PICK_TTL_SEC = _env_number("PICK_TTL_SEC", 300, min_value=1)
 MAX_PENDING_PICKS = _env_number("MAX_PENDING_PICKS", 500, cast=int, min_value=1)
-# Только в памяти: после рестарта кнопки честно протухают, это штатно.
+# Только память. После рестарта кнопки протухают, это штатно.
 _pending_picks: dict[str, dict[str, Any]] = {}
 
 

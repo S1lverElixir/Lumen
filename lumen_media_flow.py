@@ -1,8 +1,5 @@
 """
-lumen_media_flow.py — скачивание вложений из Telegram и учёт медиа-истории
-(вынесено из bot.py, P2 аудита). Чистые mime-утилиты живут в lumen_media.py
-и импортируются напрямую; связи с рантаймом bot.py — только через отложенный
-`import bot` внутри функций. bot.py реэкспортирует имена.
+lumen_media_flow.py — скачивание вложений из Telegram и учёт медиа-истории.
 """
 from __future__ import annotations
 

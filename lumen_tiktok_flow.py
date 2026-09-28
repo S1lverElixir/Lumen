@@ -64,10 +64,8 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
               residual_title = re.sub(re.escape(author_nick), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
          if author_uniq_clean:
               residual_title = re.sub(re.escape(author_uniq_clean), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
-         # Хендл АВТОРА ЗВУКА тоже вырезаем (прод 22.09.2026, [tiktok-music][diag]:
-         # raw 'original sound - account2525101295' — TikTok подставляет хендл автора звука
-         # в заголовок ДЕЙСТВИТЕЛЬНО безымянного звука; иначе остаток считался "настоящим
-         # названием" и в ТГ уезжало title=performer=хендл вместо локализованной подписи.
+         # Хендл автора звука тоже вырезаем: TikTok подставляет его в заголовок
+         # безымянного звука (прод 22.09.2026), иначе остаток считался названием.
          if raw_music_author:
               residual_title = re.sub(re.escape(raw_music_author), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
          is_original_sound = mentions_generic_phrase and not residual_title
@@ -95,11 +93,9 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
                    _stripped = re.sub(r"\s+[–—-]\s+" + re.escape(raw_music_author) + r"\s*$", "", cleaned_title, flags=re.IGNORECASE).strip()
                    if _stripped:
                         cleaned_title = _stripped
-              # TikWM иногда привозит поля перевёрнутыми (прод 22.09.2026: в title лежал юзернейм
-              # автора видео, в author — название трека; по той же ссылке в другой раз — наоборот).
-              # Чиним очевидный случай: название без единого пробела совпало с хендлом автора видео,
-              # а в "авторе" — фраза с пробелами. Однословный настоящий трек под правило не попадает:
-              # он не равен хендлу автора.
+              # TikWM иногда привозит title/author перевёрнутыми (прод 22.09.2026).
+              # Чиним очевидный случай: название без пробелов совпало с хендлом,
+              # а в "авторе" фраза с пробелами.
               _title_handle = cleaned_title.strip().lower().lstrip("@")
               _known_handles = {h for h in (author_uniq_clean.lower(), author_nick.lower()) if h}
               if _title_handle in _known_handles and re.search(r"\s", performer_name or ""):
@@ -227,11 +223,8 @@ async def _try_send_tiktok_slideshow(
          video_indices = [idx for idx, b in enumerate(downloaded) if b and _looks_like_video_bytes(b)]
          if video_indices:
               log.info('[tiktok] In the slideshow, %d of %d slides were recognized as video (live_images/magic bytes).', len(video_indices), len(downloaded))
-         # Пробинг длительности/размеров/превью для видео-слайдов — ПАРАЛЛЕЛЬНО
-         # для всех сразу (asyncio.gather), а не по очереди: каждый ffprobe/
-         # ffmpeg-вызов занимает время, и при нескольких видео-слайдах в одном
-         # слайдшоу последовательный перебор заметно увеличил бы общее время
-         # ответа без необходимости — эти вызовы независимы друг от друга.
+         # Пробинг видео-слайдов — параллельно (gather): вызовы независимы,
+         # по очереди заметно дольше.
          probe_results: dict[int, tuple[int, int, int, bytes | None]] = {}
          if video_indices:
               async def _probe_bounded(item_bytes: bytes) -> tuple[int, int, int, bytes | None]:

@@ -1,7 +1,7 @@
 """
-lumen_images.py — генерация изображений через Pollinations.ai.
-
-Вынесено из bot.py (аудит техдолга) — самый изолированный модуль: не пишет в chat_state/квоту, не зовёт Telegram. Сессию принимает параметром (общий getter `_get_http_session` в bot.py — второй источник соединений не заводим). `/imgmodel` и клавиатура выбора убраны 19.08.2026 — модель выбирает роутер (`_pick_image_model`).
+lumen_images.py — генерация изображений через Pollinations.ai. Модуль изолирован:
+не пишет в chat_state/квоту, не зовёт Telegram, сессию принимает параметром.
+Модель выбирает роутер (`_pick_image_model`).
 """
 
 from __future__ import annotations

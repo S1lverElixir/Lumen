@@ -168,11 +168,19 @@ async def _gemini_tts_bytes(text: str) -> tuple[bytes, str, str]:
         return bot._classify_model_error(bot._error_status(e, err_txt), err_txt) == "rate_limit"
 
     # TTS пишется в провайдер "gemini" — модели видны в /stats рядом с остальными.
+    # Различаем суточную квоту и минутный всплеск так же, как текстовый маршрут:
+    # иначе один 429 убирал бы TTS-модель из квоты до полуночи.
+    def _is_daily_quota(e: Exception) -> bool:
+        err_txt = bot._error_text(e).strip() or e.__class__.__name__
+        return bot._is_gemini_daily_quota(err_txt)
+
     return await _lumen_gemini_tts_bytes(
         bot.client, text, tts_models=bot.GEMINI_TTS_MODELS,
         is_rate_limit_error=_is_rate_limit,
         on_model_exhausted=lambda mname: bot._mark_quota_exhausted("gemini", mname),
         on_model_success=lambda mname: bot._record_quota_usage("gemini", mname),
+        is_daily_quota_error=_is_daily_quota,
+        on_model_rate_limited=lambda mname: bot._mark_rate_limited("gemini", mname),
         request_timeout_sec=bot.TTS_SYNTH_TIMEOUT_SEC,
     )
 
@@ -589,14 +597,31 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     # что у прежнего pop-first: всё синхронно до первого await ниже.
     rec = bot._pending_picks.get(token)
     # Язык для служебных реплик: из записи (если есть), иначе из чата кнопки.
+    # Фолбэк без создания записи: обычный _chat_lang через get_state заводил бы чат
+    # даже на чужой тап по неизвестному токену.
     _qchat = query.message.chat.id if query.message and query.message.chat else None
-    rec_lang = (rec or {}).get("lang") or bot._chat_lang(_qchat)
+    rec_lang = (rec or {}).get("lang") or bot._peek_chat_lang(_qchat)
+
+    def _is_rec_owner(rec_rec: dict) -> bool:
+        """Чей это выбор. Запись без user_id (пост канала/аноним) принадлежит чату."""
+        owner_id = rec_rec.get("user_id")
+        if owner_id is not None and query.from_user is not None and query.from_user.id != owner_id:
+            return False
+        if owner_id is None and query.message is not None and query.message.chat is not None:
+            return query.message.chat.id == rec_rec.get("chat_id")
+        return True
+
+    if rec is not None and not _is_rec_owner(rec):
+        # Проверка авторства ДО перевыпуска: иначе чужой тап по протухшей кнопке
+        # продлевал бы чужой выбор новыми кнопками (враждебное ревью 27.09.2026).
+        with contextlib.suppress(Exception):
+            await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
+        return
+
     if rec is None or rec["expires"] < time.monotonic():
         if rec is not None and query.message is not None:
-            # Протухший, но известный выбор — молча выдаём свежие кнопки вместо
-            # стены "протухло, пиши текстом". Старый токен забираем явно (выше
-            # теперь get, а не pop). Второй такой тап упрётся в rec None ниже
-            # и честно покажет pick_expired. Один ресенд.
+            # Протухший известный выбор — молча свежие кнопки вместо стены текста.
+            # Один ресенд: второй тап упрётся в rec None и честно покажет expired.
             bot._pending_picks.pop(token, None)
             _purge_expired_picks()
             _enforce_pending_picks_cap()
@@ -644,13 +669,17 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
                 await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
             return
     # Все проверки пройдены — только теперь забираем токен (см. комментарий у get выше).
+    # Без сообщения кнопки не во что упереть: токен не трогаем, иначе тап из инлайн
+    # режима сжёг бы чужой выбор без дела.
+    question_msg = query.message
+    if question_msg is None:
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
     bot._pending_picks.pop(token, None)
     choice = options[idx]
     with contextlib.suppress(Exception):
         await query.answer()
-    question_msg = query.message
-    if question_msg is None:
-        return
     with contextlib.suppress(Exception):
         # Клавиатуру снимаем пустой разметкой, иначе кнопки повиснут (повторный тап всё равно упрётся в pop).
         await bot._tg_call(

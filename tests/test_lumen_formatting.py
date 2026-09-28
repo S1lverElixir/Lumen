@@ -1,4 +1,4 @@
-"""
+﻿"""
 test_lumen_formatting.py — юнит-тесты на lumen_formatting.py: конвертация markdown-подобного
 текста Lumen в Telegram HTML (_md_to_html), защитная сетка от сырого LaTeX (_scrub_latex),
 нормализация маркеров списков (_normalize_bullet_markers).
@@ -643,3 +643,63 @@ def test_rich_prices_are_not_treated_as_math():
     assert lumen_formatting._md_to_rich_html("от $50 до $100") == "от $50 до $100"
     assert lumen_formatting._md_to_rich_html("всего $80 000") == "всего $80 000"
     assert lumen_formatting._md_to_rich_html("$x$") == "<tg-math>x</tg-math>"
+
+
+def test_inline_splitters_leave_structural_lines_alone():
+    # Регрессия (враждебное ревью 27.09.2026): разнос слипшихся списков ел цитаты,
+    # заголовки и строки markdown-таблиц — пользователь видел пустую плашку цитаты,
+    # торчащее "##" и разорванную таблицу.
+    quoted = "> 1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn"
+    out = lumen_formatting._md_to_html(quoted)
+    assert out.startswith("<blockquote>") and out.endswith("</blockquote>")
+    assert "1." in out, f"пункты должны остаться внутри цитаты: {out!r}"
+    assert "1." in lumen_formatting._md_to_rich_html(quoted)
+
+    head = "## 1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn"
+    assert "##" not in lumen_formatting._md_to_html(head)
+    rich_head = lumen_formatting._md_to_rich_html(head)
+    assert rich_head.startswith("<h3>") and "\n" not in rich_head, rich_head
+
+    table = "| A | B |\n|---|---|\n| 1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn | four |"
+    assert "<b>A:</b>" in lumen_formatting._md_to_html(table), "разнос разорвал строку таблицы"
+    rich_table = lumen_formatting._md_to_rich_html(table)
+    assert "<table" in rich_table and "<td>1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn</td>" in rich_table
+
+    # Таблица без внешних пайпов: строка не начинается с `|`, но разносчик обязан
+    # узнать блок таблицы, иначе HTML-путь рвал её до детекта, а rich — нет.
+    bare_table = "Name | Age\n---|---\n1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn | four"
+    html_bare = lumen_formatting._md_to_html(bare_table)
+    assert "<b>Name:</b>" in html_bare and "---" not in html_bare, html_bare
+    rich_bare = lumen_formatting._md_to_rich_html(bare_table)
+    assert "<table" in rich_bare and "1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn" in rich_bare
+
+    # Буллеты тоже не лезут в служебные строки (длина обязана превышать порог 200).
+    long_items = " • ".join(f"пункт номер {i} с достаточно длинным описанием" for i in range(4))
+    for structural in (f"> вводная {long_items}", f"## вводная {long_items}", f"| вводная {long_items} | конец |"):
+        assert lumen_formatting._split_inline_bullets(structural) == structural, structural[:60]
+    long_numbered = "1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn"
+    for structural in (f"> {long_numbered}", f"## {long_numbered}"):
+        assert "\n" not in lumen_formatting._split_inline_numbered(structural), structural[:60]
+
+
+def test_inline_splitters_still_split_prose():
+    # Граница правки: обычная проза по-прежнему разносится.
+    prose = "1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn"
+    assert lumen_formatting._split_inline_numbered(prose).count("\n") == 2
+    assert lumen_formatting._split_inline_bullets(prose) == prose
+
+
+def test_scrub_latex_int_is_not_eaten_by_in():
+    # Регрессия (враждебное ревью 27.09.2026): в карте символов \in шёл раньше \int,
+    # поэтому "\int_0^1" превращался в "∈t₀¹".
+    assert lumen_formatting._scrub_latex(r"\int_0^1 x dx") == "∫₀¹ x dx"
+    assert lumen_formatting._scrub_latex(r"a \in b") == "a ∈ b"
+    assert lumen_formatting._scrub_latex(r"\infty") == "∞"
+
+
+def test_rich_heading_keeps_scrubbed_latex():
+    # Регрессия (враждебное ревью 27.09.2026): заголовок уходил в плейсхолдер ДО
+    # общего _scrub_latex, поэтому "\alpha" оставался сырым в <h3>.
+    out = lumen_formatting._md_to_rich_html("## Коэффициент \\alpha и \\int_0^1")
+    assert "\\alpha" not in out and "\\int" not in out
+    assert "α" in out and "∫" in out

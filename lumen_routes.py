@@ -1,12 +1,7 @@
 """
-lumen_routes.py — LLM-маршрутизация: OpenRouter/Gemini вызовы с фолбэком,
-построение истории/конфигов и _run_route (вынесено из bot.py, P2 аудита).
-
-Связи с рантаймом bot.py — только через отложенный `import bot` внутри функций
-(модульного цикла нет). bot.py реэкспортирует имена — `bot.ask_gemini`,
-`bot._run_route` и т.п. в тестах и `_handle_message_core` не менялись.
-Подменяемые в тестах имена (`bot.ask_gemini`, `bot._or_request`, ...) вызываются
-через `bot.` и внутри модуля, чтобы monkeypatch видел их как раньше.
+lumen_routes.py — LLM-маршрутизация: OpenRouter/Gemini с фолбэком, история,
+конфиги, _run_route. Подменяемые в тестах имена вызываются через `bot.`,
+чтобы monkeypatch видел их как раньше.
 """
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ import logging
 import time
 from collections import deque
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Callable
 
 import aiohttp
 from aiogram.types import Message
@@ -147,6 +142,18 @@ def _is_account_wide_or_rate_limit(text: str) -> bool:
     low = text.lower()
     return "free-models-per-day" in low
 
+def _is_gemini_daily_quota(text: str) -> bool:
+    """Суточная квота Gemini против минутного лимита запросов. Оба приходят как 429,
+    но запирать модель до утра можно только за первый: минутный лимит у Google сыпется
+    на любом всплеске (враждебное ревью 27.09.2026). Тексты ошибок — по документации
+    Google (RESOURCE_EXHAUSTED с "per day"/"daily limit"). Отдельно ловим слитное
+    PerDay из имён метрик вида GenerateRequestsPerDayPerProjectPerModel — иначе
+    настоящая суточная квота выглядела бы минутным всплеском."""
+    low = text.lower()
+    return any(tok in low for tok in (
+        "per day", "per_day", "perday", "daily limit", "daily quota", "quota exceeded for the day",
+    ))
+
 async def _probe_or_model_liveness() -> None:
     """Проактивная проверка живости (раз в сутки): только предупреждает в логах тем же паттерном, что у известных мёртвых — реестр _OR_MODEL_HEALTH не мутирует (курируется вручную). Ротация day-of-year % len — за N дней проверяются все модели списка за те же 3 запроса/сутки."""
     import bot
@@ -177,7 +184,8 @@ async def _probe_or_model_liveness() -> None:
 
 async def _chat_completion_chain(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
-    request_fn, provider: str, deadline: float | None = None,
+    request_fn, provider: str, deadline: float | None = None, stop_on: Callable[[Exception], bool] | None = None,
+    log_label: str | None = None,
 ) -> tuple[str, str]:
     """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (OpenRouter и Groq).
 
@@ -189,13 +197,21 @@ async def _chat_completion_chain(
 
     Аккаунтный лимит OpenRouter (free-моделей на сутки) обрывает цепочку сразу —
     это осталось в обёртке _or_chat_completion_with_fallback, потому что у Groq
-    лимит скоупный на модель, и обрыв там означал бы лишний отказ."""
+    лимит скоупный на модель, и обрыв там означал бы лишний отказ.
+
+    stop_on — предикат "этот отказ конец всей цепочки". ВАЖНО: решать это должен
+    сам цикл. Раньше ранний выход жил прямо в теле цикла, а когда петли объединили,
+    он уехал в обёртку request_fn, и общий `except` его проглатывал — цепочка
+    выжигалась целиком вместо одной попытки (враждебное ревью 27.09.2026).
+    log_label — тег для логов/источников скраба: у OpenRouter он исторически "or",
+    поэтому используем provider-строку извне, а не 'openrouter'."""
     import bot
+    label = log_label or provider
     last_exc: Exception | None = None
     tried: list[str] = []
     for model_trial in trial_models:
         if deadline is not None and time.monotonic() > deadline:
-            log.warning('[%s] Route time budget exhausted before model %s. Tried: %s', provider, model_trial, ", ".join(tried) or "none")
+            log.warning('[%s] Route time budget exhausted before model %s. Tried: %s', label, model_trial, ", ".join(tried) or "none")
             raise bot.RouteBudgetExceededError(tried)
         tried.append(model_trial)
         messages[0]["content"] = bot.get_system_prompt(model_trial)
@@ -213,14 +229,20 @@ async def _chat_completion_chain(
                 raise RuntimeError(f"Model {model_trial} returned an empty response")
 
             answer = _scrub_identity_leak(answer, source=f"{provider}_chat_completion:{model_trial}")
-            log.info('[%s] Successful response from model %s (primary=%s, models tried: %d)', provider, model_trial, primary_model_id, len(tried))
+            log.info('[%s] Successful response from model %s (primary=%s, models tried: %d)', label, model_trial, primary_model_id, len(tried))
             _record_model_latency(_model_speed_key(provider, model_trial), total_sec=time.monotonic() - attempt_start)
             return answer, model_trial
         except bot.RouteBudgetExceededError:
             raise
         except Exception as exc:
             last_exc = exc
-            log.warning("[%s] Model %s failed: %s. Switching to next candidate...", provider, model_trial, str(last_exc) or last_exc.__class__.__name__)
+            if stop_on is not None and stop_on(exc):
+                log.warning(
+                    '[%s] Model %s failed with an account-wide limit — stopping the chain, the rest would fail the same way.',
+                    label, model_trial,
+                )
+                raise
+            log.warning("[%s] Model %s failed: %s. Switching to next candidate...", label, model_trial, str(last_exc) or last_exc.__class__.__name__)
 
     if last_exc:
         raise last_exc
@@ -233,24 +255,21 @@ async def _or_chat_completion_with_fallback(
 ) -> tuple[str, str]:
     """Fallback-цикл по цепочке OpenRouter поверх общего _chat_completion_chain. Аккаунтный
     лимит free-моделей/сутки обрывает остаток цепочки сразу — они упали бы тем же
-    ответом, просто потратив по попытке на модель."""
+    ответом, просто потратив по попытке на модель. Решение обрыва принимает цикл через
+    stop_on (в request_fn raise проглатывался общим except — враждебное ревью 27.09.2026)."""
     import bot
 
     async def _request(payload: dict, dl: float | None):
-        try:
-            return await bot._or_request("chat/completions", "POST", json_body=payload, deadline=dl)
-        except bot.OpenRouterAPIError as exc:
-            if bot._is_account_wide_or_rate_limit((str(exc) or exc.__class__.__name__).lower()):
-                log.warning(
-                    '[or] Detected an account-wide OpenRouter limit (free-models-per-day) on model %s — stopping the remaining candidates in the chain, they would fail with the same error anyway.',
-                    payload.get("model"),
-                )
-                raise
-            raise
+        return await bot._or_request("chat/completions", "POST", json_body=payload, deadline=dl)
+
+    def _account_wide(exc: Exception) -> bool:
+        txt = bot._error_text(exc).strip() or exc.__class__.__name__
+        return bot._is_account_wide_or_rate_limit(txt.lower())
 
     return await _chat_completion_chain(
         messages, trial_models, primary_model_id,
         request_fn=_request, provider="openrouter", deadline=deadline,
+        stop_on=_account_wide, log_label="or",
     )
 
 async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
@@ -455,14 +474,9 @@ def _build_gemma_identity_contents(model_id: str, contents: list[types.Content])
     ]
     call_contents = _identity_ctx + contents
 
-    # Разросшаяся история "разбавляет" единственное упоминание личности, которое
-    # стоит в самом НАЧАЛЕ контекста (см. _identity_ctx выше) — чем длиннее
-    # разговор, тем физически легче модели "заиграться" в инъекцию, встретившуюся
-    # где-то в хвосте. У Gemma нет отдельного канала system_instruction (в отличие
-    # от остальных моделей — см. ветку выше), где эта проблема так остро не стоит,
-    # поэтому именно здесь добавляем короткое напоминание НЕПОСРЕДСТВЕННО перед
-    # последним (новым) сообщением пользователя — ближе к концу контекста модель
-    # учитывает инструкции надёжнее, чем инструкции в давно разросшемся начале.
+    # Длинная история разбавляет упоминание личности в начале контекста, а у Gemma
+    # нет отдельного канала system_instruction — дублируем напоминание прямо
+    # перед новым сообщением: конец контекста модель учитывает надёжнее.
     if len(contents) > 12:
         _reminder = types.Content(role="user", parts=[types.Part.from_text(
             text="[Напоминание перед ответом: ты — Lumen, не называй себя Gemini/Gemma/Google. "
@@ -555,14 +569,14 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
         if not ans and tool_calls:
             ans = "[Tool call: " + "; ".join(tool_calls) + "]"
         elif not ans and reasons:
+            retry_failed = False
             if any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
-                # Модель сломала собственный вызов инструмента — повторяем БЕЗ инструментов (ответ своими знаниями вместо ошибки).
+                # Модель сломала свой вызов инструмента — повторяем без инструментов.
                 try:
                     retry_gconfig = gconfig.model_copy(update={"tools": None}) if gconfig is not None else None
-                    # Async-клиент, а не to_thread: wait_for тогда реально отменяет зависший
-                    # запрос (поток to_thread отменить нельзя — он бы жил дальше в фоне).
-                    # Повтор тоже влезет в бюджет маршрута: полный TELEGRAM_AI_TIMEOUT
-                    # поверх истраченного держал бы lock чата за ROUTE_TOTAL_BUDGET_SEC.
+                    # Async-клиент, а не to_thread: wait_for реально отменяет зависший
+                    # запрос. Повтор тоже в бюджет маршрута, иначе держал бы лок
+                    # поверх истраченного.
                     retry_timeout = bot.TELEGRAM_AI_TIMEOUT
                     if deadline is not None:
                         retry_timeout = min(retry_timeout, max(0.0, deadline - time.monotonic()))
@@ -576,9 +590,20 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                     if retry_text.strip():
                         ans = retry_text
                         log.warning("[gemini] Model %s had MALFORMED_FUNCTION_CALL, retried without tools successfully.", model_id)
+                    elif deadline is not None and deadline - time.monotonic() <= 0:
+                        # Повтор не успел уложиться в бюджет маршрута. Возвращаем ПУСТОЙ
+                        # ответ, чтобы ask_gemini ушёл на следующую модель, а не подсунул
+                        # пользователю "[Ответ заблокирован...]" (враждебное ревью 27.09.2026):
+                        # раньше повтор выполнялся почти всегда, и эта ветка не всплывала.
+                        retry_failed = True
+                        log.warning("[gemini] Retry after MALFORMED_FUNCTION_CALL skipped: route budget is exhausted, trying the next model.")
                 except Exception as retry_exc:
                     log.warning("[gemini] Retry without tools after MALFORMED_FUNCTION_CALL also failed: %s", retry_exc)
-            if not ans:
+                    # Повтор упал — тоже отдаём пусто: маршрут должен уйти на следующую
+                    # модель, а не показывать заглушку блокировки как готовый ответ
+                    # (иначе цепочка останавливалась на первой же битой модели).
+                    retry_failed = True
+            if not ans and not retry_failed:
                 ans = f"[Ответ заблокирован или пуст. Причина: {', '.join(reasons)}]"
     # Пустая строка без блокировки — не "Empty response": ask_gemini пробует следующую модель.
     return ans.strip()
@@ -663,9 +688,15 @@ async def ask_gemini(
             exc_class = exc.__class__.__name__
 
             if kind == "rate_limit":
-                # Квота — реальный лимит Google, а не перегрузка: помечаем исчерпанной (влияет на будущие маршруты).
-                bot._mark_quota_exhausted("gemini", curr_model_id)
-                quota_exhausted_models.append(curr_model_id)
+                # 429 у Google — обычно минутный лимит запросов, а не суточная квота.
+                # Раньше любой 429 ставил суточную метку, и один всплеск убирал модель из
+                # роута до полуночи (враждебное ревью 27.09.2026). Суточную квоту Google
+                # опознаём по тексту ошибки — тогда метка держится до утра.
+                if bot._is_gemini_daily_quota(txt):
+                    bot._mark_quota_exhausted("gemini", curr_model_id)
+                    quota_exhausted_models.append(curr_model_id)
+                else:
+                    bot._mark_rate_limited("gemini", curr_model_id)
                 next_model = bot._next_fallback_model(tried_models, chain)
                 if next_model:
                     log.warning("[gemini] Model %s quota exhausted (429). Switching to %s", curr_model_id, next_model)

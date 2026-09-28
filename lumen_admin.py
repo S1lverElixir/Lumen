@@ -1,11 +1,6 @@
 """
-lumen_admin.py — HTTP-слой бота: FastAPI-приложение, секрет-гейты и
-admin/diag/export эндпоинты (вынесено из bot.py, P2 аудита).
-
-Связи с рантаймом bot.py — ТОЛЬКО через отложенный `import bot` внутри функций
-(модульного цикла нет: bot.py импортирует этот модуль, а не наоборот).
-bot.py реэкспортирует имена — `bot.webhook_handler`, `bot.healthcheck`,
-`bot.WEBHOOK_SECRET` и т.п. в тестах и main() не менялись.
+lumen_admin.py — HTTP-слой: FastAPI-приложение, секрет-гейты, admin/diag/export.
+Связь с bot.py — только через отложенный `import bot` внутри функций.
 """
 from __future__ import annotations
 

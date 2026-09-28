@@ -262,3 +262,45 @@ def test_proxy_middleware_strips_stale_secret_and_requires_secret():
             proxy_secret="", proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
         )
 
+
+def test_proxy_middleware_rejects_authenticated_redirects():
+    # Редирект через прокси отключён в коде, но ветка была без теста: регрессия
+    # осталась бы незамеченной. Секрет при этом уже снят с заголовков.
+    from multidict import CIMultiDict
+    from types import SimpleNamespace
+    from yarl import URL
+
+    (authenticate,) = lumen_telegram_transport.proxy_auth_middlewares(
+        proxy_secret="proxy-secret-abc",
+        proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
+    )
+
+    class _Req:
+        def __init__(self):
+            self.url = URL("https://proxy.example/fetch/api.telegram.org/bot123/getMe")
+            self.headers = CIMultiDict()
+
+    class _Resp302:
+        status = 302
+
+        def __init__(self, req):
+            self.request_info = SimpleNamespace(
+                url=req.url, method="GET", headers=CIMultiDict(req.headers), real_url=req.url,
+            )
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    async def _handler_302(request):
+        resp = _Resp302(request)
+        seen_resp["resp"] = resp
+        return resp
+
+    seen_resp = {}
+    request = _Req()
+    with pytest.raises(RuntimeError, match="redirects are disabled"):
+        asyncio.run(authenticate(request, _handler_302))
+    assert seen_resp["resp"].closed is True
+    assert "X-Lumen-Proxy-Secret" not in request.headers
+

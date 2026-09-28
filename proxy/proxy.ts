@@ -50,9 +50,30 @@ export const ALLOWED_HOSTS = new Set([
 ]);
 
 // Кап объявленного тела запроса (аудит 26.09.2026). Telegram сам режет загрузки
-// на 50 МБ, а прокси — общий трафик аккаунта, поэтому верхняя граница взята с
-// запасом под legitimately большие файлы, но не «без предела».
+// на 50 МБ, а прокси — общий трафик аккаунта, поэтому граница взята с запасом
+// под честно большие файлы, но не «без предела».
 export const MAX_REQUEST_BODY_BYTES = 100 * 1024 * 1024;
+
+export function limitStreamBytes(
+  stream: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+): ReadableStream<Uint8Array> | null {
+  // Потоковый кап без буферизации: считаем байты на лету и рвём стрим при
+  // превышении. Нужен и для тела запроса без Content-Length, и для тела ответа:
+  // иначе объявленный кап обходился chunked-потоком любого размера.
+  if (!stream) return stream;
+  let total = 0;
+  return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        controller.error(new Error(`Body exceeds ${maxBytes} byte cap`));
+      } else {
+        controller.enqueue(chunk);
+      }
+    },
+  }));
+}
 
 // Заголовки, которые нельзя слепо пробрасывать дальше как есть — Host/Connection
 // в запросе относятся к соединению с ЭТИМ (Deno) сервером, а не с реальным
@@ -65,12 +86,9 @@ export const MAX_REQUEST_BODY_BYTES = 100 * 1024 * 1024;
 const HOP_BY_HOP_REQUEST_HEADERS = ["host", "connection"];
 const HOP_BY_HOP_RESPONSE_HEADERS = ["content-encoding", "content-length", "connection", "transfer-encoding"];
 
-// Разложено на чистые, независимо тестируемые функции (resolveTarget/
-// buildForwardHeaders/buildResponseHeaders) вместо одного большого обработчика —
-// тот же принцип, что и в остальном проекте Lumen (см. lumen_tiktok.py и др.):
-// маршрутизацию и фильтрацию заголовков можно проверить юнит-тестами без единого
-// реального сетевого вызова, а сама сетевая часть (handleRequest) тестируется
-// отдельно через подмену fetch.
+// Разложено на чистые тестируемые функции вместо одного большого обработчика:
+// маршрутизацию и заголовки проверяют юниты без сети, сетевую часть —
+// handleRequest через подмену fetch.
 
 export type TargetResolution =
   | { ok: true; host: string; url: string }
@@ -79,13 +97,9 @@ export type TargetResolution =
 export function resolveTarget(pathname: string, search: string): TargetResolution {
   // pathname всегда начинается с "/", поэтому после split("/") первый элемент —
   // всегда пустая строка, а реальные сегменты — начиная с индекса 1. Намеренно
-  // НЕ фильтруем пустые сегменты через .filter(Boolean) (как было в первой
-  // версии) — НАЙДЕНО ПРИ ТЕСТИРОВАНИИ: filter(Boolean) съедал завершающий "/"
-  // у путей вида "/fetch/host/api/" (пустой хвостовой сегмент после join
-  // как раз и восстанавливает эту же завершающую "/"), из-за чего запрос
-  // TikWM вида ".../api/?url=..." ушёл бы к апстриму как ".../api?url=..."
-  // без слеша — ровно тот класс "почти правильного, но не совсем" URL, из-за
-  // которого уже был потрачен не один час отладки в этом проекте.
+  // Пустые сегменты намеренно не фильтруем: filter(Boolean) съедал завершающий "/"
+  // у путей вида "/fetch/host/api/", и запрос TikWM уходил без слеша (дорогая
+  // отладка в истории проекта).
   const parts = pathname.split("/");
   if (parts.length < 3 || parts[1] !== "fetch" || parts[2] === "") {
     return { ok: false, status: 404, message: "Not found — ожидаемый формат пути: /fetch/<host>/<путь>" };
@@ -111,12 +125,12 @@ export function buildResponseHeaders(upstreamHeaders: Headers): Headers {
   return headers;
 }
 
-// fetchImpl — точка подмены для тестов (тот же приём, что bot._get_http_session
-// и т.п. в Python-части проекта) — реальная сеть не нужна ни одному юнит-тесту.
+// fetchImpl — точка подмены для тестов: реальная сеть юнитам не нужна.
 export async function handleRequest(
   req: Request,
   fetchImpl: typeof fetch = fetch,
   proxySecret: string | undefined = undefined,
+  maxBodyBytes: number = MAX_REQUEST_BODY_BYTES,
 ): Promise<Response> {
   if (!proxySecret || !/^[\x21-\x7e]+$/.test(proxySecret)) {
     return new Response("Proxy authentication unavailable", { status: 503 });
@@ -146,13 +160,15 @@ export async function handleRequest(
   // Кап тела запроса по объявленному content-length: без него любой, у кого есть
   // секрет, лил в прокси поток любого размера и съедал общий лимит Deno-аккаунта
   // (ровно то, от чего прокси и защищает — аудит 26.09.2026). Потоковое тело без
-  // заголовка пропускаем дальше: его уже не обойти, не буферизуя.
+  // заголовка тоже капаем на лету, а не пропускаем: иначе кап обходился chunked.
   const declaredLength = Number(req.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
+  if (Number.isFinite(declaredLength) && declaredLength > maxBodyBytes) {
     return new Response("Request body too large", { status: 413 });
   }
 
   const forwardHeaders = buildForwardHeaders(req.headers);
+  const hasBody = req.method !== "GET" && req.method !== "HEAD";
+  const cappedRequestBody = hasBody ? limitStreamBytes(req.body, maxBodyBytes) : undefined;
   let upstreamResp: Response;
   try {
     upstreamResp = await fetchImpl(target.url, {
@@ -163,7 +179,7 @@ export async function handleRequest(
       // передать body для них) — для остальных методов пробрасываем тело
       // напрямую как поток, не буферизуя целиком в памяти (важно для
       // multipart file-загрузок в Telegram, см. докстринг выше).
-      body: (req.method === "GET" || req.method === "HEAD") ? undefined : req.body,
+      body: cappedRequestBody,
       // @ts-ignore — Deno требует duplex:"half" для потокового тела запроса
       // (часть стандарта WHATWG fetch для body типа ReadableStream).
       duplex: "half",
@@ -173,7 +189,7 @@ export async function handleRequest(
   }
 
   const respHeaders = buildResponseHeaders(upstreamResp.headers);
-  return new Response(upstreamResp.body, {
+  return new Response(limitStreamBytes(upstreamResp.body, maxBodyBytes), {
     status: upstreamResp.status,
     headers: respHeaders,
   });

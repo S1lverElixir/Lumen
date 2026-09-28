@@ -184,13 +184,9 @@ def _normalize_telegram_base_url(url: str) -> str:
     """Голый хост без схемы чиним в https://: иначе aiohttp валится на каждом вызове невнятной ошибкой."""
     url = url.strip().rstrip("/")
     if url and not url.lower().startswith(("http://", "https://")):
-        # Реальный инцидент: TELEGRAM_API_BASE_URL был задан как голый хост воркера
-        # (например "tg-proxy.egor-kuzko-04.workers.dev") без схемы. aiohttp такой URL
-        # не проглатывает — падает с "Network error" на КАЖДЫЙ вызов (getMe/setWebhook/
-        # deleteWebhook/setMyCommands и далее вообще все reply/send_message через aiogram),
-        # при этом само сообщение об ошибке невнятное (просто битый URL как текст), не
-        # указывает на реальную причину. Раз уж опечатка в схеме случилась один раз —
-        # молча чинить её тут дешевле, чем снова терять время на диагностику того же самого.
+        # Реальный инцидент: TELEGRAM_API_BASE_URL задали голым хостом без схемы —
+        # aiohttp падал с невнятным "Network error" на каждый вызов. Молча чиним
+        # схему тут: дешевле, чем снова диагностировать ту же опечатку.
         log.warning('[setup] Telegram proxy URL given without a scheme (%r) — adding https:// automatically.', url)
         url = "https://" + url
     return url
@@ -212,12 +208,9 @@ _proxy_rotation_lock = asyncio.Lock()
 # База прокси для TikWM: HF IP банится с пустым 403, лечится только прокси (инцидент 11–12.08.2026).
 # Пусто — стучимся в два зеркала напрямую, как раньше.
 TIKWM_API_BASE_URL = os.getenv("TIKWM_API_BASE_URL", "").strip().rstrip("/")
-# Резервные прокси для TikWM (тот же принцип, что и TELEGRAM_API_BASE_URL_FALLBACKS
-# выше по логике — см. _TELEGRAM_PROXY_CANDIDATES) — асимметрии быть не должно:
-# TikWM зависит от того же самого единственного Deno-прокси, что и Telegram, и
-# точка отказа для обоих одна и та же, но раньше только у Telegram был путь
-# переключиться на резервный адрес. Пусто по умолчанию — поведение не меняется
-# для тех, кто не настраивал (см. _tikwm_proxy_candidates ниже).
+# Резервные прокси для TikWM — та же схема, что у Telegram выше: раньше резервный
+# путь был только у Telegram, хотя точка отказа одна. Пусто по умолчанию —
+# поведение без настройки не меняется.
 _TIKWM_API_BASE_URL_FALLBACKS = [
     u.strip().rstrip("/") for u in os.getenv("TIKWM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
 ]
@@ -317,39 +310,18 @@ TELEGRAM_GET_FILE_TIMEOUT = _env_number("TELEGRAM_GET_FILE_TIMEOUT", 15, min_val
 TELEGRAM_PROXY_COOLDOWN_SEC = _env_number("TELEGRAM_PROXY_COOLDOWN_SEC", 20, min_value=0)
 # Лимит ожидания следующего куска для любого провайдера: зависший стрим иначе держит лок чата бесконечно.
 STREAM_CHUNK_TIMEOUT_SEC = _env_number("STREAM_CHUNK_TIMEOUT_SEC", 30, min_value=1)
-# ── Паттерн "живой печати" при стриминге (см. lumen_typing_pace.py и
-# _run_streaming_reply ниже) ── Раньше во время стрима сообщение показывало РОВНО
-# то, что успело накопиться с последнего edit_text — если бэкенд (особенно у
-# бесплатных моделей OpenRouter, см. докстринг lumen_typing_pace.py про то, почему
-# скорость там не свойство модели) присылал текст парой больших кусков вместо
-# потока токен-в-токен, пользователь видел резкие скачки на 15-20 слов вместо
-# плавного набора. Теперь показ "подкрашивается" под оценённую (самокалибрующуюся,
-# НЕ захардкоженную — см. lumen_typing_pace.py) скорость конкретной модели: пока
-# реальный текст ещё приходит, видимый срез растёт по времени, а не скачком до
-# всего, что уже накоплено. STREAM_EDIT_MIN_INTERVAL_SEC — не чаще какого периода
-# реально дёргаем edit_text (тот же лимит, что защищал от 429 Telegram и раньше,
-# просто вынесен в именованную константу). STREAM_TYPING_TICK_SEC/_MAX_CATCHUP_TICKS —
-# только для "довывода" остатка ПОСЛЕ того, как стрим уже полностью получен, но
-# показан ещё не весь (см. catchup_reveal_steps) — произведение двух этих чисел
-# ограничивает МАКСИМАЛЬНУЮ добавленную задержку сверху реальной скорости ответа,
-# независимо от длины текста и точности оценки скорости.
+# ── Паттерн "живой печати" при стриминге (см. lumen_typing_pace.py) ──
+# Показ подкрашивается под оценённую скорость модели, чтобы куски не мигали
+# скачками. Три константы ниже — периоды правок и предел довывода остатка.
 STREAM_EDIT_MIN_INTERVAL_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_SEC", 1.2, min_value=0)
 STREAM_TYPING_TICK_SEC = _env_number("STREAM_TYPING_TICK_SEC", 0.5, min_value=0)
 STREAM_TYPING_MAX_CATCHUP_TICKS = _env_number("STREAM_TYPING_MAX_CATCHUP_TICKS", 6, cast=int, min_value=0)
-# FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска стрима (см.
-# lumen_model_speed.first_chunk_limit_sec): обычно-быстрая модель, зависшая
-# разово, бросается рано (12–25с вместо полных 30). Честная оговорка: предел
-# только УКОРАЧИВАЕТ ожидание, но не удлиняет — внутри генераторов кусков уже
-# стоит STREAM_CHUNK_TIMEOUT_SEC на каждый кусок, включая первый, и для
-# обычно-медленной модели первым сработает именно он. Итоговый предел первого
-# куска — всегда минимум из двух.
+# FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска (см.
+# lumen_model_speed.first_chunk_limit_sec): быструю зависшую модель бросаем рано.
+# Предел только укорачивает ожидание: первым сработает минимум из двух таймаутов.
 FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 12, min_value=1)
-# Анимация ожидания ("бегущие точки") в плейсхолдере, пока не пришёл первый
-# кусок стрима: первые полсекунды висит статичное "…" (дешевле, чем дёргать
-# API ради мгновенных ответов — их анимация вообще не касается), дальше —
-# кадр каждые _DOTS_TICK_SEC. Интервалы подобраны под лимит Telegram (не чаще
-# правки в секунду) с запасом; правки идут только показывать нечего (до
-# первого куска), поэтому с показом текста не конфликтуют.
+# Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
+# дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).
 _DOTS_START_AFTER_SEC = 0.5
 _DOTS_TICK_SEC = 1.2
 _DOTS_FRAMES = (".", "..", "…")
@@ -371,26 +343,25 @@ _PROCESS_START_MONOTONIC = time.monotonic()
 # выбор модели" ниже) ──
 # Без ретраев одной модели: любая ошибка — сразу следующая в маршруте; общий бюджет ROUTE_TOTAL_BUDGET_SEC держит лок чата от минутного зависания.
 ROUTE_MODEL_TIMEOUT_SEC = _env_number("ROUTE_MODEL_TIMEOUT_SEC", 22, min_value=1)
-# ROUTE_TOTAL_BUDGET_SEC — общий бюджет времени на ВЕСЬ маршрут одного сообщения,
-# включая ОБА провайдера (Gemini и OpenRouter), если маршрут предполагает
-# резервный переход между ними. Без этого потолка каскадный сбой сразу у многих
-# моделей/провайдеров мог бы растянуть один ответ на несколько минут, всё это
-# время удерживая лок чата (_chat_locks). При превышении бюджета дальнейшие
-# попытки прекращаются и пользователь получает честное "сейчас всё перегружено"
-# вместо тихого зависания.
+# ROUTE_TOTAL_BUDGET_SEC — общий бюджет на ВЕСЬ маршрут одного сообщения. Без него
+# каскадный сбой у многих моделей растягивал бы один ответ на минуты под локом чата.
 ROUTE_TOTAL_BUDGET_SEC = _env_number("ROUTE_TOTAL_BUDGET_SEC", 40, min_value=1)
-# HISTORY_SUMMARY_BUDGET_SEC — потолок саммаризации истории: без него два висящих
-# backend-вызова подряд (Groq + OpenRouter по ROUTE_MODEL_TIMEOUT_SEC каждый) держали бы
-# lock чата десятки секунд ПОСЛЕ готового ответа (найдено внешним аудитом).
+# HISTORY_SUMMARY_BUDGET_SEC — потолок саммаризации истории: без него висящие
+# вызовы держали бы лок чата десятки секунд уже после готового ответа.
 HISTORY_SUMMARY_BUDGET_SEC = _env_number("HISTORY_SUMMARY_BUDGET_SEC", 30, min_value=1)
 # Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
 DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
 # CHAT_LOCK_TIMEOUT_SEC — сколько ждём лок чата, прежде чем ответить «занято».
-# Обязан быть ВЫШЕ самой долгой защищаемой работы: /draw держит лок до
-# DRAW_TOTAL_BUDGET_SEC, поэтому хардкод 45с отдавал «занято» посреди ещё идущей
-# отрисовки, а в pick-кнопках стояло ещё и третье значение — 10с (аудит 26.09.2026).
-# Одно имя на все три места, чтобы значения снова не разъехались.
-CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 150, min_value=1)
+# Обратная сторона: пока ждём, юзер видит тишину. Поэтому держим НЕ выше хардкода
+# ожидания пользователя, а лок при этом остаётся защищаемым: работа под локом
+# ограничена собственным бюджетом и всегда try/finally его отпускает
+# (враждебное ревью 27.09.2026: значение 150с молчало почти 2.5 минуты).
+# Лок НЕ берут только слэш-команды (/draw, /tts — их хендлеры зарегистрированы
+# раньше общего @dp.message). Триггерные фразы («нарисуй», «озвучь») идут через
+# _handle_message_core ПОД локом: отрисовка держит его до DRAW_TOTAL_BUDGET_SEC,
+# озвучка — до конца синтеза. Это осознанно (один чат — одно дело за раз), но
+# второй вопрос во время длинной отрисовки честно получит «занято» через 45с.
+CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 45, min_value=1)
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
 # завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
 INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = _env_number("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", 10, min_value=0)
@@ -440,6 +411,7 @@ from lumen_chat_state import (
     _QUOTA_CHECK_THROTTLE_SEC,
     _maybe_alert_gemini_exhausted,
     _reset_quota_if_new_day,
+    _mark_rate_limited,
     load_global_quota,
     save_global_quota,
     _restore_single_chat,
@@ -462,6 +434,8 @@ from lumen_chat_state import (
     get_state,
     _chat_lang,
     _t,
+    _t_no_create,
+    _peek_chat_lang,
     _prune_old_chats,
     get_chat_lock,
     _evict_orphan_chat_locks,
@@ -653,10 +627,8 @@ ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "guest_message
 # хранение состояния и квот
 
 
-# Опциональное персистентное хранилище (Upstash Redis, бесплатный тир — см. README).
-# Если оба значения заданы, состояние пишется туда вместо эфемерного диска контейнера.
-# Если не заданы — поведение полностью как раньше (локальный файл в STATE_DIR), без
-# каких-либо изменений для тех, кто это не настраивал.
+# Опциональное хранилище Upstash Redis (см. README). Заданы оба значения — пишем
+# туда вместо диска контейнера; не заданы — всё как раньше, без изменений.
 UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip().rstrip("/")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
 USE_UPSTASH = bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN)
@@ -675,17 +647,10 @@ from lumen_state_storage import (
 )
 
 
-# `_urllib_request` (импортирован в самом начале файла) больше не используется
-# напрямую нигде в коде bot.py — реальный клиент Upstash REST API (единственный
-# потребитель) переехал в lumen_state_storage.py. Остаётся нужен как
-# `bot._urllib_request.urlopen` для существующих тестов, которые патчат его именно
-# по этому пути (см. пояснение про __all__ у первого блока (lumen_formatting) в
-# начале файла). CHAT_STATE_SCHEMA_VERSION аналогично не используется напрямую в
-# коде bot.py (сравнение идёт внутри _serialize_chat_state в lumen_state_storage.py),
-# но нужен как `bot.CHAT_STATE_SCHEMA_VERSION` тестам, сверяющим версию схемы снимка.
-# Имена из lumen_limits.py (RATE_LIMIT_*/user_rate_limits/MAX_PENDING_PICKS) код
-# bot.py сам не читает — они нужны как `bot.X` существующим тестам, поэтому тоже
-# здесь (импорт — вверху файла, рядом с остальными lumen_импортами).
+# `_urllib_request` в коде bot.py больше не используется — клиент Upstash переехал в
+# lumen_state_storage.py. Остаётся ради тестов, которые патчат `bot._urllib_request.urlopen`
+# (как и CHAT_STATE_SCHEMA_VERSION и имена из lumen_limits.py ниже — см. пояснение
+# про __all__ у первого блока в начале файла).
 __all__ = [
     "_urllib_request",
     "CHAT_STATE_SCHEMA_VERSION",
@@ -758,6 +723,7 @@ __all__ = [
     "_attempt_timeout",
     "_or_extract_text",
     "_is_account_wide_or_rate_limit",
+    "_is_gemini_daily_quota",
     "_probe_or_model_liveness",
     "_or_chat_completion_with_fallback",
     "ask_openrouter_text",
@@ -840,6 +806,7 @@ __all__ = [
     "_is_owner",
     "_is_privileged_in_chat",
     "_mark_quota_exhausted",
+    "_mark_rate_limited",
     "_record_quota_usage",
     "_trim_history",
     "PICK_TTL_SEC",
@@ -902,6 +869,9 @@ __all__ = [
     "mark_state_dirty",
     "get_state",
     "_chat_lang",
+    "_t",
+    "_t_no_create",
+    "_peek_chat_lang",
     "_check_and_register_rate_limit",
     "_record_passive_group_context",
     "_should_only_record_passively",
@@ -937,18 +907,12 @@ from lumen_images import (
     _pollinations_text_to_image,
 )
 
-# DEFAULT_POLLINATIONS_IMAGE_MODEL больше не читается напрямую нигде в остальном коде bot.py
-# (используется только внутри самой _pick_image_model в lumen_images.py) — но
-# остаётся нужен как `bot.DEFAULT_POLLINATIONS_IMAGE_MODEL` для существующих тестов. См.
-# пояснение про __all__ у первого блока (lumen_formatting) в начале файла.
+# Нужен только тестам как `bot.DEFAULT_POLLINATIONS_IMAGE_MODEL` (см. пояснение
+# про __all__ у первого блока в начале файла).
 __all__ += ["DEFAULT_POLLINATIONS_IMAGE_MODEL"]
 
-# метаданные и скачивание медиа: чистые утилиты (mime-типы, file_id,
-# суффиксы) вынесены в lumen_media.py (срез монолита) — импортируются напрямую,
-# чтобы `bot._sanitize_mime_type(...)` и т.д. продолжали работать ровно как
-# раньше (включая подмену в тестах через module globals). Сетевая часть
-# (_download_telegram_file_bytes/_fetch_media/...) остаётся здесь: ей нужны
-# сессия, BOT_TOKEN и bot.get_file.
+# Чистые утилиты медиа — в lumen_media.py; сетевая часть остаётся здесь
+# (ей нужны сессия, BOT_TOKEN и bot.get_file).
 from lumen_media import (
     _sanitize_mime_type,
     _media_file_id_and_mime,
@@ -963,13 +927,10 @@ from lumen_media import (
 
 
 
-# openrouter api
+# API OpenRouter.
 #
-# TEXT_MODEL_ORDER / _OR_MODEL_HEALTH / _ROUTER_EXCLUDED_OR_MODELS /
-# _check_temporary_free_models_expiry вынесены в lumen_router_config.py (см.
-# импорт рядом с GEMINI_MODELS выше по файлу) — здесь остаётся только код,
-# который реально ХОДИТ в OpenRouter API (OpenRouterAPIError/_or_request/
-# ask_openrouter_*/_or_chat_completion_with_fallback и т.д.).
+# Списки моделей и здоровье роута живут в lumen_router_config.py — здесь только
+# код, который реально ходит в API.
 
 # ─────────────────── защита от утечки провайдера/модели и промт-инъекций ───────────────────
 # Детекторы утечек/инъекций — чистые функции в lumen_security.py (импортируем только используемое).
@@ -992,6 +953,7 @@ from lumen_routes import (
     _or_extract_text,
     _attempt_timeout,
     _is_account_wide_or_rate_limit,
+    _is_gemini_daily_quota,
     _probe_or_model_liveness,
     _or_chat_completion_with_fallback,
     ask_openrouter_text,
@@ -1012,10 +974,8 @@ from lumen_routes import (
 
 # скачивание тикток
 #
-# Механика загрузчика — в lumen_tiktok.py, оркестрация отправки — в
-# lumen_tiktok_flow.py (P2). Имена ниже код bot.py сам не читает (кроме
-# _communicate_process для TTS-пробинга) — они нужны как `bot.X` существующим
-# тестам, поэтому тоже здесь.
+# Механика загрузчика — в lumen_tiktok.py, оркестрация — в lumen_tiktok_flow.py.
+# Имена ниже нужны как `bot.X` существующим тестам, поэтому тоже здесь.
 from lumen_tiktok import (
     _original_sound_label,
     _GENERIC_ORIGINAL_SOUND_PHRASES,
@@ -1037,10 +997,8 @@ from lumen_tiktok import (
     _looks_like_resolved_tiktok_url,
 )
 
-# _looks_like_resolved_tiktok_url используется только внутри самой _resolve_tiktok_short
-# в lumen_tiktok.py — но остаётся нужна как `bot._looks_like_resolved_tiktok_url(...)`
-# для регрессионных тестов (см. пояснение про __all__ у первого блока (lumen_formatting)
-# в начале файла).
+# Нужна только регрессионным тестам как `bot._looks_like_resolved_tiktok_url`
+# (см. пояснение про __all__ у первого блока в начале файла).
 __all__ += ["_looks_like_resolved_tiktok_url"]
 
 # TikTok-оркестрация живёт в lumen_tiktok_flow.py (P2): здесь только реэкспорт
@@ -1055,15 +1013,9 @@ from lumen_tiktok_flow import (
 )
 
 
-# Самокалибрующаяся оценка скорости "печати" — см. докстринг lumen_typing_pace.py
-# про то, почему это НЕ статическая таблица токенов/сек по каждой модели: реальная
-# скорость отдачи текста бесплатными моделями OpenRouter не является свойством
-# самой модели (провайдер маршрутизирует один слаг на разные бэкенды), поэтому
-# любая захардкоженная цифра устарела бы быстрее, чем список живых/мёртвых моделей
-# в _OR_MODEL_HEALTH. Вместо этого — измерение по факту на каждом стриме (см.
-# _run_streaming_reply) и экспоненциальное усреднение; при добавлении/замене
-# модели НИЧЕГО вручную обновлять не нужно — новая модель "нащупывает" свою
-# реальную скорость сама за первые несколько ответов.
+# Скорость отдачи текста — свойство бэкенда, а не модели, поэтому замер по факту
+# на каждом стриме + EMA (см. lumen_typing_pace.py). Новая модель калибруется
+# сама за первые ответы, вручную обновлять ничего не нужно.
 
 # Самокалибрующаяся оценка задержек моделей — см. докстринг lumen_model_speed.py.
 # Здесь осталось только имя-точка подмены тестов; само измерение уехало в
@@ -1093,12 +1045,8 @@ from lumen_streaming import (
     _try_groq_streaming,
 )
 
-# определение ссылок и упоминаний, триггеры draw/tts, категории медиа —
-# вынесено в lumen_message_parse.py (срез монолита): чистые функции над
-# строками + конфигурация, без зависимости от рантайма. Импортируется напрямую,
-# чтобы `bot.extract_url(...)`, `bot.DRAW_TRIGGER_PREFIXES` и т.д. продолжали
-# работать ровно как раньше (включая подмену в тестах через module globals).
-# clean_mention остаётся здесь: ей нужен BOT_USERNAME из этого модуля.
+# Чистые функции парсинга — в lumen_message_parse.py. clean_mention остаётся
+# здесь: ей нужен BOT_USERNAME из этого модуля.
 from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
@@ -1116,10 +1064,8 @@ from lumen_message_parse import (
     match_pick_request,
 )
 
-# _looks_like_media_reference/_mime_matches_media_category кодом bot.py больше
-# не используются напрямую (только через _find_recent_media_by_category), но
-# остаются нужны как `bot.X` для существующих тестов — см. пояснение про __all__
-# у первого блока (lumen_formatting) в начале файла.
+# Нужны только тестам как `bot.X` (см. пояснение про __all__ у первого блока
+# в начале файла).
 __all__ += ["_looks_like_media_reference", "_mime_matches_media_category"]
 
 def clean_mention(text: str) -> str:
@@ -1146,9 +1092,8 @@ def message_mentions_bot(message: Message) -> bool:
 
 # команды бота
 
-# Команды/TTS/Draw/pick живут в lumen_commands.py (P2): здесь только реэкспорт
-# имён и регистрация хендлеров (декораторы @dp.* заменены явными register —
-# тот же порядок, то же поведение).
+# Команды/TTS/Draw/pick — в lumen_commands.py; здесь только импорт имён
+# и регистрация хендлеров явными register (тот же порядок, то же поведение).
 from lumen_commands import (
     cmd_start,
     inline_draw,
@@ -1181,12 +1126,9 @@ dp.callback_query.register(handle_pick_callback, F.data.startswith("pick:"))
 
 
 # ── Кнопки-уточнения (pick-сценарии) ──
-# Детерминированная альтернатива "одному уточняющему вопросу" модели для
-# вкусовых запросов без деталей ("посоветуй фильм"): вопрос с кнопками вместо
-# гадания. Опции заданы кодом (см. PICK_TABLE в lumen_lang.py — вопросы,
-# варианты и шаблоны на языке чата), никаких сгенерированных моделью
-# вариантов — слабые модели их калечат.
-# Без эмодзи в кнопках — по правилу эмодзи (см. system_prompt.py).
+# Вопрос с кнопками вместо гадания модели для вкусовых запросов без деталей
+# ("посоветуй фильм"). Опции заданы кодом (PICK_TABLE в lumen_lang.py), модель
+# варианты не генерирует — слабые их калечат. В кнопках без эмодзи.
 PICK_BUTTONS_ENABLED = os.getenv("PICK_BUTTONS_ENABLED", "1") == "1"
 # PICK_TTL_SEC/MAX_PENDING_PICKS/_pending_picks/_purge/_enforce — в lumen_limits.py,
 # импортированы выше рядом с rate limit (P2), здесь используются напрямую.
@@ -1218,8 +1160,8 @@ async def handle_message(message: Message) -> None:
     is_private = message.chat.type == ChatType.PRIVATE if message.chat else True
     is_guest = is_guest_message(message)
     mentioned = message_mentions_bot(message)
-    # Входящее медиа логируем всегда: молчаливый дроп таких сообщений (прод 23.09.2026 — войс
-    # в личке обработан за 0 мс без следа) иначе не диагностировать вообще.
+    # Входящее медиа логируем всегда: молчаливый дроп (прод 23.09.2026) иначе
+    # не диагностировать вообще.
     _in_src = _msg_media_source(message)
     if _in_src is not None:
         log.info(
@@ -1238,7 +1180,9 @@ async def handle_message(message: Message) -> None:
     except asyncio.TimeoutError:
         log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
         with contextlib.suppress(Exception):
-             await _tg_call(message.reply, _t(chat_id, "lock_busy"))
+             # Ответ без создания чата: обычный _t через get_state завёл бы запись
+             # даже тому, кого отшили «занято» (та же причина, что у лимита).
+             await _tg_call(message.reply, _t_no_create(chat_id, "lock_busy"))
         return
 
     try:
@@ -1278,7 +1222,8 @@ async def _webhook_startup() -> None:
 
     log.info("[webhook] Space URL: https://%s", space_host)
     log.info("[webhook] Webhook endpoint: %s", webhook_url)
-    # Полные секреты в логи не печатаем (доступ к /diag и /webhook_url), только отпечаток; полные — через /admin_keys с Bearer BOT_TOKEN (не query — токен в URL оседает в логах прокси).
+    # Полные секреты в логи не печатаем, только отпечаток; полные — через
+    # /admin_keys с Bearer BOT_TOKEN (токен в URL оседает в логах прокси).
     log.info('[webhook] WEBHOOK_SECRET (fingerprint): %s', _redact_secret(WEBHOOK_SECRET))
     log.info(
         '[admin] Full keys (WEBHOOK_SECRET/ADMIN_PANEL_KEY): curl -H "Authorization: Bearer <your BOT_TOKEN>" https://%s/admin_keys',
@@ -1292,10 +1237,7 @@ async def _webhook_startup() -> None:
         BotCommand(command="reset", description=_lang_t(DEFAULT_LANG, "cmd_desc_reset")),
         BotCommand(command="lang", description=_lang_t(DEFAULT_LANG, "cmd_desc_lang")),
     ]
-    # Локализованные описания команд: Telegram показывает меню на языке
-    # клиента (language_code), если такой вариант задан. Не задали — клиент
-    # увидит дефолтный английский список выше. Каждый язык — отдельным вызовом,
-    # падение одного не роняет остальные.
+    # Описания команд на языке клиента; падение одного языка не роняет остальные.
     localized_commands = [
         (
             code,
@@ -1339,13 +1281,9 @@ async def _webhook_startup() -> None:
                 telegram_api_call("setWebhook", {
                     "url": webhook_url,
                     "secret_token": WEBHOOK_SECRET,
-                    # drop_pending_updates=True — ОСОЗНАННОЕ РЕШЕНИЕ владельца
-                    # (27.09.2026), не забытый флаг: при передеплое/сбое Space
-                    # Telegram копит накопленные апдейты, и без сброса бот после
-                    # долгого простоя получил бы пачку старых сообщений и ответил
-                    # на них разом — это и деньги, и тон, и риск. Цена решения —
-                    # сообщения, пришедшие пока бот лежал, теряются. Размен
-                    # владелец осознанно выбрал в сторону квоты.
+                    # drop_pending_updates=True — решение владельца (27.09.2026): после
+                    # простоя не отвечать пачкой на старые сообщения. Цена — сообщения,
+                    # пришедшие пока бот лежал, теряются.
                     "drop_pending_updates": True,
                     "allowed_updates": ALLOWED_UPDATES,
                 }, request_timeout=15.0),
@@ -1382,16 +1320,15 @@ async def _webhook_startup() -> None:
     await try_setup()
 
     log.info("[webhook] Bot is running in webhook mode. Updates arrive via POST /webhook")
-    # Суточные перепроверки моделей в часовом цикле: иначе истёкшее промо (как hy3:free) видно только после рестарта.
+    # Суточные перепроверки моделей в часовом цикле: истёкшее промо иначе видно
+    # только после рестарта.
     _last_daily_check_date = date.today()
     while True:
         await asyncio.sleep(3600)
         _cleanup_rate_limit_dict()
         _evict_orphan_chat_locks()
-        # Проверяем и обнуляем счётчики квоты на каждом часовом тике (а не только
-        # раз в сутки, как две проверки ниже) — если между тиками не пришло ни
-        # одного сообщения, ленивая проверка внутри _quota_entry не сработает
-        # сама, и /stats ещё какое-то время показывал бы вчерашние числа.
+        # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
+        # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
         _reset_quota_if_new_day()
         today = date.today()
         if today != _last_daily_check_date:
@@ -1402,14 +1339,9 @@ async def _webhook_startup() -> None:
             await _probe_or_model_liveness()
 
 async def _drain_inflight_tasks() -> None:
-    """Даёт fire-and-forget задачам обработки апдейтов (см. _inflight_tasks/
-    _track_inflight_task) шанс завершиться штатно, вместо того чтобы быть
-    уничтоженными event loop'ом на середине (см. LUMEN-2 в Sentry: "Task was
-    destroyed but it is pending!", реальная асинхронная задача внутри держала
-    вызов bot.send_message). Ждёт до INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC секунд;
-    то, что не успело — явно отменяет и ДОЖИДАЕТСЯ самой отмены (а не просто
-    вызывает cancel() и уходит — иначе получили бы то же самое предупреждение
-    асинхронно, просто чуть позже, когда GC доберётся до объекта таски)."""
+    """Даёт фоновым задачам апдейтов шанс завершиться штатно при остановке
+    (LUMEN-2: loop убивал их посреди сетевых вызовов при редеплое). Не успели —
+    отменяем и дожидаемся самой отмены."""
     pending = [t for t in _inflight_tasks if not t.done()]
     if not pending:
         return
@@ -1424,7 +1356,7 @@ async def _drain_inflight_tasks() -> None:
 async def main() -> None:
     global bot, client
 
-    # Мы настраиваем Bot сессию с принудительным IPv4 и таймаутами для hg space
+    # Сессия с принудительным IPv4 и таймаутами под HF Space.
     if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
         api_server = TelegramAPIServer.from_base(TELEGRAM_API_BASE_URL)
         sess = IPv4AiohttpSession(

@@ -12,6 +12,7 @@ import {
   buildForwardHeaders,
   buildResponseHeaders,
   handleRequest,
+  limitStreamBytes,
   resolveTarget,
 } from "./proxy.ts";
 
@@ -291,4 +292,64 @@ Deno.test("handleRequest allows body at the cap and unknown-length streams", asy
   });
   assertEquals((await handleRequest(streamed, fakeFetch, TEST_SECRET)).status, 200);
   assertEquals(seen.length, 2);
+});
+
+Deno.test("limitStreamBytes пропускает тело в пределах капа без буферизации", async () => {
+  const capped = limitStreamBytes(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2]));
+      controller.enqueue(new Uint8Array([3]));
+      controller.close();
+    },
+  }), 3);
+  assert(capped !== null, "ожидался поток");
+  assertEquals(Array.from(new Uint8Array(await new Response(capped).arrayBuffer())), [1, 2, 3]);
+});
+
+Deno.test("limitStreamBytes рвёт поток при превышении капа", async () => {
+  const capped = limitStreamBytes(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2]));
+      controller.enqueue(new Uint8Array([3, 4]));
+      controller.close();
+    },
+  }), 3);
+  assert(capped !== null, "ожидался поток");
+  let failed = false;
+  try {
+    await new Response(capped).arrayBuffer();
+  } catch {
+    failed = true;
+  }
+  assert(failed, "поток сверх капа обязан оборваться, а не доставиться целиком");
+});
+
+Deno.test("handleRequest не пропускает chunked-тело запроса сверх капа", async () => {
+  const fakeFetch: typeof fetch = async (_url, init) => {
+    await new Response(init?.body as BodyInit | null | undefined).arrayBuffer();
+    return new Response('{"ok":true}', { status: 200 });
+  };
+  const req = new Request("https://proxy.example/fetch/api.telegram.org/bot123/sendVideo", {
+    method: "POST",
+    headers: { ...AUTH_HEADERS },
+    body: new Uint8Array([1, 2, 3, 4, 5]),
+  });
+  const resp = await handleRequest(req, fakeFetch, TEST_SECRET, 3);
+  assertEquals(resp.status, 502);
+});
+
+Deno.test("handleRequest не отдаёт тело ответа сверх капа", async () => {
+  const fakeFetch: typeof fetch = () =>
+    Promise.resolve(new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 }));
+  const req = new Request("https://proxy.example/fetch/api.telegram.org/file/bot123/x", {
+    headers: { ...AUTH_HEADERS },
+  });
+  const resp = await handleRequest(req, fakeFetch, TEST_SECRET, 3);
+  let failed = false;
+  try {
+    await resp.arrayBuffer();
+  } catch {
+    failed = true;
+  }
+  assert(failed, "ответ сверх капа обязан оборваться, а не утечь целиком");
 });

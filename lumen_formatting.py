@@ -1,14 +1,6 @@
 """
-lumen_formatting.py — конвертация markdown-подобного текста Lumen в Telegram HTML.
-
-Вынесено из bot.py при аудите технического долга (см. пункт про монолитный
-bot.py, который на момент этого разбиения на модули разросся до нескольких
-тысяч строк): вся эта логика — чистые функции над строками (никакой
-Telegram/Gemini/OpenRouter I/O, никакого рантайм-состояния) и поэтому один из
-самых безопасных кандидатов на выделение в отдельный модуль. bot.py импортирует
-из этого файла все нужные имена напрямую (см. `from lumen_formatting import ...`
-в bot.py) — поведение и публичные имена (`_md_to_html`, `_scrub_latex` и т.д.)
-не изменились, изменилось только физическое расположение кода.
+lumen_formatting.py — markdown Lumen в Telegram HTML.
+Вынесен из bot.py: чистые функции над строками без I/O и состояния.
 """
 
 from __future__ import annotations
@@ -60,6 +52,29 @@ def _convert_markdown_tables_to_lists(text: str) -> str:
         i += 1
     return "\n".join(out)
 
+def _table_block_line_indexes(lines: list[str]) -> set[int]:
+    """Индексы строк markdown-таблиц (шапка + разделитель + тело) — теми же
+    условиями, что _convert_markdown_tables_to_lists выше. Разносчикам списков
+    эти строки трогать нельзя: в обычном пути таблицы разворачиваются ПОСЛЕ
+    разноса, и строка без ведущего `|` (валидная таблица без внешних пайпов)
+    иначе рвалась до детекта таблицы — стрим и финал расходились."""
+    idx: set[int] = set()
+    i, n = 0, len(lines)
+    while i < n:
+        if "|" in lines[i] and i + 1 < n and "-" in lines[i + 1] and _TABLE_SEP_RE.match(lines[i + 1]):
+            if len(_split_table_cells(lines[i])) >= 2:
+                j = i + 2
+                data = 0
+                while j < n and "|" in lines[j] and lines[j].strip():
+                    data += 1
+                    j += 1
+                if data:
+                    idx.update(range(i, j))
+                    i = j
+                    continue
+        i += 1
+    return idx
+
 # ── Защитная сетка от сырого LaTeX ──────────────────────────────────────────
 # Реальный найденный при калибровке случай: nemotron-3-nano-30b-a3b:free выдала
 # "\[ S = \pi r^{2}, \]" и "\(x^{2}+y^{2}=r^{2}\)" вместо юникода в ответе про
@@ -75,8 +90,10 @@ _LATEX_SYMBOL_MAP: dict[str, str] = {
     r"\times": "×", r"\cdot": "·", r"\approx": "≈", r"\infty": "∞",
     r"\leq": "≤", r"\le": "≤", r"\geq": "≥", r"\ge": "≥", r"\neq": "≠", r"\ne": "≠",
     r"\rightarrow": "→", r"\Rightarrow": "⇒", r"\to": "→",
-    r"\forall": "∀", r"\exists": "∃", r"\emptyset": "∅", r"\cup": "∪", r"\cap": "∩", r"\in": "∈",
-    r"\pi": "π", r"\pm": "±", r"\mp": "∓", r"\sum": "∑", r"\int": "∫", r"\prod": "∏",
+    r"\forall": "∀", r"\exists": "∃", r"\emptyset": "∅", r"\cup": "∪", r"\cap": "∩",
+    r"\int": "∫",  # ДО \in: иначе "\int" съедался как "\in" и давал "∈t" (враждебное ревью 27.09.2026)
+    r"\in": "∈",
+    r"\pi": "π", r"\pm": "±", r"\mp": "∓", r"\sum": "∑", r"\prod": "∏",
     r"\alpha": "α", r"\beta": "β", r"\gamma": "γ", r"\Gamma": "Γ", r"\theta": "θ",
     r"\lambda": "λ", r"\mu": "μ", r"\sigma": "σ", r"\Sigma": "Σ", r"\delta": "δ", r"\Delta": "Δ",
     r"\phi": "φ", r"\omega": "ω", r"\Omega": "Ω",
@@ -131,9 +148,16 @@ _INLINE_BULLETS_MIN_SEPS = 2
 _INLINE_BULLETS_MIN_LEN = 200
 
 def _split_inline_bullets(text: str) -> str:
+    lines = text.split("\n")
+    skip = _table_block_line_indexes(lines)
     out = []
-    for line in text.split("\n"):
-        if len(line) >= _INLINE_BULLETS_MIN_LEN and line.count(" • ") >= _INLINE_BULLETS_MIN_SEPS:
+    for idx, line in enumerate(lines):
+        if (
+            idx not in skip
+            and len(line) >= _INLINE_BULLETS_MIN_LEN
+            and line.count(" • ") >= _INLINE_BULLETS_MIN_SEPS
+            and not _is_structural_line(line)
+        ):
             head, *items = line.split(" • ")
             # Первый кусок — вводная фраза ("Вот моменты:"), дальше — пункты.
             out.append(head.rstrip())
@@ -141,6 +165,14 @@ def _split_inline_bullets(text: str) -> str:
         else:
             out.append(line)
     return "\n".join(out)
+
+# Строки служебной разметки: разносчик не должен ни есть заголовок, ни вытаскивать
+# пункты из цитаты, ни рвать строку markdown-таблицы (враждебное ревью 27.09.2026).
+# Проверка нужна в ОБОИХ разносчиках и в обоих путях рендера.
+_STRUCT_LINE_RE = re.compile(r"^\s*(?:#{1,6}\s|>|\|)")
+
+def _is_structural_line(line: str) -> bool:
+    return bool(_STRUCT_LINE_RE.match(line))
 
 # Слипшиеся в один абзац нумерованные пункты ("1. ... 2. ... 3. ...", прод
 # 25.09.2026: модель написала все 3 причины голубого неба одной строкой) —
@@ -151,12 +183,16 @@ _INLINE_NUMBERED_MIN_ITEM_LEN = 12
 _NUMBERED_MARKER_RE = re.compile(r"(?<!\d)(\d{1,3})\. ")
 
 def _split_inline_numbered(text: str) -> str:
+    lines = text.split("\n")
+    skip = _table_block_line_indexes(lines)
     out = []
-    for line in text.split("\n"):
+    for idx, line in enumerate(lines):
         markers = [(m.start(), int(m.group(1))) for m in _NUMBERED_MARKER_RE.finditer(line)]
         if (
-            len(markers) >= _INLINE_NUMBERED_MIN_ITEMS
+            idx not in skip
+            and len(markers) >= _INLINE_NUMBERED_MIN_ITEMS
             and [num for _, num in markers] == list(range(1, len(markers) + 1))
+            and not _is_structural_line(line)
         ):
             bounds = [pos for pos, _ in markers] + [len(line)]
             items = [line[bounds[i]:bounds[i + 1]].strip() for i in range(len(markers))]
@@ -471,7 +507,10 @@ def _md_to_rich_html(text: str) -> str:
         # решёток); масштаб под чат: # → h2, ## → h3, остальное → h4.
         level = len(m.group(1))
         tag_level = 2 if level == 1 else (3 if level == 2 else 4)
-        return _take(_heads, "HD", (tag_level, m.group(2).strip()))
+        # Остаточный LaTeX в заголовке скрабим сразу: заголовок уходит в плейсхолдер
+        # ДО общего _scrub_latex ниже, и юзер видел "\alpha" в <h3> вместо α
+        # (враждебное ревью 27.09.2026).
+        return _take(_heads, "HD", (tag_level, _scrub_latex(m.group(2).strip())))
 
     text = re.sub(r"^[ \t]*(#{1,6})[ \t]+(.+)$", _take_heading, text, flags=re.MULTILINE)
 

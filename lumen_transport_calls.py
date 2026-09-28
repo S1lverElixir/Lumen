@@ -1,11 +1,6 @@
 """
 lumen_transport_calls.py — вызовы Telegram API: сессии, ротация прокси,
-circuit breaker, _tg_call/telegram_api_call (вынесено из bot.py, P2 аудита).
-
-Само состояние (TELEGRAM_API_BASE_URL, сессии, выключатель) живёт в bot.py —
-здесь только операции над ним, связи через отложенный `import bot` внутри
-функций. bot.py реэкспортирует имена — `bot._tg_call` и т.п. в тестах
-и вызывающем коде не менялись.
+circuit breaker, _tg_call/telegram_api_call. Состояние живёт в bot.py.
 """
 from __future__ import annotations
 

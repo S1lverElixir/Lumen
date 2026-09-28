@@ -54,9 +54,9 @@ def test_inline_tts_records_quota_usage_on_success():
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
 
 
-def test_inline_tts_marks_quota_exhausted_on_rate_limit():
-    # Первая модель отдаёт явный 429 — должна быть помечена исчерпанной через
-    # _mark_quota_exhausted, а синтез должен продолжиться со второй моделью цепочки.
+def test_inline_tts_marks_quota_exhausted_on_daily_quota():
+    # Суточная квота первой TTS-модели — метка до утра через _mark_quota_exhausted,
+    # а синтез продолжается со второй моделью цепочки.
     class _RateLimitExc(Exception):
         status_code = 429
 
@@ -66,12 +66,10 @@ def test_inline_tts_marks_quota_exhausted_on_rate_limit():
     def fake_generate_content(*, model, contents, config=None):
         calls.append(model)
         if model == "gemini-3.1-flash-tts-preview":
-            raise _RateLimitExc("rate limit exceeded")
+            raise _RateLimitExc("Quota exceeded for quota metric 'GenerateRequestsPerDayPerProjectPerModel'")
         return _fake_tts_response(fake_wav_bytes)
 
     fake_client = MagicMock()
-    # Асинхронный путь (lumen_tts): синхронный вызов в потоке убран — зависший
-    # Google держал лок чата бесконечно (аудит 26.09.2026).
     fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
 
     incoming = _FakeIncomingMessage(999802)
@@ -90,6 +88,49 @@ def test_inline_tts_marks_quota_exhausted_on_rate_limit():
         assert exhausted is not None and exhausted.get("exhausted_at") is not None
         succeeded = bot.GLOBAL_QUOTA["gemini"].get("gemini-2.5-flash-preview-tts")
         assert succeeded is not None and succeeded["used"] >= 1
+    finally:
+        bot.client = original_client
+        bot.bot = original_bot
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash-preview-tts", None)
+
+
+def test_inline_tts_burst_rate_limit_only_cools_down():
+    # Минутный всплеск у первой TTS-модели не должен ставить суточную метку:
+    # раньше любой 429 убирал её до полуночи, хотя текстовый маршрут уже получил
+    # короткую остывку. Синтез всё равно продолжается со второй моделью.
+    import time as _time
+
+    class _RateLimitExc(Exception):
+        status_code = 429
+
+    fake_wav_bytes = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 64
+    calls = []
+
+    def fake_generate_content(*, model, contents, config=None):
+        calls.append(model)
+        if model == "gemini-3.1-flash-tts-preview":
+            raise _RateLimitExc("rate limit exceeded")
+        return _fake_tts_response(fake_wav_bytes)
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
+
+    incoming = _FakeIncomingMessage(999803)
+    incoming.message_id = 12347
+
+    original_client = bot.client
+    original_bot = bot.bot
+    bot.client = fake_client
+    bot.bot = _FakeVoiceBot()
+    bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
+    bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash-preview-tts", None)
+    try:
+        asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+        assert calls == ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
+        entry = bot.GLOBAL_QUOTA["gemini"].get("gemini-3.1-flash-tts-preview")
+        assert entry is not None and entry.get("exhausted_at") is None
+        assert entry.get("cooldown_until", 0) > _time.time()
     finally:
         bot.client = original_client
         bot.bot = original_bot
