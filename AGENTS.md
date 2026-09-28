@@ -48,6 +48,10 @@
 ## Docs lookup
 - When you need current library docs (aiogram, FastAPI, google-genai, Deno) rather than memory, use the `context7` MCP tools.
 
+## Effort routing (quick/deep subagents)
+- Выбор effort: сам задачи не решай, а делегируй через Task tool. Простые и механические задачи отдавай сабагенту quick, сложные отдавай сабагенту deep. Если сомневаешься в сложности, бери deep.
+- Sentry: организация silverelixir. Сначала вызови find_organizations, потом search_issues с organizationSlug=silverelixir. Отдельные issue читай через get_sentry_resource с resourceType=issue.
+
 ## Session hygiene (the owner does not track this, guide them)
-- Effort: for tasks above the default (High: streaming, security, refactor; XHigh: audits, architecture, production incidents), say which level fits and why, then wait for the owner's OK. For default-level tasks (Low: read, explain, rename; Medium: single-module fixes, tests, docs) just proceed. You cannot change effort yourself; the owner does.
+- Effort: see "Effort routing" above instead of asking the owner, unless the task needs a different model entirely.
 - Suggest a new chat when the topic changes completely, and /compact when the session gets long.
