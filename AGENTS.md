@@ -24,7 +24,7 @@
 ## Commands (verified against CI, .github/workflows/ci.yml)
 - Full gate: pip install -r requirements.txt -r requirements-dev.txt; pyflakes bot.py lumen_*.py system_prompt.py tests/*.py; pytest -q; pip-audit -r requirements.txt
 - Single test file: pytest tests/test_bot_routes.py -v; single test: pytest tests/test_bot_routes.py::test_classify_model_error_rate_limit_by_status -v
-- Proxy (Deno): deno test proxy/proxy_test.ts (no external imports, works offline; see proxy_test.ts header)
+- Proxy (Deno): deno test proxy/proxy_test.ts (no external imports, works offline; see proxy_test.ts header); deno check proxy/proxy.ts; deno lint proxy/proxy.ts
 - Run the gate before changing anything (green baseline) and after each batch of changes. Never say "done" or "tests pass" without having run it.
 - If the gate is red before your changes, stop and report which checks fail. Do not start the task and do not fix unrelated failures on your own unless the owner says to continue. A missing dev dependency is the exception: install it.
 - Done means: gate green, and the final report lists the changed files and the gate result.
@@ -54,7 +54,7 @@
 - Check first whether the project, the stdlib or an already installed dependency does it. New dependencies need approval.
 
 ## Effort routing
-- Answer questions, plans and discussion yourself. Delegate code edits, debugging, audits and multi-file analysis via Task: mechanical work to `quick`, anything non-trivial to `deep`. If unsure, use `deep`.
+- Answer questions, plans and discussion yourself. Delegate code edits, debugging, audits and multi-file analysis via the subagent tool: mechanical work to `quick`, anything non-trivial to `deep`. If unsure, use `deep`.
 - A subagent starts with no chat history. Put into the task text: file paths, the goal, the constraints from this file (branch, no push, gate) and the expected result. Ask it to return a short summary of what changed.
 - If the subagents are unavailable, do the work yourself.
 

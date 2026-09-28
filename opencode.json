@@ -24,11 +24,15 @@
     "servers": {
       "sentry": {
         "type": "remote",
-        "url": "https://mcp.sentry.dev/mcp",
-        "enabled": true
+        "url": "https://mcp.sentry.dev/mcp"
       }
     }
   },
+  "permissions": [
+    { "action": "shell", "resource": "git push", "effect": "ask" },
+    { "action": "shell", "resource": "git push *", "effect": "ask" },
+    { "action": "shell", "resource": "git merge *", "effect": "ask" }
+  ],
   "agents": {
     "quick": {
       "description": "простые задачи: поиск по файлам, мелкие правки, форматирование, простые вопросы",
