@@ -355,8 +355,7 @@ def test_extract_gemini_answer_skips_retry_when_route_budget_spent():
         bot.client = original_client
 
 
-def test_extract_gemini_answer_reports_non_malformed_block_without_retry_state():
-    # Пустой ответ с причиной без MALFORMED_FUNCTION_CALL не должен падать из-за
+def test_extract_gemini_answer_reports_non_malformed_block_without_retry_state():    # Пустой ответ с причиной без MALFORMED_FUNCTION_CALL не должен падать из-за
     # неинициализированного флага пропуска ретрая. Раньше правка оставляла переменную
     # только внутри MALFORMED-ветки и такой ответ давал UnboundLocalError.
     resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="SAFETY")])
@@ -364,6 +363,27 @@ def test_extract_gemini_answer_reports_non_malformed_block_without_retry_state()
         resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
     ))
     assert "SAFETY" in ans
+
+
+def test_extract_gemini_answer_falls_through_when_retry_raises():
+    # Повтор после битого вызова сам упал (а не просто не влез в бюджет) — тоже
+    # отдаём пусто, чтобы маршрут ушёл на следующую модель. Раньше пользователь
+    # получал "[Ответ заблокирован...]" как готовый ответ и цепочка вставала.
+    async def retry_raises(*, model, contents, config=None):
+        raise RuntimeError("transient 500 on retry")
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = retry_raises
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="MALFORMED_FUNCTION_CALL")])
+        ans = asyncio.run(bot._extract_gemini_answer_text(
+            resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
+        ))
+        assert ans == ""
+    finally:
+        bot.client = original_client
 
 
 def test_run_route_reorders_slow_head_down(monkeypatch):
@@ -447,7 +467,8 @@ def test_ask_gemini_attempt_respects_short_budget(monkeypatch):
             asyncio.run(bot.ask_gemini(chat_id, "привет", model_chain=["m1", "m2"], deadline=time.monotonic() + 0.6))
         # Попытка обрезалась остатком бюджета, дальше маршрут сразу остановился —
         # главное, он не ушёл далеко за объявленный бюджет.
-        assert time.monotonic() - started < 8
+        elapsed = time.monotonic() - started
+        assert elapsed < 3, f"маршрут с бюджетом 0.6с обязан остановиться быстро: {elapsed:.1f}с"
         assert calls == ["m1"]
     finally:
         bot.client = original_client
@@ -826,25 +847,34 @@ def test_ask_gemini_raises_all_models_exhausted_when_entire_chain_429s():
 
 
 def test_ask_gemini_falls_back_to_next_model_on_timeout():
+    # Прежняя версия использовала блокирующий time.sleep в async-фейке и один и тот
+    # же текст ответа для обеих моделей: таймаут никогда не срабатывал, фолбэка не
+    # было, а тест всё равно проходил (враждебное ревью 27.09.2026). Теперь фейк
+    # асинхронный, тексты разные, проверяются оба вызова и время.
     chat_id = 999012
     calls = []
     original_timeout = bot.ROUTE_MODEL_TIMEOUT_SEC
 
-    def fake_generate_content(*, model, contents, config=None):
+    async def fake_generate_content(*, model, contents, config=None):
         calls.append(model)
         if model == "gemini-3.6-flash":
-            time.sleep(0.5)  # 10-кратный запас над ROUTE_MODEL_TIMEOUT_SEC ниже
-        return _FakeGeminiResponse(text="Ответ от второй модели")
+            await asyncio.sleep(5.0)
+        # Нейтральные тексты без имён моделей: имя модели в ответе триггерит
+        # скраб утечек личности и подменяет ответ заглушкой.
+        return _FakeGeminiResponse(text="Первый ответ" if model == "gemini-3.6-flash" else "Второй ответ")
 
     fake_client = MagicMock()
-    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
+    fake_client.aio.models.generate_content = fake_generate_content
     original_client = bot.client
     bot.client = fake_client
     bot.ROUTE_MODEL_TIMEOUT_SEC = 0.05
     try:
+        started = time.monotonic()
         answer = asyncio.run(bot.ask_gemini(chat_id, "Привет", model_chain=["gemini-3.6-flash", "gemini-2.5-flash"]))
-        assert answer == "Ответ от второй модели"
-        assert calls[0] == "gemini-3.6-flash"
+        elapsed = time.monotonic() - started
+        assert answer == "Второй ответ"
+        assert calls == ["gemini-3.6-flash", "gemini-2.5-flash"]
+        assert elapsed < 5, f"фолбэк по таймауту обязан уложиться быстрее висящей модели: {elapsed:.1f}с"
     finally:
         bot.client = original_client
         bot.ROUTE_MODEL_TIMEOUT_SEC = original_timeout
@@ -1345,6 +1375,22 @@ def test_record_quota_usage_service_flag_skips_counter():
         assert bot.GLOBAL_QUOTA["groq"]["svc-probe-model"]["used"] >= 1
     finally:
         bot.GLOBAL_QUOTA.get("groq", {}).pop("svc-probe-model", None)
+
+
+def test_record_quota_usage_clears_cooldown_and_exhausted_marks():
+    # Успешный ответ снимает и суточную метку, и остывку: иначе модель, однажды
+    # упёршаяся в лимит, несла бы метку даже после живых ответов.
+    bot.GLOBAL_QUOTA.setdefault("groq", {}).pop("cool-probe-model", None)
+    try:
+        bot._mark_quota_exhausted("groq", "cool-probe-model")
+        bot._mark_rate_limited("groq", "cool-probe-model")
+        entry = bot.GLOBAL_QUOTA["groq"]["cool-probe-model"]
+        assert entry["exhausted_at"] is not None and entry["cooldown_until"] is not None
+        bot._record_quota_usage("groq", "cool-probe-model")
+        entry = bot.GLOBAL_QUOTA["groq"]["cool-probe-model"]
+        assert entry["exhausted_at"] is None and entry["cooldown_until"] is None
+    finally:
+        bot.GLOBAL_QUOTA.get("groq", {}).pop("cool-probe-model", None)
 
 
 def test_transcribe_audio_empty_result_is_none(monkeypatch):

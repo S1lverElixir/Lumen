@@ -473,12 +473,16 @@ def test_streaming_respects_route_deadline():
 
     incoming = _FakeIncomingMessage(chat_id)
     try:
+        started = time.monotonic()
         answer, placeholder = asyncio.run(bot._run_streaming_reply(
             chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
             piece_agen=slow_drip_pieces(), deadline=time.monotonic() - 1.0,
         ))
+        elapsed = time.monotonic() - started
         # Бюджет уже прошёл: либо плейсхолдер дальше, либо финал с пометкой — но не вечное ожидание.
         assert placeholder is not None or answer is not None
+        # Висящий второй кусок (3600с) обязан оборваться бюджетом, а не зависнуть.
+        assert elapsed < 30, f"стрим ждал висящий кусок мимо дедлайна: {elapsed:.1f}с"
     finally:
         bot.chat_state.pop(chat_id, None)
 

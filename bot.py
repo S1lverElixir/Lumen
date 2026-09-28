@@ -390,8 +390,11 @@ DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
 # ожидания пользователя, а лок при этом остаётся защищаемым: работа под локом
 # ограничена собственным бюджетом и всегда try/finally его отпускает
 # (враждебное ревью 27.09.2026: значение 150с молчало почти 2.5 минуты).
-# /draw лок НЕ берёт (его хендлер зарегистрирован раньше общего @dp.message),
-# так что ориентир — озвучка, у неё свой потолок ожидания.
+# Лок НЕ берут только слэш-команды (/draw, /tts — их хендлеры зарегистрированы
+# раньше общего @dp.message). Триггерные фразы («нарисуй», «озвучь») идут через
+# _handle_message_core ПОД локом: отрисовка держит его до DRAW_TOTAL_BUDGET_SEC,
+# озвучка — до конца синтеза. Это осознанно (один чат — одно дело за раз), но
+# второй вопрос во время длинной отрисовки честно получит «занято» через 45с.
 CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 45, min_value=1)
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
 # завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
@@ -466,6 +469,7 @@ from lumen_chat_state import (
     _chat_lang,
     _t,
     _t_no_create,
+    _peek_chat_lang,
     _prune_old_chats,
     get_chat_lock,
     _evict_orphan_chat_locks,
@@ -908,7 +912,9 @@ __all__ = [
     "mark_state_dirty",
     "get_state",
     "_chat_lang",
+    "_t",
     "_t_no_create",
+    "_peek_chat_lang",
     "_check_and_register_rate_limit",
     "_record_passive_group_context",
     "_should_only_record_passively",
@@ -1246,7 +1252,9 @@ async def handle_message(message: Message) -> None:
     except asyncio.TimeoutError:
         log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
         with contextlib.suppress(Exception):
-             await _tg_call(message.reply, _t(chat_id, "lock_busy"))
+             # Ответ без создания чата: обычный _t через get_state завёл бы запись
+             # даже тому, кого отшили «занято» (та же причина, что у лимита).
+             await _tg_call(message.reply, _t_no_create(chat_id, "lock_busy"))
         return
 
     try:

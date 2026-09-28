@@ -314,5 +314,15 @@ def test_admin_secrets_are_independent_of_bot_token_when_seed_set():
 def test_admin_secret_seed_falls_back_to_bot_token_when_unset():
     # Без ADMIN_SECRET_SEED поведение идентично прежнему (соль = BOT_TOKEN) — не
     # ломает существующие деплои, которые эту переменную не настраивали.
-    assert bot._ADMIN_SECRET_SEED == (os.environ.get("ADMIN_SECRET_SEED", "").strip() or bot.BOT_TOKEN or "default")
+    # Прежняя версия ждала `or "default"`, а код делает `or secrets.token_hex(32)`
+    # (bot.py) — ветка «всё пусто» не проверялась и ожидание было неверным.
+    import re
+    seed_env = os.environ.get("ADMIN_SECRET_SEED", "").strip()
+    if seed_env:
+        assert bot._ADMIN_SECRET_SEED == seed_env
+    elif bot.BOT_TOKEN:
+        assert bot._ADMIN_SECRET_SEED == bot.BOT_TOKEN
+    else:
+        # Оба пустые: случайная соль, а не литерал "default".
+        assert re.fullmatch(r"[0-9a-f]{64}", bot._ADMIN_SECRET_SEED)
 

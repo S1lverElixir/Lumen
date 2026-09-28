@@ -579,7 +579,7 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
         if not ans and tool_calls:
             ans = "[Tool call: " + "; ".join(tool_calls) + "]"
         elif not ans and reasons:
-            retry_skipped_for_budget = False
+            retry_failed = False
             if any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
                 # Модель сломала собственный вызов инструмента — повторяем БЕЗ инструментов (ответ своими знаниями вместо ошибки).
                 try:
@@ -606,11 +606,15 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                         # ответ, чтобы ask_gemini ушёл на следующую модель, а не подсунул
                         # пользователю "[Ответ заблокирован...]" (враждебное ревью 27.09.2026):
                         # раньше повтор выполнялся почти всегда, и эта ветка не всплывала.
-                        retry_skipped_for_budget = True
+                        retry_failed = True
                         log.warning("[gemini] Retry after MALFORMED_FUNCTION_CALL skipped: route budget is exhausted, trying the next model.")
                 except Exception as retry_exc:
                     log.warning("[gemini] Retry without tools after MALFORMED_FUNCTION_CALL also failed: %s", retry_exc)
-            if not ans and not retry_skipped_for_budget:
+                    # Повтор упал — тоже отдаём пусто: маршрут должен уйти на следующую
+                    # модель, а не показывать заглушку блокировки как готовый ответ
+                    # (иначе цепочка останавливалась на первой же битой модели).
+                    retry_failed = True
+            if not ans and not retry_failed:
                 ans = f"[Ответ заблокирован или пуст. Причина: {', '.join(reasons)}]"
     # Пустая строка без блокировки — не "Empty response": ask_gemini пробует следующую модель.
     return ans.strip()

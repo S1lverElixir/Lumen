@@ -1139,6 +1139,40 @@ def test_download_url_bin_refuses_internal_redirect_before_fetching_it():
     assert session.requested == ["http://8.8.8.8/start.jpg"]
 
 
+def test_download_url_bin_refuses_non_http_redirect_target():
+    # Location со схемой мимо http(s) — отказ до запроса, а не попытка скачать.
+    mapping = {
+        "http://8.8.8.8/start.jpg": _RedirectDownloadResponse(302, {"Location": "file:///etc/passwd"}),
+    }
+    session = _RedirectDownloadSession(mapping)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "http://8.8.8.8/start.jpg"))
+    assert result is None
+    assert session.requested == ["http://8.8.8.8/start.jpg"]
+
+
+def test_download_url_bin_stops_on_redirect_without_location():
+    # Редирект без Location — тупик, а не вечный цикл и не скачивание чего попало.
+    mapping = {
+        "http://8.8.8.8/start.jpg": _RedirectDownloadResponse(302, {}),
+    }
+    session = _RedirectDownloadSession(mapping)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "http://8.8.8.8/start.jpg"))
+    assert result is None
+    assert session.requested == ["http://8.8.8.8/start.jpg"]
+
+
+def test_download_url_bin_stops_after_too_many_redirects():
+    # Защита от redirect-петель: больше лимита хопов — отказ.
+    mapping = {
+        f"http://8.8.8.8/hop{i}.jpg": _RedirectDownloadResponse(302, {"Location": f"http://8.8.8.8/hop{i + 1}.jpg"})
+        for i in range(7)
+    }
+    session = _RedirectDownloadSession(mapping)
+    result = asyncio.run(lumen_tiktok._download_url_bin(session, "http://8.8.8.8/hop0.jpg"))
+    assert result is None
+    assert len(session.requested) == lumen_tiktok._DOWNLOAD_MAX_REDIRECTS + 1
+
+
 def test_communicate_process_returns_output_on_success():
     proc = _FakeProc()
     out, err = asyncio.run(lumen_tiktok._communicate_process(proc, timeout=5))

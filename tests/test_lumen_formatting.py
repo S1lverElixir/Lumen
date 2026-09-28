@@ -660,10 +660,26 @@ def test_inline_splitters_leave_structural_lines_alone():
     rich_head = lumen_formatting._md_to_rich_html(head)
     assert rich_head.startswith("<h3>") and "\n" not in rich_head, rich_head
 
-    table = "| A | B |\n|---|---|\n| 1. raz 2. dva 3. tri | four |"
+    table = "| A | B |\n|---|---|\n| 1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn | four |"
     assert "<b>A:</b>" in lumen_formatting._md_to_html(table), "разнос разорвал строку таблицы"
     rich_table = lumen_formatting._md_to_rich_html(table)
-    assert "<table" in rich_table and "<td>1. raz 2. dva 3. tri</td>" in rich_table
+    assert "<table" in rich_table and "<td>1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn</td>" in rich_table
+
+    # Таблица без внешних пайпов: строка не начинается с `|`, но разносчик обязан
+    # узнать блок таблицы, иначе HTML-путь рвал её до детекта, а rich — нет.
+    bare_table = "Name | Age\n---|---\n1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn | four"
+    html_bare = lumen_formatting._md_to_html(bare_table)
+    assert "<b>Name:</b>" in html_bare and "---" not in html_bare, html_bare
+    rich_bare = lumen_formatting._md_to_rich_html(bare_table)
+    assert "<table" in rich_bare and "1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn" in rich_bare
+
+    # Буллеты тоже не лезут в служебные строки (длина обязана превышать порог 200).
+    long_items = " • ".join(f"пункт номер {i} с достаточно длинным описанием" for i in range(4))
+    for structural in (f"> вводная {long_items}", f"## вводная {long_items}", f"| вводная {long_items} | конец |"):
+        assert lumen_formatting._split_inline_bullets(structural) == structural, structural[:60]
+    long_numbered = "1. alpharazat elfin uvicorn 2. betakakt elfin uvicorn 3. gamakakt elfin uvicorn"
+    for structural in (f"> {long_numbered}", f"## {long_numbered}"):
+        assert "\n" not in lumen_formatting._split_inline_numbered(structural), structural[:60]
 
 
 def test_inline_splitters_still_split_prose():

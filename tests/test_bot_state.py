@@ -629,8 +629,48 @@ def test_process_media_group_buffers_skips_download_when_rate_limited(monkeypatc
         bot.chat_state.pop(chat_id, None)
 
 
-def test_process_media_group_buffers_ignores_passive_group_album(monkeypatch):
-    # Альбом в группе без упоминания бота — пассивный фон, как и обычное сообщение:
+def test_process_media_group_buffers_spends_exactly_one_rate_limit_slot(monkeypatch):
+    # Альбом из N сообщений списывает ровно один слот лимита, а не по слоту на
+    # сообщение: буферизация идёт мимо _handle_message_core, единственная проверка —
+    # в locked-обработчике альбома.
+    chat_id = 999965
+    user_id = 999966
+
+    def _photo_msg(file_id):
+        photo = SimpleNamespace(file_id=file_id, mime_type=None, file_name=None)
+        return SimpleNamespace(
+            chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE), from_user=SimpleNamespace(id=user_id),
+            media_group_id="mgoneslot", text=None, caption=None, reply_to_message=None,
+            photo=[photo], video=None, animation=None, video_note=None,
+            voice=None, audio=None, document=None, sticker=None,
+        )
+
+    msgs = [_photo_msg(f"file_S{i}") for i in range(4)]
+    downloaded = []
+
+    async def fake_fetch(file_id, mime):
+        downloaded.append(file_id)
+        return (b"x", "image/jpeg")
+
+    async def fake_core(message, extra_media=None):
+        return None
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    bot.user_rate_limits.pop(user_id, None)
+    bot._mg_buffers["mgoneslot"] = msgs
+    try:
+        asyncio.run(bot._process_media_group_buffers("mgoneslot"))
+        assert sorted(downloaded) == ["file_S1", "file_S2", "file_S3"]
+        assert len(bot.user_rate_limits.get(user_id, [])) == 1
+    finally:
+        bot._mg_buffers.pop("mgoneslot", None)
+        bot._mg_tasks.pop("mgoneslot", None)
+        bot.user_rate_limits.pop(user_id, None)
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_process_media_group_buffers_ignores_passive_group_album(monkeypatch):    # Альбом в группе без упоминания бота — пассивный фон, как и обычное сообщение:
     # не должен ни тратить слот лимита, ни качать файлы, ни звать модель
     # (враждебное ревью 27.09.2026).
     chat_id = 999964
@@ -1405,8 +1445,8 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
     }
     original_throttle = lumen_chat_state._last_quota_check_monotonic
     try:
-        bot.GLOBAL_QUOTA["gemini"] = {"gemini-2.5-flash": {"used": 106, "remaining": 0, "limit": 1500, "exhausted_at": 12345.0}}
-        bot.GLOBAL_QUOTA["openrouter"] = {"some-model:free": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None}}
+        bot.GLOBAL_QUOTA["gemini"] = {"gemini-2.5-flash": {"used": 106, "remaining": 0, "limit": 1500, "exhausted_at": 12345.0, "cooldown_until": time.time() + 600.0}}
+        bot.GLOBAL_QUOTA["openrouter"] = {"some-model:free": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None, "cooldown_until": None}}
         bot.GLOBAL_QUOTA["groq"] = {"qwen/qwen3.8-27b": {"used": 9, "exhausted_at": 12345.0}}
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"  # заведомо "вчерашний" день
         lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
@@ -1415,6 +1455,7 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
 
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["used"] == 0
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["exhausted_at"] is None
+        assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["cooldown_until"] is None
         assert bot.GLOBAL_QUOTA["openrouter"]["some-model:free"]["used"] == 0
         # Groq сбрасывается вместе с остальными (внешний аудит: провайдер забыли в цикле сброса/загрузки).
         assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["used"] == 0

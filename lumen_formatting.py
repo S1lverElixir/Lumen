@@ -60,6 +60,29 @@ def _convert_markdown_tables_to_lists(text: str) -> str:
         i += 1
     return "\n".join(out)
 
+def _table_block_line_indexes(lines: list[str]) -> set[int]:
+    """Индексы строк markdown-таблиц (шапка + разделитель + тело) — теми же
+    условиями, что _convert_markdown_tables_to_lists выше. Разносчикам списков
+    эти строки трогать нельзя: в обычном пути таблицы разворачиваются ПОСЛЕ
+    разноса, и строка без ведущего `|` (валидная таблица без внешних пайпов)
+    иначе рвалась до детекта таблицы — стрим и финал расходились."""
+    idx: set[int] = set()
+    i, n = 0, len(lines)
+    while i < n:
+        if "|" in lines[i] and i + 1 < n and "-" in lines[i + 1] and _TABLE_SEP_RE.match(lines[i + 1]):
+            if len(_split_table_cells(lines[i])) >= 2:
+                j = i + 2
+                data = 0
+                while j < n and "|" in lines[j] and lines[j].strip():
+                    data += 1
+                    j += 1
+                if data:
+                    idx.update(range(i, j))
+                    i = j
+                    continue
+        i += 1
+    return idx
+
 # ── Защитная сетка от сырого LaTeX ──────────────────────────────────────────
 # Реальный найденный при калибровке случай: nemotron-3-nano-30b-a3b:free выдала
 # "\[ S = \pi r^{2}, \]" и "\(x^{2}+y^{2}=r^{2}\)" вместо юникода в ответе про
@@ -133,10 +156,13 @@ _INLINE_BULLETS_MIN_SEPS = 2
 _INLINE_BULLETS_MIN_LEN = 200
 
 def _split_inline_bullets(text: str) -> str:
+    lines = text.split("\n")
+    skip = _table_block_line_indexes(lines)
     out = []
-    for line in text.split("\n"):
+    for idx, line in enumerate(lines):
         if (
-            len(line) >= _INLINE_BULLETS_MIN_LEN
+            idx not in skip
+            and len(line) >= _INLINE_BULLETS_MIN_LEN
             and line.count(" • ") >= _INLINE_BULLETS_MIN_SEPS
             and not _is_structural_line(line)
         ):
@@ -165,11 +191,14 @@ _INLINE_NUMBERED_MIN_ITEM_LEN = 12
 _NUMBERED_MARKER_RE = re.compile(r"(?<!\d)(\d{1,3})\. ")
 
 def _split_inline_numbered(text: str) -> str:
+    lines = text.split("\n")
+    skip = _table_block_line_indexes(lines)
     out = []
-    for line in text.split("\n"):
+    for idx, line in enumerate(lines):
         markers = [(m.start(), int(m.group(1))) for m in _NUMBERED_MARKER_RE.finditer(line)]
         if (
-            len(markers) >= _INLINE_NUMBERED_MIN_ITEMS
+            idx not in skip
+            and len(markers) >= _INLINE_NUMBERED_MIN_ITEMS
             and [num for _, num in markers] == list(range(1, len(markers) + 1))
             and not _is_structural_line(line)
         ):

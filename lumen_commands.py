@@ -597,8 +597,10 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     # что у прежнего pop-first: всё синхронно до первого await ниже.
     rec = bot._pending_picks.get(token)
     # Язык для служебных реплик: из записи (если есть), иначе из чата кнопки.
+    # Фолбэк без создания записи: обычный _chat_lang через get_state заводил бы чат
+    # даже на чужой тап по неизвестному токену.
     _qchat = query.message.chat.id if query.message and query.message.chat else None
-    rec_lang = (rec or {}).get("lang") or bot._chat_lang(_qchat)
+    rec_lang = (rec or {}).get("lang") or bot._peek_chat_lang(_qchat)
 
     def _is_rec_owner(rec_rec: dict) -> bool:
         """Чей это выбор. Запись без user_id (пост канала/аноним) принадлежит чату."""
@@ -669,13 +671,17 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
                 await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
             return
     # Все проверки пройдены — только теперь забираем токен (см. комментарий у get выше).
+    # Без сообщения кнопки не во что упереть: токен не трогаем, иначе тап из инлайн
+    # режима сжёг бы чужой выбор без дела.
+    question_msg = query.message
+    if question_msg is None:
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
     bot._pending_picks.pop(token, None)
     choice = options[idx]
     with contextlib.suppress(Exception):
         await query.answer()
-    question_msg = query.message
-    if question_msg is None:
-        return
     with contextlib.suppress(Exception):
         # Клавиатуру снимаем пустой разметкой, иначе кнопки повиснут (повторный тап всё равно упрётся в pop).
         await bot._tg_call(
