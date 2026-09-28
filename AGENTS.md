@@ -44,6 +44,15 @@
 - Banned in code, comments and docs: code paraphrase, filler ("Важно", "Здесь мы", "Следует отметить"), filler prose, emojis, heavy dash use, commented-out code.
 - Module docstring: one line saying what the module does. No extraction history ("вынесено из bot.py").
 
+## Tests
+- Before adding a test, state in the report: what behavior it protects, what real regression makes it fail, why existing tests do not already catch it. If you cannot answer, do not add it.
+- Extend an existing parametrized test instead of writing a near-duplicate.
+- A bug-fix test must fail on the old code and pass on the fixed code; run both to confirm.
+- Do not write: tests without assertions, tests comparing a value to itself, tests where the mock reimplements the asserted behavior, greps over source text.
+
+## Before writing new code
+- Check first whether the project, the stdlib or an already installed dependency does it. New dependencies need approval.
+
 ## Effort routing
 - Answer questions, plans and discussion yourself. Delegate code edits, debugging, audits and multi-file analysis via Task: mechanical work to `quick`, anything non-trivial to `deep`. If unsure, use `deep`.
 - A subagent starts with no chat history. Put into the task text: file paths, the goal, the constraints from this file (branch, no push, gate) and the expected result. Ask it to return a short summary of what changed.
