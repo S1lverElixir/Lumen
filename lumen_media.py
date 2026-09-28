@@ -1,21 +1,10 @@
 """
-lumen_media.py — чистые утилиты медиа: поддерживаемые mime-типы, нормализация
-mime по расширению, разбор file_id/mime/имени из объектов Telegram, суффиксы
-файлов, источник медиа из сообщения и текст-подсказка по умолчанию для
-вложения без подписи.
+lumen_media.py — чистые утилиты медиа: mime-типы, file_id, суффиксы файлов,
+источник медиа из сообщения, текст-подсказка для вложения без подписи.
 
-Вынесено из bot.py (срез монолита): ни одна функция не читает module globals
-и не зовёт сеть/Telegram — тот же класс, что lumen_formatting.py/
-lumen_security.py/lumen_message_parse.py. bot.py импортирует нужные имена
-напрямую, поэтому `bot._sanitize_mime_type(...)` и т.д. продолжают работать
-ровно как раньше (включая подмену в тестах через module globals).
-
-Сознательно НЕ вынесено (остаётся в bot.py): _download_telegram_file_bytes
-(сессия, BOT_TOKEN, ретраи через bot.get_file), _fetch_media и
-_download_message_attachment_to_tmp (поверх него), _save_media_to_history
-(пишет в state + константа MAX_MEDIA_RECENT_IDS, живущая рядом с остальным
-состоянием в bot.py) — у всех есть зависимость от рантайма, вынос дал бы
-либо циклический импорт, либо проброс половины bot.py параметрами.
+Сетевая часть сознательно остаётся в bot.py (_download_telegram_file_bytes,
+_fetch_media, _save_media_to_history): у неё зависимость от рантайма, вынос
+дал бы циклический импорт или проброс половины bot.py параметрами.
 """
 
 from __future__ import annotations

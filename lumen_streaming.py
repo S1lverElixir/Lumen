@@ -294,10 +294,8 @@ async def _run_streaming_reply(
                     final_answer = full_text.strip()
                     hist.append({"role": "user", "content": _history_user_text(user_text)})
                     hist.append({"role": "assistant", "content": final_answer})
-                    # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез:
-                    # раньше здесь стояло del hist[:-SHARED_HISTORY_MAX_LEN], из-за чего
-                    # саммаризация истории работала только в нестриминговых путях — то
-                    # есть в самом частом сценарии (аудит 26.09.2026).
+                    # Обрезка с саммари (см. _trim_history): молчаливый срез оставлял
+                    # саммаризацию только нестриминговым путям (аудит 26.09.2026).
                     await bot._trim_history(hist)
                     ctx.clear()
                     bot._record_quota_usage(provider, model_id)
@@ -352,10 +350,9 @@ async def _run_streaming_reply(
 
     except Exception as exc:
         if not full_text.strip():
-            # 429 до первого куска — отмечаем модель для /stats и ненадолго убираем из
-            # роута. Суточный лимит (free-models-per-day) держим до утра, минутный
-            # всплеск — короткая остывка, иначе всплеск 429 запирал модель до полуночи
-            # (враждебное ревью 27.09.2026).
+            # 429 до первого куска — в /stats и ненадолго из роута. Суточный лимит
+            # держим до утра, минутный всплеск — короткая остывка (иначе один 429
+            # запирал модель до полуночи — враждебное ревью 27.09.2026).
             try:
                 _txt = bot._error_text(exc).strip() or exc.__class__.__name__
                 if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":

@@ -1,10 +1,5 @@
 """
-lumen_rich.py — отправка сообщений: гости, Rich Messages, чанкинг (вынесено
-из bot.py, P2 аудита).
-
-Связи с рантаймом bot.py — только через отложенный `import bot` внутри функций.
-bot.py реэкспортирует имена — `bot._send_text`, `bot._safe_reply` и т.п.
-в тестах и вызывающем коде не менялись.
+lumen_rich.py — отправка сообщений: гости, Rich Messages, чанкинг.
 """
 from __future__ import annotations
 

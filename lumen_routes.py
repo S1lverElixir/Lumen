@@ -1,12 +1,7 @@
 """
-lumen_routes.py — LLM-маршрутизация: OpenRouter/Gemini вызовы с фолбэком,
-построение истории/конфигов и _run_route (вынесено из bot.py, P2 аудита).
-
-Связи с рантаймом bot.py — только через отложенный `import bot` внутри функций
-(модульного цикла нет). bot.py реэкспортирует имена — `bot.ask_gemini`,
-`bot._run_route` и т.п. в тестах и `_handle_message_core` не менялись.
-Подменяемые в тестах имена (`bot.ask_gemini`, `bot._or_request`, ...) вызываются
-через `bot.` и внутри модуля, чтобы monkeypatch видел их как раньше.
+lumen_routes.py — LLM-маршрутизация: OpenRouter/Gemini с фолбэком, история,
+конфиги, _run_route. Подменяемые в тестах имена вызываются через `bot.`,
+чтобы monkeypatch видел их как раньше.
 """
 from __future__ import annotations
 
@@ -479,14 +474,9 @@ def _build_gemma_identity_contents(model_id: str, contents: list[types.Content])
     ]
     call_contents = _identity_ctx + contents
 
-    # Разросшаяся история "разбавляет" единственное упоминание личности, которое
-    # стоит в самом НАЧАЛЕ контекста (см. _identity_ctx выше) — чем длиннее
-    # разговор, тем физически легче модели "заиграться" в инъекцию, встретившуюся
-    # где-то в хвосте. У Gemma нет отдельного канала system_instruction (в отличие
-    # от остальных моделей — см. ветку выше), где эта проблема так остро не стоит,
-    # поэтому именно здесь добавляем короткое напоминание НЕПОСРЕДСТВЕННО перед
-    # последним (новым) сообщением пользователя — ближе к концу контекста модель
-    # учитывает инструкции надёжнее, чем инструкции в давно разросшемся начале.
+    # Длинная история разбавляет упоминание личности в начале контекста, а у Gemma
+    # нет отдельного канала system_instruction — дублируем напоминание прямо
+    # перед новым сообщением: конец контекста модель учитывает надёжнее.
     if len(contents) > 12:
         _reminder = types.Content(role="user", parts=[types.Part.from_text(
             text="[Напоминание перед ответом: ты — Lumen, не называй себя Gemini/Gemma/Google. "
@@ -581,13 +571,12 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
         elif not ans and reasons:
             retry_failed = False
             if any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
-                # Модель сломала собственный вызов инструмента — повторяем БЕЗ инструментов (ответ своими знаниями вместо ошибки).
+                # Модель сломала свой вызов инструмента — повторяем без инструментов.
                 try:
                     retry_gconfig = gconfig.model_copy(update={"tools": None}) if gconfig is not None else None
-                    # Async-клиент, а не to_thread: wait_for тогда реально отменяет зависший
-                    # запрос (поток to_thread отменить нельзя — он бы жил дальше в фоне).
-                    # Повтор тоже влезет в бюджет маршрута: полный TELEGRAM_AI_TIMEOUT
-                    # поверх истраченного держал бы lock чата за ROUTE_TOTAL_BUDGET_SEC.
+                    # Async-клиент, а не to_thread: wait_for реально отменяет зависший
+                    # запрос. Повтор тоже в бюджет маршрута, иначе держал бы лок
+                    # поверх истраченного.
                     retry_timeout = bot.TELEGRAM_AI_TIMEOUT
                     if deadline is not None:
                         retry_timeout = min(retry_timeout, max(0.0, deadline - time.monotonic()))

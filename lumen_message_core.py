@@ -1,11 +1,7 @@
 """
-lumen_message_core.py — ядро обработки входящих сообщений (вынесено из bot.py,
-P2 аудита): альбомы, пассивный фон групп, rate limit, разбор вложений,
-_handle_message_core, handle_message, _process_raw_update.
-
-Буферы альбомов (_mg_buffers/_mg_tasks) живут в bot.py — здесь только чтение/
-мутация тех же объектов через `bot.`. Остальные связи с рантаймом — тоже через
-отложенный `import bot` внутри функций. bot.py реэкспортирует имена.
+lumen_message_core.py — ядро обработки входящих сообщений: альбомы, пассивный
+фон групп, rate limit, разбор вложений, _handle_message_core. Буферы альбомов
+живут в bot.py, связь с ним — отложенным импортом внутри функций.
 """
 from __future__ import annotations
 
@@ -59,10 +55,9 @@ async def _process_media_group_buffers(mgid: str) -> None:
             bot._mg_tasks.pop(mgid, None)
     if not messages:
          return
-    # Альбом идёт под тем же per-chat lock, что обычные сообщения: иначе фоновый таск
-    # и свежий вопрос гоняются за history/ctx одного чата (найдено внешним аудитом).
-    # Ожидание лока ограничено (как в основном пути) — раньше `async with lock` ждал
-    # вечно, и альбом мог висеть в фоне дольше любого бюджета (аудит 26.09.2026).
+    # Альбом — под тем же per-chat lock: иначе фоновый таск и свежий вопрос
+    # гоняются за history/ctx (аудит). Ожидание ограничено: вечное висело в фоне
+    # дольше любого бюджета (аудит 26.09.2026).
     main_msg = messages[0]
     lock = bot.get_chat_lock(main_msg.chat.id if main_msg.chat else 0)
     try:
@@ -96,11 +91,9 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
         ):
             bot._record_passive_group_context(main_msg, bot.get_state(main_msg.chat.id), t_text)
             return
-    # Лимит пользователя проверяем ДО скачивания файлов: раньше альбом из 9 фото
-    # грузился целиком даже в группе без упоминания бота и для уже отклонённого по
-    # лимиту автора — трафик прокси и память расходовались впустую (аудит 26.09.2026).
-    # Слот тут списывается ровно один: handle_message буферизует альбом целиком и в
-    # _handle_message_core не заходит (проверено 27.09.2026).
+    # Лимит — ДО скачивания: раньше альбом грузился целиком даже для отклонённого
+    # автора (аудит 26.09.2026). Слот ровно один: handle_message буферизует альбом
+    # целиком и в _handle_message_core не заходит.
     if await bot._reject_rate_limited_message(main_msg):
         return
     extra_media: list[tuple[bytes, str]] = []
@@ -340,10 +333,9 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             await bot.inline_tts(message, tts_content)
             return
 
-    # Кнопки-уточнения для вкусовых запросов без деталей ("посоветуй фильм"):
-    # вместо гадания модели — вопрос с вариантами. _pick_resolved ставят только
-    # колбэки (см. handle_pick_callback): дополненный текст всё ещё матчится
-    # детектором, без флага ушёл бы в кнопки по кругу.
+    # Кнопки-уточнения для вкусовых запросов без деталей — вместо гадания модели.
+    # _pick_resolved ставят только колбэки: без флага дополненный текст ушёл бы
+    # в кнопки по кругу.
     if bot.PICK_BUTTONS_ENABLED and not is_continuation and not getattr(message, "_pick_resolved", False):
         pick_scenario = match_pick_request(lower_prompt)
         if pick_scenario:

@@ -1,7 +1,7 @@
 """
-lumen_tiktok.py — чистая механика TikTok-загрузчика (подписи, слайдшоу, детект видео-слайдов, выбор URL/качества, разбор ссылок на звук, MP3-теги, ffmpeg-пробинг, скачивание).
-
-Вынесено из bot.py (аудит техдолга): только то, что не зовёт Telegram напрямую. Оркестрация handle_tiktok/handle_tiktok_sound остаётся в bot.py — неотделима от bot.send_*/_tg_call.
+lumen_tiktok.py — механика TikTok-загрузчика без прямого Telegram: подписи,
+слайдшоу, выбор URL/качества, разбор ссылок на звук, MP3-теги, ffmpeg-пробинг.
+Оркестрация отправки — в lumen_tiktok_flow.py.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ from mutagen.mp3 import MP3
 log = logging.getLogger("bot")
 
 
-# ─────────────────── локализация подписи "оригинальный звук" ───────────────────
-# TikWM даёт язык автора исходного видео, а подпись нужна на языке отправителя ссылки — берём message.from_user.language_code.
+# Подпись нужна на языке отправителя ссылки, а не автора видео.
+# TikWM даёт язык автора, поэтому берём message.from_user.language_code.
 _ORIGINAL_SOUND_LABELS: dict[str, str] = {
     "ru": "Оригинальный звук",
     "uk": "Оригінальний звук",

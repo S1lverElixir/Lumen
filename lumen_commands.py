@@ -620,10 +620,8 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
 
     if rec is None or rec["expires"] < time.monotonic():
         if rec is not None and query.message is not None:
-            # Протухший, но известный выбор — молча выдаём свежие кнопки вместо
-            # стены "протухло, пиши текстом". Старый токен забираем явно (выше
-            # теперь get, а не pop). Второй такой тап упрётся в rec None ниже
-            # и честно покажет pick_expired. Один ресенд.
+            # Протухший известный выбор — молча свежие кнопки вместо стены текста.
+            # Один ресенд: второй тап упрётся в rec None и честно покажет expired.
             bot._pending_picks.pop(token, None)
             _purge_expired_picks()
             _enforce_pending_picks_cap()

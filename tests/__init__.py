@@ -1,2 +1,2 @@
-# Marks tests/ as a package so pytest imports test modules as
-# tests.test_bot_state (repo root stays on sys.path, `import bot` keeps working).
+# Пакет для pytest: модули импортируются как tests.test_bot_state,
+# корень репо остаётся в sys.path, поэтому `import bot` работает.

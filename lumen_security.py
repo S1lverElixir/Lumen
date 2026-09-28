@@ -1,14 +1,7 @@
 """
-lumen_security.py — детерминированная защита от промт-инъекций и утечки
-идентичности провайдера/модели (Lumen никогда не должен представляться как
-Gemini/Gemma/OpenRouter и т.п. — см. system_prompt.py).
-
-Вынесено из bot.py при аудите технического долга: детекторы (_detect_identity_leak,
-_detect_injected_payload_echo, _looks_like_injection_probe) — чистые функции над
-строками, не зависящие от Telegram/рантайм-состояния бота. Единственная внешняя
-зависимость — GEMINI_MODELS/TEXT_MODEL_ORDER из lumen_router_config.py (нужны для
-списка точных строк внутренних ID моделей, см. _LEAK_LITERAL_STRINGS ниже).
-Публичные имена и поведение не изменились.
+lumen_security.py — защита от промт-инъекций и утечки идентичности
+(Lumen не представляется Gemini/Gemma/OpenRouter — см. system_prompt.py).
+Детекторы — чистые функции; внешний список ID моделей — из lumen_router_config.
 """
 
 from __future__ import annotations

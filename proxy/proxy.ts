@@ -50,8 +50,8 @@ export const ALLOWED_HOSTS = new Set([
 ]);
 
 // Кап объявленного тела запроса (аудит 26.09.2026). Telegram сам режет загрузки
-// на 50 МБ, а прокси — общий трафик аккаунта, поэтому верхняя граница взята с
-// запасом под legitimately большие файлы, но не «без предела».
+// на 50 МБ, а прокси — общий трафик аккаунта, поэтому граница взята с запасом
+// под честно большие файлы, но не «без предела».
 export const MAX_REQUEST_BODY_BYTES = 100 * 1024 * 1024;
 
 export function limitStreamBytes(
@@ -86,12 +86,9 @@ export function limitStreamBytes(
 const HOP_BY_HOP_REQUEST_HEADERS = ["host", "connection"];
 const HOP_BY_HOP_RESPONSE_HEADERS = ["content-encoding", "content-length", "connection", "transfer-encoding"];
 
-// Разложено на чистые, независимо тестируемые функции (resolveTarget/
-// buildForwardHeaders/buildResponseHeaders) вместо одного большого обработчика —
-// тот же принцип, что и в остальном проекте Lumen (см. lumen_tiktok.py и др.):
-// маршрутизацию и фильтрацию заголовков можно проверить юнит-тестами без единого
-// реального сетевого вызова, а сама сетевая часть (handleRequest) тестируется
-// отдельно через подмену fetch.
+// Разложено на чистые тестируемые функции вместо одного большого обработчика:
+// маршрутизацию и заголовки проверяют юниты без сети, сетевую часть —
+// handleRequest через подмену fetch.
 
 export type TargetResolution =
   | { ok: true; host: string; url: string }
@@ -100,13 +97,9 @@ export type TargetResolution =
 export function resolveTarget(pathname: string, search: string): TargetResolution {
   // pathname всегда начинается с "/", поэтому после split("/") первый элемент —
   // всегда пустая строка, а реальные сегменты — начиная с индекса 1. Намеренно
-  // НЕ фильтруем пустые сегменты через .filter(Boolean) (как было в первой
-  // версии) — НАЙДЕНО ПРИ ТЕСТИРОВАНИИ: filter(Boolean) съедал завершающий "/"
-  // у путей вида "/fetch/host/api/" (пустой хвостовой сегмент после join
-  // как раз и восстанавливает эту же завершающую "/"), из-за чего запрос
-  // TikWM вида ".../api/?url=..." ушёл бы к апстриму как ".../api?url=..."
-  // без слеша — ровно тот класс "почти правильного, но не совсем" URL, из-за
-  // которого уже был потрачен не один час отладки в этом проекте.
+  // Пустые сегменты намеренно не фильтруем: filter(Boolean) съедал завершающий "/"
+  // у путей вида "/fetch/host/api/", и запрос TikWM уходил без слеша (дорогая
+  // отладка в истории проекта).
   const parts = pathname.split("/");
   if (parts.length < 3 || parts[1] !== "fetch" || parts[2] === "") {
     return { ok: false, status: 404, message: "Not found — ожидаемый формат пути: /fetch/<host>/<путь>" };
@@ -132,8 +125,7 @@ export function buildResponseHeaders(upstreamHeaders: Headers): Headers {
   return headers;
 }
 
-// fetchImpl — точка подмены для тестов (тот же приём, что bot._get_http_session
-// и т.п. в Python-части проекта) — реальная сеть не нужна ни одному юнит-тесту.
+// fetchImpl — точка подмены для тестов: реальная сеть юнитам не нужна.
 export async function handleRequest(
   req: Request,
   fetchImpl: typeof fetch = fetch,
