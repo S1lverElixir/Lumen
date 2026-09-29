@@ -352,6 +352,51 @@ def test_sse_parsers_share_one_implementation():
         assert "_sse_pieces" in fn_src
 
 
+@pytest.mark.parametrize("deadline_mode", ["none", "expired"])
+def test_sse_pieces_hanging_post_entry_times_out(deadline_mode, monkeypatch):
+    # Регрессия A4-01: вход в session.post шёл с total=None без общего лимита —
+    # зависший провайдер держал per-chat lock вечно. Теперь заголовки ждут не
+    # дольше попытки маршрута, висящий вход быстро даёт TimeoutError.
+    class _HangingPostCM:
+        def __init__(self):
+            self.exited = False
+
+        async def __aenter__(self):
+            await asyncio.sleep(3600)
+            return self
+
+        async def __aexit__(self, *args):
+            self.exited = True
+            return False
+
+    class _HangingPostSession:
+        def __init__(self, cm):
+            self._cm = cm
+
+        def post(self, *args, **kwargs):
+            return self._cm
+
+    monkeypatch.setattr(bot, "ROUTE_MODEL_TIMEOUT_SEC", 0.2)
+    cm = _HangingPostCM()
+    session = _HangingPostSession(cm)
+    deadline = None if deadline_mode == "none" else time.monotonic() - 1.0
+
+    async def collect():
+        async for _ in lumen_streaming._sse_pieces(
+            session, "http://example.test/chat", {}, {},
+            err_cls=bot.OpenRouterAPIError, provider_label="OpenRouter", deadline=deadline,
+        ):
+            pass
+
+    started = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(asyncio.wait_for(collect(), timeout=5.0))
+    elapsed = time.monotonic() - started
+    # Старый код висел все 5с внешнего wait_for; новый обрывает вход за ~0.2-0.5с.
+    assert elapsed < 2.5, f"вход в POST ждал мимо лимита попытки: {elapsed:.1f}с"
+    assert cm.exited
+
+
 def test_groq_stream_pieces_raises_on_http_error_status():
     # У Groq раньше не было теста на HTTP>=400 (ветка-копия без покрытия, аудит 26.09.2026).
     fake_resp = _FakeSSEResponse([], status=500)

@@ -131,7 +131,16 @@ async def _sse_pieces(
     чанка (HTTP 200, стрим уже открыт) поднимается: ранний сбой — откат на
     следующую модель, поздний — пометка "соединение прервалось"."""
     import bot
-    async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=None, connect=12.0)) as resp:
+    post_cm = session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=None, connect=12.0))
+    try:
+        # Заголовки без total висели вечно и держали lock чата до рестарта (аудит 29.09.2026),
+        # поэтому вход ждём не дольше попытки маршрута, а тело стрима — по-прежнему покусочно.
+        resp = await asyncio.wait_for(post_cm.__aenter__(), timeout=bot._attempt_timeout(bot, deadline))
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await post_cm.__aexit__(None, None, None)
+        raise
+    try:
         if resp.status >= 400:
             body = await resp.read()
             raise err_cls(f"HTTP {resp.status}: {body[:300]!r}", status_code=resp.status)
@@ -163,6 +172,9 @@ async def _sse_pieces(
             piece = delta.get("content") or ""
             if piece:
                 yield piece
+    finally:
+        with contextlib.suppress(Exception):
+            await post_cm.__aexit__(None, None, None)
 
 async def _openrouter_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
     """Куски от OpenRouter: SSE через общий _sse_pieces, таймаут на строку — тот же
