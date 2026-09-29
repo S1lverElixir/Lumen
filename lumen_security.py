@@ -49,8 +49,9 @@ def _leak_scan_window(full_text: str, latest_piece: str) -> str:
 # рассказы про бренды: "я" — частый токен, а хеджирование вроде "я не могу
 # сравнивать себя..." — не утечка.
 _LEAK_BRAND_TOKENS = (
-    r"(gemini|gemma|gpt[\s\-]?oss|chatgpt|openai|claude|anthropic|deepmind|openrouter|"
-    r"nemotron|qwen|llama|glm[\s\-]?4|hermes|dolphin[\s\-]?mistral|venice|laguna|"
+    r"(gemini|gemma|gpt[\s\-]?(?:oss|\d)[\w\-]*|chatgpt|openai|claude|anthropic|deepmind|openrouter|"
+    r"nemotron|qwen|llama|glm[\s\-]?4|hermes|mistral|dolphin[\s\-]?mistral|venice|laguna|"
+    r"deepseek|grok|meta(?:\s*ai)?|google|"
     r"lfm[\s\-]?2\.5|нейросет\w*\s+google|модел\w*\s+google|google\s*ai|google\s+gemini)"
 )
 _IDENTITY_LEAK_RE = re.compile(
@@ -65,6 +66,14 @@ _IDENTITY_LEAK_RE = re.compile(
     rf"|\bbuilt\s+on\s+{_LEAK_BRAND_TOKENS}\b"
     rf"|\bpowered\s+by\s+{_LEAK_BRAND_TOKENS}\b"
     rf"|\bbased\s+on\s+{_LEAK_BRAND_TOKENS}\b"
+    rf"|\bi\s+(?:was\s+)?(?:created|made)\s+by\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
+    rf"|\bi\s*(?:am|'m)\s+from\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
+    rf"|\bmy\s+creators?\s+(?:is|are)\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
+    # "я от Google" только как короткое самоопределение (дальше пунктуация/конец):
+    # "я от Google узнал..." — честная фраза, а не утечка.
+    rf"|\bя\s+от\s+(?:компании\s+)?{_LEAK_BRAND_TOKENS}(?=\s*[.!?…;:,]|$)"
+    rf"|\bмо[йи]\s+создател\w*\s*(?:—|-|:)?\s*(?:компани\w*\s+)?{_LEAK_BRAND_TOKENS}\b"
+    rf"|\bя\s*(?:—|-|:)?\s*(?:это\s+|являюсь\s+)?(?:модел\w*|нейросет\w*)\s+от\s+(?:компании\s+)?{_LEAK_BRAND_TOKENS}\b"
     rf"|{_LEAK_BRAND_TOKENS}\s*,?\s*а\s+не\s+lumen\b",
     re.IGNORECASE,
 )
@@ -196,6 +205,22 @@ _INJECTION_PROBE_RE = re.compile(
     re.IGNORECASE,
 )
 
+def _normalize_for_detection(text: str) -> str:
+    # Обход через невидимки/совместимые символы: чистим копию для проверки.
+    if not text:
+        return text
+    norm = unicodedata.normalize("NFKC", text)
+    return "".join(ch for ch in norm if unicodedata.category(ch) != "Cf")
+
+
 def _looks_like_injection_probe(text: str) -> bool:
     """Чистая функция — тестируется отдельно от _handle_message_core."""
-    return bool(text) and bool(_INJECTION_PROBE_RE.search(text))
+    if not text:
+        return False
+    norm = unicodedata.normalize("NFKC", text)
+    # Невидимки бывают и внутри слова, и вместо пробела: проверяем оба варианта.
+    stripped = "".join(ch for ch in norm if unicodedata.category(ch) != "Cf")
+    if _INJECTION_PROBE_RE.search(stripped):
+        return True
+    spaced = "".join(" " if unicodedata.category(ch) == "Cf" else ch for ch in norm)
+    return bool(_INJECTION_PROBE_RE.search(spaced))

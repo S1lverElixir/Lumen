@@ -354,6 +354,11 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         if transcript:
             clean_prompt = (clean_prompt + "\n" + transcript).strip() if clean_prompt else transcript
             media_tuple = None
+            if _looks_like_injection_probe(clean_prompt):
+                # Голосовой транскрипт дописывается после первого префильтра (аудит A3-1).
+                log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s: %r', message.chat.id, clean_prompt[:300])
+                await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
+                return
 
     if media_tuple and not clean_prompt:
          clean_prompt = _ensure_prompt_text(None, media_tuple[1])
