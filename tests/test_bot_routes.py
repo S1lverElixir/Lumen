@@ -70,6 +70,29 @@ def test_error_status_returns_none_when_no_code_found():
     assert bot._error_status(exc, "no numbers here") is None
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("Error 503: unavailable", 503),
+    ("HTTP 429 too many requests", 429),
+    ("status 403", 403),
+    ("status_code=400", 400),
+    ("error 500", 500),
+])
+def test_error_status_matches_status_templates(text, expected):
+    # Сторож к A8-04: явные HTTP/status-шаблоны продолжают распознаваться.
+    assert bot._error_status(_FakeExc(text), text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "429 токенов",
+    "лимит исчерпан: 429 запросов",
+    "500 попыток",
+    "no numbers here",
+])
+def test_error_status_ignores_bare_numbers(text):
+    # Регрессия A8-04: голое число без шаблона — не статус («429 токенов» давало ложный 429).
+    assert bot._error_status(_FakeExc(text), text) is None
+
+
 def test_gemini_error_msg_rate_limit():
     # РЕГРЕССИЯ (аудит техдолга): раньше здесь проверялось "модель через /model" —
     # команда /model давно удалена (см. README, "Automatic model routing"),

@@ -8,6 +8,14 @@ import bot
 import lumen_telegram_transport
 import pytest
 import time
+from unittest.mock import MagicMock
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNotFound,
+    TelegramRetryAfter,
+    TelegramUnauthorizedError,
+)
 from tests.bot_test_helpers import (
     _run_proxy_middleware,
 )
@@ -303,4 +311,147 @@ def test_proxy_middleware_rejects_authenticated_redirects():
         asyncio.run(authenticate(request, _handler_302))
     assert seen_resp["resp"].closed is True
     assert "X-Lumen-Proxy-Secret" not in request.headers
+
+
+def _save_breaker_state():
+    breaker = bot._tg_proxy_breaker
+    return (breaker.consecutive_failures, breaker.down_until, breaker.down_logged_at)
+
+
+def _restore_breaker_state(saved):
+    breaker = bot._tg_proxy_breaker
+    breaker.consecutive_failures, breaker.down_until, breaker.down_logged_at = saved
+
+
+def test_tg_call_waits_retry_after_before_retry(monkeypatch):
+    # Регрессия A8-02: флуд-контроль ждём по retry_after, а не 0.5с (ранний повтор продлевал бан).
+    calls = []
+    slept = []
+
+    async def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise TelegramRetryAfter(method=MagicMock(), message="Flood", retry_after=7)
+        return "ok"
+
+    async def fake_sleep(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    saved = _save_breaker_state()
+    try:
+        assert asyncio.run(bot._tg_call(flaky, retries=1)) == "ok"
+    finally:
+        _restore_breaker_state(saved)
+    assert len(calls) == 2
+    assert slept == [7.0]
+
+
+@pytest.mark.parametrize("exc_cls", [
+    TelegramBadRequest,
+    TelegramUnauthorizedError,
+    TelegramForbiddenError,
+    TelegramNotFound,
+])
+def test_tg_call_does_not_retry_client_errors(monkeypatch, exc_cls):
+    # Регрессия A8-02: 4xx (кроме 429) повторять бессмысленно — один вызов, сразу None.
+    calls = []
+
+    async def always_bad():
+        calls.append(1)
+        raise exc_cls(method=MagicMock(), message="client error")
+
+    saved = _save_breaker_state()
+    try:
+        assert asyncio.run(bot._tg_call(always_bad, retries=2)) is None
+    finally:
+        _restore_breaker_state(saved)
+    assert len(calls) == 1
+
+
+def test_tg_call_still_retries_transient_errors(monkeypatch):
+    # Сторож к A8-02: запрет повторов 4xx не должен отменять ретраи сетевых сбоев.
+    calls = []
+    slept = []
+
+    async def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError("boom")
+        return "ok"
+
+    async def fake_sleep(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    saved = _save_breaker_state()
+    try:
+        assert asyncio.run(bot._tg_call(flaky, retries=1)) == "ok"
+    finally:
+        _restore_breaker_state(saved)
+    assert len(calls) == 2
+    assert slept == [0.5]
+
+
+def test_telegram_api_call_network_error_keeps_cause(monkeypatch):
+    # Регрессия A8-03: цепочка для Sentry не рвётся (было from None).
+    original = ConnectionError("dns boom")
+
+    class _Post:
+        async def __aenter__(self):
+            raise original
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Sess:
+        def post(self, *args, **kwargs):
+            return _Post()
+
+    async def fake_session():
+        return _Sess()
+
+    monkeypatch.setattr(bot, "_get_telegram_session", fake_session)
+    saved = _save_breaker_state()
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            asyncio.run(bot.telegram_api_call("sendMessage", {"chat_id": 1}))
+    finally:
+        _restore_breaker_state(saved)
+    assert exc_info.value.__cause__ is original
+    assert "sendMessage" in str(exc_info.value)
+
+
+def test_telegram_api_call_ok_false_reports_description(monkeypatch):
+    # Регрессия A8-03: в тексте код+описание, а не весь словарь ответа целиком.
+    body = {"ok": False, "error_code": 400, "description": "Bad Request: chat not found"}
+
+    class _Resp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def json(self, content_type=None):
+            return body
+
+    class _Sess:
+        def post(self, *args, **kwargs):
+            return _Resp()
+
+    async def fake_session():
+        return _Sess()
+
+    monkeypatch.setattr(bot, "_get_telegram_session", fake_session)
+    saved = _save_breaker_state()
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            asyncio.run(bot.telegram_api_call("sendMessage", {"chat_id": 1}))
+    finally:
+        _restore_breaker_state(saved)
+    msg = str(exc_info.value)
+    assert "Bad Request: chat not found" in msg
+    assert "400" in msg
+    assert "'ok'" not in msg
 

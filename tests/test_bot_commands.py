@@ -947,3 +947,118 @@ def test_ru_system_messages_use_informal_ty():
     no_sep = lumen_lang.STRINGS["tiktok_sound_no_separate"]["ru"]
     assert "Пришли, пожалуйста" in no_sep
     assert "Пришлите" not in no_sep
+
+
+def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
+    # Регрессия A8-01: send_photo идёт через _tg_call (breaker/таймаут/RetryAfter), а не напрямую.
+    chat_id = 999433
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    calls = []
+
+    async def fake_pollinations(session, model_id, prompt):
+        return b"\x89PNG fake bytes"
+
+    async def fake_tg_call(method, *args, **kwargs):
+        calls.append((method, kwargs))
+        if "photo" in kwargs:
+            return SimpleNamespace()
+        return await method(*args, **kwargs)
+
+    direct = AsyncMock()
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_pollinations)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_photo=direct))
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    finally:
+        bot.chat_state.pop(chat_id, None)
+    assert any("photo" in kw for _, kw in calls)
+    send_kwargs = next(kw for _, kw in calls if "photo" in kw)
+    assert send_kwargs.get("call_timeout") == bot.TELEGRAM_MEDIA_TIMEOUT
+    direct.assert_not_awaited()
+
+
+def test_inline_draw_send_failure_reports_service_error(monkeypatch):
+    # Регрессия A8-01: _tg_call вернул None (сеть/брейкер) — пользователь видит ошибку сервиса.
+    chat_id = 999434
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    replied = []
+
+    async def fake_pollinations(session, model_id, prompt):
+        return b"\x89PNG fake bytes"
+
+    async def fake_tg_call(method, *args, **kwargs):
+        if "photo" in kwargs:
+            return None
+        return await method(*args, **kwargs)
+
+    async def fake_edit_quietly(msg, text, **kwargs):
+        replied.append(text)
+        return True
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_pollinations)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit_quietly)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_photo=AsyncMock()))
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    finally:
+        bot.chat_state.pop(chat_id, None)
+    assert replied and replied[-1] == bot._t(chat_id, "draw_err_unavailable")
+    bot.chat_state.pop(chat_id, None)
+
+
+def test_inline_tts_sends_voice_via_tg_call(monkeypatch):
+    # Регрессия A8-01: send_voice идёт через _tg_call, а не напрямую.
+    chat_id = 999435
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    calls = []
+
+    async def fake_tg_call(method, *args, **kwargs):
+        calls.append((method, kwargs))
+        if "voice" in kwargs:
+            return SimpleNamespace()
+        return await method(*args, **kwargs)
+
+    async def fake_synth(text):
+        return (b"fake-ogg", "speech.ogg", 5)
+
+    direct = AsyncMock()
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fake_synth)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_voice=direct))
+    try:
+        asyncio.run(bot.inline_tts(incoming, "привет"))
+    finally:
+        bot.chat_state.pop(chat_id, None)
+    assert any("voice" in kw for _, kw in calls)
+    send_kwargs = next(kw for _, kw in calls if "voice" in kw)
+    assert send_kwargs.get("call_timeout") == bot.TELEGRAM_MEDIA_TIMEOUT
+    direct.assert_not_awaited()
+
+
+def test_inline_tts_send_failure_raises(monkeypatch):
+    # Регрессия A8-01: None от _tg_call — наружу исключение, как раньше при прямом вызове.
+    chat_id = 999436
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+
+    async def fake_tg_call(method, *args, **kwargs):
+        if "voice" in kwargs:
+            return None
+        return await method(*args, **kwargs)
+
+    async def fake_synth(text):
+        return (b"fake-ogg", "speech.ogg", 5)
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fake_synth)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_voice=AsyncMock(return_value=SimpleNamespace())))
+    try:
+        with pytest.raises(RuntimeError, match="send_voice"):
+            asyncio.run(bot.inline_tts(incoming, "привет"))
+    finally:
+        bot.chat_state.pop(chat_id, None)
