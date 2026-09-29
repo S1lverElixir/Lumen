@@ -10,6 +10,7 @@ import contextlib
 import logging
 import os
 import re
+import time
 from typing import Any
 
 from aiogram.enums import ChatType
@@ -349,8 +350,11 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # Голос/аудио: сначала дешёвая транскрибация — дальше текст идёт общим роутингом по
     # сценарию (тяжесть/свежесть определяются по сказанному). Не вышло — падает в прежний
     # путь: аудио напрямую в Gemini (см. is_video_or_audio_media в роутере).
+    # Один бюджет на транскрибацию и маршрут: иначе войс держал лок сверх бюджета.
+    route_deadline: float | None = None
     if media_tuple and media_tuple[1].startswith("audio/"):
-        transcript = await bot._transcribe_audio(media_tuple[0], media_tuple[1], message.chat.id)
+        route_deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
+        transcript = await bot._transcribe_audio(media_tuple[0], media_tuple[1], message.chat.id, deadline=route_deadline)
         if transcript:
             clean_prompt = (clean_prompt + "\n" + transcript).strip() if clean_prompt else transcript
             media_tuple = None
@@ -421,6 +425,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             message.chat.id, ai_prompt, route, message,
             media=gemini_media_list, media_filename=med_name,
             youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
+            deadline=route_deadline,
         )
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
@@ -456,7 +461,21 @@ async def _process_raw_update(raw_update: dict) -> None:
                  if gq_id is not None and not getattr(msg_obj, "guest_query_id", None):
                      with contextlib.suppress(Exception):
                          object.__setattr__(msg_obj, "guest_query_id", gq_id)
-                 await bot._handle_message_core(msg_obj)
+                 # Тот же per-chat lock, что у обычного пути: параллельные апдейты иначе гоняются за history/ctx.
+                 guest_chat_id = msg_obj.chat.id if msg_obj.chat else 0
+                 guest_lock = bot.get_chat_lock(guest_chat_id)
+                 try:
+                     await asyncio.wait_for(guest_lock.acquire(), timeout=bot.CHAT_LOCK_TIMEOUT_SEC)
+                 except asyncio.TimeoutError:
+                     log.warning("[guest] Timeout waiting for lock on chat %s", guest_chat_id)
+                     with contextlib.suppress(Exception):
+                         await bot._tg_call(msg_obj.reply, bot._t_no_create(guest_chat_id, "lock_busy"))
+                     return
+                 try:
+                     await bot._handle_message_core(msg_obj)
+                 finally:
+                     with contextlib.suppress(Exception):
+                         guest_lock.release()
             except Exception as exc:
                  log.warning("[guest] Guest processing failed: %s", exc)
             return
