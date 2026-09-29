@@ -189,9 +189,12 @@ def _reset_quota_if_new_day() -> None:
 
 def load_global_quota() -> None:
     import bot
+    global _state_load_failed
     try:
         raw = bot._storage_read_text("lumen:global_quota", GLOBAL_QUOTA_FILE)
         if not raw:
+            # Пусто — первый запуск, а не отказ: сбрасывать нечего.
+            _state_load_failed = False
             return
         loaded = json.loads(raw)
         if isinstance(loaded, dict):
@@ -203,7 +206,10 @@ def load_global_quota() -> None:
                 GLOBAL_QUOTA["groq"] = loaded["groq"]
             if "quota_day" in loaded:
                 GLOBAL_QUOTA["quota_day"] = loaded["quota_day"]
+        _state_load_failed = False
     except Exception as exc:
+        # Чтение/разбор упали — память недостоверна, перезапись запрещена (см. флаг).
+        _state_load_failed = True
         log.warning("[quota] Failed to load global quota: %s", exc)
     # Проверяем сразу после загрузки — если бот был перезапущен уже на следующие
     # сутки (обычное дело при редеплое), счётчики должны обнулиться сразу на
@@ -212,6 +218,10 @@ def load_global_quota() -> None:
 
 def save_global_quota() -> None:
     import bot
+    if _state_load_failed:
+        # Стартовая загрузка не удалась: удалённая квота новее пустой памяти, не затираем.
+        log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
+        return
     try:
         bot._storage_write_text("lumen:global_quota", GLOBAL_QUOTA_FILE, json.dumps(GLOBAL_QUOTA, ensure_ascii=False))
     except Exception as exc:
@@ -256,13 +266,16 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         "lang": normalize_lang(s.get("lang")),
     }
 
-def _save_chat_index() -> None:
+def _save_chat_index() -> bool:
+    """True/False для повтора в _flush_state_now: раньше неуспех молча терялся (аудит A5-1)."""
     import bot
     try:
         ids = sorted(chat_state.keys())
         bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, json.dumps(ids))
+        return True
     except Exception as exc:
         log.warning("[state] Saving chat index failed: %s", exc)
+        return False
 
 def _save_chat_index_payload(payload: str) -> bool:
     """Только блокирующая запись готового снапшота индекса — для to_thread. True/False для повтора."""
@@ -292,6 +305,9 @@ _dirty_chat_ids: set[int] = set()
 _pending_chat_deletions: set[int] = set()
 _index_dirty = False
 _quota_dirty = False
+# Отказ стартовой загрузки: пока стоит, индекс и квоту не перезаписываем,
+# иначе первый флаш затрёт хорошие удалённые данные пустым снимком (аудит A5-2).
+_state_load_failed = False
 FLUSH_INTERVAL_SEC = 10.0
 # Конкурентность флаша — семафором: всплеск "грязных" чатов иначе породил бы сотни параллельных HTTP к Upstash.
 STATE_FLUSH_CONCURRENCY = int(os.getenv("STATE_FLUSH_CONCURRENCY", "10"))
@@ -396,13 +412,21 @@ async def _flush_dirty_state_once() -> None:
             # Флаг сбрасываем только после подтверждённой записи — иначе упавший индекс
             # молча терялся бы до следующей мутации (найдено внешним аудитом).
             # Снапшот ключей — здесь (см. комментарий у _save_chat_to_storage_limited).
-            index_payload = json.dumps(sorted(chat_state.keys()))
-            if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
-                _index_dirty = False
+            if _state_load_failed:
+                # Удалённый индекс новее пустой памяти — не затираем, очередь живёт дальше.
+                log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+            else:
+                index_payload = json.dumps(sorted(chat_state.keys()))
+                if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
+                    _index_dirty = False
         if _quota_dirty:
-            quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
-            if await asyncio.to_thread(bot._save_quota_payload, quota_payload):
-                _quota_dirty = False
+            if _state_load_failed:
+                # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
+                log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
+            else:
+                quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
+                if await asyncio.to_thread(bot._save_quota_payload, quota_payload):
+                    _quota_dirty = False
     except Exception as exc:
         log.warning('[state] Periodic state flush failed: %s', exc)
 
@@ -420,26 +444,59 @@ def _flush_state_now() -> None:
     проблема."""
     import bot
     global _index_dirty
+    # Неуспех — обратно в очередь с громким логом, как в async-флаше: молча
+    # чистить очереди на shutdown значило бы тихо терять записи (аудит A5-1).
     for cid in list(_pending_chat_deletions):
-        bot._delete_chat_storage(cid)
-    _pending_chat_deletions.clear()
+        try:
+            deleted = bot._delete_chat_storage(cid)
+        except Exception as exc:
+            deleted = False
+            log.warning('[state] Deleting chat %s failed: %s', cid, exc)
+        if deleted is True:
+            _pending_chat_deletions.discard(cid)
+        else:
+            log.warning('[state] Chat %s deletion failed, keeping it queued.', cid)
     for cid in list(_dirty_chat_ids):
         st = chat_state.get(cid)
-        if st is not None:
-            bot._save_chat_to_storage(cid, st)
-    _dirty_chat_ids.clear()
+        if st is None:
+            _dirty_chat_ids.discard(cid)
+            continue
+        try:
+            saved = bot._save_chat_to_storage(cid, st)
+        except Exception as exc:
+            saved = False
+            log.warning('[state] Saving chat %s failed: %s', cid, exc)
+        if saved is True:
+            _dirty_chat_ids.discard(cid)
+        else:
+            log.warning('[state] Chat %s save failed, keeping it dirty.', cid)
     if _index_dirty:
-        bot._save_chat_index()
-        _index_dirty = False
+        if _state_load_failed:
+            # Удалённый индекс новее пустой памяти — не затираем (аудит A5-2).
+            log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+        else:
+            try:
+                index_saved = bot._save_chat_index()
+            except Exception as exc:
+                index_saved = False
+                log.warning('[state] Saving chat index failed: %s', exc)
+            if index_saved is True:
+                _index_dirty = False
+            else:
+                log.warning('[state] Chat index save failed, keeping it dirty.')
 
 def load_state_from_disk() -> None:
     import bot
+    global _state_load_failed
+    # Новая попытка снимает старый отказ; неуспех ниже выставит его заново.
+    _state_load_failed = False
     bot.load_global_quota()
 
     index_raw = None
     try:
         index_raw = bot._storage_read_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE)
     except Exception as exc:
+        _state_load_failed = True
         log.warning("[state] Reading chat index failed, falling back to legacy combined blob: %s", exc)
 
     if index_raw is not None:
@@ -460,6 +517,7 @@ def load_state_from_disk() -> None:
                 try:
                     raw = bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
                 except Exception as exc:
+                    _state_load_failed = True
                     log.warning('[state] Failed to read chat %s: %s', cid, exc)
                     continue
                 if not raw:
@@ -467,6 +525,7 @@ def load_state_from_disk() -> None:
                 try:
                     s = json.loads(raw)
                 except Exception as exc:
+                    _state_load_failed = True
                     log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
                     continue
                 bot._restore_single_chat(cid, s)
@@ -497,6 +556,7 @@ def load_state_from_disk() -> None:
         )
         bot.mark_state_dirty()
     except Exception as exc:
+        _state_load_failed = True
         log.warning("[state] Restoring states failed: %s", exc)
 
 def get_state(chat_id: int) -> dict[str, Any]:

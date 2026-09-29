@@ -462,6 +462,124 @@ def test_load_global_quota_restores_groq():
             bot.GLOBAL_QUOTA.update(real)
 
 
+def test_startup_load_failure_blocks_quota_overwrite():
+    # A5-2: старт с мёртвым Upstash — чтение квоты падает, а _reset_quota_if_new_day
+    # всё равно метит квоту грязной. Раньше первый флаш затирал хорошую удалённую
+    # квоту пустым снимком; теперь флаг отказа запрещает перезапись.
+    import lumen_chat_state as lcs
+    real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
+    orig_throttle = lcs._last_quota_check_monotonic
+    orig_quota_dirty = lcs._quota_dirty
+    lcs._state_load_failed = False
+    try:
+        bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
+        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        with patch("bot._storage_read_text", side_effect=RuntimeError("Upstash down")):
+            bot.load_global_quota()
+        assert lcs._state_load_failed is True
+        assert lcs._quota_dirty is True
+        bot._dirty_chat_ids.clear()
+        bot._pending_chat_deletions.clear()
+        lcs._index_dirty = False
+        with patch("bot._save_quota_payload") as mock_quota, \
+                patch("bot._save_chat_index_payload") as mock_index:
+            asyncio.run(bot._flush_dirty_state_once())
+            mock_quota.assert_not_called()
+            mock_index.assert_not_called()
+        assert lcs._quota_dirty is True
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        lcs._last_quota_check_monotonic = orig_throttle
+        lcs._quota_dirty = orig_quota_dirty
+        lcs._index_dirty = False
+        lcs._state_load_failed = False
+
+
+def test_startup_load_failure_blocks_index_overwrite_but_not_new_chats(caplog):
+    # A5-2: пустая память после отказа + новый чат метит индекс грязным. Раньше
+    # первый флаш перезаписывал хороший удалённый индекс одноэлементным мусором;
+    # теперь индекс не пишется, а per-chat ключ нового чата — пишется.
+    import logging
+    import lumen_chat_state as lcs
+    new_id = 999713
+    real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
+    orig_throttle = lcs._last_quota_check_monotonic
+    lcs._state_load_failed = False
+    try:
+        bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
+        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        bot._dirty_chat_ids.clear()
+        bot._pending_chat_deletions.clear()
+        with patch("bot._storage_read_text", side_effect=RuntimeError("Upstash down")):
+            bot.load_state_from_disk()
+        assert lcs._state_load_failed is True
+        assert new_id not in bot.chat_state
+        bot.get_state(new_id)
+        assert lcs._index_dirty is True
+        with patch("bot._save_chat_payload", return_value=True) as mock_chat, \
+                patch("bot._save_chat_index_payload", return_value=True) as mock_index, \
+                patch("bot._save_quota_payload", return_value=True) as mock_quota, \
+                caplog.at_level(logging.WARNING, logger="bot"):
+            asyncio.run(bot._flush_dirty_state_once())
+            mock_index.assert_not_called()
+            mock_quota.assert_not_called()
+        saved_ids = [c.args[0] for c in mock_chat.call_args_list]
+        assert new_id in saved_ids
+        assert lcs._index_dirty is True
+        assert new_id not in lcs._dirty_chat_ids
+        assert any("Skip index save" in r.getMessage() for r in caplog.records)
+    finally:
+        bot.chat_state.pop(new_id, None)
+        lcs._dirty_chat_ids.discard(new_id)
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        lcs._last_quota_check_monotonic = orig_throttle
+        lcs._index_dirty = False
+        lcs._quota_dirty = False
+        lcs._state_load_failed = False
+
+
+def test_successful_startup_load_keeps_index_and_quota_writes():
+    # A5-2, companion: здоровая загрузка флаг не ставит — флаш пишет как раньше,
+    # защита не превращается в вечный запрет записи.
+    import lumen_chat_state as lcs
+    real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
+    orig_throttle = lcs._last_quota_check_monotonic
+    lcs._state_load_failed = False
+    try:
+        payload = json.dumps({"gemini": {}, "openrouter": {}, "quota_day": bot._current_quota_day()})
+
+        def fake_read(key, path):
+            if key == "lumen:global_quota":
+                return payload
+            if key == "lumen:chat_index":
+                return "[4243]"
+            if key == "lumen:chat:4243":
+                return '{"history": [], "lang": "ru"}'
+            return None
+
+        with patch("bot._storage_read_text", side_effect=fake_read):
+            bot.load_state_from_disk()
+        assert lcs._state_load_failed is False
+        assert bot.chat_state[4243]["history"] == []
+        lcs._index_dirty = True
+        lcs._quota_dirty = True
+        with patch("bot._save_chat_index_payload", return_value=True), \
+                patch("bot._save_quota_payload", return_value=True):
+            asyncio.run(bot._flush_dirty_state_once())
+            assert lcs._index_dirty is False
+            assert lcs._quota_dirty is False
+    finally:
+        bot.chat_state.pop(4243, None)
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        lcs._last_quota_check_monotonic = orig_throttle
+        lcs._index_dirty = False
+        lcs._quota_dirty = False
+        lcs._state_load_failed = False
+
+
 def test_trim_history_plain_cuts_when_summarizer_over_budget(monkeypatch):
     # Внешний аудит: саммаризация держала lock чата мимо бюджета — теперь колпак, дальше plain cut.
     async def hanging_summarize(text):
@@ -865,6 +983,59 @@ def test_flush_state_now_writes_everything_on_shutdown(tmp_path):
         lcs._CHATS_DIR = original_chats_dir
         lcs.chat_state.pop(chat_id, None)
         lcs._pending_chat_deletions.discard(999999)
+        lcs._index_dirty = False
+
+
+def test_flush_state_now_keeps_failed_writes_queued_and_logs_loudly(caplog):
+    # A5-1: shutdown-флаш игнорировал неуспех записей и безусловно чистил очереди —
+    # провал тихо терялся. Теперь неуспех остаётся в очередях + WARNING в лог.
+    import logging
+    import lumen_chat_state as lcs
+    chat_id, del_id = 999721, 999722
+    lcs.chat_state[chat_id] = {"history": [], "last_activity": 0.0}
+    lcs._dirty_chat_ids.add(chat_id)
+    lcs._pending_chat_deletions.add(del_id)
+    lcs._index_dirty = True
+    lcs._state_load_failed = False
+    try:
+        with patch("bot._delete_chat_storage", return_value=False), \
+                patch("bot._save_chat_to_storage", return_value=False), \
+                patch("bot._save_chat_index", return_value=False), \
+                caplog.at_level(logging.WARNING, logger="bot"):
+            bot._flush_state_now()
+        assert del_id in lcs._pending_chat_deletions
+        assert chat_id in lcs._dirty_chat_ids
+        assert lcs._index_dirty is True
+        assert any("failed" in r.getMessage().lower() for r in caplog.records)
+    finally:
+        lcs.chat_state.pop(chat_id, None)
+        lcs._dirty_chat_ids.discard(chat_id)
+        lcs._pending_chat_deletions.discard(del_id)
+        lcs._index_dirty = False
+
+
+def test_flush_state_now_survives_raising_storage_ops():
+    # A5-1, вторая сторона: исключение из записи (а не False) раньше рвало
+    # shutdown-флаш на середине — остальные записи не выполнялись вообще.
+    import lumen_chat_state as lcs
+    chat_id, del_id = 999723, 999724
+    lcs.chat_state[chat_id] = {"history": [], "last_activity": 0.0}
+    lcs._dirty_chat_ids.add(chat_id)
+    lcs._pending_chat_deletions.add(del_id)
+    lcs._index_dirty = True
+    lcs._state_load_failed = False
+    try:
+        with patch("bot._delete_chat_storage", side_effect=RuntimeError("boom")), \
+                patch("bot._save_chat_to_storage", side_effect=RuntimeError("boom")), \
+                patch("bot._save_chat_index", side_effect=RuntimeError("boom")):
+            bot._flush_state_now()  # не должно поднять исключение
+        assert del_id in lcs._pending_chat_deletions
+        assert chat_id in lcs._dirty_chat_ids
+        assert lcs._index_dirty is True
+    finally:
+        lcs.chat_state.pop(chat_id, None)
+        lcs._dirty_chat_ids.discard(chat_id)
+        lcs._pending_chat_deletions.discard(del_id)
         lcs._index_dirty = False
 
 
