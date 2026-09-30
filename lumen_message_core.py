@@ -77,8 +77,8 @@ async def _process_media_group_buffers(mgid: str) -> None:
 async def _process_media_group_buffers_locked(messages: list) -> None:
     """Тело обработки альбома под per-chat lock (см. выше)."""
     import bot
-    # Первое сообщение альбома с caption — основное, остальные файлы отдаём модели как доп. вложения.
-    main_msg = messages[0]
+    # Основное — сообщение с подписью (caption бывает не на первом фото); иначе промт терялся.
+    main_msg = next((m for m in messages if m.text or m.caption), messages[0])
     # Альбом в группе без упоминания бота — такой же пассивный фон, как обычное
     # сообщение: раньше он всё равно тратил слот лимита и качал файлы (враждебное
     # ревью 27.09.2026). В личке и при прямом обращении альбом обрабатывается как раньше.
@@ -90,7 +90,13 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
             is_guest=bot.is_guest_message(main_msg),
             mentioned=bot.message_mentions_bot(main_msg),
         ):
-            bot._record_passive_group_context(main_msg, bot.get_state(main_msg.chat.id), t_text)
+            # Файлы 2..10 пассивного альбома тоже в recent_media_ids: иначе
+            # "что на втором фото" их не найдёт (порядок — как в альбоме).
+            _passive_state = bot.get_state(main_msg.chat.id)
+            bot._record_passive_group_context(main_msg, _passive_state, t_text)
+            _passive_uid = main_msg.from_user.id if main_msg.from_user else None
+            for _m in messages[1:]:
+                bot._save_media_to_history(_msg_media_source(_m), _passive_state, _passive_uid)
             return
     # Лимит — ДО скачивания: раньше альбом грузился целиком даже для отклонённого
     # автора (аудит 26.09.2026). Слот ровно один: handle_message буферизует альбом
@@ -188,6 +194,11 @@ async def _reject_rate_limited_message(message: Message) -> bool:
     return True
 
 
+def _read_attachment_sync(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
 async def _resolve_incoming_media(
     message: Message, state: dict[str, Any], clean_prompt: str, *, is_private: bool,
 ) -> tuple[str | None, str, str, tuple[bytes, str] | None]:
@@ -203,8 +214,8 @@ async def _resolve_incoming_media(
         if res:
             med_path, med_mime, med_name = res
             bot._save_media_to_history(media_src, state, asking_user_id)
-            with open(med_path, "rb") as f:
-                media_tuple = (f.read(), med_mime)
+            # Чтение вложения в потоке: файлы до десятков МБ стопорили loop.
+            media_tuple = (await asyncio.to_thread(_read_attachment_sync, med_path), med_mime)
 
     # Приоритет №2: явный реплай на сообщение с медиа — самый надёжный сигнал,
     # пользователь прямо указал, о каком файле речь. Работает без триггер-слов.
@@ -215,6 +226,8 @@ async def _resolve_incoming_media(
             if reply_fid:
                 fetched = await bot._fetch_media(reply_fid, reply_mime)
                 if fetched:
+                    # Медиа из реплая тоже в историю: ссылка словами должна находить файл.
+                    bot._save_media_to_history(reply_src, state, asking_user_id)
                     media_tuple = fetched
 
     # №3 ищем у автора, не последнее в чате: калибровка 18.08.2026 — "покажи стикер" описывал чужое фото.
@@ -240,6 +253,18 @@ async def _resolve_incoming_media(
                     media_tuple = fetched
 
     return med_path, med_mime, med_name, media_tuple
+
+
+def _strip_trigger_content(clean_prompt: str, trigger: str, message: Message) -> str:
+    """Текст после draw/tts-триггера: чистка префикса + фолбэк на текст реплая
+    ("нарисуй это" в ответ на сообщение с описанием)."""
+    content = re.sub(r'^[:\s\-\,]+', '', clean_prompt[len(trigger):].strip()).strip()
+    content = _strip_reply_marker(content)
+    if not content and message.reply_to_message is not None:
+        reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
+        if reply_text:
+            content = reply_text
+    return content
 
 
 async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
@@ -306,30 +331,13 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     matched_tts_trigger = _match_trigger_prefix(lower_prompt, TTS_TRIGGER_PREFIXES)
 
     if matched_draw_trigger:
-        prompt_content = clean_prompt[len(matched_draw_trigger):].strip()
-        prompt_content = re.sub(r'^[:\s\-\,]+', '', prompt_content).strip()
-        # Триггер сказан без содержания ("нарисуй" / "нарисуй это" в ответ на
-        # сообщение с описанием) — берём текст из reply вместо того, чтобы
-        # просто промолчать/уйти в обычный диалог.
-        prompt_content = _strip_reply_marker(prompt_content)
-        if not prompt_content and message.reply_to_message is not None:
-            reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
-            if reply_text:
-                prompt_content = reply_text
+        prompt_content = _strip_trigger_content(clean_prompt, matched_draw_trigger, message)
         if prompt_content:
             await bot.inline_draw(message, prompt_content)
             return
 
     if matched_tts_trigger:
-        tts_content = clean_prompt[len(matched_tts_trigger):].strip()
-        tts_content = re.sub(r'^[:\s\-\,]+', '', tts_content).strip()
-        # То же самое для озвучки — реплай "озвучь"/"озвучь это" без текста
-        # означает "озвучь ТО сообщение, на которое я отвечаю".
-        tts_content = _strip_reply_marker(tts_content)
-        if not tts_content and message.reply_to_message is not None:
-            reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
-            if reply_text:
-                tts_content = reply_text
+        tts_content = _strip_trigger_content(clean_prompt, matched_tts_trigger, message)
         if tts_content:
             await bot.inline_tts(message, tts_content)
             return

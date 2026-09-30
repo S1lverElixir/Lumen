@@ -17,6 +17,7 @@ import lumen_limits
 import pathlib
 import sentry_sdk
 import sys
+import threading
 import time
 from tests.bot_test_helpers import (
     _FakeIncomingMessage,
@@ -2206,3 +2207,140 @@ def test_voice_transcription_shares_route_deadline(rate_guard_setup, monkeypatch
     assert seen["transcribe_deadline"] is not None
     assert seen["route_deadline"] == seen["transcribe_deadline"]
     bot.chat_state.pop(123, None)
+
+
+# ─────────────── S10a: альбомы, реплай-медиа, чтение вложений, триггеры ───────────────
+
+def _album_message(chat_id, *, caption=None, file_id=None, private=True):
+    from tests.bot_test_helpers import _FakeChat
+    msg = SimpleNamespace(
+        chat=_FakeChat(chat_id, bot.ChatType.PRIVATE if private else bot.ChatType.GROUP),
+        text=None,
+        caption=caption,
+        from_user=SimpleNamespace(id=777),
+        reply_to_message=None,
+        message_id=chat_id,
+    )
+    if file_id is not None:
+        msg.photo = [SimpleNamespace(file_id=file_id, mime_type="image/jpeg")]
+    return msg
+
+
+def test_album_main_message_is_captioned_photo(monkeypatch):
+    # Аудит A4-07: подпись не на первом фото терялась — основным было messages[0].
+    import lumen_message_core
+
+    seen = {}
+
+    async def fake_core(message, extra_media=None):
+        seen["main"] = message
+
+    async def allow_all(message):
+        return False
+
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", allow_all)
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    chat_id = 999960
+    try:
+        asyncio.run(lumen_message_core._process_media_group_buffers_locked([
+            _album_message(chat_id),
+            _album_message(chat_id, caption="опиши это"),
+        ]))
+        assert seen["main"].caption == "опиши это"
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_passive_album_keeps_all_files_in_recent_media():
+    # Аудит A4-08: файлы 2..10 пассивного альбома терялись — "что на втором фото" их не находило.
+    import lumen_message_core
+    chat_id = 999961
+    try:
+        asyncio.run(lumen_message_core._process_media_group_buffers_locked([
+            _album_message(chat_id, file_id="fid1", private=False),
+            _album_message(chat_id, file_id="fid2", private=False),
+        ]))
+        bucket = bot.get_state(chat_id)["recent_media_ids"]["777"]
+        assert [fid for fid, _ in bucket] == ["fid1", "fid2"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_resolve_incoming_media_saves_reply_attachment_to_history():
+    # Аудит A4-09: медиа из реплая качалось, но в историю не сохранялось.
+    chat_id = 999962
+    state = bot.get_state(chat_id)
+    try:
+        msg = _FakeIncomingMessage(chat_id)
+        msg.from_user = SimpleNamespace(id=555)
+        msg.reply_to_message = SimpleNamespace(
+            photo=[SimpleNamespace(file_id="reply_fid", mime_type="image/png")],
+            video=None, animation=None, video_note=None, voice=None,
+            audio=None, document=None, sticker=None, text=None, caption=None,
+        )
+
+        async def fake_fetch_media(file_id, mime):
+            return (b"bytes", mime)
+
+        original_fetch = bot._fetch_media
+        bot._fetch_media = fake_fetch_media
+        try:
+            _, _, _, media_tuple = asyncio.run(
+                bot._resolve_incoming_media(msg, state, "что там", is_private=True)
+            )
+            assert media_tuple == (b"bytes", "image/png")
+            assert ("reply_fid", "image/png") in list(state["recent_media_ids"]["555"])
+        finally:
+            bot._fetch_media = original_fetch
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_resolve_incoming_media_reads_attachment_off_loop(monkeypatch, tmp_path):
+    # Аудит A4-13: блокирующий open()/f.read() стопорил loop.
+    seen = {}
+    real_to_thread = asyncio.to_thread
+
+    def _wrap(func):
+        import functools
+
+        @functools.wraps(func)
+        def _inner(*args, **kwargs):
+            seen.setdefault("threads", []).append(threading.current_thread())
+            return func(*args, **kwargs)
+
+        return _inner
+
+    async def _recorder(func, /, *args, **kwargs):
+        return await real_to_thread(_wrap(func), *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _recorder)
+    tmp_file = tmp_path / "pic.jpg"
+    tmp_file.write_bytes(b"\xff\xd8fake")
+    monkeypatch.setattr(
+        bot, "_download_message_attachment_to_tmp",
+        AsyncMock(return_value=(str(tmp_file), "image/jpeg", "pic.jpg")),
+    )
+    chat_id = 999963
+    state = bot.get_state(chat_id)
+    try:
+        msg = _FakeIncomingMessage(chat_id)
+        msg.photo = [SimpleNamespace(file_id="fid", mime_type="image/jpeg")]
+        msg.from_user = SimpleNamespace(id=555)
+        _, _, _, media_tuple = asyncio.run(
+            bot._resolve_incoming_media(msg, state, "что на фото", is_private=True)
+        )
+        assert media_tuple == (b"\xff\xd8fake", "image/jpeg")
+        assert seen["threads"] and all(t is not threading.main_thread() for t in seen["threads"])
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_strip_trigger_content_with_prefix_and_reply_fallback():
+    # Аудит A4-16: общий хелпер draw/tts-триггеров вместо двух копий.
+    import lumen_message_core
+    msg = _FakeIncomingMessage(1)
+    msg.reply_to_message = SimpleNamespace(text="закат над морем", caption=None)
+    assert lumen_message_core._strip_trigger_content("нарисуй: кота", "нарисуй", msg) == "кота"
+    assert lumen_message_core._strip_trigger_content("нарисуй это", "нарисуй", msg) == "закат над морем"
+    assert lumen_message_core._strip_trigger_content("озвучь", "озвучь", msg) == "закат над морем"

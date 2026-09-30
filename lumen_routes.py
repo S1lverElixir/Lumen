@@ -594,6 +594,11 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                     if retry_text.strip():
                         ans = retry_text
                         log.warning("[gemini] Model %s had MALFORMED_FUNCTION_CALL, retried without tools successfully.", model_id)
+                    elif retry_resp is not None:
+                        # Повтор прошёл, но вернул пусто без исчерпания бюджета:
+                        # это повод на следующую модель, а не заглушка успеха.
+                        retry_failed = True
+                        log.warning("[gemini] Retry after MALFORMED_FUNCTION_CALL returned empty text, trying the next model.")
                     elif deadline is not None and deadline - time.monotonic() <= 0:
                         # Повтор не успел уложиться в бюджет маршрута. Возвращаем ПУСТОЙ
                         # ответ, чтобы ask_gemini ушёл на следующую модель, а не подсунул
@@ -879,6 +884,16 @@ async def _run_route(
                 if reused:
                     return ans, True
             return ans, False
+        except asyncio.CancelledError:
+            # Отмена посреди ответа: плейсхолдер чистим, отмену пробрасываем —
+            # иначе в чате навсегда висело "…".
+            if reusable_placeholder is not None:
+                try:
+                    await bot._delete_message_quietly(reusable_placeholder)
+                except Exception:
+                    pass
+                reusable_placeholder = None
+            raise
         except Exception as exc:
             last_exc = exc
             if provider == "gemini" and isinstance(exc, ValueError) and media and not media_note_added:

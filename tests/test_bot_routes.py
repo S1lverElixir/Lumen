@@ -1637,3 +1637,48 @@ def test_run_route_marks_unsupported_media_for_text_fallback(monkeypatch):
     finally:
         bot.chat_state.pop(chat_id, None)
 
+
+def test_extract_gemini_answer_empty_retry_goes_to_next_model():
+    # Аудит A4-10: повтор прошёл, но вернул пусто без исчерпания бюджета — это
+    # повод на следующую модель, а не заглушка блокировки как успех.
+    async def retry_empty(*, model, contents, config=None):
+        return _FakeGeminiResponse(text="", candidates=[])
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = retry_empty
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="MALFORMED_FUNCTION_CALL")])
+        ans = asyncio.run(bot._extract_gemini_answer_text(
+            resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
+        ))
+        assert ans == ""
+    finally:
+        bot.client = original_client
+
+
+def test_run_route_cleans_placeholder_on_cancel(monkeypatch):
+    # Аудит A4-06: отмена посреди ответа оставляла "…" в чате навсегда.
+    placeholder = _FakeSentMessage()
+
+    async def failed_stream(*args, **kwargs):
+        return None, placeholder
+
+    async def cancelled_ask(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(bot, "_try_openrouter_streaming", failed_stream)
+    monkeypatch.setattr(bot, "ask_openrouter_text", cancelled_ask)
+    incoming = _FakeIncomingMessage(999970)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(bot._run_route(
+                999970, "привет",
+                [("openrouter", "m1"), ("openrouter", "m2")],
+                incoming, allow_stream=True,
+            ))
+        assert placeholder.deleted is True
+    finally:
+        bot.chat_state.pop(999970, None)
+

@@ -867,3 +867,71 @@ def test_rich_edit_falls_back_to_legacy_on_failure():
     finally:
         bot.bot = original_bot
 
+
+def test_streaming_limits_chunk_resplits(monkeypatch):
+    # Аудит A4-11: _split_text_chunks на каждый кусок давал O(n²) в loop —
+    # теперь пересчёт только при заметном приросте текста.
+    real_split = lumen_streaming._split_text_chunks
+    calls = {"n": 0}
+
+    def _counting_split(text, limit):
+        calls["n"] += 1
+        return real_split(text, limit)
+
+    monkeypatch.setattr(lumen_streaming, "_split_text_chunks", _counting_split)
+    chat_id = 999971
+
+    async def many_pieces():
+        for i in range(30):
+            yield f"кусок{i:02d} " + "x" * 60
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="split:free",
+            piece_agen=many_pieces(),
+        ))
+        assert answer is not None and "кусок29" in answer
+        assert calls["n"] < 30, f"разбиение на каждый кусок: {calls['n']}"
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_falls_back_to_reply_when_edits_die(monkeypatch):
+    # Аудит A4-12: сообщение снесли посреди стрима — серия неуспешных правок
+    # ведёт к досылке ответа новым сообщением, а не к истории под невидимый текст.
+    chat_id = 999972
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def many_big_pieces():
+        for i in range(5):
+            yield f"часть{i} " + "y" * 5000
+
+    async def _failing_edits_tg_call(method, *args, **kwargs):
+        if getattr(method, "__name__", "") in ("reply", "send_message"):
+            return await incoming.reply("…")
+        return None
+
+    async def send_message(*args, **kwargs):
+        return await incoming.reply("…")
+
+    sent_fallback = {}
+
+    async def _recorder_fallback(message, text, **kwargs):
+        sent_fallback["text"] = text
+
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_message=send_message))
+    monkeypatch.setattr(bot, "_tg_call", _failing_edits_tg_call)
+    monkeypatch.setattr(bot, "_safe_reply", _recorder_fallback)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="dead:edit",
+            piece_agen=many_big_pieces(),
+        ))
+        assert answer is not None and "часть4" in answer
+        assert "часть4" in sent_fallback.get("text", "")
+        history = bot.chat_state[chat_id]["history"]
+        assert history[-1]["content"] == answer
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
