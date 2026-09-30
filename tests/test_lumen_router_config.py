@@ -20,6 +20,7 @@ logger="bot") ниже продолжает работать так же, как
     pytest test_lumen_router_config.py -v
 """
 import lumen_router_config
+from datetime import date
 
 
 
@@ -695,3 +696,30 @@ def test_successful_usage_clears_exhausted_mark():
         assert [m for _, m in lumen_router_config._or_route(["probe/recover:free"])] == ["probe/recover:free"]
     finally:
         bot.GLOBAL_QUOTA["openrouter"].pop("probe/recover:free", None)
+
+
+def test_all_gemini_models_declare_url_context_explicitly():
+    # Аудит A2-11: дефолт True в conf.get давал инструмент молча — теперь ключ
+    # прописан явно у каждой модели (поведение то же, намерение видно).
+    missing = [m for m, c in lumen_router_config.GEMINI_MODELS.items() if "url_context" not in c]
+    assert missing == []
+
+
+def test_freshness_year_window_tracks_current_year():
+    # Аудит A2-13: зашитый 202[6-9] протухал в 2030 — окно строится от текущей даты.
+    assert str(date.today().year) in lumen_router_config._FRESHNESS_QUERY_RE.pattern
+    assert lumen_router_config._looks_like_freshness_query("вспомним 2039 год") is False
+
+
+def test_quota_exhausted_logs_broken_state_loudly(monkeypatch, caplog):
+    # Аудит A2-10: битое состояние квоты раньше давало молчаливый fail-open.
+    import bot
+
+    class _BrokenQuota(dict):
+        def get(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(bot, "GLOBAL_QUOTA", _BrokenQuota())
+    with caplog.at_level("WARNING", logger="bot"):
+        assert lumen_router_config._is_quota_exhausted("openrouter", "m") is False
+    assert "Quota state unreadable" in caplog.text

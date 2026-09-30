@@ -1485,6 +1485,43 @@ def test_transcribe_audio_uses_remaining_budget_not_full_timeout(monkeypatch):
     assert captured["timeout"].total < bot.ROUTE_MODEL_TIMEOUT_SEC
 
 
+def test_transcribe_audio_capped_by_own_limit(monkeypatch):
+    # Аудит A2-12: транскрибация ждала остаток всего бюджета и морила модель —
+    # теперь отдельный меньший лимит поверх остатка.
+    import lumen_routes
+    captured = {}
+
+    class _FakeResp:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def read(self):
+            return b"{}"
+
+        async def json(self, content_type=None):
+            return {"text": "привет"}
+
+    class _FakeSession:
+        def post(self, *args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return _FakeResp()
+
+    async def fake_get_http_session():
+        return _FakeSession()
+
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    text = asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123, deadline=time.monotonic() + 1000.0))
+    assert text == "привет"
+    assert captured["timeout"].total <= lumen_routes._TRANSCRIBE_TIMEOUT_SEC
+    assert captured["timeout"].total < bot.ROUTE_MODEL_TIMEOUT_SEC
+
+
 def test_ask_openrouter_text_trims_history_with_summary_not_silent_cut(monkeypatch):
     # Аудит A4-05: история резалась молчаливым срезом вместо _trim_history с саммари.
     import lumen_chat_state

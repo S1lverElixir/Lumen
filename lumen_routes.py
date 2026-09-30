@@ -39,6 +39,9 @@ from lumen_security import _scrub_identity_leak
 
 # Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
 _TRANSCRIPT_MAX_CHARS = 4000
+# Транскрибация не должна съедать весь бюджет маршрута: войсы короткие (до
+# VOICE_TRANSCRIBE_MAX_BYTES), turbo-модель отвечает секундами — остаток оставляем модели.
+_TRANSCRIBE_TIMEOUT_SEC = 15.0
 
 log = logging.getLogger("bot")
 
@@ -351,7 +354,7 @@ async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int, deadlin
             f"{bot.GROQ_BASE_URL}/audio/transcriptions",
             headers={"Authorization": f"Bearer {bot.GROQ_API_KEY}"},
             data=form,
-            timeout=aiohttp.ClientTimeout(total=_attempt_timeout(bot, deadline), connect=10.0),
+            timeout=aiohttp.ClientTimeout(total=min(_attempt_timeout(bot, deadline), _TRANSCRIBE_TIMEOUT_SEC), connect=10.0),
         ) as resp:
             if resp.status >= 400:
                 body = await resp.read()

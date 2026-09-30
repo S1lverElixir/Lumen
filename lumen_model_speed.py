@@ -42,14 +42,17 @@ def expected_total_sec(key: str) -> float:
 
 
 def record_response(key: str, *, total_sec: float, ttf_sec: float | None = None) -> None:
-    """Учесть один УСПЕШНЫЙ ответ. Без ttf_sec подставляется total_sec, неположительные замеры игнорируются."""
+    """Учесть один УСПЕШНЫЙ ответ. Без ttf_sec (нестриминговый ответ первого куска
+    не видел) ttf-EMA не трогаем: подстановка total завышала first_chunk_limit,
+    и зависшая голова держалась дольше. Неположительные замеры игнорируются."""
     if total_sec <= 0:
         return
-    if ttf_sec is None or ttf_sec <= 0:
-        ttf_sec = total_sec
-    obs_ttf = max(_MIN_TTF_SEC, min(_MAX_TTF_SEC, ttf_sec))
-    obs_total = max(_MIN_TOTAL_SEC, min(_MAX_TOTAL_SEC, total_sec))
     prev = _latency_ema.get(key)
+    if ttf_sec is None or ttf_sec <= 0:
+        obs_ttf = prev[0] if prev is not None else _DEFAULT_TTF_SEC
+    else:
+        obs_ttf = max(_MIN_TTF_SEC, min(_MAX_TTF_SEC, ttf_sec))
+    obs_total = max(_MIN_TOTAL_SEC, min(_MAX_TOTAL_SEC, total_sec))
     if prev is None:
         _latency_ema[key] = (obs_ttf, obs_total)
     else:
