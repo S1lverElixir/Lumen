@@ -10,6 +10,7 @@ import contextlib
 import logging
 import os
 import re
+import time
 from typing import Any
 
 from aiogram.enums import ChatType
@@ -59,9 +60,8 @@ async def _process_media_group_buffers(mgid: str) -> None:
     # гоняются за history/ctx (аудит). Ожидание ограничено: вечное висело в фоне
     # дольше любого бюджета (аудит 26.09.2026).
     main_msg = messages[0]
-    lock = bot.get_chat_lock(main_msg.chat.id if main_msg.chat else 0)
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=bot.CHAT_LOCK_TIMEOUT_SEC)
+        lock = await bot.acquire_chat_lock(main_msg.chat.id if main_msg.chat else 0, bot.CHAT_LOCK_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         log.warning("[album] Timeout waiting for lock on chat %s", main_msg.chat.id if main_msg.chat else None)
         with contextlib.suppress(Exception):
@@ -76,8 +76,8 @@ async def _process_media_group_buffers(mgid: str) -> None:
 async def _process_media_group_buffers_locked(messages: list) -> None:
     """Тело обработки альбома под per-chat lock (см. выше)."""
     import bot
-    # Первое сообщение альбома с caption — основное, остальные файлы отдаём модели как доп. вложения.
-    main_msg = messages[0]
+    # Основное — сообщение с подписью (caption бывает не на первом фото); иначе промт терялся.
+    main_msg = next((m for m in messages if m.text or m.caption), messages[0])
     # Альбом в группе без упоминания бота — такой же пассивный фон, как обычное
     # сообщение: раньше он всё равно тратил слот лимита и качал файлы (враждебное
     # ревью 27.09.2026). В личке и при прямом обращении альбом обрабатывается как раньше.
@@ -89,7 +89,13 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
             is_guest=bot.is_guest_message(main_msg),
             mentioned=bot.message_mentions_bot(main_msg),
         ):
-            bot._record_passive_group_context(main_msg, bot.get_state(main_msg.chat.id), t_text)
+            # Файлы 2..10 пассивного альбома тоже в recent_media_ids: иначе
+            # "что на втором фото" их не найдёт (порядок — как в альбоме).
+            _passive_state = bot.get_state(main_msg.chat.id)
+            bot._record_passive_group_context(main_msg, _passive_state, t_text)
+            _passive_uid = main_msg.from_user.id if main_msg.from_user else None
+            for _m in messages[1:]:
+                bot._save_media_to_history(_msg_media_source(_m), _passive_state, _passive_uid)
             return
     # Лимит — ДО скачивания: раньше альбом грузился целиком даже для отклонённого
     # автора (аудит 26.09.2026). Слот ровно один: handle_message буферизует альбом
@@ -111,11 +117,17 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
         targets.append((fid, mime, src))
     # Качаем параллельно, а не по очереди: альбом из 9 фото иначе ждал бы до ~10-20с последовательных скачиваний.
     fetched_list = await asyncio.gather(*(bot._fetch_media(fid, mime) for fid, mime, _ in targets))
+    skipped = 0
     for (fid, mime, src), fetched in zip(targets, fetched_list):
         if fetched:
             extra_media.append(fetched)
             # Регрессия: файлы альбома пишем в recent_media_ids, иначе "что на втором фото" не найдёт их.
             bot._save_media_to_history(src, album_state, album_user_id)
+        else:
+            skipped += 1
+    if skipped:
+        # Упавшие слайды молча выпадали и анализ шёл по части файлов.
+        log.warning("[album] Skipped %d of %d files: download failed, analysing the rest.", skipped, len(targets))
     await bot._handle_message_core(main_msg, extra_media=extra_media or None)
 
 def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
@@ -187,6 +199,11 @@ async def _reject_rate_limited_message(message: Message) -> bool:
     return True
 
 
+def _read_attachment_sync(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
 async def _resolve_incoming_media(
     message: Message, state: dict[str, Any], clean_prompt: str, *, is_private: bool,
 ) -> tuple[str | None, str, str, tuple[bytes, str] | None]:
@@ -202,8 +219,8 @@ async def _resolve_incoming_media(
         if res:
             med_path, med_mime, med_name = res
             bot._save_media_to_history(media_src, state, asking_user_id)
-            with open(med_path, "rb") as f:
-                media_tuple = (f.read(), med_mime)
+            # Чтение вложения в потоке: файлы до десятков МБ стопорили loop.
+            media_tuple = (await asyncio.to_thread(_read_attachment_sync, med_path), med_mime)
 
     # Приоритет №2: явный реплай на сообщение с медиа — самый надёжный сигнал,
     # пользователь прямо указал, о каком файле речь. Работает без триггер-слов.
@@ -214,6 +231,8 @@ async def _resolve_incoming_media(
             if reply_fid:
                 fetched = await bot._fetch_media(reply_fid, reply_mime)
                 if fetched:
+                    # Медиа из реплая тоже в историю: ссылка словами должна находить файл.
+                    bot._save_media_to_history(reply_src, state, asking_user_id)
                     media_tuple = fetched
 
     # №3 ищем у автора, не последнее в чате: калибровка 18.08.2026 — "покажи стикер" описывал чужое фото.
@@ -239,6 +258,18 @@ async def _resolve_incoming_media(
                     media_tuple = fetched
 
     return med_path, med_mime, med_name, media_tuple
+
+
+def _strip_trigger_content(clean_prompt: str, trigger: str, message: Message) -> str:
+    """Текст после draw/tts-триггера: чистка префикса + фолбэк на текст реплая
+    ("нарисуй это" в ответ на сообщение с описанием)."""
+    content = re.sub(r'^[:\s\-\,]+', '', clean_prompt[len(trigger):].strip()).strip()
+    content = _strip_reply_marker(content)
+    if not content and message.reply_to_message is not None:
+        reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
+        if reply_text:
+            content = reply_text
+    return content
 
 
 async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
@@ -305,30 +336,13 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     matched_tts_trigger = _match_trigger_prefix(lower_prompt, TTS_TRIGGER_PREFIXES)
 
     if matched_draw_trigger:
-        prompt_content = clean_prompt[len(matched_draw_trigger):].strip()
-        prompt_content = re.sub(r'^[:\s\-\,]+', '', prompt_content).strip()
-        # Триггер сказан без содержания ("нарисуй" / "нарисуй это" в ответ на
-        # сообщение с описанием) — берём текст из reply вместо того, чтобы
-        # просто промолчать/уйти в обычный диалог.
-        prompt_content = _strip_reply_marker(prompt_content)
-        if not prompt_content and message.reply_to_message is not None:
-            reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
-            if reply_text:
-                prompt_content = reply_text
+        prompt_content = _strip_trigger_content(clean_prompt, matched_draw_trigger, message)
         if prompt_content:
             await bot.inline_draw(message, prompt_content)
             return
 
     if matched_tts_trigger:
-        tts_content = clean_prompt[len(matched_tts_trigger):].strip()
-        tts_content = re.sub(r'^[:\s\-\,]+', '', tts_content).strip()
-        # То же самое для озвучки — реплай "озвучь"/"озвучь это" без текста
-        # означает "озвучь ТО сообщение, на которое я отвечаю".
-        tts_content = _strip_reply_marker(tts_content)
-        if not tts_content and message.reply_to_message is not None:
-            reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
-            if reply_text:
-                tts_content = reply_text
+        tts_content = _strip_trigger_content(clean_prompt, matched_tts_trigger, message)
         if tts_content:
             await bot.inline_tts(message, tts_content)
             return
@@ -349,11 +363,19 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # Голос/аудио: сначала дешёвая транскрибация — дальше текст идёт общим роутингом по
     # сценарию (тяжесть/свежесть определяются по сказанному). Не вышло — падает в прежний
     # путь: аудио напрямую в Gemini (см. is_video_or_audio_media в роутере).
+    # Один бюджет на транскрибацию и маршрут: иначе войс держал лок сверх бюджета.
+    route_deadline: float | None = None
     if media_tuple and media_tuple[1].startswith("audio/"):
-        transcript = await bot._transcribe_audio(media_tuple[0], media_tuple[1], message.chat.id)
+        route_deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
+        transcript = await bot._transcribe_audio(media_tuple[0], media_tuple[1], message.chat.id, deadline=route_deadline)
         if transcript:
             clean_prompt = (clean_prompt + "\n" + transcript).strip() if clean_prompt else transcript
             media_tuple = None
+            if _looks_like_injection_probe(clean_prompt):
+                # Голосовой транскрипт дописывается после первого префильтра (аудит A3-1).
+                log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s: %r', message.chat.id, clean_prompt[:300])
+                await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
+                return
 
     if media_tuple and not clean_prompt:
          clean_prompt = _ensure_prompt_text(None, media_tuple[1])
@@ -416,6 +438,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             message.chat.id, ai_prompt, route, message,
             media=gemini_media_list, media_filename=med_name,
             youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
+            deadline=route_deadline,
         )
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
@@ -451,7 +474,20 @@ async def _process_raw_update(raw_update: dict) -> None:
                  if gq_id is not None and not getattr(msg_obj, "guest_query_id", None):
                      with contextlib.suppress(Exception):
                          object.__setattr__(msg_obj, "guest_query_id", gq_id)
-                 await bot._handle_message_core(msg_obj)
+                 # Тот же per-chat lock, что у обычного пути: параллельные апдейты иначе гоняются за history/ctx.
+                 guest_chat_id = msg_obj.chat.id if msg_obj.chat else 0
+                 try:
+                     guest_lock = await bot.acquire_chat_lock(guest_chat_id, bot.CHAT_LOCK_TIMEOUT_SEC)
+                 except asyncio.TimeoutError:
+                     log.warning("[guest] Timeout waiting for lock on chat %s", guest_chat_id)
+                     with contextlib.suppress(Exception):
+                         await bot._tg_call(msg_obj.reply, bot._t_no_create(guest_chat_id, "lock_busy"))
+                     return
+                 try:
+                     await bot._handle_message_core(msg_obj)
+                 finally:
+                     with contextlib.suppress(Exception):
+                         guest_lock.release()
             except Exception as exc:
                  log.warning("[guest] Guest processing failed: %s", exc)
             return

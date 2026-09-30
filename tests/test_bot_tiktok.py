@@ -6,11 +6,16 @@ test_bot_tiktok.py — TikTok: резолв, слайдшоу, видео, му�
 from types import SimpleNamespace
 import asyncio
 import bot
+import functools
 import lumen_tiktok
 import pytest
+import socket
+import threading
 import time
 from tests.bot_test_helpers import (
     _FakeAudioBot,
+    _FakeChainResolveResponse,
+    _FakeChainResolveSession,
     _FakeDownloadResponse,
     _FakeDownloadSession,
     _FakeIncomingMessage,
@@ -713,9 +718,15 @@ def test_handle_tiktok_no_media_found_gives_user_facing_error():
         # handle_tiktok сам ловит исключение и редактирует статусное сообщение —
         # не поднимает наружу; проверяем, что оно не падает необработанным.
         asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/456"))
+        # A9-1: имя обещает user-facing error — проверяем, что текст реально
+        # показан пользователю, а не просто "не упало".
+        expected = bot._t(999421, "tiktok_no_media")
+        shown = [text for msg in incoming.sent for text, _ in msg.edits]
+        assert shown and expected[:50] in shown[0]
     finally:
         bot._get_http_session = original_get_session
         bot._resolve_tiktok_short = original_resolve
+        bot.chat_state.pop(999421, None)
 
 
 def test_handle_tiktok_known_user_facing_error_logs_as_warning_not_exception(caplog):
@@ -1484,4 +1495,133 @@ def test_single_video_status_deleted_after_music():
         bot.bot = original_bot
         bot._delete_message_quietly = original_delete
         lumen_tiktok_flow._send_tiktok_music = original_music
+
+
+# ─────────────── S9: DNS в потоке, ручные редиректы, капы, N/A, WebM ───────────────
+
+def _fake_public_dns(host, port, *args, **kwargs):
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+
+
+def test_download_url_bin_resolves_dns_off_loop(monkeypatch):
+    # A7-2: блокирующий getaddrinfo раньше стопорил loop на время резолва.
+    seen = {}
+
+    def _recording_dns(host, port, *args, **kwargs):
+        seen["thread"] = threading.current_thread()
+        return _fake_public_dns(host, port)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _recording_dns)
+    result = asyncio.run(lumen_tiktok._download_url_bin(
+        _FakeDownloadSession(_FakeDownloadResponse([b"ok"])), "https://example.com/f.mp4"))
+    assert result == b"ok"
+    assert seen["thread"] is not threading.main_thread()
+
+
+def test_resolve_tiktok_short_disables_auto_redirect(monkeypatch):
+    # A7-3: allow_redirects=True ходил на следующий хоп до проверки хоста.
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
+    canonical = "https://www.tiktok.com/@u/video/123"
+    session = _FakeChainResolveSession({
+        "https://vt.tiktok.com/x/": (
+            _FakeChainResolveResponse(301, headers={"Location": canonical}),
+            _FakeChainResolveResponse(200, url="https://vt.tiktok.com/x/"),
+        ),
+        canonical: (
+            _FakeChainResolveResponse(200, url=canonical),
+            _FakeChainResolveResponse(200, url=canonical),
+        ),
+    })
+    result = asyncio.run(bot._resolve_tiktok_short(session, "https://vt.tiktok.com/x/"))
+    assert result == canonical
+    assert session.calls
+    assert all(call[2].get("allow_redirects") is False for call in session.calls)
+
+
+def test_resolve_tiktok_short_refuses_non_public_hop():
+    # A7-3: внутренний адрес в Location останавливает цепочку до запроса к нему.
+    session = _FakeChainResolveSession({
+        "https://vt.tiktok.com/x/": (
+            _FakeChainResolveResponse(301, headers={"Location": "http://169.254.169.254/evil"}),
+            _FakeChainResolveResponse(404, url="https://vt.tiktok.com/x/"),
+        ),
+    })
+    result = asyncio.run(bot._resolve_tiktok_short(session, "https://vt.tiktok.com/x/"))
+    assert "169.254" not in result
+    assert all("169.254" not in url for _, url, _ in session.calls)
+
+
+def test_fetch_tikwm_media_data_skips_huge_content_length():
+    # A7-4: тело JSON раньше читалось без капа — заявленные гигабайты
+    # пропускаем до скачивания.
+    from tests.bot_test_helpers import _FakeTikwmApiResponse, _FakeTikwmApiSession
+    resp = _FakeTikwmApiResponse(status=200, json_body={"code": 0, "data": {}})
+    resp.headers = {"Content-Length": str(10 ** 12)}
+    result = asyncio.run(bot._fetch_tikwm_media_data(
+        _FakeTikwmApiSession([resp]), "https://www.tiktok.com/@u/video/1", {}))
+    assert result is None
+
+
+def test_probe_video_dimensions_survives_na_width(monkeypatch):
+    # A7-6: width=N/A раньше ронял float() и вместе с ним валидный duration.
+    class _FakeFFprobe:
+        returncode = 0
+
+        def __init__(self, out):
+            self._out = out
+
+        async def communicate(self):
+            return (self._out, b"")
+
+        async def wait(self):
+            return 0
+
+        def kill(self):
+            pass
+
+    async def _fake_exec(*args, **kwargs):
+        return _FakeFFprobe(b"width=N/A\nheight=720\nduration=10.5\n")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    assert asyncio.run(lumen_tiktok._probe_video_dimensions("/tmp/x.mp4")) == (10, 0, 720)
+
+
+def test_probe_thumbnail_from_bytes_writes_off_loop(monkeypatch):
+    # A7-7: запись файла раньше шла в loop.
+    seen = {}
+    real_to_thread = asyncio.to_thread
+
+    def _wrap(func):
+        @functools.wraps(func)
+        def _inner(*args, **kwargs):
+            seen.setdefault("threads", []).append(threading.current_thread())
+            return func(*args, **kwargs)
+        return _inner
+
+    async def _recorder(func, /, *args, **kwargs):
+        return await real_to_thread(_wrap(func), *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _recorder)
+    assert asyncio.run(lumen_tiktok._probe_and_thumbnail_from_bytes(b"\x00" * 16)) == (0, 0, 0, None)
+    assert seen["threads"] and all(t is not threading.main_thread() for t in seen["threads"])
+
+
+def test_write_and_tag_mp3_sync_roundtrip(tmp_path):
+    # A7-7: синхронный кусок MP3-пути вынесен в хелпер (мутаген битый вход терпит).
+    from lumen_tiktok_flow import _write_and_tag_mp3_sync
+    path = str(tmp_path / "m.mp3")
+    _write_and_tag_mp3_sync(path, b"not a real mp3", "t", "a", None)
+    import os
+    assert os.path.exists(path) and os.path.getsize(path) > 0
+
+
+def test_tiktok_video_candidates_protocol_relative_url():
+    # A7-8: "//host/path" раньше склеивался в битый tikwm-URL.
+    candidates = bot._tiktok_video_candidates({"play": "//cdn.tikwm.com/v.mp4", "size": 1})
+    assert candidates[0]["url"] == "https://cdn.tikwm.com/v.mp4"
+
+
+def test_looks_like_video_bytes_true_for_webm_ebml():
+    # A7-9: WebM-слайд раньше принимался за фото.
+    assert bot._looks_like_video_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 16) is True
 

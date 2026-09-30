@@ -14,6 +14,8 @@ _TIKTOK_RE = re.compile(r"(?:^|\.)tiktok\.com$")
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
 
 def extract_url(text: str) -> str | None:
+    """Первая ссылка в тексте. Вторая и далее игнорируются: TikTok/YouTube-пути
+    берут одну ссылку (см. match-обработку в message_core)."""
     m = re.search(r"https?://[^\s]+", text)
     if not m:
          return None
@@ -164,13 +166,19 @@ _PICK_TOPICS: dict[str, str] = {
     "сериал": "series", "сериалы": "series",
     "музык": "music", "песн": "music", "трек": "music",
     "книг": "books", "книж": "books", "книжку": "books",
-    "игр": "games", "игру": "games", "игрушку": "games",
+    "игрушку": "games",
     "movie": "film", "movies": "film", "film": "film", "films": "film",
     "series": "series", "show": "series", "shows": "series",
     "music": "music", "song": "music", "songs": "music",
     "track": "music", "tracks": "music",
     "book": "books", "books": "books",
     "game": "games", "games": "games",
+}
+# Игровые формы — только целиком с двух сторон: префикс "игр" ловил глаголы
+# ("кто играет сегодня" — не запрос игры). Инфинитивы оставляем: "во что поиграть" — игры.
+_PICK_EXACT_TOPICS: dict[str, str] = {
+    "игра": "games", "игры": "games", "игру": "games", "игрой": "games",
+    "игре": "games", "игр": "games", "играть": "games", "поиграть": "games",
 }
 _PICK_MAX_LEN = 60
 PICK_QUESTIONS: dict[str, str] = {
@@ -209,6 +217,9 @@ def match_pick_request(text_lower: str) -> str | None:
         return None
     if not any(v in text for v in _PICK_VERBS):
         return None
+    for topic, scenario in _PICK_EXACT_TOPICS.items():
+        if re.search(r"(?<!\w)" + re.escape(topic) + r"(?!\w)", text):
+            return scenario
     for topic, scenario in _PICK_TOPICS.items():
         # Латиница строго \b, кириллица префиксом (AUD-E-006): "тигр" не игры.
         if topic.isascii():

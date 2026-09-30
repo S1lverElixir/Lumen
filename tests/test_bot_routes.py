@@ -70,6 +70,29 @@ def test_error_status_returns_none_when_no_code_found():
     assert bot._error_status(exc, "no numbers here") is None
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("Error 503: unavailable", 503),
+    ("HTTP 429 too many requests", 429),
+    ("status 403", 403),
+    ("status_code=400", 400),
+    ("error 500", 500),
+])
+def test_error_status_matches_status_templates(text, expected):
+    # Сторож к A8-04: явные HTTP/status-шаблоны продолжают распознаваться.
+    assert bot._error_status(_FakeExc(text), text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "429 токенов",
+    "лимит исчерпан: 429 запросов",
+    "500 попыток",
+    "no numbers here",
+])
+def test_error_status_ignores_bare_numbers(text):
+    # Регрессия A8-04: голое число без шаблона — не статус («429 токенов» давало ложный 429).
+    assert bot._error_status(_FakeExc(text), text) is None
+
+
 def test_gemini_error_msg_rate_limit():
     # РЕГРЕССИЯ (аудит техдолга): раньше здесь проверялось "модель через /model" —
     # команда /model давно удалена (см. README, "Automatic model routing"),
@@ -1425,4 +1448,237 @@ def test_transcribe_audio_http_error_is_none(monkeypatch):
     monkeypatch.setattr(bot, "_get_http_session", _fake_groq_audio_session({}, status=503))
     monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
     assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123)) is None
+
+
+def test_transcribe_audio_uses_remaining_budget_not_full_timeout(monkeypatch):
+    # Аудит A4-03: Whisper ждал полный ROUTE_MODEL_TIMEOUT_SEC вне бюджета маршрута.
+    captured = {}
+
+    class _FakeResp:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def read(self):
+            return b"{}"
+
+        async def json(self, content_type=None):
+            return {"text": "привет"}
+
+    class _FakeSession:
+        def post(self, *args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return _FakeResp()
+
+    async def fake_get_http_session():
+        return _FakeSession()
+
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    text = asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123, deadline=time.monotonic() + 5.0))
+    assert text == "привет"
+    assert captured["timeout"].total <= 5.0
+    assert captured["timeout"].total < bot.ROUTE_MODEL_TIMEOUT_SEC
+
+
+def test_transcribe_audio_capped_by_own_limit(monkeypatch):
+    # Аудит A2-12: транскрибация ждала остаток всего бюджета и морила модель —
+    # теперь отдельный меньший лимит поверх остатка.
+    import lumen_routes
+    captured = {}
+
+    class _FakeResp:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def read(self):
+            return b"{}"
+
+        async def json(self, content_type=None):
+            return {"text": "привет"}
+
+    class _FakeSession:
+        def post(self, *args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return _FakeResp()
+
+    async def fake_get_http_session():
+        return _FakeSession()
+
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    text = asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123, deadline=time.monotonic() + 1000.0))
+    assert text == "привет"
+    assert captured["timeout"].total <= lumen_routes._TRANSCRIBE_TIMEOUT_SEC
+    assert captured["timeout"].total < bot.ROUTE_MODEL_TIMEOUT_SEC
+
+
+def test_ask_openrouter_text_trims_history_with_summary_not_silent_cut(monkeypatch):
+    # Аудит A4-05: история резалась молчаливым срезом вместо _trim_history с саммари.
+    import lumen_chat_state
+    from collections import deque
+    chat_id = 999811
+
+    async def fake_fallback(messages, trial_models, primary_model_id, **kwargs):
+        return "ответ", trial_models[0]
+
+    async def fake_summarize(text):
+        return "итог: погода и коты"
+
+    monkeypatch.setattr(bot, "_or_chat_completion_with_fallback", fake_fallback)
+    monkeypatch.setattr(lumen_chat_state, "_summarize_text", fake_summarize)
+    state = bot.get_state(chat_id)
+    state["history"] = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"сообщение {i}"}
+        for i in range(105)
+    ]
+    state["ctx"] = deque()
+    try:
+        asyncio.run(bot.ask_openrouter_text(chat_id, "новый вопрос", model_chain=["m1"]))
+        history = bot.chat_state[chat_id]["history"]
+        assert len(history) == 81
+        assert history[0]["content"].startswith("[Ранее в диалоге]")
+        assert "погода" in history[0]["content"]
+        assert history[-2:] == [
+            {"role": "user", "content": "новый вопрос"},
+            {"role": "assistant", "content": "ответ"},
+        ]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_ask_groq_text_trims_history_with_summary_not_silent_cut(monkeypatch):
+    # Тот же молчаливый срез жил в ask_groq_text — фиксим парой (аудит A4-05: везде _trim_history).
+    import lumen_chat_state
+    from collections import deque
+    chat_id = 999812
+
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": [{"message": {"content": "ответ groq"}}]}
+
+    async def fake_summarize(text):
+        return "итог: погода и коты"
+
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(lumen_chat_state, "_summarize_text", fake_summarize)
+    state = bot.get_state(chat_id)
+    state["history"] = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"сообщение {i}"}
+        for i in range(105)
+    ]
+    state["ctx"] = deque()
+    try:
+        asyncio.run(bot.ask_groq_text(chat_id, "новый вопрос", model_chain=["m1"]))
+        history = bot.chat_state[chat_id]["history"]
+        assert len(history) == 81
+        assert history[0]["content"].startswith("[Ранее в диалоге]")
+        assert "погода" in history[0]["content"]
+        assert history[-2:] == [
+            {"role": "user", "content": "новый вопрос"},
+            {"role": "assistant", "content": "ответ groq"},
+        ]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_text_providers_keep_media_note_out_of_history(monkeypatch):
+    # Пометка одноразовая (как у ask_gemini): в историю — чистый текст, иначе старые пометки всплывут в следующих ходах.
+    async def fake_fallback(messages, trial_models, primary_model_id, **kwargs):
+        return "ответ", trial_models[0]
+
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": [{"message": {"content": "ответ"}}]}
+
+    monkeypatch.setattr(bot, "_or_chat_completion_with_fallback", fake_fallback)
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    prompt = "что на фото?" + bot._NO_MEDIA_NOTE
+    try:
+        asyncio.run(bot.ask_openrouter_text(999813, prompt, model_chain=["m1"]))
+        asyncio.run(bot.ask_groq_text(999814, prompt, model_chain=["m1"]))
+        for cid in (999813, 999814):
+            assert bot.chat_state[cid]["history"][-2] == {"role": "user", "content": "что на фото?"}
+    finally:
+        bot.chat_state.pop(999813, None)
+        bot.chat_state.pop(999814, None)
+
+
+def test_run_route_marks_unsupported_media_for_text_fallback(monkeypatch):
+    # Аудит A4-15: ValueError Gemini уходил в текст-модели вслепую — фолбэк честно видит пометку.
+    chat_id = 999815
+    captured = {}
+
+    async def failing_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None):
+        raise ValueError("Тип вложения 'application/x-foo' не поддерживается для анализа.")
+
+    async def fake_groq_text(cid, prompt, model_chain, deadline=None):
+        captured["prompt"] = prompt
+        return "не вижу файла, пришлите его"
+
+    monkeypatch.setattr(bot, "ask_gemini", failing_gemini)
+    monkeypatch.setattr(bot, "ask_groq_text", fake_groq_text)
+    try:
+        route = [("gemini", "gemini-3.6-flash"), ("groq", "qwen/qwen3.8-27b")]
+        ans, sent = asyncio.run(bot._run_route(
+            chat_id, "что на фото?", route, message=None,
+            media=[(b"bytes", "application/x-foo")], allow_stream=False,
+        ))
+        assert ans == "не вижу файла, пришлите его"
+        assert sent is False
+        assert "[Служебная пометка" in captured["prompt"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_extract_gemini_answer_empty_retry_goes_to_next_model():
+    # Аудит A4-10: повтор прошёл, но вернул пусто без исчерпания бюджета — это
+    # повод на следующую модель, а не заглушка блокировки как успех.
+    async def retry_empty(*, model, contents, config=None):
+        return _FakeGeminiResponse(text="", candidates=[])
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = retry_empty
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="MALFORMED_FUNCTION_CALL")])
+        ans = asyncio.run(bot._extract_gemini_answer_text(
+            resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
+        ))
+        assert ans == ""
+    finally:
+        bot.client = original_client
+
+
+def test_run_route_cleans_placeholder_on_cancel(monkeypatch):
+    # Аудит A4-06: отмена посреди ответа оставляла "…" в чате навсегда.
+    placeholder = _FakeSentMessage()
+
+    async def failed_stream(*args, **kwargs):
+        return None, placeholder
+
+    async def cancelled_ask(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(bot, "_try_openrouter_streaming", failed_stream)
+    monkeypatch.setattr(bot, "ask_openrouter_text", cancelled_ask)
+    incoming = _FakeIncomingMessage(999970)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(bot._run_route(
+                999970, "привет",
+                [("openrouter", "m1"), ("openrouter", "m2")],
+                incoming, allow_stream=True,
+            ))
+        assert placeholder.deleted is True
+    finally:
+        bot.chat_state.pop(999970, None)
 

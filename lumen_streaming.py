@@ -131,7 +131,16 @@ async def _sse_pieces(
     чанка (HTTP 200, стрим уже открыт) поднимается: ранний сбой — откат на
     следующую модель, поздний — пометка "соединение прервалось"."""
     import bot
-    async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=None, connect=12.0)) as resp:
+    post_cm = session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=None, connect=12.0))
+    try:
+        # Заголовки без total висели вечно и держали lock чата до рестарта (аудит 29.09.2026),
+        # поэтому вход ждём не дольше попытки маршрута, а тело стрима — по-прежнему покусочно.
+        resp = await asyncio.wait_for(post_cm.__aenter__(), timeout=bot._attempt_timeout(bot, deadline))
+    except BaseException:
+        with contextlib.suppress(Exception):
+            await post_cm.__aexit__(None, None, None)
+        raise
+    try:
         if resp.status >= 400:
             body = await resp.read()
             raise err_cls(f"HTTP {resp.status}: {body[:300]!r}", status_code=resp.status)
@@ -163,6 +172,9 @@ async def _sse_pieces(
             piece = delta.get("content") or ""
             if piece:
                 yield piece
+    finally:
+        with contextlib.suppress(Exception):
+            await post_cm.__aexit__(None, None, None)
 
 async def _openrouter_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
     """Куски от OpenRouter: SSE через общий _sse_pieces, таймаут на строку — тот же
@@ -214,6 +226,13 @@ async def _run_streaming_reply(
 
     sent_messages: list[Message] = []
     full_text = ""
+    # Базис последнего разбиения: чанки кроме последнего стабильны, поэтому
+    # _split_text_chunks пересчитываем только при заметном приросте, а не на
+    # каждый кусок (иначе O(n²) в loop при посимвольном стриме).
+    split_basis = ""
+    chunks: list[str] = []
+    edit_fail_streak = 0
+    edits_dead = False
     last_edit_ts = 0.0
     last_edited_plain = ""
     first_piece_ts: float | None = None
@@ -279,7 +298,9 @@ async def _run_streaming_reply(
                 bot._record_quota_usage(provider, model_id)
                 return final_answer, None
 
-            chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
+            if not chunks or len(full_text) - len(split_basis) >= 1000:
+                chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
+                split_basis = full_text
             # Чанки кроме последнего (растущего) финализируем тем же разбиением, что у нестримленных ответов.
             while len(chunks) > len(sent_messages):
                 idx = len(sent_messages) - 1
@@ -300,7 +321,12 @@ async def _run_streaming_reply(
                     ctx.clear()
                     bot._record_quota_usage(provider, model_id)
                     return final_answer, None
-                await bot._tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]), parse_mode=ParseMode.HTML, call_timeout=15.0)
+                if not edits_dead:
+                    edit_ok = await bot._tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]), parse_mode=ParseMode.HTML, call_timeout=15.0)
+                    # Серия неуспешных правок подряд — сообщение снесли посреди стрима:
+                    # дальше не правим, в финале досылаем ответ новым сообщением.
+                    edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
+                    edits_dead = edit_fail_streak >= 3
                 sent_messages.append(new_msg)
                 last_edited_plain = ""
                 # Новое сообщение — новый "лист", показ в нём начинается с нуля (темп прихода бэкенда тот же).
@@ -312,8 +338,10 @@ async def _run_streaming_reply(
             typing_speed = _typing_display_speed(arrival_ewma, pace_key)
             reveal_len = min(len(target_full), max(0, int((now - (reveal_base_ts or now)) * typing_speed)))
             current_chunk_text = target_full[:reveal_len]
-            if now - last_edit_ts >= bot.STREAM_EDIT_MIN_INTERVAL_SEC and current_chunk_text != last_edited_plain:
-                await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0)
+            if not edits_dead and now - last_edit_ts >= bot.STREAM_EDIT_MIN_INTERVAL_SEC and current_chunk_text != last_edited_plain:
+                edit_ok = await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0)
+                edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
+                edits_dead = edit_fail_streak >= 3
                 last_edited_plain = current_chunk_text
                 last_edit_ts = now
 
@@ -334,7 +362,7 @@ async def _run_streaming_reply(
         target_full = final_chunks[-1]
         already_shown_len = len(last_edited_plain) if last_edited_plain and target_full.startswith(last_edited_plain) else 0
         remaining_len = len(target_full) - already_shown_len
-        if remaining_len > 0:
+        if remaining_len > 0 and not edits_dead:
             typing_speed = _typing_display_speed(arrival_ewma, pace_key)
             for step_len in _typing_catchup_steps(remaining_len, typing_speed, bot.STREAM_TYPING_TICK_SEC, bot.STREAM_TYPING_MAX_CATCHUP_TICKS):
                 await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
@@ -345,8 +373,14 @@ async def _run_streaming_reply(
 
         # Финал — с полной HTML-конвертацией (во время стрима голый текст: частичный markdown дал бы несбалансированные теги).
         final_text = final_chunks[-1]
-        # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
-        await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
+        if edits_dead:
+            # Правки умирали серией — сообщение снесли посреди стрима: весь ответ
+            # досылаем новым сообщением (_send_text внутри режет на части сам),
+            # иначе пользователь его не увидит.
+            await bot._safe_reply(message, full_text.strip())
+        else:
+            # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
+            await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
 
     except Exception as exc:
         if not full_text.strip():

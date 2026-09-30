@@ -47,11 +47,16 @@ def test_record_response_clamps_outliers_and_ignores_garbage():
     assert lumen_model_speed.expected_ttf_sec(key) == lumen_model_speed._MAX_TTF_SEC
 
 
-def test_record_response_defaults_ttf_to_total():
+def test_record_response_without_ttf_keeps_ttf_ema():
+    # Аудит A2-4: нестриминговый ответ первого куска не видел — подстановка total
+    # в ttf-EMA завышала first_chunk_limit, зависшая голова держалась дольше.
     _reset()
     key = lumen_model_speed.speed_key("openrouter", "m:free")
     lumen_model_speed.record_response(key, total_sec=30.0)
-    assert lumen_model_speed.expected_ttf_sec(key) == 30.0
+    assert lumen_model_speed.expected_ttf_sec(key) == lumen_model_speed._DEFAULT_TTF_SEC
+    lumen_model_speed.record_response(key, total_sec=6.0, ttf_sec=2.0)
+    lumen_model_speed.record_response(key, total_sec=80.0)
+    assert lumen_model_speed.expected_ttf_sec(key) < 10.0
 
 
 def test_first_chunk_limit_respects_floor_and_adapts():

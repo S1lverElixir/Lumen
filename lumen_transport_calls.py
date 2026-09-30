@@ -1,18 +1,29 @@
 """
 lumen_transport_calls.py — вызовы Telegram API: сессии, ротация прокси,
-circuit breaker, _tg_call/telegram_api_call. Состояние живёт в bot.py.
+circuit breaker, _tg_call/telegram_api_call. Состояние (сессия, breaker, очередь прокси) живёт в этом модуле, из bot.py только читается.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import re
 import socket
 from typing import Any
 
 import aiohttp
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramConflictError,
+    TelegramEntityTooLarge,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+    TelegramNotFound,
+    TelegramUnauthorizedError,
+)
 
+from lumen_errors import _error_status
 from lumen_telegram_transport import (
     IPv4AiohttpSession,
     _looks_like_proxy_garbage,
@@ -111,6 +122,46 @@ async def _handle_proxy_failure(context: str) -> None:
         bot.TELEGRAM_API_BASE_URL,
     )
 
+# 4xx (кроме флуда 429): повтор не поможет, такой вызов не ретраим.
+_TG_CLIENT_ERRORS = (
+    TelegramBadRequest,
+    TelegramUnauthorizedError,
+    TelegramForbiddenError,
+    TelegramNotFound,
+    TelegramConflictError,
+    TelegramEntityTooLarge,
+    TelegramMigrateToChat,
+)
+
+
+def _tg_retry_after_sec(exc: Exception) -> float | None:
+    # Прямой атрибут aiogram TelegramRetryAfter; запасной вариант — текстовые
+    # шаблоны "retry after N"/"retry in N" (флуд без ожидания продлевал бан).
+    val = getattr(exc, "retry_after", None)
+    try:
+        if val is not None and float(val) > 0:
+            return float(val)
+    except (TypeError, ValueError):
+        pass
+    m = re.search(r"(?i)retry[_ ]after\D{0,8}(\d+)|retry in (\d+)", str(exc))
+    if m:
+        with contextlib.suppress(TypeError, ValueError):
+            return float(m.group(1) or m.group(2))
+    return None
+
+
+def _tg_is_client_error(exc: Exception) -> bool:
+    # Типы aiogram покрывают реальные 4xx; статус из текста — подстраховка
+    # для нетипизированных ошибок (после A8-04 он уже без ложных срабатываний).
+    if isinstance(exc, _TG_CLIENT_ERRORS):
+        return True
+    try:
+        status = _error_status(exc, str(exc))
+    except Exception:
+        return False
+    return status in (400, 401, 403, 404, 409, 413, 422)
+
+
 async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, retries: int = 1, **kwargs: Any) -> Any:
     import bot
     now = bot.time.monotonic()
@@ -129,8 +180,12 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
             raise
         except Exception as exc:
             last_exc = exc
+            if _tg_is_client_error(exc):
+                # Клиентская ошибка: повтор с теми же аргументами даст то же самое.
+                break
             if attempt < retries:
-                await asyncio.sleep(0.5 * (attempt + 1))
+                # Флуд-контроль ждём по retry_after, остальное — коротким бэкоффом.
+                await asyncio.sleep(_tg_retry_after_sec(exc) or 0.5 * (attempt + 1))
     if last_exc is not None and "message is not modified" in str(last_exc).lower():
         # "message is not modified" — валидный ответ API (семантический не-op), а не сбой: засчитываем успех, иначе повторные edit_text накручивали бы счётчик.
         bot._tg_proxy_breaker.note_success()
@@ -161,11 +216,17 @@ async def telegram_api_call(method: str, payload: dict, *, request_timeout: floa
             # См. _handle_proxy_failure — выключатель срабатывает по счётчику
             # подряд идущих сбоев (см. _TelegramProxyCircuitBreaker), а не на первый же сбой.
             await bot._handle_proxy_failure(f"вызове {method}")
-        raise RuntimeError(f"Network error in telegram_api_call for {method}: {exc_str}") from None
+        # Цепочку не рвём (from exc): Sentry должен видеть первопричину, а не только обёртку.
+        raise RuntimeError(f"Network error in telegram_api_call for {method}: {exc_str}") from exc
     if not isinstance(data, dict) or not data.get("ok"):
         # Прокси round-trip'нул нормально и вернул валидный JSON — сам факт, что
         # Telegram ответил "ok: false", НЕ вина прокси-звена, засчитываем успех.
         bot._tg_proxy_breaker.note_success()
-        raise RuntimeError(f"Telegram API {method} failed: {data}")
+        # В текст — только код и описание, а не весь словарь ответа целиком.
+        if isinstance(data, dict):
+            detail = f"{data.get('error_code', '?')} {data.get('description', '')}".strip()
+        else:
+            detail = repr(data)[:300]
+        raise RuntimeError(f"Telegram API {method} failed: {detail}")
     bot._tg_proxy_breaker.note_success()
     return data["result"]

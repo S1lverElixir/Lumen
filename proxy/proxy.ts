@@ -54,6 +54,8 @@ export const ALLOWED_HOSTS = new Set([
 // под честно большие файлы, но не «без предела».
 export const MAX_REQUEST_BODY_BYTES = 100 * 1024 * 1024;
 
+export class BodyTooLargeError extends Error {}
+
 export function limitStreamBytes(
   stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
@@ -67,13 +69,16 @@ export function limitStreamBytes(
     transform(chunk, controller) {
       total += chunk.byteLength;
       if (total > maxBytes) {
-        controller.error(new Error(`Body exceeds ${maxBytes} byte cap`));
+        controller.error(new BodyTooLargeError(`Body exceeds ${maxBytes} byte cap`));
       } else {
         controller.enqueue(chunk);
       }
     },
   }));
 }
+
+// Апстрим без таймаута держал бы запрос вечно, жря квоту Deno: висящий апстрим — 504.
+export const UPSTREAM_FETCH_TIMEOUT_MS = 60_000;
 
 // Заголовки, которые нельзя слепо пробрасывать дальше как есть — Host/Connection
 // в запросе относятся к соединению с ЭТИМ (Deno) сервером, а не с реальным
@@ -83,20 +88,39 @@ export function limitStreamBytes(
 // реальное тело — клиент, попытавшийся распаковать уже распакованное, получил бы
 // битые данные. Content-Length по той же причине может не совпадать с реальным
 // размером — рантайм сам выставит корректный Transfer-Encoding для стрима.
-const HOP_BY_HOP_REQUEST_HEADERS = ["host", "connection"];
-const HOP_BY_HOP_RESPONSE_HEADERS = ["content-encoding", "content-length", "connection", "transfer-encoding"];
+const HOP_BY_HOP_REQUEST_HEADERS = [
+  "host",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+];
+const HOP_BY_HOP_RESPONSE_HEADERS = [
+  "content-encoding",
+  "content-length",
+  "connection",
+  "transfer-encoding",
+  "keep-alive",
+  "trailer",
+  "upgrade",
+];
 
 // Разложено на чистые тестируемые функции вместо одного большого обработчика:
 // маршрутизацию и заголовки проверяют юниты без сети, сетевую часть —
 // handleRequest через подмену fetch.
 
 export type TargetResolution =
-  | { ok: true; host: string; url: string }
+  | { ok: true; url: string }
   | { ok: false; status: 404 | 403; message: string };
 
 export function resolveTarget(pathname: string, search: string): TargetResolution {
   // pathname всегда начинается с "/", поэтому после split("/") первый элемент —
-  // всегда пустая строка, а реальные сегменты — начиная с индекса 1. Намеренно
+  // всегда пустая строка, а реальные сегменты — начиная с индекса 1.
   // Пустые сегменты намеренно не фильтруем: filter(Boolean) съедал завершающий "/"
   // у путей вида "/fetch/host/api/", и запрос TikWM уходил без слеша (дорогая
   // отладка в истории проекта).
@@ -109,12 +133,14 @@ export function resolveTarget(pathname: string, search: string): TargetResolutio
     return { ok: false, status: 403, message: "Host not allowed" };
   }
   const path = "/" + parts.slice(3).join("/");
-  return { ok: true, host, url: `https://${host}${path}${search}` };
+  return { ok: true, url: `https://${host}${path}${search}` };
 }
 
 export function buildForwardHeaders(reqHeaders: Headers): Headers {
   const headers = new Headers(reqHeaders);
   for (const name of HOP_BY_HOP_REQUEST_HEADERS) headers.delete(name);
+  // Тело заменено capped-стримом, исходный length врёт (рантайм выставит сам).
+  headers.delete("content-length");
   headers.delete(PROXY_AUTH_HEADER);
   return headers;
 }
@@ -174,17 +200,26 @@ export async function handleRequest(
     upstreamResp = await fetchImpl(target.url, {
       method: req.method,
       headers: forwardHeaders,
+      // redirect:"error" осознанно: проброс 3xx Location наружу вывел бы клиент
+      // из allowlist, а переезд хоста у TikWM даст честный 502 ниже.
       redirect: "error",
       // GET/HEAD не могут иметь тело запроса (fetch бросит исключение, если
       // передать body для них) — для остальных методов пробрасываем тело
       // напрямую как поток, не буферизуя целиком в памяти (важно для
       // multipart file-загрузок в Telegram, см. докстринг выше).
       body: cappedRequestBody,
+      signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
       // @ts-ignore — Deno требует duplex:"half" для потокового тела запроса
       // (часть стандарта WHATWG fetch для body типа ReadableStream).
       duplex: "half",
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      return new Response("Request body too large", { status: 413 });
+    }
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      return new Response("Upstream fetch timed out", { status: 504 });
+    }
     return new Response("Upstream fetch failed", { status: 502 });
   }
 

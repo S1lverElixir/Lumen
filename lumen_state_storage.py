@@ -77,6 +77,8 @@ def _storage_write_text(cfg: StorageConfig, key: str, path: Path, text: str) -> 
     if cfg.use_upstash:
         _upstash_set(cfg.upstash_url, cfg.upstash_token, key, text)
         return
+    # Каталог chats/ мог снести внешний процесс — создаём заново, иначе запись падает.
+    path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(".tmp")
     with open(temp_path, "w", encoding="utf-8") as f:
         f.write(text)

@@ -39,6 +39,9 @@ from lumen_security import _scrub_identity_leak
 
 # Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
 _TRANSCRIPT_MAX_CHARS = 4000
+# Транскрибация не должна съедать весь бюджет маршрута: войсы короткие (до
+# VOICE_TRANSCRIBE_MAX_BYTES), turbo-модель отвечает секундами — остаток оставляем модели.
+_TRANSCRIBE_TIMEOUT_SEC = 15.0
 
 log = logging.getLogger("bot")
 
@@ -286,11 +289,11 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline)
 
     # В историю пишем чистый текст (без "Фон разговора") — её читает и Gemini, разовый групповой контекст там оседать не должен.
-    history.append({"role": "user", "content": user_text})
+    history.append({"role": "user", "content": _history_user_text(user_text)})
     history.append({"role": "assistant", "content": answer})
     ctx.clear()
-    if len(history) > bot.SHARED_HISTORY_MAX_LEN:
-        del history[:-bot.SHARED_HISTORY_MAX_LEN]
+    # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
+    await bot._trim_history(history)
     bot._record_quota_usage("openrouter", model_trial)
     return answer
 
@@ -318,17 +321,18 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     )
 
     # В историю — чистый текст пользователя, как у остальных провайдеров.
-    history.append({"role": "user", "content": user_text})
+    history.append({"role": "user", "content": _history_user_text(user_text)})
     history.append({"role": "assistant", "content": answer})
     ctx.clear()
-    if len(history) > bot.SHARED_HISTORY_MAX_LEN:
-        del history[:-bot.SHARED_HISTORY_MAX_LEN]
+    # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
+    await bot._trim_history(history)
     bot._record_quota_usage("groq", model_trial)
     return answer
 
-async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int) -> str | None:
+async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int, deadline: float | None = None) -> str | None:
     """Голос/аудио в текст через Groq Whisper (дешевле Gemini-квоты на порядок). None при
-    любой неудаче — вызывающий код молча идёт прежним путём (аудио напрямую в Gemini)."""
+    любой неудаче — вызывающий код молча идёт прежним путём (аудио напрямую в Gemini).
+    Таймаут — остаток бюджета маршрута, а не полный лимит: иначе войс держал лок сверх бюджета."""
     import bot
     from lumen_media import _mime_suffix
     if not bot.GROQ_API_KEY or not audio_bytes:
@@ -350,7 +354,7 @@ async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int) -> str 
             f"{bot.GROQ_BASE_URL}/audio/transcriptions",
             headers={"Authorization": f"Bearer {bot.GROQ_API_KEY}"},
             data=form,
-            timeout=aiohttp.ClientTimeout(total=bot.ROUTE_MODEL_TIMEOUT_SEC, connect=10.0),
+            timeout=aiohttp.ClientTimeout(total=min(_attempt_timeout(bot, deadline), _TRANSCRIBE_TIMEOUT_SEC), connect=10.0),
         ) as resp:
             if resp.status >= 400:
                 body = await resp.read()
@@ -416,7 +420,7 @@ async def ask_openrouter_multimodal(
 
     answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline)
 
-    history.append({"role": "user", "content": user_text})
+    history.append({"role": "user", "content": _history_user_text(user_text)})
     history.append({"role": "assistant", "content": answer})
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(history)
@@ -590,6 +594,11 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                     if retry_text.strip():
                         ans = retry_text
                         log.warning("[gemini] Model %s had MALFORMED_FUNCTION_CALL, retried without tools successfully.", model_id)
+                    elif retry_resp is not None:
+                        # Повтор прошёл, но вернул пусто без исчерпания бюджета:
+                        # это повод на следующую модель, а не заглушка успеха.
+                        retry_failed = True
+                        log.warning("[gemini] Retry after MALFORMED_FUNCTION_CALL returned empty text, trying the next model.")
                     elif deadline is not None and deadline - time.monotonic() <= 0:
                         # Повтор не успел уложиться в бюджет маршрута. Возвращаем ПУСТОЙ
                         # ответ, чтобы ask_gemini ушёл на следующую модель, а не подсунул
@@ -643,7 +652,8 @@ async def ask_gemini(
     quota_exhausted_models: list[str] = []
 
     loop_guard = 0
-    # Запас len+4: NOT_FOUND может увести на модель вне chain.
+    # Запас len+4 сверх длины цепочки: страховка от зацикливания при будущих
+    # ветках фолбэка (сейчас все переходы идут только внутри chain).
     max_loop_guard = len(chain) + 4
 
     while True:
@@ -793,6 +803,7 @@ async def _run_route(
     chat_id: int, ai_prompt: str, route: list[tuple[str, str]], message: Message, *,
     media: list[tuple[bytes, str]] | None = None, media_filename: str = "",
     youtube_url: str | None = None, allow_stream: bool = False,
+    deadline: float | None = None,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
@@ -800,7 +811,9 @@ async def _run_route(
         raise RuntimeError("Empty route — no model to choose from.")
     # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
     route = _reorder_route_by_speed(route)
-    deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
+    if deadline is None:
+        # Снаружи дедлайн приходит с транскрибацией: она уже потратила часть бюджета.
+        deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
 
     groups: dict[str, list[str]] = {"gemini": [], "openrouter": [], "groq": []}
     for provider, model_id in route:
@@ -839,6 +852,7 @@ async def _run_route(
 
     is_video_or_audio = bool(media) and any(not (m[1] or "").startswith("image/") for m in media)
     last_exc: Exception | None = None
+    media_note_added = False
     for provider in provider_order:
         ids = list(groups.get(provider) or [])
         if provider == tried_stream_provider and tried_stream_model in ids:
@@ -871,8 +885,23 @@ async def _run_route(
                 if reused:
                     return ans, True
             return ans, False
+        except asyncio.CancelledError:
+            # Отмена посреди ответа: плейсхолдер чистим, отмену пробрасываем —
+            # иначе в чате навсегда висело "…".
+            if reusable_placeholder is not None:
+                try:
+                    await bot._delete_message_quietly(reusable_placeholder)
+                except Exception:
+                    pass
+                reusable_placeholder = None
+            raise
         except Exception as exc:
             last_exc = exc
+            if provider == "gemini" and isinstance(exc, ValueError) and media and not media_note_added:
+                # Неподдерживаемый mime: текстовый фолбэк медиа не видит, без пометки ответит вслепую.
+                if not ai_prompt.endswith(bot._NO_MEDIA_NOTE):
+                    ai_prompt += bot._NO_MEDIA_NOTE
+                media_note_added = True
             log.warning('[router] Provider %s failed completely (%s), trying the next one on the route, if any.', provider, exc)
 
     if reusable_placeholder is not None:

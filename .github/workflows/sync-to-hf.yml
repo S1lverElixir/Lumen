@@ -10,6 +10,15 @@ on:
     types: [completed]
     branches: [main]
 
+permissions:
+  contents: read
+
+# Два завершившихся подряд CI-прогона деплоились бы наперегонки: старый коммит
+# перезаписывал новый. Сериализуем очередь, уже идущий деплой не отменяем.
+concurrency:
+  group: hf-space-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
     # Только пуши в ЭТОТ репозиторий. Без второй проверки пул-реквест из форка с
@@ -37,4 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
-          git push hf HEAD:main --force
+          # Lease вместо голого force: хотфикс, залитый напрямую на Space,
+          # честно уронит push вместо молчаливого отката.
+          git fetch hf main || true
+          git push hf HEAD:main --force-with-lease

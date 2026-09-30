@@ -30,6 +30,7 @@ from lumen_images import (
 )
 from lumen_lang import SUPPORTED_LANGS, LANG_NAMES, normalize_lang, pick_texts, t as _lang_t
 from lumen_limits import (
+    PICK_TTL_SEC,
     _purge_expired_picks,
     _enforce_pending_picks_cap,
 )
@@ -105,11 +106,18 @@ async def inline_draw(message: Message, prompt: str) -> None:
 
         if image_bytes:
             await bot._delete_message_quietly(status)
-            await bot.bot.send_photo(
+            # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_photo.
+            # _tg_call отдаёт None вместо исключения — внешний except ждёт исключение,
+            # поэтому отсутствие результата превращаем в ошибку сервиса здесь.
+            sent = await bot._tg_call(
+                bot.bot.send_photo,
                 chat_id=message.chat.id,
                 photo=BufferedInputFile(image_bytes, filename="generated.jpg"),
                 reply_to_message_id=message.message_id,
+                call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
             )
+            if sent is None:
+                raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
         else:
             if rate_limited:
                 raise RuntimeError("image generation service overloaded with requests") from last_error
@@ -324,12 +332,18 @@ async def inline_tts(message: Message, text: str) -> None:
         return
     await bot._delete_message_quietly(status)
     for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
-        await bot.bot.send_voice(
+        # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
+        # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.
+        sent = await bot._tg_call(
+            bot.bot.send_voice,
             chat_id=message.chat.id,
             voice=BufferedInputFile(final_audio, filename=final_filename),
             duration=voice_duration if voice_duration > 0 else None,
             reply_to_message_id=message.message_id if i == 0 else None,
+            call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
         )
+        if sent is None:
+            raise RuntimeError("Telegram send_voice failed: connection timeout or proxy unavailable")
 
 async def cmd_tts(message: Message) -> None:
     import bot
@@ -559,7 +573,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
         "user_id": message.from_user.id if message.from_user else None,
         "scenario": scenario,
         "original": original_text,
-        "expires": time.monotonic() + bot.PICK_TTL_SEC,
+        "expires": time.monotonic() + PICK_TTL_SEC,
         "lang": lang,
     }
     question, options, _tpl = pick_texts(lang, scenario)
@@ -603,7 +617,8 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     rec_lang = (rec or {}).get("lang") or bot._peek_chat_lang(_qchat)
 
     def _is_rec_owner(rec_rec: dict) -> bool:
-        """Чей это выбор. Запись без user_id (пост канала/аноним) принадлежит чату."""
+        """Чей это выбор. Запись без user_id (пост канала/аноним) принадлежит чату:
+        иначе любой участник нажал бы чужую кнопку и сжёг токен (аудит 26.09.2026)."""
         owner_id = rec_rec.get("user_id")
         if owner_id is not None and query.from_user is not None and query.from_user.id != owner_id:
             return False
@@ -631,7 +646,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
                 "user_id": rec.get("user_id"),
                 "scenario": rec.get("scenario", ""),
                 "original": rec.get("original", ""),
-                "expires": time.monotonic() + bot.PICK_TTL_SEC,
+                "expires": time.monotonic() + PICK_TTL_SEC,
                 "lang": rec_lang,
             }
             _rq, _ropts, _tpl = pick_texts(rec_lang, rec.get("scenario", ""))
@@ -656,18 +671,11 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer()
         return
-    if rec["user_id"] is not None and query.from_user is not None and query.from_user.id != rec["user_id"]:
+    if not _is_rec_owner(rec):
+        # Та же проверка авторства, что выше до перевыпуска (дубль убран, поведение то же).
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
         return
-    if rec["user_id"] is None and query.message is not None and query.message.chat is not None:
-        # Вопрос задал пост канала или аноним в группе (from_user пустой) — тогда
-        # авторство не по id, а по чату: любой участник чата нажал бы чужую кнопку
-        # и сжёг токен (аудит 26.09.2026). Показываем выбор только в том же чате.
-        if query.message.chat.id != rec.get("chat_id"):
-            with contextlib.suppress(Exception):
-                await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
-            return
     # Все проверки пройдены — только теперь забираем токен (см. комментарий у get выше).
     # Без сообщения кнопки не во что упереть: токен не трогаем, иначе тап из инлайн
     # режима сжёг бы чужой выбор без дела.
@@ -707,11 +715,10 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     )
     # Флаг против зацикливания: дополненный текст всё ещё матчит детектор — без флага снова ушёл бы в кнопки.
     ns._pick_resolved = True
-    lock = bot.get_chat_lock(chat.id)
     try:
         # Тот же лимит лока, что и в основном пути (bot.CHAT_LOCK_TIMEOUT_SEC):
         # третье значение в 10с отдавало «занято» на любом живом маршруте.
-        await asyncio.wait_for(lock.acquire(), timeout=bot.CHAT_LOCK_TIMEOUT_SEC)
+        lock = await bot.acquire_chat_lock(chat.id, bot.CHAT_LOCK_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         log.warning("[pick] Timeout waiting for lock on chat %s", chat.id)
         with contextlib.suppress(Exception):

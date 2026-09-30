@@ -59,18 +59,18 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | Variable | Default | Purpose |
 |---|---|---|
 | `TELEGRAM_REQUEST_TIMEOUT` | `45s` | Timeout for HTTP calls to the Telegram API. |
-| `TELEGRAM_AI_TIMEOUT` | `45s` | Timeout for a single Gemini request outside the main chat route (e.g. `/tts`). |
+| `TELEGRAM_AI_TIMEOUT` | `45s` | Budget for the Gemini retry after `MALFORMED_FUNCTION_CALL` inside the main chat route (capped by the remaining `ROUTE_TOTAL_BUDGET_SEC`). Not used by `/tts` — that lives on `TTS_SYNTH_TIMEOUT_SEC`. |
 | `TELEGRAM_MEDIA_TIMEOUT` | `25s` | Timeout for downloading media files from Telegram. |
 | `TELEGRAM_GET_FILE_TIMEOUT` | `15s` | Timeout for the `getFile` metadata call before a download. |
-| `TTS_MAX_CHARS` | `800` | Max text length accepted by `/tts`. |
+| `TTS_MAX_CHARS` | `800` | Size of one `/tts` synthesis chunk; up to `TTS_MAX_PARTS` (5) chunks are synthesized, so the accepted maximum is `TTS_MAX_CHARS × TTS_MAX_PARTS` (4000 by default). |
 | `TTS_SYNTH_TIMEOUT_SEC` | `60s` | Timeout for a single TTS synthesis call. Also passed into the SDK as `http_options.timeout`, so a hung provider cannot hold the chat lock. |
 | `RATE_LIMIT_MAX_REQUESTS` | `5` | Max requests per user within `RATE_LIMIT_WINDOW_SEC`. |
 | `RATE_LIMIT_WINDOW_SEC` | `30s` | Sliding window width for rate limiting. |
 | `ROUTE_MODEL_TIMEOUT_SEC` | `22s` | Timeout for a single attempt at a single model. No retries: any failure moves straight to the next model. |
-| `ROUTE_TOTAL_BUDGET_SEC` | `40s` | Total time budget for the whole routing chain of one message, across both providers. |
+| `ROUTE_TOTAL_BUDGET_SEC` | `40s` | Total time budget for the whole routing chain of one message, across all providers (Gemini, OpenRouter, Groq). |
 | `DRAW_TOTAL_BUDGET_SEC` | `120s` | Same idea, for the `/draw` fallback chain across image models. |
-| `CHAT_LOCK_TIMEOUT_SEC` | `150s` | How long an incoming message waits for that chat's lock before replying "busy". Must exceed the longest lock-holding operation (`/draw` holds it for `DRAW_TOTAL_BUDGET_SEC`); one value is shared by normal messages, pick-buttons and albums. |
-| `STREAM_CHUNK_TIMEOUT_SEC` | `30s` | Timeout waiting for the next streamed chunk, shared by Gemini and OpenRouter. |
+| `CHAT_LOCK_TIMEOUT_SEC` | `45s` | How long an incoming message waits for that chat's lock before replying "busy". Deliberately shorter than `DRAW_TOTAL_BUDGET_SEC`: a second message during a long drawing gets "busy" instead of hanging. Shared by normal messages, pick-buttons and albums. |
+| `STREAM_CHUNK_TIMEOUT_SEC` | `30s` | Timeout waiting for the next streamed chunk, shared by Gemini, OpenRouter and Groq. |
 | `FIRST_CHUNK_TIMEOUT_SEC` | `12s` | Floor for waiting on the *first* streamed chunk. The real limit adapts per model (`max(floor, EMA × 2.5)`, see `lumen_model_speed.py`): a usually-fast model hanging once is abandoned early. It only ever shortens the wait — the per-chunk `STREAM_CHUNK_TIMEOUT_SEC` inside the generators remains the ceiling, so the effective first-chunk limit is the minimum of the two. |
 | `STREAM_EDIT_MIN_INTERVAL_SEC` | `1.2s` | Minimum interval between message edits during streaming (protects against Telegram's `429`). |
 | `STREAM_TYPING_TICK_SEC` | `0.5s` | Interval between steps of the post-stream "catch-up" reveal. |
@@ -87,7 +87,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TIKTOK_DOWNLOAD_MAX_BYTES` | `75 MB` | Hard cap on any single downloaded TikTok file (video, slide, or cover), aborted mid-stream if exceeded. |
+| `TIKTOK_DOWNLOAD_MAX_BYTES` | `75 MB` | Hard cap on any single downloaded TikTok file (video, slide, cover or music), aborted mid-stream if exceeded. |
 | `TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY` | `8` | Max slideshow slides downloaded in parallel; keeps one large post from hogging the shared HTTP connection pool. |
 | `TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY` | `4` | Max concurrent `ffprobe`/`ffmpeg` processes when probing "live" video slides in a slideshow. |
 
@@ -101,6 +101,18 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `UPSTASH_REDIS_REST_TOKEN` | — | Upstash Redis REST token. |
 
 Setup: create a free database at [upstash.com](https://upstash.com), grab the REST URL and token from the database page, add them as Space secrets, and redeploy. The free tier is 256 MB / 500,000 commands per month, no card required.
+
+## Hardcoded limits (not environment variables)
+
+These ceilings are fixed in code; change them only with a code edit:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `FLUSH_INTERVAL_SEC` | `10` | Period of the background state-flush cycle. |
+| `MAX_CHAT_LIMIT` / `PRUNED_CHAT_TARGET` | `5000` / `4500` | Chat-count ceiling and prune target. |
+| `MAX_CHAT_HISTORY_LEN` | `100` | Max stored messages per chat. |
+| `QUOTA_RATE_LIMIT_COOLDOWN_SEC` | `600` | Cooldown after a rate-limit hit. |
+| `HISTORY_SUMMARIZE_KEEP` | `80` | Recent messages kept verbatim when older history is summarized. |
 
 ## Observability
 

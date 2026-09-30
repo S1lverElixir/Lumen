@@ -339,17 +339,113 @@ def test_openrouter_stream_pieces_raises_on_midstream_error_chunk():
         bot.OPENROUTER_API_KEY = original_key
 
 
-def test_sse_parsers_share_one_implementation():
-    # Две копии разбора SSE по 45 строк разъезжались (у Groq ветки с ошибками вообще
-    # не были покрыты) — теперь один общий _sse_pieces на оба провайдера.
-    import inspect
-    import lumen_streaming
-    src = inspect.getsource(lumen_streaming)
-    assert src.count("async def _sse_pieces(") == 1
-    for fn in (lumen_streaming._openrouter_stream_pieces, lumen_streaming._groq_stream_pieces):
-        fn_src = inspect.getsource(fn)
-        assert "delta" not in fn_src, "разбор чанков должен жить в _sse_pieces"
-        assert "_sse_pieces" in fn_src
+def test_sse_parsers_share_one_implementation(monkeypatch):
+    # Было grep-тестом по исходникам (запрещённый класс): теперь проверяем
+    # поведение — обе обёртки разбирают SSE через общий _sse_pieces.
+    real_sse = lumen_streaming._sse_pieces
+    calls = []
+
+    async def _counting_sse(*args, **kwargs):
+        calls.append(1)
+        async for piece in real_sse(*args, **kwargs):
+            yield piece
+
+    monkeypatch.setattr(lumen_streaming, "_sse_pieces", _counting_sse)
+    lines = [
+        'data: {"choices":[{"delta":{"content":"Раз"}}]}\n'.encode("utf-8"),
+        'data: {"choices":[{"delta":{"content":" два"}}]}\n'.encode("utf-8"),
+        b"data: [DONE]\n",
+    ]
+
+    async def _fake_session():
+        return _FakeSessionForSSE(_FakeSSEResponse(lines))
+
+    async def collect(gen):
+        return [piece async for piece in gen]
+
+    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_get_http_session", _fake_session)
+    or_pieces = asyncio.run(collect(bot._openrouter_stream_pieces("m:free", [])))
+    groq_pieces = asyncio.run(collect(bot._groq_stream_pieces("m", [])))
+    assert or_pieces == ["Раз", " два"]
+    assert groq_pieces == ["Раз", " два"]
+    assert len(calls) == 2
+
+
+def test_streaming_history_goes_through_summarizing_trim(monkeypatch):
+    # Поведенческая пара grep-теста test_streaming_history_uses_summarizing_trim:
+    # длинная история в стриминге идёт через _trim_history с саммари,
+    # а не молчаливым срезом.
+    chat_id = 999981
+    state = bot.get_state(chat_id)
+    state["history"] = [{"role": "user", "content": f"q{i}"} for i in range(120)]
+
+    async def fake_pieces():
+        yield "готово"
+
+    calls = {}
+
+    async def fake_trim(hist):
+        calls["n"] = calls.get("n", 0) + 1
+        hist[:] = hist[-10:]
+
+    monkeypatch.setattr(bot, "_trim_history", fake_trim)
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "вопрос", incoming, provider="openrouter", model_id="trim:free",
+            piece_agen=fake_pieces(),
+        ))
+        assert answer == "готово"
+        assert calls.get("n", 0) >= 1
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+@pytest.mark.parametrize("deadline_mode", ["none", "expired"])
+def test_sse_pieces_hanging_post_entry_times_out(deadline_mode, monkeypatch):
+    # Регрессия A4-01: вход в session.post шёл с total=None без общего лимита —
+    # зависший провайдер держал per-chat lock вечно. Теперь заголовки ждут не
+    # дольше попытки маршрута, висящий вход быстро даёт TimeoutError.
+    class _HangingPostCM:
+        def __init__(self):
+            self.exited = False
+
+        async def __aenter__(self):
+            await asyncio.sleep(3600)
+            return self
+
+        async def __aexit__(self, *args):
+            self.exited = True
+            return False
+
+    class _HangingPostSession:
+        def __init__(self, cm):
+            self._cm = cm
+
+        def post(self, *args, **kwargs):
+            return self._cm
+
+    monkeypatch.setattr(bot, "ROUTE_MODEL_TIMEOUT_SEC", 0.2)
+    cm = _HangingPostCM()
+    session = _HangingPostSession(cm)
+    deadline = None if deadline_mode == "none" else time.monotonic() - 1.0
+
+    async def collect():
+        async for _ in lumen_streaming._sse_pieces(
+            session, "http://example.test/chat", {}, {},
+            err_cls=bot.OpenRouterAPIError, provider_label="OpenRouter", deadline=deadline,
+        ):
+            pass
+
+    started = time.monotonic()
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(asyncio.wait_for(collect(), timeout=5.0))
+    elapsed = time.monotonic() - started
+    # Старый код висел все 5с внешнего wait_for; новый обрывает вход за ~0.2-0.5с.
+    assert elapsed < 2.5, f"вход в POST ждал мимо лимита попытки: {elapsed:.1f}с"
+    assert cm.exited
 
 
 def test_groq_stream_pieces_raises_on_http_error_status():
@@ -821,4 +917,72 @@ def test_rich_edit_falls_back_to_legacy_on_failure():
         assert msg.edits and msg.edits[0][0] == "<b>жирный</b>"
     finally:
         bot.bot = original_bot
+
+
+def test_streaming_limits_chunk_resplits(monkeypatch):
+    # Аудит A4-11: _split_text_chunks на каждый кусок давал O(n²) в loop —
+    # теперь пересчёт только при заметном приросте текста.
+    real_split = lumen_streaming._split_text_chunks
+    calls = {"n": 0}
+
+    def _counting_split(text, limit):
+        calls["n"] += 1
+        return real_split(text, limit)
+
+    monkeypatch.setattr(lumen_streaming, "_split_text_chunks", _counting_split)
+    chat_id = 999971
+
+    async def many_pieces():
+        for i in range(30):
+            yield f"кусок{i:02d} " + "x" * 60
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="split:free",
+            piece_agen=many_pieces(),
+        ))
+        assert answer is not None and "кусок29" in answer
+        assert calls["n"] < 30, f"разбиение на каждый кусок: {calls['n']}"
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_falls_back_to_reply_when_edits_die(monkeypatch):
+    # Аудит A4-12: сообщение снесли посреди стрима — серия неуспешных правок
+    # ведёт к досылке ответа новым сообщением, а не к истории под невидимый текст.
+    chat_id = 999972
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def many_big_pieces():
+        for i in range(5):
+            yield f"часть{i} " + "y" * 5000
+
+    async def _failing_edits_tg_call(method, *args, **kwargs):
+        if getattr(method, "__name__", "") in ("reply", "send_message"):
+            return await incoming.reply("…")
+        return None
+
+    async def send_message(*args, **kwargs):
+        return await incoming.reply("…")
+
+    sent_fallback = {}
+
+    async def _recorder_fallback(message, text, **kwargs):
+        sent_fallback["text"] = text
+
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_message=send_message))
+    monkeypatch.setattr(bot, "_tg_call", _failing_edits_tg_call)
+    monkeypatch.setattr(bot, "_safe_reply", _recorder_fallback)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="dead:edit",
+            piece_agen=many_big_pieces(),
+        ))
+        assert answer is not None and "часть4" in answer
+        assert "часть4" in sent_fallback.get("text", "")
+        history = bot.chat_state[chat_id]["history"]
+        assert history[-1]["content"] == answer
+    finally:
+        bot.chat_state.pop(chat_id, None)
 

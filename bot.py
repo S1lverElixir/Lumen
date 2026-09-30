@@ -420,8 +420,6 @@ from lumen_chat_state import (
     _save_quota_payload,
     _dirty_chat_ids,
     _pending_chat_deletions,
-    _last_quota_check_monotonic,
-    _last_gemini_exhausted_alert_monotonic,
     _save_chat_to_storage_limited,
     _delete_chat_storage_limited,
     mark_state_dirty,
@@ -438,6 +436,7 @@ from lumen_chat_state import (
     _peek_chat_lang,
     _prune_old_chats,
     get_chat_lock,
+    acquire_chat_lock,
     _evict_orphan_chat_locks,
     _is_owner,
     _notify_owner,
@@ -449,17 +448,12 @@ from lumen_chat_state import (
 )
 
 # Простой трекер для rate limiting и очередь кнопок-уточнений живут в
-# lumen_limits.py (P2): здесь только реэкспорт имён, чтобы `bot.X` в тестах
-# и вызывающий код не менялись.
+# lumen_limits.py (P2): скаляры читаем из модуля-владельца, а не копируем —
+# копия в bot.X молча расходилась бы с патчами тестов (аудит A5-8).
 from lumen_limits import (
-    RATE_LIMIT_MAX_REQUESTS,
-    RATE_LIMIT_WINDOW_SEC,
-    MAX_RATE_LIMIT_KEYS,
     user_rate_limits,
     _cleanup_rate_limit_dict,
     _check_and_register_rate_limit,
-    PICK_TTL_SEC,
-    MAX_PENDING_PICKS,
     _pending_picks,
     _purge_expired_picks,
     _enforce_pending_picks_cap,
@@ -574,6 +568,19 @@ from lumen_errors import (
 # Буферы альбомов/медиа-групп
 _mg_buffers: dict[str, list[Message]] = {}
 _mg_tasks: dict[str, asyncio.Task] = {}
+# Живых медиагрупп единицы (каждая живёт 0.8с); сотни distinct mgid — флуд.
+# Потолок только против раздувания задач и памяти, легитимные альбомы не задевает.
+_MG_TRACK_CAP = 200
+
+def _mg_evict_if_full() -> None:
+    """Вытесняет старейшие медиагруппы сверх потолка (задача отменяется —
+    её сообщения уже утеряны флудом, ждать нечего)."""
+    while len(_mg_buffers) > _MG_TRACK_CAP:
+        oldest = next(iter(_mg_buffers))
+        _mg_buffers.pop(oldest, None)
+        task = _mg_tasks.pop(oldest, None)
+        if task is not None and not task.done():
+            task.cancel()
 
 # _inflight_tasks — общий набор fire-and-forget задач (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое); main() дренирует при остановке.
 _inflight_tasks: set[asyncio.Task] = set()
@@ -649,16 +656,11 @@ from lumen_state_storage import (
 
 # `_urllib_request` в коде bot.py больше не используется — клиент Upstash переехал в
 # lumen_state_storage.py. Остаётся ради тестов, которые патчат `bot._urllib_request.urlopen`
-# (как и CHAT_STATE_SCHEMA_VERSION и имена из lumen_limits.py ниже — см. пояснение
-# про __all__ у первого блока в начале файла).
+# (как и CHAT_STATE_SCHEMA_VERSION — см. пояснение про __all__ у первого блока в начале файла).
 __all__ = [
     "_urllib_request",
     "CHAT_STATE_SCHEMA_VERSION",
-    "RATE_LIMIT_MAX_REQUESTS",
-    "RATE_LIMIT_WINDOW_SEC",
-    "MAX_RATE_LIMIT_KEYS",
     "user_rate_limits",
-    "MAX_PENDING_PICKS",
     # Имена из lumen_admin.py (app, гейты, эндпоинты) код bot.py сам не читает
     # (main() берёт только app) — они нужны как `bot.X` существующим тестам.
     "app",
@@ -785,12 +787,13 @@ __all__ = [
     "_flush_dirty_state_once",
     "_prune_old_chats",
     "_quota_entry",
+    # Локи чатов код bot.py берёт через acquire_chat_lock; оба имени ниже —
+    # только для `bot.X` в тестах.
+    "get_chat_lock",
+    "acquire_chat_lock",
     # Прямые имена lumen_state_storage для тестов.
     "_serialize_chat_state",
     "_current_quota_day",
-    # Монотонный маркер троттлинга проверки даты (читают тесты).
-    "_last_quota_check_monotonic",
-    "_last_gemini_exhausted_alert_monotonic",
     # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
     "GEMINI_TTS_MODELS",
     "FISH_AUDIO_TTS_MODEL",
@@ -809,7 +812,6 @@ __all__ = [
     "_mark_rate_limited",
     "_record_quota_usage",
     "_trim_history",
-    "PICK_TTL_SEC",
     "_pending_picks",
     "_purge_expired_picks",
     "_enforce_pending_picks_cap",
@@ -1076,10 +1078,12 @@ def clean_mention(text: str) -> str:
 # (нужен BOT_USERNAME) и message_mentions_bot ниже.
 
 # Защита от промт-инъекций (входной префильтр) вынесена в lumen_security.py вместе
-# с защитой от утечки идентичности (см. импорт рядом с _detect_identity_leak выше) —
-# см. импорт _looks_like_injection_probe/_INJECTION_PROBE_REPLY там же.
+# с защитой от утечки идентичности (см. импорт рядом с _detect_identity_leak выше).
 
 def message_mentions_bot(message: Message) -> bool:
+    # chat None (сырой апдейт без чата) — упоминания искать негде, апдейт не роняем.
+    if message.chat is None:
+        return False
     if message.chat.type == ChatType.PRIVATE:
          return True
     t = message.text or message.caption or ""
@@ -1152,6 +1156,7 @@ async def handle_message(message: Message) -> None:
     if message.media_group_id:
         mgid = message.media_group_id
         _mg_buffers.setdefault(mgid, []).append(message)
+        _mg_evict_if_full()
         if mgid not in _mg_tasks or _mg_tasks[mgid].done():
              _mg_tasks[mgid] = _track_inflight_task(asyncio.create_task(_process_media_group_buffers(mgid)))
         return
@@ -1174,9 +1179,8 @@ async def handle_message(message: Message) -> None:
         await _handle_message_core(message)
         return
 
-    lock = get_chat_lock(chat_id)
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=CHAT_LOCK_TIMEOUT_SEC)
+        lock = await acquire_chat_lock(chat_id, CHAT_LOCK_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
         with contextlib.suppress(Exception):
@@ -1204,7 +1208,8 @@ from lumen_message_core import (
 )
 
 async def _webhook_startup() -> None:
-    load_state_from_disk()
+    # Синхронное дисковое чтение в потоке: иначе старт стопорит приём /webhook.
+    await asyncio.to_thread(load_state_from_disk)
     log.info("Bot startup: webhook mode.")
     _check_temporary_free_models_expiry()
     _check_unconfirmed_model_quotas()
@@ -1306,16 +1311,21 @@ async def _webhook_startup() -> None:
             }
             for code, cmds in localized_commands
         ]
+        commands_ok = False
         for cmd_payload in cmd_payloads:
             try:
                 await asyncio.wait_for(
                     telegram_api_call("setMyCommands", cmd_payload, request_timeout=15.0),
                     timeout=18.0
                 )
+                commands_ok = True
             except Exception as exc:
                 log.warning("[webhook] setMyCommands failed (%s): %s", cmd_payload.get("language_code", "default"), exc)
-        else:
+        # for-else без break врал бы об успехе при провале всех языков.
+        if commands_ok:
             log.info("[webhook] Bot commands set successfully.")
+        else:
+            log.warning("[webhook] Bot commands were not set for any language.")
 
     await try_setup()
 
@@ -1325,18 +1335,22 @@ async def _webhook_startup() -> None:
     _last_daily_check_date = date.today()
     while True:
         await asyncio.sleep(3600)
-        _cleanup_rate_limit_dict()
-        _evict_orphan_chat_locks()
-        # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
-        # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
-        _reset_quota_if_new_day()
-        today = date.today()
-        if today != _last_daily_check_date:
-            _last_daily_check_date = today
-            _check_temporary_free_models_expiry()
-            _check_unconfirmed_model_quotas()
-            _check_scheduled_removals_due()
-            await _probe_or_model_liveness()
+        try:
+            _cleanup_rate_limit_dict()
+            _evict_orphan_chat_locks()
+            # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
+            # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
+            _reset_quota_if_new_day()
+            today = date.today()
+            if today != _last_daily_check_date:
+                _last_daily_check_date = today
+                _check_temporary_free_models_expiry()
+                _check_unconfirmed_model_quotas()
+                _check_scheduled_removals_due()
+                await _probe_or_model_liveness()
+        except Exception:
+            # Упавший тик не убивает цикл: иначе чистки и квоты вставали бы навсегда.
+            log.exception("[webhook] Hourly maintenance tick failed, next tick in an hour")
 
 async def _drain_inflight_tasks() -> None:
     """Даёт фоновым задачам апдейтов шанс завершиться штатно при остановке
@@ -1353,8 +1367,19 @@ async def _drain_inflight_tasks() -> None:
             t.cancel()
         await asyncio.gather(*still_pending, return_exceptions=True)
 
+def _require_bot_token() -> str:
+    # Пустой токен раньше умирал внутри Bot() с TokenValidationError и рестартами:
+    # выходим сразу с понятной причиной.
+    if not BOT_TOKEN:
+        log.error("[setup] BOT_TOKEN пуст — задайте BOT_TOKEN/TELEGRAM_BOT_TOKEN и перезапустите.")
+        raise SystemExit(1)
+    return BOT_TOKEN
+
+
 async def main() -> None:
     global bot, client
+
+    _require_bot_token()
 
     # Сессия с принудительным IPv4 и таймаутами под HF Space.
     if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
@@ -1392,10 +1417,11 @@ async def main() -> None:
         # последним тиком и остановкой процесса терялись бы при рестарте.
         # Флаги — канонически в lumen_chat_state (P2): множества общие объектом,
         # bool-флаги читаем из модуля, т.к. bot-привязки после выноса stale.
+        # Синхронная запись в потоке: loop уже дренирует задачи, висеть нельзя.
         if _dirty_chat_ids or lumen_chat_state._index_dirty or _pending_chat_deletions:
-            _flush_state_now()
+            await asyncio.to_thread(_flush_state_now)
         if lumen_chat_state._quota_dirty:
-            save_global_quota()
+            await asyncio.to_thread(save_global_quota)
         await _close_sessions()
 
 if __name__ == "__main__":

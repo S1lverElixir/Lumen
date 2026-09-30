@@ -2,7 +2,7 @@
 lumen_media.py — чистые утилиты медиа: mime-типы, file_id, суффиксы файлов,
 источник медиа из сообщения, текст-подсказка для вложения без подписи.
 
-Сетевая часть сознательно остаётся в bot.py (_download_telegram_file_bytes,
+Сетевая часть сознательно остаётся в lumen_media_flow.py (_download_telegram_file_bytes,
 _fetch_media, _save_media_to_history): у неё зависимость от рантайма, вынос
 дал бы циклический импорт или проброс половины bot.py параметрами.
 """
@@ -10,6 +10,7 @@ _fetch_media, _save_media_to_history): у неё зависимость от р�
 from __future__ import annotations
 
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +77,11 @@ def _sanitize_mime_type(file_path: str | None, mime: str | None, default_fallbac
                 ".json": "application/json",
                 ".html": "text/html",
                 ".htm": "text/html",
-                ".xml": "text/xml"
+                ".xml": "text/xml",
+                ".md": "text/markdown",
+                ".py": "text/x-python",
+                ".js": "text/javascript",
+                ".css": "text/css"
             }
             if ext in ext_map:
                 return ext_map[ext]
@@ -124,24 +129,31 @@ def _mime_suffix(mime: str, filename: str = "") -> str:
         suffix = Path(filename).suffix
         if suffix:
              return suffix
+    # Чужой subtype в имя tmp-файла не пускаем ("image/../../x" давал странный
+    # путь): только [a-z0-9], остальное — нейтральный .bin.
+    def _safe_sub(sub: str, known: dict[str, str]) -> str:
+        if sub in known:
+            return known[sub]
+        if re.fullmatch(r"[a-z0-9]+", sub):
+            return f".{sub}"
+        return ".bin"
     m = (mime or "").lower()
     if m.startswith("image/"):
-        sub = m.split("/", 1)[1]
-        return {"jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"}.get(sub, f".{sub}")
+        return _safe_sub(m.split("/", 1)[1], {"jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"})
     # Расширение по содержимому (AUD-E-005): ".mp3 для всего" врало.
     if m.startswith("audio/"):
         sub = m.split("/", 1)[1].split(";")[0].strip()
-        return {
+        return _safe_sub(sub, {
             "mpeg": ".mp3", "mp3": ".mp3", "ogg": ".ogg", "wav": ".wav",
             "x-wav": ".wav", "webm": ".webm", "mp4": ".m4a", "x-m4a": ".m4a",
             "aac": ".aac", "flac": ".flac", "opus": ".opus",
-        }.get(sub, f".{sub}")
+        })
     if m.startswith("video/"):
         sub = m.split("/", 1)[1].split(";")[0].strip()
-        return {
+        return _safe_sub(sub, {
             "mp4": ".mp4", "quicktime": ".mov", "x-msvideo": ".avi",
             "x-matroska": ".mkv", "webm": ".webm", "mpeg": ".mpg",
-        }.get(sub, f".{sub}")
+        })
     return ".bin"
 
 def _msg_media_source(message: Any) -> Any | None:

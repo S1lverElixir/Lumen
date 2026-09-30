@@ -1,7 +1,7 @@
 """
 lumen_telegram_transport.py — низкоуровневый Telegram-транспорт: circuit breaker мёртвого прокси, детектор "прокси вернул мусор", TCP-коннектор, IPv4-сессия, кэш сессии.
 
-Только самодостаточное: мутирующие TELEGRAM_API_BASE_URL/bot обёртки (_tg_call и др.) осознанно остались в bot.py — их вынос трогал бы десяток мест ради "чистого рефакторинга".
+Только самодостаточное: мутирующие TELEGRAM_API_BASE_URL/bot обёртки (_tg_call и др.) живут в lumen_transport_calls.py — их вынос туда завершён, здесь только сессия и middlewares.
 """
 
 from __future__ import annotations
@@ -166,9 +166,10 @@ def proxy_auth_middlewares(
             request.headers[PROXY_AUTH_HEADER] = proxy_secret
         try:
             response = await handler(request)
-        except Exception:
+        except Exception as exc:
             if authenticated:
-                raise RuntimeError("Authenticated proxy request failed") from None
+                # Цепочку не рвём (from exc) + тип первопричины в тексте для Sentry.
+                raise RuntimeError(f"Authenticated proxy request failed: {type(exc).__name__}") from exc
             raise
         finally:
             request.headers.popall(PROXY_AUTH_HEADER, None)

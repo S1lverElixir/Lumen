@@ -16,6 +16,13 @@ log = logging.getLogger("bot")
 def _error_text(e: Exception) -> str:
     return " ".join(p for p in [str(e), str(getattr(e, "message", "")), str(getattr(e, "detail", ""))] if p).strip()
 
+# Только явные шаблоны ("HTTP 503", "status_code=429", "error 400"): голое число
+# в тексте ("429 токенов") статусом не считаем — давало ложную классификацию.
+_STATUS_RE = re.compile(
+    r"(?i)(?:http|status(?:[_ \-]?code)?|статус(?:[_ \-]?код)?"
+    r"|error(?:[_ \-]?code)?|ошибка|code|код)[_ \-]*[:=]?\s*(\d{3})\b"
+)
+
 def _error_status(e: Exception, text: str) -> int | None:
     for a in ("status_code", "status", "code", "http_status"):
         val = getattr(e, a, None)
@@ -24,7 +31,7 @@ def _error_status(e: Exception, text: str) -> int | None:
                 return int(val)
         except Exception:
             pass
-    m = re.search(r"(?<!\d)(\d{3})(?!\d)", text)
+    m = _STATUS_RE.search(text or "")
     if m:
         try:
             return int(m.group(1))

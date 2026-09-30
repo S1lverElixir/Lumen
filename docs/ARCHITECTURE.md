@@ -5,7 +5,7 @@ This document goes one level deeper than the main [README](../README.md) into ho
 ## Request lifecycle
 
 1. Telegram POSTs an update to `/webhook`, authenticated by a secret header (`X-Telegram-Bot-Api-Secret-Token`).
-2. `_handle_message_core` in `bot.py` classifies the message: is it a TikTok link, a `/draw` or `/tts` trigger phrase, a reply to earlier media, plain text, or an attachment?
+2. `_handle_message_core` (`lumen_message_core.py`, re-exported in `bot.py`) classifies the message: is it a TikTok link, a `/draw` or `/tts` trigger phrase, a reply to earlier media, plain text, or an attachment?
 3. `_build_route` (`lumen_router_config.py`) turns that classification into an ordered list of `(provider, model_id)` candidates.
 4. `_run_route` tries the first candidate. If a whole provider's chain fails, it falls back to the next provider in the route, except where that's physically impossible (only Gemini can read links or analyze video/audio).
 5. The reply streams into the chat if the request qualifies (see [Streaming](#streaming--typing-pace) below), or is sent as a single message otherwise.
@@ -18,13 +18,13 @@ Routing is fully automatic: the router builds a fresh candidate list for every m
 - **A video or audio attachment** → video goes to Gemini only (OpenRouter's multimodal models only accept images as base64). Voice/audio is first transcribed cheaply (Groq Whisper) and the text joins the normal routing below; if transcription fails or is unavailable, the audio goes to Gemini as before.
 - **An image attachment, no live-info need** → free OpenRouter vision models first, Gemini as a reserve.
 - **Needs current information** (a lightweight keyword heuristic: "now," "today," "price," "who is currently...") → Gemini, prioritizing the models with a real search-grounding quota, then OpenRouter as a reserve, Groq last (knowledge-only answer if both are down).
-- **Plain text, no attachments, no freshness need** (the most common case) → Groq first (1000 free requests/day: Qwen, then gpt-oss), then OpenRouter. Heavier requests (code, multi-step reasoning, caught by another lightweight heuristic) get routed to the stronger free OpenRouter models first.
+- **Plain text, no attachments, no freshness need** (the most common case) → Groq first (1000 free requests/day: Qwen, then gpt-oss), then OpenRouter. Heavier requests (code, multi-step reasoning, caught by another lightweight heuristic) skip Groq entirely and start at the stronger free OpenRouter models, Gemini as reserve.
 
 The reasoning: Gemini's free quota (roughly 20 requests per day for the flagship model) is the scarcest resource in the system, so it's only spent where a capability unique to Gemini is actually needed. Everything else, the bulk of ordinary messages, runs on Groq (1000/day) and OpenRouter's free tiers.
 
 Models that the router should never pick are tracked in a single registry, `_OR_MODEL_HEALTH` (`lumen_router_config.py`), each with a dated reason: the provider dropped the free tier, or the model turned out to be uncensored and a poor fit for Lumen's persona. Nothing is removed on speculation, only on confirmed evidence from production logs (`HTTP 404`, `"no endpoints,"` etc.).
 
-Each model is tried exactly once per route, with no retries: a single failure (timeout, `429`, `5xx`) moves straight to the next candidate. That keeps the worst case bounded by `len(route) × ROUTE_MODEL_TIMEOUT_SEC`, further capped by `ROUTE_TOTAL_BUDGET_SEC` for the whole route.
+Each model is tried exactly once per route, with no retries: a single failure (timeout, `429`, `5xx`) moves straight to the next candidate. That keeps the worst case bounded by `len(route) × ROUTE_MODEL_TIMEOUT_SEC`, further capped by `ROUTE_TOTAL_BUDGET_SEC` for the whole route. Within each provider block the order is re-sorted by measured latency (`lumen_model_speed.py`; provider blocks stay in place), so the stream head is the post-reorder head, not the curated `_build_route` order.
 
 ### Image generation
 
@@ -39,6 +39,8 @@ Telegram won't let a bot edit one message more than about once a second, so true
 This speed estimate is measured, not hardcoded. There is no table of "model X does N tokens/sec" to maintain, because that number isn't a property of the model on OpenRouter's free tier in the first place. A new model just starts at a default speed and calibrates itself over its first few replies.
 
 If the streaming attempt for the head-of-route model fails before showing any text, the bot falls back to a normal (non-streaming) call further down the chain, reusing the same placeholder message rather than sending a new one.
+
+Final answers go out via `sendRichMessage` (Bot API 10.1: real tables, headings, math) with automatic fallback to plain HTML; streaming edits always use HTML. Kill-switch: `RICH_MESSAGES_ENABLED=0` (plus restart) forces legacy HTML.
 
 ### Manual smoke test before touching streaming code
 
@@ -64,11 +66,11 @@ None of this is airtight except the input pre-filter. The goal is raising the ba
 
 ## TikTok downloader
 
-Downloads go through the public TikWM API (`tikwm.com`), no account or API key needed. The bot never re-encodes video or photos; bytes go to Telegram exactly as TikWM served them.
+Downloads go through the public TikWM API (`tikwm.com`), no account or API key needed. The bot never re-encodes video or photos; bytes go to Telegram exactly as TikWM served them. Music tracks are the exception: MP3 tags are rewritten with mutagen before sending.
 
 - **Video quality**: requested with `&hd=1`; among the variants TikWM returns (`hdplay`/`play`/`wmplay`, each with a known byte size), the best one that fits Telegram's 50 MB upload limit is picked. If Telegram still rejects it as too large, the next lighter variant is tried automatically.
 - **Slideshows**: TikTok allows up to 35 slides per post; Telegram's `sendMediaGroup` caps out at 10 items per call. The bot downloads the whole post in parallel and sends it as several media groups in sequence, never with a trailing group of exactly one item (Telegram requires 2–10 per group).
-- **"Live" slides**: TikWM's response includes a separate `live_images` field alongside the regular `images`; that's where the actually-moving version of a slide lives, if it has one. Each downloaded slide is also double-checked by its magic bytes (`ftyp` = video container) rather than trusting the field alone.
+- **"Live" slides**: TikWM's response includes a separate `live_images` field alongside the regular `images`; that's where the actually-moving version of a slide lives, if it has one. Each downloaded slide is also double-checked by its magic bytes (`ftyp` = MP4 container, EBML header = WebM) rather than trusting the field alone.
 - TikWM rejects Hugging Face Spaces' outbound IPs with an empty `403`, the same class of block that also keeps [YouTube downloading off the table](../README.md#known-limitations). The proxy (`TIKWM_API_BASE_URL`) is the only fix that's worked in practice; throttling, retries, and spoofed `Referer`/`Origin` headers didn't help on their own (they're still in place as defense in depth).
 
 ## Persistent storage

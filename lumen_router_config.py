@@ -1,7 +1,7 @@
 """
-lumen_router_config.py — модели и выбор маршрута (Gemini/OpenRouter) для одного сообщения.
+lumen_router_config.py — модели и выбор маршрута (Gemini/OpenRouter/Groq) для одного сообщения.
 
-Только конфигурация и чистые функции решения (_build_route, эвристики тяжести и свежести). Обращений к API отсюда нет, bot.py импортирует имена напрямую.
+Конфигурация плюс функции решения (_build_route, эвристики тяжести и свежести, фильтры квот). Обращений к API отсюда нет, bot.py импортирует имена напрямую.
 """
 
 from __future__ import annotations
@@ -53,30 +53,30 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
     # Быстрая и экономичная (21.07.2026, до 350 токенов/сек).
     "gemini-3.5-flash-lite": {
         "stream": True,
-        "search_grounding": False, "map_grounding": True,
+        "search_grounding": False, "map_grounding": True, "url_context": True,
     },
     # Резерв после 3.5 Flash-Lite.
     "gemini-3.1-flash-lite": {
         "stream": True,
-        "search_grounding": False, "map_grounding": True,
+        "search_grounding": False, "map_grounding": True, "url_context": True,
     },
     # Баланс скорости и качества. Единственное поколение с квотой search grounding (21/1500).
     "gemini-2.5-flash": {
         "stream": True,
-        "search_grounding": True, "map_grounding": True,
+        "search_grounding": True, "map_grounding": True, "url_context": True,
     },
     # Экономичная: скорость важнее глубины рассуждений.
     "gemini-2.5-flash-lite": {
         "stream": True,
-        "search_grounding": True, "map_grounding": True,
+        "search_grounding": True, "map_grounding": True, "url_context": True,
     },
     "gemma-4-31b-it": {
-        "no_system": True, "no_search": True, "stream": True,
+        "no_system": True, "no_search": True, "stream": True, "url_context": True,
     },
     "gemma-4-26b-a4b-it": {
         "no_system": True,
         # 24.07.2026: без no_search Gemma получала бы инструменты, которых не поддерживает.
-        "no_search": True, "stream": True,
+        "no_search": True, "stream": True, "url_context": True,
     },
 }
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
@@ -94,7 +94,7 @@ def _check_unconfirmed_model_quotas() -> None:
     for mid, conf in GEMINI_MODELS.items():
         if conf.get("quota_unconfirmed"):
             log.warning(
-                "[setup] Real RPD limits and search/map grounding availability for model %s are NOT yet confirmed against the AI Studio dashboard (model was recently released) — the current search_grounding/map_grounding values in GEMINI_MODELS are a guess by analogy with a model of the same class. Check the dashboard and remove 'quota_unconfirmed' for this model in bot.py, adjusting the config if needed.",
+                "[setup] Real RPD limits and search/map grounding availability for model %s are NOT yet confirmed against the AI Studio dashboard (model was recently released) — the current search_grounding/map_grounding values in GEMINI_MODELS are a guess by analogy with a model of the same class. Check the dashboard and remove 'quota_unconfirmed' for this model in lumen_router_config.py, adjusting the config if needed.",
                 mid,
             )
 
@@ -259,7 +259,10 @@ def _is_quota_exhausted(provider: str, model_id: str) -> bool:
             return True
         cooldown_until = entry.get("cooldown_until")
         return bool(cooldown_until and cooldown_until > time.time())
-    except Exception:
+    except Exception as exc:
+        # Битое состояние квоты чиним видимой ошибкой в логе, а не молчаливыми
+        # лишними попытками: fail-open здесь — пропуск фильтра.
+        log.warning("[router] Quota state unreadable, treating %s/%s as available: %s", provider, model_id, exc)
         return False
 
 def _skip_exhausted(provider: str, models: list[str]) -> list[str]:
@@ -272,6 +275,9 @@ def _or_route(models: list[str]) -> list[tuple[str, str]]:
     return [("openrouter", m) for m in _skip_exhausted("openrouter", models) if m not in _ROUTER_EXCLUDED_OR_MODELS]
 
 def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
+    # Реестра здоровья, как _OR_MODEL_HEALTH, здесь нет (аудит 29.09.2026):
+    # мёртвая модель стоит головой и каждая попытка платит лишнее обращение.
+    # При инциденте убирать из ORDER-списков с датой, как для OpenRouter.
     return [("gemini", m) for m in _skip_exhausted("gemini", models)]
 
 # ── Groq (прямой провайдер, не через OpenRouter) ──
@@ -283,6 +289,7 @@ _GROQ_LIGHT_ORDER: list[str] = [
 ]
 
 def _groq_route(models: list[str]) -> list[tuple[str, str]]:
+    # То же про реестр здоровья, что у _gemini_route выше.
     return [("groq", m) for m in _skip_exhausted("groq", models)]
 
 
@@ -395,6 +402,8 @@ def _looks_like_heavy_query(text: str) -> bool:
 
 # ── Эвристика свежести без LLM.
 # Ложные срабатывания дёшевы: модель сама решает, вызывать ли поиск.
+# Годы свежести — окном от текущей даты, а не зашитым диапазоном (иначе протухает).
+_FRESHNESS_YEAR_ALTS = "|".join(str(date.today().year + i) for i in range(4))
 _FRESHNESS_QUERY_RE = re.compile(
     r"сейчас|сегодня|текущ\w*|последн\w*|актуальн\w*|свеж\w*|недавно|на\s+данный\s+момент"
     r"|новост\w*|курс\s+(валют|доллара|евро|рубл\w*)|погод\w*|прогноз\w*"
@@ -406,7 +415,7 @@ _FRESHNESS_QUERY_RE = re.compile(
     r"|кто\s+(сейчас|является|президент|премьер|глава|ceo|мэр)"
     r"|результат\w*\s+(матч\w*|игр\w*|выбор\w*)"
     r"|в\s+эт(ом|ой)\s+(году|месяце|неделе)"
-    r"|\b202[6-9]\b"
+    rf"|\b(?:{_FRESHNESS_YEAR_ALTS})\b"
     # EN-набор: детект был только русским при 25 языках (внешний аудит). Границы слов обязательны: now ловил know/snow.
     r"|\bnow\b|\btoday\b|current\w*|latest|recent\w*|\bbreaking\b"
     r"|\bnews\b|weather|forecast|price\w*|\bcost\w*|how\s+much|exchange|\bscore\w*|schedule"

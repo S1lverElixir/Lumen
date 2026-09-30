@@ -17,7 +17,7 @@ pinned: false
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-A Telegram bot styled after Claude's tone and personality (direct, warm, light on hedging), running on Google Gemini and free OpenRouter models with automatic per-message routing between them. Lumen also generates images, downloads TikTok videos without watermarks, and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
+A Telegram bot styled after Claude's tone and personality (direct, warm, light on hedging), running on Google Gemini, free OpenRouter models and Groq with automatic per-message routing between them. Lumen also generates images, downloads TikTok videos without watermarks, and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
 
 **Stack:** Python 3.13 · aiogram · FastAPI · google-genai · Docker
 

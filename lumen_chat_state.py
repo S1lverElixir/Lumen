@@ -38,6 +38,9 @@ MAX_CHAT_LIMIT = 5000
 PRUNED_CHAT_TARGET = 4500
 MAX_CHAT_HISTORY_LEN = 100
 MAX_MEDIA_RECENT_IDS = 8  # хранится ОТДЕЛЬНО на каждого пользователя чата (см. recent_media_ids: dict[user_id, deque])
+# Живых отправителей медиа в чате десятки, 500 покрывает большие группы с запасом.
+# Потолок только против подделки user_id и раздувания снапшота, легитимные чаты не задевает.
+MAX_MEDIA_BUCKETS_PER_CHAT = 500
 
 
 class ChatState(TypedDict, total=False):
@@ -189,21 +192,28 @@ def _reset_quota_if_new_day() -> None:
 
 def load_global_quota() -> None:
     import bot
+    global _state_load_failed
     try:
         raw = bot._storage_read_text("lumen:global_quota", GLOBAL_QUOTA_FILE)
         if not raw:
+            # Пусто — первый запуск, а не отказ: сбрасывать нечего.
+            _state_load_failed = False
             return
         loaded = json.loads(raw)
         if isinstance(loaded, dict):
-            if "gemini" in loaded:
-                GLOBAL_QUOTA["gemini"] = loaded["gemini"]
-            if "openrouter" in loaded:
-                GLOBAL_QUOTA["openrouter"] = loaded["openrouter"]
-            if "groq" in loaded:
-                GLOBAL_QUOTA["groq"] = loaded["groq"]
+            for provider in ("gemini", "openrouter", "groq"):
+                if provider in loaded:
+                    # Чужой тип (список вместо dict) раньше ломал _quota_entry на каждом обращении.
+                    if isinstance(loaded[provider], dict):
+                        GLOBAL_QUOTA[provider] = loaded[provider]
+                    else:
+                        log.warning("[quota] Skip provider %s: expected dict, got %s", provider, type(loaded[provider]).__name__)
             if "quota_day" in loaded:
                 GLOBAL_QUOTA["quota_day"] = loaded["quota_day"]
+        _state_load_failed = False
     except Exception as exc:
+        # Чтение/разбор упали — память недостоверна, перезапись запрещена (см. флаг).
+        _state_load_failed = True
         log.warning("[quota] Failed to load global quota: %s", exc)
     # Проверяем сразу после загрузки — если бот был перезапущен уже на следующие
     # сутки (обычное дело при редеплое), счётчики должны обнулиться сразу на
@@ -212,6 +222,10 @@ def load_global_quota() -> None:
 
 def save_global_quota() -> None:
     import bot
+    if _state_load_failed:
+        # Стартовая загрузка не удалась: удалённая квота новее пустой памяти, не затираем.
+        log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
+        return
     try:
         bot._storage_write_text("lumen:global_quota", GLOBAL_QUOTA_FILE, json.dumps(GLOBAL_QUOTA, ensure_ascii=False))
     except Exception as exc:
@@ -226,24 +240,55 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
 
     Старые поля моделей игнорируются: роутер автоматический; schema пока только задел."""
     import bot
+    # Битая запись не должна ронять восстановление остальных чатов: пропускаем с warning.
+    if not isinstance(s, dict):
+        log.warning('[state] Skip chat %s: snapshot is not a dict', cid)
+        return
     schema_version = s.get("schema_version", 0)
     log.debug('[state] Restoring chat %s (schema_version=%s)', cid, schema_version)
     raw_media = s.get("recent_media_ids", {})
     if isinstance(raw_media, dict):
-        media_buckets = {
-            str(uid): deque(items, maxlen=MAX_MEDIA_RECENT_IDS)
-            for uid, items in raw_media.items()
-        }
+        media_buckets: dict[str, Any] = {}
+        for uid, items in raw_media.items():
+            # Строка вместо списка давала deque из символов — такой бакет отбрасываем.
+            if not isinstance(items, list):
+                continue
+            clean = [
+                tuple(it) if isinstance(it, list) else it
+                for it in items
+                if isinstance(it, (list, tuple)) and len(it) == 2
+                and isinstance(it[0], str) and isinstance(it[1], str)
+            ]
+            media_buckets[str(uid)] = deque(clean, maxlen=MAX_MEDIA_RECENT_IDS)
+        if len(media_buckets) > MAX_MEDIA_BUCKETS_PER_CHAT:
+            # Снимок старше фикса мог накопить лишнее — оставляем хвост, новые вытесняются в _save_media_to_history.
+            media_buckets = dict(list(media_buckets.items())[-MAX_MEDIA_BUCKETS_PER_CHAT:])
     else:
         # Старый формат (плоский список на весь чат) — не мигрируем содержимое,
         # просто стартуем с чистого состояния, новые записи наполнят сами по себе.
         media_buckets = {}
     if "history" in s:
-        history = list(s.get("history") or [])
+        raw_history = s.get("history")
+        if raw_history is None:
+            history = []
+        elif not isinstance(raw_history, list):
+            # list("строка") давал список символов и пересохранял мусор — пропускаем запись.
+            log.warning('[state] Skip chat %s: history is not a list', cid)
+            return
+        else:
+            history = list(raw_history)
     else:
         # Миграция со старого раздельного формата памяти: конкатенируем обе истории.
         # Точный порядок уже не восстановить, сам факт истории важнее.
-        history = list(s.get("gemini_history") or []) + list(s.get("or_history") or [])
+        raw_gem = s.get("gemini_history")
+        raw_or = s.get("or_history")
+        if raw_gem is not None and not isinstance(raw_gem, list):
+            log.warning('[state] Skip chat %s: gemini_history is not a list', cid)
+            return
+        if raw_or is not None and not isinstance(raw_or, list):
+            log.warning('[state] Skip chat %s: or_history is not a list', cid)
+            return
+        history = list(raw_gem or []) + list(raw_or or [])
         if len(history) > bot.SHARED_HISTORY_MAX_LEN:
             history = history[-bot.SHARED_HISTORY_MAX_LEN:]
     chat_state[cid] = {
@@ -256,13 +301,16 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         "lang": normalize_lang(s.get("lang")),
     }
 
-def _save_chat_index() -> None:
+def _save_chat_index() -> bool:
+    """True/False для повтора в _flush_state_now: раньше неуспех молча терялся (аудит A5-1)."""
     import bot
     try:
         ids = sorted(chat_state.keys())
         bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, json.dumps(ids))
+        return True
     except Exception as exc:
         log.warning("[state] Saving chat index failed: %s", exc)
+        return False
 
 def _save_chat_index_payload(payload: str) -> bool:
     """Только блокирующая запись готового снапшота индекса — для to_thread. True/False для повтора."""
@@ -292,6 +340,9 @@ _dirty_chat_ids: set[int] = set()
 _pending_chat_deletions: set[int] = set()
 _index_dirty = False
 _quota_dirty = False
+# Отказ стартовой загрузки: пока стоит, индекс и квоту не перезаписываем,
+# иначе первый флаш затрёт хорошие удалённые данные пустым снимком (аудит A5-2).
+_state_load_failed = False
 FLUSH_INTERVAL_SEC = 10.0
 # Конкурентность флаша — семафором: всплеск "грязных" чатов иначе породил бы сотни параллельных HTTP к Upstash.
 STATE_FLUSH_CONCURRENCY = int(os.getenv("STATE_FLUSH_CONCURRENCY", "10"))
@@ -327,9 +378,8 @@ async def _delete_chat_storage_limited(chat_id: int) -> bool:
 def mark_state_dirty(chat_id: int | None = None) -> None:
     """Помечает состояние чата как требующее сохранения.
     Явный chat_id (предпочтительный путь для нового кода) — помечает "грязным"
-    ТОЛЬКО этот чат, ничего больше. Вызов БЕЗ chat_id (для мест, которые меняют
-    сразу много чатов разом — например _prune_old_chats при вытеснении старых
-    чатов) помечает "грязными" вообще все текущие чаты и индекс целиком."""
+    ТОЛЬКО этот чат, ничего больше. Вызов БЕЗ chat_id (миграция из старого
+    общего блоба) помечает "грязными" вообще все текущие чаты и индекс целиком."""
     global _index_dirty
     if chat_id is not None:
         _dirty_chat_ids.add(chat_id)
@@ -396,13 +446,21 @@ async def _flush_dirty_state_once() -> None:
             # Флаг сбрасываем только после подтверждённой записи — иначе упавший индекс
             # молча терялся бы до следующей мутации (найдено внешним аудитом).
             # Снапшот ключей — здесь (см. комментарий у _save_chat_to_storage_limited).
-            index_payload = json.dumps(sorted(chat_state.keys()))
-            if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
-                _index_dirty = False
+            if _state_load_failed:
+                # Удалённый индекс новее пустой памяти — не затираем, очередь живёт дальше.
+                log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+            else:
+                index_payload = json.dumps(sorted(chat_state.keys()))
+                if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
+                    _index_dirty = False
         if _quota_dirty:
-            quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
-            if await asyncio.to_thread(bot._save_quota_payload, quota_payload):
-                _quota_dirty = False
+            if _state_load_failed:
+                # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
+                log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
+            else:
+                quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
+                if await asyncio.to_thread(bot._save_quota_payload, quota_payload):
+                    _quota_dirty = False
     except Exception as exc:
         log.warning('[state] Periodic state flush failed: %s', exc)
 
@@ -420,26 +478,59 @@ def _flush_state_now() -> None:
     проблема."""
     import bot
     global _index_dirty
+    # Неуспех — обратно в очередь с громким логом, как в async-флаше: молча
+    # чистить очереди на shutdown значило бы тихо терять записи (аудит A5-1).
     for cid in list(_pending_chat_deletions):
-        bot._delete_chat_storage(cid)
-    _pending_chat_deletions.clear()
+        try:
+            deleted = bot._delete_chat_storage(cid)
+        except Exception as exc:
+            deleted = False
+            log.warning('[state] Deleting chat %s failed: %s', cid, exc)
+        if deleted is True:
+            _pending_chat_deletions.discard(cid)
+        else:
+            log.warning('[state] Chat %s deletion failed, keeping it queued.', cid)
     for cid in list(_dirty_chat_ids):
         st = chat_state.get(cid)
-        if st is not None:
-            bot._save_chat_to_storage(cid, st)
-    _dirty_chat_ids.clear()
+        if st is None:
+            _dirty_chat_ids.discard(cid)
+            continue
+        try:
+            saved = bot._save_chat_to_storage(cid, st)
+        except Exception as exc:
+            saved = False
+            log.warning('[state] Saving chat %s failed: %s', cid, exc)
+        if saved is True:
+            _dirty_chat_ids.discard(cid)
+        else:
+            log.warning('[state] Chat %s save failed, keeping it dirty.', cid)
     if _index_dirty:
-        bot._save_chat_index()
-        _index_dirty = False
+        if _state_load_failed:
+            # Удалённый индекс новее пустой памяти — не затираем (аудит A5-2).
+            log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+        else:
+            try:
+                index_saved = bot._save_chat_index()
+            except Exception as exc:
+                index_saved = False
+                log.warning('[state] Saving chat index failed: %s', exc)
+            if index_saved is True:
+                _index_dirty = False
+            else:
+                log.warning('[state] Chat index save failed, keeping it dirty.')
 
 def load_state_from_disk() -> None:
     import bot
+    global _state_load_failed
+    # Новая попытка снимает старый отказ; неуспех ниже выставит его заново.
+    _state_load_failed = False
     bot.load_global_quota()
 
     index_raw = None
     try:
         index_raw = bot._storage_read_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE)
     except Exception as exc:
+        _state_load_failed = True
         log.warning("[state] Reading chat index failed, falling back to legacy combined blob: %s", exc)
 
     if index_raw is not None:
@@ -460,6 +551,7 @@ def load_state_from_disk() -> None:
                 try:
                     raw = bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
                 except Exception as exc:
+                    _state_load_failed = True
                     log.warning('[state] Failed to read chat %s: %s', cid, exc)
                     continue
                 if not raw:
@@ -467,10 +559,18 @@ def load_state_from_disk() -> None:
                 try:
                     s = json.loads(raw)
                 except Exception as exc:
+                    _state_load_failed = True
                     log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
                     continue
-                bot._restore_single_chat(cid, s)
-                loaded_count += 1
+                try:
+                    bot._restore_single_chat(cid, s)
+                except Exception as exc:
+                    # Одна битая запись не обрывает восстановление остальных чатов.
+                    _state_load_failed = True
+                    log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
+                    continue
+                if cid in chat_state:
+                    loaded_count += 1
             log.info("[state] Restored states for %d chats (per-chat storage).", loaded_count)
             return
         # Индекс битый, но per-chat файлы могут быть целы — пробуем legacy-блоб:
@@ -490,13 +590,20 @@ def load_state_from_disk() -> None:
                 cid = int(chat_id_str)
             except Exception:
                 continue
-            bot._restore_single_chat(cid, s)
+            try:
+                bot._restore_single_chat(cid, s)
+            except Exception as exc:
+                # Одна битая запись не обрывает восстановление остальных чатов.
+                _state_load_failed = True
+                log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
+                continue
         log.info(
             '[state] Restored states for %d chats (migrated from the old shared storage format — will be rewritten in the new per-chat format on next flush).',
             len(chat_state),
         )
         bot.mark_state_dirty()
     except Exception as exc:
+        _state_load_failed = True
         log.warning("[state] Restoring states failed: %s", exc)
 
 def get_state(chat_id: int) -> dict[str, Any]:
@@ -554,6 +661,7 @@ def _t_no_create(chat_id: int | None, key: str, **kwargs: Any) -> str:
 
 def _prune_old_chats() -> None:
     import bot
+    global _index_dirty
     sorted_ids = sorted(chat_state.keys(), key=lambda cid: chat_state[cid].get("last_activity", 0))
     # Лок ЗАНЯТ = в чате идёт ответ. Такой чат вытеснять нельзя: идущий маршрут
     # продолжал бы писать в отвязанный state, а следующее сообщение создало бы
@@ -576,8 +684,10 @@ def _prune_old_chats() -> None:
     # ключи/файлы бесхозно копятся вечно) — ставим в очередь на удаление,
     # обрабатывается в _flush_dirty_state вместе с обычным сбросом.
     _pending_chat_deletions.update(removed_ids)
+    _dirty_chat_ids.difference_update(removed_ids)
     if removed_ids:
-        bot.mark_state_dirty()
+        # Неизменённые чаты не пачкаем: иначе следующий флаш перезаписывал тысячи лишних ключей.
+        _index_dirty = True
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
     import bot
@@ -585,6 +695,24 @@ def get_chat_lock(chat_id: int) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         bot._chat_locks[chat_id] = lock
+    return lock
+
+_CHAT_LOCK_MAX_RETRIES = 3
+
+async def acquire_chat_lock(chat_id: int, timeout: float) -> asyncio.Lock:
+    """Захват per-chat лока с проверкой поколения: между get и acquire прунинг
+    или эвикт могли снести чат и лок — захваченный лок тогда чужой, отпускаем
+    и берём заново. Без проверки два сообщения отвечали бы параллельно, портя
+    историю (аудит A5-10). Таймаут — на каждую попытку, кругов не больше трёх."""
+    import bot
+    for _ in range(_CHAT_LOCK_MAX_RETRIES):
+        lock = get_chat_lock(chat_id)
+        await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        if bot._chat_locks.get(chat_id) is lock:
+            return lock
+        lock.release()
+    lock = get_chat_lock(chat_id)
+    await asyncio.wait_for(lock.acquire(), timeout=timeout)
     return lock
 
 def _evict_orphan_chat_locks() -> int:

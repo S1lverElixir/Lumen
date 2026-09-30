@@ -5,7 +5,11 @@ test_bot_admin.py — Админка и webhook: гейты секретов, he
 """
 import asyncio
 import bot
+import logging
 import os
+import threading
+import pytest
+from unittest.mock import Mock
 from tests.bot_test_helpers import (
     _FakeAdminRequest,
     _FakeWebhookRequest,
@@ -167,6 +171,27 @@ def test_fastapi_schema_endpoints_are_disabled():
     assert bot.app.openapi_url is None
 
 
+def test_export_state_returns_detached_snapshot():
+    # Аудит A11-05: экспорт отдавал живые ссылки на мутабельные объекты —
+    # запись между возвратом и сериализацией давала несогласованный бэкап.
+    original = bot.ADMIN_PANEL_KEY
+    bot.ADMIN_PANEL_KEY = "real-admin-key"
+    chat_id = 999980
+    state = bot.get_state(chat_id)
+    state["history"].append({"role": "user", "content": "hi"})
+    bot.GLOBAL_QUOTA.setdefault("groq", {})["snaptest"] = {"used": 1}
+    try:
+        result = asyncio.run(bot.export_state(_FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+        bot.GLOBAL_QUOTA["groq"]["snaptest"]["used"] = 999
+        state["history"].append({"role": "user", "content": "after"})
+        assert result["global_quota"]["groq"]["snaptest"]["used"] == 1
+        assert all(m["content"] != "after" for m in result["chats"][str(chat_id)]["history"])
+    finally:
+        bot.GLOBAL_QUOTA.get("groq", {}).pop("snaptest", None)
+        bot.chat_state.pop(chat_id, None)
+        bot.ADMIN_PANEL_KEY = original
+
+
 def test_export_state_rejects_query_param_regression():
     # См. test_check_admin_key_rejects_query_param_regression — /export_state — самый
     # чувствительный из трёх эндпоинтов (отдаёт ПОЛНЫЕ истории всех чатов), поэтому
@@ -325,4 +350,118 @@ def test_admin_secret_seed_falls_back_to_bot_token_when_unset():
     else:
         # Оба пустые: случайная соль, а не литерал "default".
         assert re.fullmatch(r"[0-9a-f]{64}", bot._ADMIN_SECRET_SEED)
+
+
+# ─────────────── lifecycle: токен, часовой цикл, старт (S7) ───────────────
+
+def test_require_bot_token_exits_on_empty_token(monkeypatch):
+    # A1-1: пустой токен раньше умирал внутри Bot() с TokenValidationError и
+    # рестартами — теперь чистый выход с понятной причиной.
+    monkeypatch.setattr(bot, "BOT_TOKEN", "")
+    with pytest.raises(SystemExit):
+        bot._require_bot_token()
+
+
+def test_require_bot_token_returns_configured_token(monkeypatch):
+    # Сторож: непустой токен молча проходит дальше в Bot().
+    monkeypatch.setattr(bot, "BOT_TOKEN", "123:abc")
+    assert bot._require_bot_token() == "123:abc"
+
+
+def _sleep_then_cancel(loop_sleeps):
+    # Первые loop_sleeps+1 вызовов sleep проходят (1.5с старта + тики),
+    # дальше CancelledError останавливает бесконечный цикл стартапа.
+    state = {"n": 0}
+
+    async def _fake_sleep(delay):
+        state["n"] += 1
+        if state["n"] > loop_sleeps + 1:
+            raise asyncio.CancelledError
+
+    return _fake_sleep
+
+
+def _patch_startup(monkeypatch, tg_impl, loader=None):
+    monkeypatch.setattr(bot, "load_state_from_disk", loader or Mock())
+    monkeypatch.setattr(bot, "_check_temporary_free_models_expiry", Mock())
+    monkeypatch.setattr(bot, "_check_unconfirmed_model_quotas", Mock())
+    monkeypatch.setattr(bot, "_check_scheduled_removals_due", Mock())
+    monkeypatch.setattr(bot, "telegram_api_call", tg_impl)
+    monkeypatch.setattr(bot, "_cleanup_rate_limit_dict", Mock())
+    monkeypatch.setattr(bot, "_evict_orphan_chat_locks", Mock())
+    monkeypatch.setattr(bot, "_reset_quota_if_new_day", Mock())
+    # getMe в try_setup переписывает globals — снапшот для отката.
+    monkeypatch.setattr(bot, "BOT_USERNAME", bot.BOT_USERNAME)
+    monkeypatch.setattr(bot, "OPENROUTER_HTTP_REFERER", bot.OPENROUTER_HTTP_REFERER)
+
+
+async def _fake_tg_ok(method, *args, **kwargs):
+    if method == "getMe":
+        return {"username": "testbot"}
+    return {}
+
+
+def test_hourly_tick_survives_failing_step(monkeypatch):
+    # A1-2: упавшая чистка раньше убивала часовой цикл навсегда — теперь
+    # второй тик всё равно наступает.
+    monkeypatch.setattr(bot.asyncio, "sleep", _sleep_then_cancel(2))
+    _patch_startup(monkeypatch, _fake_tg_ok)
+    monkeypatch.setattr(
+        bot, "_cleanup_rate_limit_dict",
+        Mock(side_effect=[RuntimeError("boom"), None]),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(bot._webhook_startup())
+    # Упавший шаг пропускает остаток своего тика, но цикл живёт: чистка звалась
+    # дважды (второй тик наступил), evict — один раз (первый тик оборвался).
+    assert bot._cleanup_rate_limit_dict.call_count == 2
+    assert bot._evict_orphan_chat_locks.call_count == 1
+
+
+def test_startup_loads_state_off_loop(monkeypatch):
+    # A1-3: синхронное чтение диска раньше стопорило loop на старте.
+    seen = {}
+    monkeypatch.setattr(bot.asyncio, "sleep", _sleep_then_cancel(0))
+    _patch_startup(monkeypatch, _fake_tg_ok,
+                   loader=lambda: seen.setdefault("thread", threading.current_thread()))
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(bot._webhook_startup())
+    assert seen["thread"] is not threading.main_thread()
+
+
+def test_startup_logs_commands_failure_honestly(monkeypatch, caplog):
+    # A1-4: провал всех языков раньше логировался как успех (for-else без break).
+    async def _fake_tg_fail_commands(method, *args, **kwargs):
+        if method == "getMe":
+            return {"username": "testbot"}
+        if method == "setMyCommands":
+            raise RuntimeError("boom")
+        return {}
+
+    monkeypatch.setattr(bot.asyncio, "sleep", _sleep_then_cancel(0))
+    _patch_startup(monkeypatch, _fake_tg_fail_commands)
+    with caplog.at_level(logging.INFO, logger="bot"), pytest.raises(asyncio.CancelledError):
+        asyncio.run(bot._webhook_startup())
+    assert "were not set for any language" in caplog.text
+    assert "Bot commands set successfully" not in caplog.text
+
+
+def test_startup_logs_commands_success(monkeypatch, caplog):
+    # Сторож: хотя бы один язык прошёл — лог успеха на месте.
+    monkeypatch.setattr(bot.asyncio, "sleep", _sleep_then_cancel(0))
+    _patch_startup(monkeypatch, _fake_tg_ok)
+    with caplog.at_level(logging.INFO, logger="bot"), pytest.raises(asyncio.CancelledError):
+        asyncio.run(bot._webhook_startup())
+    assert "Bot commands set successfully" in caplog.text
+
+
+def test_message_mentions_bot_without_chat_returns_false():
+    # A1-6: chat None раньше давал AttributeError, апдейт глотался хендлером.
+    class _NoChatMessage:
+        chat = None
+        text = "@somebot hello"
+        caption = None
+        reply_to_message = None
+
+    assert bot.message_mentions_bot(_NoChatMessage()) is False
 
