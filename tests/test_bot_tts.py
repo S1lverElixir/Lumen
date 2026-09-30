@@ -413,3 +413,67 @@ def test_pcm_to_wav_rejects_non_wav_riff():
     assert out.startswith(b"RIFF") and out[8:12] == b"WAVE"
     assert lumen_tts.pcm_to_wav(b"RIFFxxxxWAVE....") == b"RIFFxxxxWAVE...."
 
+
+def test_inline_tts_zero_budget_never_synthesizes(monkeypatch):
+    # Аудит D2: нулевой общий бюджет — синтез не стартует вообще, сразу честная ошибка.
+    import lumen_commands
+
+    async def must_not_synthesize(text):
+        raise AssertionError("synthesis must not start on zero budget")
+
+    monkeypatch.setattr(bot, "TTS_TOTAL_BUDGET_SEC", 0)
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", must_not_synthesize)
+    incoming = _FakeIncomingMessage(999986)
+    incoming.message_id = 12350
+    original_bot = bot.bot
+    bot.bot = _FakeVoiceBot()
+    try:
+        asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+        shown = [text for msg in incoming.sent for text, _ in msg.edits]
+        assert shown, "пользователь должен увидеть ошибку, а не тишину"
+    finally:
+        bot.bot = original_bot
+        bot.chat_state.pop(999986, None)
+
+
+def test_inline_tts_sends_partial_with_shortened_note(monkeypatch):
+    # Аудит D2: второй кусок завис — первый уходит, пользователь узнаёт об обрезке.
+    import lumen_commands
+
+    class _CountingVoiceBot(_FakeVoiceBot):
+        def __init__(self):
+            super().__init__()
+            self.voice_count = 0
+
+        async def send_voice(self, **kwargs):
+            self.voice_count += 1
+            return await super().send_voice(**kwargs)
+
+    calls = {"n": 0}
+
+    async def flaky_synth(text):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            await asyncio.sleep(30)
+        return (b"audio1", "speech.ogg", 5)
+
+    sent = {}
+
+    async def fake_reply(message, text, **kwargs):
+        sent["text"] = text
+
+    monkeypatch.setattr(bot, "TTS_TOTAL_BUDGET_SEC", 0.3)
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", flaky_synth)
+    monkeypatch.setattr(bot, "_safe_reply", fake_reply)
+    voice_bot = _CountingVoiceBot()
+    monkeypatch.setattr(bot, "bot", voice_bot)
+    incoming = _FakeIncomingMessage(999987)
+    incoming.message_id = 12351
+    bot.get_state(999987)["lang"] = "ru"
+    try:
+        asyncio.run(bot.inline_tts(incoming, "x" * 900))
+        assert voice_bot.voice_count == 1
+        assert "сокращ" in sent.get("text", "")
+    finally:
+        bot.chat_state.pop(999987, None)
+

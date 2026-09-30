@@ -341,6 +341,10 @@ TTS_MAX_CHARS = _env_number("TTS_MAX_CHARS", 800, cast=int, min_value=1)
 # уходил в поток без таймаута и без http_options у клиента, и зависший Google
 # держал лок чата бесконечно (аудит 26.09.2026).
 TTS_SYNTH_TIMEOUT_SEC = _env_number("TTS_SYNTH_TIMEOUT_SEC", 60, min_value=1)
+# Общий дедлайн на все чанки мультичанкового TTS: зависший синтез иначе держал
+# per-chat lock без края (аудит D2, 30.09.2026). Худший чанк ~100с (60 синтез +
+# 30 ffmpeg + 10 probe), типичные 5 чанков укладываются с запасом.
+TTS_TOTAL_BUDGET_SEC = _env_number("TTS_TOTAL_BUDGET_SEC", 240, min_value=30)
 _PROCESS_START_MONOTONIC = time.monotonic()
 # ── Тайминги автоматического маршрутизатора моделей (см. секцию "автоматический
 # выбор модели" ниже) ──
