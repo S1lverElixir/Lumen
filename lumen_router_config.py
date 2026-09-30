@@ -441,10 +441,14 @@ def _build_route(
         return _gemini_route(chain)
 
     if media_mime:
-        if needs_freshness or is_video_or_audio_media:
-            # Видео/аудио и медиа+поиск — только Gemini (OpenRouter не примет не-изображение и без поиска).
+        if is_video_or_audio_media:
+            # Видео/аудио — только Gemini (OpenRouter не примет не-изображение).
             chain = GEMINI_SEARCH_CHAIN if needs_freshness else GEMINI_HEAVY_CHAIN
             return _gemini_route(chain)
+        if needs_freshness:
+            # Картинка+свежесть: Gemini с поиском головой, дальше vision
+            # OpenRouter без поиска (аудит D3, 30.09.2026: раньше резерва не было).
+            return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_VISION_ORDER)
         # Картинка без поиска — сначала vision OpenRouter, Gemini резервом.
         return _or_route(_OR_VISION_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
 
@@ -453,6 +457,8 @@ def _build_route(
         return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_HEAVY_ORDER if is_heavy else _OR_LIGHT_ORDER) + _groq_route(_GROQ_LIGHT_ORDER)
 
     # Обычный текст — сначала Groq (1000/день против 50 у OpenRouter), дальше OpenRouter, Gemini резервом.
+    # Тяжёлый — тоже с Groq первой: свободная квота Groq-Tier экономит scarce-квоты
+    # OR/Gemini (аудит D3, 30.09.2026); не потянет — цепочка уйдёт дальше сама.
     if is_heavy:
-        return _or_route(_OR_HEAVY_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
+        return _groq_route(_GROQ_LIGHT_ORDER) + _or_route(_OR_HEAVY_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
     return _groq_route(_GROQ_LIGHT_ORDER) + _or_route(_OR_LIGHT_ORDER) + _gemini_route(GEMINI_SEARCH_CHAIN)
