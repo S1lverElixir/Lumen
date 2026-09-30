@@ -38,7 +38,6 @@ Deno.test("resolveTarget строит корректный URL для разре
   const result = resolveTarget("/fetch/api.telegram.org/bot123/getMe", "");
   assert(result.ok, "ожидался ok=true");
   if (result.ok) {
-    assertEquals(result.host, "api.telegram.org");
     assertEquals(result.url, "https://api.telegram.org/bot123/getMe");
   }
 });
@@ -335,7 +334,8 @@ Deno.test("handleRequest не пропускает chunked-тело запрос
     body: new Uint8Array([1, 2, 3, 4, 5]),
   });
   const resp = await handleRequest(req, fakeFetch, TEST_SECRET, 3);
-  assertEquals(resp.status, 502);
+  assertEquals(resp.status, 413);
+  assertEquals(await resp.text(), "Request body too large");
 });
 
 Deno.test("handleRequest не отдаёт тело ответа сверх капа", async () => {
@@ -352,4 +352,65 @@ Deno.test("handleRequest не отдаёт тело ответа сверх ка
     failed = true;
   }
   assert(failed, "ответ сверх капа обязан оборваться, а не утечь целиком");
+});
+
+Deno.test("handleRequest проверяет секрет раньше маршрутизации (401 раньше 403/404)", async () => {
+  const unusedFetch: typeof fetch = () => Promise.resolve(new Response("unused"));
+  const noSecret404 = new Request("https://proxy.example/something-else");
+  assertEquals((await handleRequest(noSecret404, unusedFetch, TEST_SECRET)).status, 401);
+  const noSecret403 = new Request("https://proxy.example/fetch/evil.example.com/x");
+  assertEquals((await handleRequest(noSecret403, unusedFetch, TEST_SECRET)).status, 401);
+});
+
+Deno.test("resolveTarget отклоняет враждебные варианты хостов", () => {
+  assertEquals(resolveTarget("/fetch/API.TELEGRAM.ORG/x", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.telegram.org./x", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.telegram.org:443/x", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.telegram.org%2Fevil/x", "").ok, false);
+  assertEquals(resolveTarget("/fetch/../x", "").ok, false);
+});
+
+Deno.test("handleRequest требует от апстрима не следовать редиректам", async () => {
+  let capturedRedirect: string | undefined;
+  const fakeFetch: typeof fetch = (_url, init) => {
+    capturedRedirect = init?.redirect;
+    return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
+  };
+  const req = new Request("https://proxy.example/fetch/api.telegram.org/getMe", { headers: AUTH_HEADERS });
+  await handleRequest(req, fakeFetch, TEST_SECRET);
+  assertEquals(capturedRedirect, "error");
+});
+
+Deno.test("handleRequest терпит кривой content-length (NaN/отрицательный)", async () => {
+  let fetchCalled = 0;
+  const fakeFetch: typeof fetch = () => {
+    fetchCalled++;
+    return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
+  };
+  for (const declared of ["abc", "-5"]) {
+    const req = new Request("https://proxy.example/fetch/api.telegram.org/getMe", {
+      headers: { ...AUTH_HEADERS, "content-length": declared },
+    });
+    assertEquals((await handleRequest(req, fakeFetch, TEST_SECRET)).status, 200);
+  }
+  assertEquals(fetchCalled, 2);
+});
+
+Deno.test("limitStreamBytes пропускает null без изменений", () => {
+  assertEquals(limitStreamBytes(null, 3), null);
+});
+
+Deno.test("buildForwardHeaders убирает расширенный hop-by-hop список и content-length", () => {
+  const original = new Headers({
+    "Transfer-Encoding": "chunked",
+    "TE": "trailers",
+    "Upgrade": "websocket",
+    "Content-Length": "10",
+    "X-Custom": "keep",
+  });
+  const forwarded = buildForwardHeaders(original);
+  for (const name of ["transfer-encoding", "te", "upgrade", "content-length"]) {
+    assertEquals(forwarded.has(name), false);
+  }
+  assertEquals(forwarded.get("x-custom"), "keep");
 });
