@@ -718,9 +718,15 @@ def test_handle_tiktok_no_media_found_gives_user_facing_error():
         # handle_tiktok сам ловит исключение и редактирует статусное сообщение —
         # не поднимает наружу; проверяем, что оно не падает необработанным.
         asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/456"))
+        # A9-1: имя обещает user-facing error — проверяем, что текст реально
+        # показан пользователю, а не просто "не упало".
+        expected = bot._t(999421, "tiktok_no_media")
+        shown = [text for msg in incoming.sent for text, _ in msg.edits]
+        assert shown and expected[:50] in shown[0]
     finally:
         bot._get_http_session = original_get_session
         bot._resolve_tiktok_short = original_resolve
+        bot.chat_state.pop(999421, None)
 
 
 def test_handle_tiktok_known_user_facing_error_logs_as_warning_not_exception(caplog):

@@ -2046,7 +2046,11 @@ def test_notify_owner_never_raises_on_send_failure():
 
     bot.bot = _FailingBot()
     try:
-        asyncio.run(bot._notify_owner("не должно упасть"))  # не должно поднять исключение
+        # Явный failure вместо неявного pass: регрессия даст понятный отчёт, а не голый error.
+        try:
+            asyncio.run(bot._notify_owner("не должно упасть"))
+        except Exception as exc:
+            raise AssertionError(f"_notify_owner must never raise, got {exc!r}") from exc
     finally:
         bot.OWNER_ID, bot.bot = original_owner, original_bot
 

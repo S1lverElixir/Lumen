@@ -132,7 +132,11 @@ def test_drain_inflight_tasks_cancels_tasks_that_time_out():
 
 def test_drain_inflight_tasks_noop_when_nothing_pending():
     bot._inflight_tasks.clear()
-    asyncio.run(bot._drain_inflight_tasks())  # не должно бросить исключение
+    # Явный failure вместо неявного pass: регрессия даст понятный отчёт, а не голый error.
+    try:
+        asyncio.run(bot._drain_inflight_tasks())
+    except Exception as exc:
+        raise AssertionError(f"drain on empty set must never raise, got {exc!r}") from exc
 
 
 def test_rotate_telegram_proxy_noop_with_single_candidate():

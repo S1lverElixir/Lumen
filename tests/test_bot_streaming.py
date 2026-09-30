@@ -339,17 +339,68 @@ def test_openrouter_stream_pieces_raises_on_midstream_error_chunk():
         bot.OPENROUTER_API_KEY = original_key
 
 
-def test_sse_parsers_share_one_implementation():
-    # Две копии разбора SSE по 45 строк разъезжались (у Groq ветки с ошибками вообще
-    # не были покрыты) — теперь один общий _sse_pieces на оба провайдера.
-    import inspect
-    import lumen_streaming
-    src = inspect.getsource(lumen_streaming)
-    assert src.count("async def _sse_pieces(") == 1
-    for fn in (lumen_streaming._openrouter_stream_pieces, lumen_streaming._groq_stream_pieces):
-        fn_src = inspect.getsource(fn)
-        assert "delta" not in fn_src, "разбор чанков должен жить в _sse_pieces"
-        assert "_sse_pieces" in fn_src
+def test_sse_parsers_share_one_implementation(monkeypatch):
+    # Было grep-тестом по исходникам (запрещённый класс): теперь проверяем
+    # поведение — обе обёртки разбирают SSE через общий _sse_pieces.
+    real_sse = lumen_streaming._sse_pieces
+    calls = []
+
+    async def _counting_sse(*args, **kwargs):
+        calls.append(1)
+        async for piece in real_sse(*args, **kwargs):
+            yield piece
+
+    monkeypatch.setattr(lumen_streaming, "_sse_pieces", _counting_sse)
+    lines = [
+        'data: {"choices":[{"delta":{"content":"Раз"}}]}\n'.encode("utf-8"),
+        'data: {"choices":[{"delta":{"content":" два"}}]}\n'.encode("utf-8"),
+        b"data: [DONE]\n",
+    ]
+
+    async def _fake_session():
+        return _FakeSessionForSSE(_FakeSSEResponse(lines))
+
+    async def collect(gen):
+        return [piece async for piece in gen]
+
+    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_get_http_session", _fake_session)
+    or_pieces = asyncio.run(collect(bot._openrouter_stream_pieces("m:free", [])))
+    groq_pieces = asyncio.run(collect(bot._groq_stream_pieces("m", [])))
+    assert or_pieces == ["Раз", " два"]
+    assert groq_pieces == ["Раз", " два"]
+    assert len(calls) == 2
+
+
+def test_streaming_history_goes_through_summarizing_trim(monkeypatch):
+    # Поведенческая пара grep-теста test_streaming_history_uses_summarizing_trim:
+    # длинная история в стриминге идёт через _trim_history с саммари,
+    # а не молчаливым срезом.
+    chat_id = 999981
+    state = bot.get_state(chat_id)
+    state["history"] = [{"role": "user", "content": f"q{i}"} for i in range(120)]
+
+    async def fake_pieces():
+        yield "готово"
+
+    calls = {}
+
+    async def fake_trim(hist):
+        calls["n"] = calls.get("n", 0) + 1
+        hist[:] = hist[-10:]
+
+    monkeypatch.setattr(bot, "_trim_history", fake_trim)
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "вопрос", incoming, provider="openrouter", model_id="trim:free",
+            piece_agen=fake_pieces(),
+        ))
+        assert answer == "готово"
+        assert calls.get("n", 0) >= 1
+    finally:
+        bot.chat_state.pop(chat_id, None)
 
 
 @pytest.mark.parametrize("deadline_mode", ["none", "expired"])
