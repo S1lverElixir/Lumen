@@ -3,10 +3,12 @@ name: Deploy proxy
 # Деплой Deno-прокси только после зелёного CI и только если менялся proxy/
 # (аудит, 30.09.2026): раньше прокси выкатывался вручную из дашборда, код и
 # деплой рассинхронизировались. Ждём воркфлоу "CI", как sync-to-hf.yml.
-# Нужны секреты репозитория:
-#   DENO_DEPLOY_TOKEN          — токен из Deno Deploy (проект → Settings → Access Tokens)
-#   DENO_PROXY_PROJECT         — имя основного проекта прокси в Deno Deploy
+# Нужны секреты репозитория (только имена проектов; токен не нужен — deployctl
+# ходит через GitHub OIDC, нужно право id-token: write ниже):
+#   DENO_PROXY_PROJECT          — имя основного проекта прокси в Deno Deploy
 #   DENO_PROXY_PROJECT_FALLBACK — имя резервного проекта прокси в Deno Deploy
+# Плюс ручной шаг в дашборде Deno (один раз на проект): Settings → Git →
+# подключить репозиторий, режим деплоя "GitHub Actions".
 on:
   workflow_run:
     workflows: ["CI"]
@@ -18,6 +20,8 @@ on:
 
 permissions:
   contents: read
+  # deployctl ходит в Deno через GitHub OIDC, токен не нужен (см. denoland/deployctl).
+  id-token: write
 
 # Два CI подряд — деплоим по очереди, идущий деплой не отменяем.
 concurrency:
@@ -65,8 +69,6 @@ jobs:
         with:
           project: ${{ secrets.DENO_PROXY_PROJECT }}
           entrypoint: proxy/proxy.ts
-        env:
-          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
 
       - name: Deploy to fallback proxy
         if: steps.proxy_changed.outputs.changed == 'true' || steps.proxy_changed_ci.outputs.changed == 'true'
@@ -74,5 +76,3 @@ jobs:
         with:
           project: ${{ secrets.DENO_PROXY_PROJECT_FALLBACK }}
           entrypoint: proxy/proxy.ts
-        env:
-          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
