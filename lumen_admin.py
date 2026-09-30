@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hmac
 import logging
 import os
@@ -189,8 +190,13 @@ async def export_state(request: Request) -> dict[str, Any]:
         _log_denied(request, "GET /export_state")
         return _forbidden()
     import bot
+    # Снимок живых структур: экспорт отдавал ссылки на мутабельные объекты —
+    # запись между возвратом и сериализацией ответа давала несогласованный бэкап.
+    chats = {str(cid): _serialize_chat_state(state) for cid, state in list(bot.chat_state.items())}
+    # Квота вложенная (счётчики per-model) — только deepcopy отцепляет её целиком.
+    quota = copy.deepcopy(dict(bot.GLOBAL_QUOTA))
     return {
         "exported_at": datetime.now().isoformat(),
-        "chats": {str(cid): _serialize_chat_state(state) for cid, state in bot.chat_state.items()},
-        "global_quota": bot.GLOBAL_QUOTA,
+        "chats": chats,
+        "global_quota": quota,
     }

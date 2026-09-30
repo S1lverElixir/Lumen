@@ -18,6 +18,9 @@ on:
     - cron: "0 3 * * *"  # 03:00 UTC ежедневно
   workflow_dispatch:      # + ручной запуск по требованию
 
+permissions:
+  contents: read
+
 # Два одновременных запуска (шедул + ручной) толкались бы в один бранч backup-репо.
 concurrency:
   group: state-backup
@@ -47,3 +50,11 @@ jobs:
           git add export_state.json
           git diff --cached --quiet || git commit -m "Backup $(date -u +%Y-%m-%d)"
           git push origin HEAD:main
+
+      - name: Report backup failure
+        # Канала уведомлений нет (нужен отдельный секрет/чат — решение владельца):
+        # минимум фиксируем провал видимым шагом и сводкой, а не тишиной в логах.
+        if: failure()
+        run: |
+          echo "## State backup FAILED — проверьте вкладку Actions" >> "$GITHUB_STEP_SUMMARY"
+          exit 1

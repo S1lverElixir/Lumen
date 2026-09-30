@@ -15,6 +15,13 @@ docs/
 assets/
 proxy/
 
+# Внутренние доки и метаданные — в рантайме не читаются, в слои образа не едут
+AGENTS.md
+SECURITY.md
+audit-report.md
+opencode.json
+.github/
+
 # Байткод/кэш
 __pycache__/
 *.py[cod]

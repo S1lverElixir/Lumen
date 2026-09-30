@@ -171,6 +171,27 @@ def test_fastapi_schema_endpoints_are_disabled():
     assert bot.app.openapi_url is None
 
 
+def test_export_state_returns_detached_snapshot():
+    # Аудит A11-05: экспорт отдавал живые ссылки на мутабельные объекты —
+    # запись между возвратом и сериализацией давала несогласованный бэкап.
+    original = bot.ADMIN_PANEL_KEY
+    bot.ADMIN_PANEL_KEY = "real-admin-key"
+    chat_id = 999980
+    state = bot.get_state(chat_id)
+    state["history"].append({"role": "user", "content": "hi"})
+    bot.GLOBAL_QUOTA.setdefault("groq", {})["snaptest"] = {"used": 1}
+    try:
+        result = asyncio.run(bot.export_state(_FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+        bot.GLOBAL_QUOTA["groq"]["snaptest"]["used"] = 999
+        state["history"].append({"role": "user", "content": "after"})
+        assert result["global_quota"]["groq"]["snaptest"]["used"] == 1
+        assert all(m["content"] != "after" for m in result["chats"][str(chat_id)]["history"])
+    finally:
+        bot.GLOBAL_QUOTA.get("groq", {}).pop("snaptest", None)
+        bot.chat_state.pop(chat_id, None)
+        bot.ADMIN_PANEL_KEY = original
+
+
 def test_export_state_rejects_query_param_regression():
     # См. test_check_admin_key_rejects_query_param_regression — /export_state — самый
     # чувствительный из трёх эндпоинтов (отдаёт ПОЛНЫЕ истории всех чатов), поэтому
