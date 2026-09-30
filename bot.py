@@ -1078,8 +1078,7 @@ def clean_mention(text: str) -> str:
 # (нужен BOT_USERNAME) и message_mentions_bot ниже.
 
 # Защита от промт-инъекций (входной префильтр) вынесена в lumen_security.py вместе
-# с защитой от утечки идентичности (см. импорт рядом с _detect_identity_leak выше) —
-# см. импорт _looks_like_injection_probe/_INJECTION_PROBE_REPLY там же.
+# с защитой от утечки идентичности (см. импорт рядом с _detect_identity_leak выше).
 
 def message_mentions_bot(message: Message) -> bool:
     # chat None (сырой апдейт без чата) — упоминания искать негде, апдейт не роняем.

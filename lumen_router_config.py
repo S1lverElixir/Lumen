@@ -1,7 +1,7 @@
 """
-lumen_router_config.py — модели и выбор маршрута (Gemini/OpenRouter) для одного сообщения.
+lumen_router_config.py — модели и выбор маршрута (Gemini/OpenRouter/Groq) для одного сообщения.
 
-Только конфигурация и чистые функции решения (_build_route, эвристики тяжести и свежести). Обращений к API отсюда нет, bot.py импортирует имена напрямую.
+Конфигурация плюс функции решения (_build_route, эвристики тяжести и свежести, фильтры квот). Обращений к API отсюда нет, bot.py импортирует имена напрямую.
 """
 
 from __future__ import annotations
@@ -94,7 +94,7 @@ def _check_unconfirmed_model_quotas() -> None:
     for mid, conf in GEMINI_MODELS.items():
         if conf.get("quota_unconfirmed"):
             log.warning(
-                "[setup] Real RPD limits and search/map grounding availability for model %s are NOT yet confirmed against the AI Studio dashboard (model was recently released) — the current search_grounding/map_grounding values in GEMINI_MODELS are a guess by analogy with a model of the same class. Check the dashboard and remove 'quota_unconfirmed' for this model in bot.py, adjusting the config if needed.",
+                "[setup] Real RPD limits and search/map grounding availability for model %s are NOT yet confirmed against the AI Studio dashboard (model was recently released) — the current search_grounding/map_grounding values in GEMINI_MODELS are a guess by analogy with a model of the same class. Check the dashboard and remove 'quota_unconfirmed' for this model in lumen_router_config.py, adjusting the config if needed.",
                 mid,
             )
 
@@ -275,6 +275,9 @@ def _or_route(models: list[str]) -> list[tuple[str, str]]:
     return [("openrouter", m) for m in _skip_exhausted("openrouter", models) if m not in _ROUTER_EXCLUDED_OR_MODELS]
 
 def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
+    # Реестра здоровья, как _OR_MODEL_HEALTH, здесь нет (аудит 29.09.2026):
+    # мёртвая модель стоит головой и каждая попытка платит лишнее обращение.
+    # При инциденте убирать из ORDER-списков с датой, как для OpenRouter.
     return [("gemini", m) for m in _skip_exhausted("gemini", models)]
 
 # ── Groq (прямой провайдер, не через OpenRouter) ──
@@ -286,6 +289,7 @@ _GROQ_LIGHT_ORDER: list[str] = [
 ]
 
 def _groq_route(models: list[str]) -> list[tuple[str, str]]:
+    # То же про реестр здоровья, что у _gemini_route выше.
     return [("groq", m) for m in _skip_exhausted("groq", models)]
 
 

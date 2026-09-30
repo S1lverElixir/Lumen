@@ -652,7 +652,8 @@ async def ask_gemini(
     quota_exhausted_models: list[str] = []
 
     loop_guard = 0
-    # Запас len+4: NOT_FOUND может увести на модель вне chain.
+    # Запас len+4 сверх длины цепочки: страховка от зацикливания при будущих
+    # ветках фолбэка (сейчас все переходы идут только внутри chain).
     max_loop_guard = len(chain) + 4
 
     while True:
