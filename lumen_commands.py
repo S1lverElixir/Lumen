@@ -30,6 +30,7 @@ from lumen_images import (
 )
 from lumen_lang import SUPPORTED_LANGS, LANG_NAMES, normalize_lang, pick_texts, t as _lang_t
 from lumen_limits import (
+    PICK_TTL_SEC,
     _purge_expired_picks,
     _enforce_pending_picks_cap,
 )
@@ -572,7 +573,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
         "user_id": message.from_user.id if message.from_user else None,
         "scenario": scenario,
         "original": original_text,
-        "expires": time.monotonic() + bot.PICK_TTL_SEC,
+        "expires": time.monotonic() + PICK_TTL_SEC,
         "lang": lang,
     }
     question, options, _tpl = pick_texts(lang, scenario)
@@ -645,7 +646,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
                 "user_id": rec.get("user_id"),
                 "scenario": rec.get("scenario", ""),
                 "original": rec.get("original", ""),
-                "expires": time.monotonic() + bot.PICK_TTL_SEC,
+                "expires": time.monotonic() + PICK_TTL_SEC,
                 "lang": rec_lang,
             }
             _rq, _ropts, _tpl = pick_texts(rec_lang, rec.get("scenario", ""))
@@ -714,11 +715,10 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     )
     # Флаг против зацикливания: дополненный текст всё ещё матчит детектор — без флага снова ушёл бы в кнопки.
     ns._pick_resolved = True
-    lock = bot.get_chat_lock(chat.id)
     try:
         # Тот же лимит лока, что и в основном пути (bot.CHAT_LOCK_TIMEOUT_SEC):
         # третье значение в 10с отдавало «занято» на любом живом маршруте.
-        await asyncio.wait_for(lock.acquire(), timeout=bot.CHAT_LOCK_TIMEOUT_SEC)
+        lock = await bot.acquire_chat_lock(chat.id, bot.CHAT_LOCK_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         log.warning("[pick] Timeout waiting for lock on chat %s", chat.id)
         with contextlib.suppress(Exception):

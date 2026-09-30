@@ -60,9 +60,8 @@ async def _process_media_group_buffers(mgid: str) -> None:
     # гоняются за history/ctx (аудит). Ожидание ограничено: вечное висело в фоне
     # дольше любого бюджета (аудит 26.09.2026).
     main_msg = messages[0]
-    lock = bot.get_chat_lock(main_msg.chat.id if main_msg.chat else 0)
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=bot.CHAT_LOCK_TIMEOUT_SEC)
+        lock = await bot.acquire_chat_lock(main_msg.chat.id if main_msg.chat else 0, bot.CHAT_LOCK_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         log.warning("[album] Timeout waiting for lock on chat %s", main_msg.chat.id if main_msg.chat else None)
         with contextlib.suppress(Exception):
@@ -477,9 +476,8 @@ async def _process_raw_update(raw_update: dict) -> None:
                          object.__setattr__(msg_obj, "guest_query_id", gq_id)
                  # Тот же per-chat lock, что у обычного пути: параллельные апдейты иначе гоняются за history/ctx.
                  guest_chat_id = msg_obj.chat.id if msg_obj.chat else 0
-                 guest_lock = bot.get_chat_lock(guest_chat_id)
                  try:
-                     await asyncio.wait_for(guest_lock.acquire(), timeout=bot.CHAT_LOCK_TIMEOUT_SEC)
+                     guest_lock = await bot.acquire_chat_lock(guest_chat_id, bot.CHAT_LOCK_TIMEOUT_SEC)
                  except asyncio.TimeoutError:
                      log.warning("[guest] Timeout waiting for lock on chat %s", guest_chat_id)
                      with contextlib.suppress(Exception):

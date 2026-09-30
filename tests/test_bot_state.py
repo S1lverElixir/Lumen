@@ -912,10 +912,15 @@ def test_process_media_group_buffers_holds_chat_lock(monkeypatch):
     async def fake_handle_core(message, extra_media=None):
         held_during_core["held"] = rec_lock.held
 
-    original_fetch, original_core, original_lock = bot._fetch_media, bot._handle_message_core, bot.get_chat_lock
+    original_fetch, original_core, original_acquire = bot._fetch_media, bot._handle_message_core, bot.acquire_chat_lock
     bot._fetch_media = lambda file_id, mime: asyncio.sleep(0, result=(b"x", "image/jpeg"))
     bot._handle_message_core = fake_handle_core
-    bot.get_chat_lock = lambda cid: rec_lock
+
+    async def fake_acquire(chat_id, timeout):
+        await rec_lock.acquire()
+        return rec_lock
+
+    bot.acquire_chat_lock = fake_acquire
     bot._mg_buffers["mg3"] = [msg]
     try:
         asyncio.run(bot._process_media_group_buffers("mg3"))
@@ -923,7 +928,7 @@ def test_process_media_group_buffers_holds_chat_lock(monkeypatch):
     finally:
         bot._fetch_media = original_fetch
         bot._handle_message_core = original_core
-        bot.get_chat_lock = original_lock
+        bot.acquire_chat_lock = original_acquire
         bot.chat_state.pop(chat_id, None)
 
 
@@ -2168,8 +2173,9 @@ def test_guest_update_holds_per_chat_lock(monkeypatch):
         def release(self):
             events.append("release")
 
-    def fake_get_lock(chat_id):
+    async def fake_acquire(chat_id, timeout):
         events.append(("lock_for", chat_id))
+        events.append("acquire")
         return _FakeLock()
 
     async def fake_core(message):
@@ -2177,7 +2183,7 @@ def test_guest_update_holds_per_chat_lock(monkeypatch):
         assert message is fake_msg
 
     monkeypatch.setattr(lumen_message_core, "Message", _StubMessage)
-    monkeypatch.setattr(bot, "get_chat_lock", fake_get_lock)
+    monkeypatch.setattr(bot, "acquire_chat_lock", fake_acquire)
     monkeypatch.setattr(bot, "_handle_message_core", fake_core)
     asyncio.run(bot._process_raw_update({"guest_message": {"message_id": 1}}))
     assert events == [("lock_for", 123), "acquire", "core", "release"]
@@ -2390,3 +2396,45 @@ def test_mg_evict_if_full_bounds_buffers():
     finally:
         bot._mg_buffers.clear()
         bot._mg_tasks.clear()
+
+
+def test_limit_scalars_live_in_owner_module_not_bot():
+    # Аудит A5-8: копии скаляров в bot.X молча расходились с патчами тестов.
+    import lumen_commands
+    import lumen_limits
+    for name in (
+        "RATE_LIMIT_MAX_REQUESTS", "RATE_LIMIT_WINDOW_SEC", "MAX_RATE_LIMIT_KEYS",
+        "PICK_TTL_SEC", "MAX_PENDING_PICKS",
+        "_last_quota_check_monotonic", "_last_gemini_exhausted_alert_monotonic",
+    ):
+        assert not hasattr(bot, name), name
+    assert lumen_commands.PICK_TTL_SEC is lumen_limits.PICK_TTL_SEC
+
+
+def test_acquire_chat_lock_retakes_after_registry_swap(monkeypatch):
+    # Аудит A5-10: прунинг между get и acquire оставлял гоняющиеся локи —
+    # захваченный чужой лок отпускаем и берём зарегистрированный.
+    import lumen_chat_state
+    chat_id = 999965
+    stale = lumen_chat_state.get_chat_lock(chat_id)
+    calls = {"n": 0}
+    real_get = lumen_chat_state.get_chat_lock
+
+    def _flaky_get(cid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return stale
+        return real_get(cid)
+
+    monkeypatch.setattr(lumen_chat_state, "get_chat_lock", _flaky_get)
+    monkeypatch.setattr(bot, "_chat_locks", {})
+    try:
+        lock = asyncio.run(lumen_chat_state.acquire_chat_lock(chat_id, timeout=5.0))
+        try:
+            assert lock is bot._chat_locks[chat_id]
+            assert lock.locked()
+            assert not stale.locked()
+        finally:
+            lock.release()
+    finally:
+        bot._chat_locks.pop(chat_id, None)

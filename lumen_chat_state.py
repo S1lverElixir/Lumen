@@ -697,6 +697,24 @@ def get_chat_lock(chat_id: int) -> asyncio.Lock:
         bot._chat_locks[chat_id] = lock
     return lock
 
+_CHAT_LOCK_MAX_RETRIES = 3
+
+async def acquire_chat_lock(chat_id: int, timeout: float) -> asyncio.Lock:
+    """Захват per-chat лока с проверкой поколения: между get и acquire прунинг
+    или эвикт могли снести чат и лок — захваченный лок тогда чужой, отпускаем
+    и берём заново. Без проверки два сообщения отвечали бы параллельно, портя
+    историю (аудит A5-10). Таймаут — на каждую попытку, кругов не больше трёх."""
+    import bot
+    for _ in range(_CHAT_LOCK_MAX_RETRIES):
+        lock = get_chat_lock(chat_id)
+        await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        if bot._chat_locks.get(chat_id) is lock:
+            return lock
+        lock.release()
+    lock = get_chat_lock(chat_id)
+    await asyncio.wait_for(lock.acquire(), timeout=timeout)
+    return lock
+
 def _evict_orphan_chat_locks() -> int:
     """Сносит локи чатов, которых уже нет в chat_state и которые никто не
     держит, — иначе _chat_locks растёт навсегда (AUD-G-001). Занятые не трогаем."""

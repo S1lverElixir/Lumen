@@ -420,8 +420,6 @@ from lumen_chat_state import (
     _save_quota_payload,
     _dirty_chat_ids,
     _pending_chat_deletions,
-    _last_quota_check_monotonic,
-    _last_gemini_exhausted_alert_monotonic,
     _save_chat_to_storage_limited,
     _delete_chat_storage_limited,
     mark_state_dirty,
@@ -438,6 +436,7 @@ from lumen_chat_state import (
     _peek_chat_lang,
     _prune_old_chats,
     get_chat_lock,
+    acquire_chat_lock,
     _evict_orphan_chat_locks,
     _is_owner,
     _notify_owner,
@@ -449,17 +448,12 @@ from lumen_chat_state import (
 )
 
 # Простой трекер для rate limiting и очередь кнопок-уточнений живут в
-# lumen_limits.py (P2): здесь только реэкспорт имён, чтобы `bot.X` в тестах
-# и вызывающий код не менялись.
+# lumen_limits.py (P2): скаляры читаем из модуля-владельца, а не копируем —
+# копия в bot.X молча расходилась бы с патчами тестов (аудит A5-8).
 from lumen_limits import (
-    RATE_LIMIT_MAX_REQUESTS,
-    RATE_LIMIT_WINDOW_SEC,
-    MAX_RATE_LIMIT_KEYS,
     user_rate_limits,
     _cleanup_rate_limit_dict,
     _check_and_register_rate_limit,
-    PICK_TTL_SEC,
-    MAX_PENDING_PICKS,
     _pending_picks,
     _purge_expired_picks,
     _enforce_pending_picks_cap,
@@ -662,16 +656,11 @@ from lumen_state_storage import (
 
 # `_urllib_request` в коде bot.py больше не используется — клиент Upstash переехал в
 # lumen_state_storage.py. Остаётся ради тестов, которые патчат `bot._urllib_request.urlopen`
-# (как и CHAT_STATE_SCHEMA_VERSION и имена из lumen_limits.py ниже — см. пояснение
-# про __all__ у первого блока в начале файла).
+# (как и CHAT_STATE_SCHEMA_VERSION — см. пояснение про __all__ у первого блока в начале файла).
 __all__ = [
     "_urllib_request",
     "CHAT_STATE_SCHEMA_VERSION",
-    "RATE_LIMIT_MAX_REQUESTS",
-    "RATE_LIMIT_WINDOW_SEC",
-    "MAX_RATE_LIMIT_KEYS",
     "user_rate_limits",
-    "MAX_PENDING_PICKS",
     # Имена из lumen_admin.py (app, гейты, эндпоинты) код bot.py сам не читает
     # (main() берёт только app) — они нужны как `bot.X` существующим тестам.
     "app",
@@ -798,12 +787,13 @@ __all__ = [
     "_flush_dirty_state_once",
     "_prune_old_chats",
     "_quota_entry",
+    # Локи чатов код bot.py берёт через acquire_chat_lock; оба имени ниже —
+    # только для `bot.X` в тестах.
+    "get_chat_lock",
+    "acquire_chat_lock",
     # Прямые имена lumen_state_storage для тестов.
     "_serialize_chat_state",
     "_current_quota_day",
-    # Монотонный маркер троттлинга проверки даты (читают тесты).
-    "_last_quota_check_monotonic",
-    "_last_gemini_exhausted_alert_monotonic",
     # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
     "GEMINI_TTS_MODELS",
     "FISH_AUDIO_TTS_MODEL",
@@ -822,7 +812,6 @@ __all__ = [
     "_mark_rate_limited",
     "_record_quota_usage",
     "_trim_history",
-    "PICK_TTL_SEC",
     "_pending_picks",
     "_purge_expired_picks",
     "_enforce_pending_picks_cap",
@@ -1191,9 +1180,8 @@ async def handle_message(message: Message) -> None:
         await _handle_message_core(message)
         return
 
-    lock = get_chat_lock(chat_id)
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=CHAT_LOCK_TIMEOUT_SEC)
+        lock = await acquire_chat_lock(chat_id, CHAT_LOCK_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
         with contextlib.suppress(Exception):
