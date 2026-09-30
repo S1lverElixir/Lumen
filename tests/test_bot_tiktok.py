@@ -1625,3 +1625,42 @@ def test_looks_like_video_bytes_true_for_webm_ebml():
     # A7-9: WebM-слайд раньше принимался за фото.
     assert bot._looks_like_video_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 16) is True
 
+
+def test_slideshow_stops_at_post_budget(monkeypatch):
+    # Аудит D1/A7-1: общий кап RAM на пост — остаток слайдов пропускается.
+    calls = {}
+
+    async def fake_download(session, url, headers=None):
+        return b"k" * 1024
+
+    class _FakeTgBot:
+        async def send_photo(self, **kwargs):
+            calls["photo"] = calls.get("photo", 0) + 1
+
+        async def send_video(self, **kwargs):
+            calls["video"] = calls.get("video", 0) + 1
+
+        async def send_media_group(self, **kwargs):
+            calls["group"] = calls.get("group", 0) + 1
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "TIKTOK_SLIDESHOW_MAX_BYTES", 1500)
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "_delete_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "bot", _FakeTgBot())
+    incoming = _FakeIncomingMessage(999985)
+    incoming.message_id = 7
+    media_data = {"images": ["http://x/1.jpg", "http://x/2.jpg", "http://x/3.jpg"]}
+    try:
+        result = asyncio.run(bot._try_send_tiktok_slideshow(
+            None, media_data, incoming, None, "author", {},
+        ))
+        assert result is True
+        assert calls.get("photo") == 1
+        assert "group" not in calls
+    finally:
+        bot.chat_state.pop(999985, None)
+

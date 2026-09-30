@@ -21,6 +21,14 @@ from lumen_media import (
 
 log = logging.getLogger("bot")
 
+class _MediaTooLargeError(RuntimeError):
+    """Файл больше капа скачивания: вызывающий код отвечает пользователю
+    понятным текстом вместо слепого анализа (аудит D1, 30.09.2026)."""
+    def __init__(self, size_bytes: int, cap_bytes: int):
+        self.size_bytes = size_bytes
+        self.cap_bytes = cap_bytes
+        super().__init__(f"file size {size_bytes} exceeds the {cap_bytes} byte download cap")
+
 async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None = None, retries: int = 1) -> tuple[bytes, str]:
     # Один ретрай getFile/скачивания: единичный сбой прокси иначе слепил бота ("NOT_FOUND" в логах).
     import bot
@@ -31,14 +39,21 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
             file_path = getattr(file, "file_path", None) or getattr(file, "path", None)
             if not file_path:
                 raise RuntimeError("File path is empty")
+            declared_size = getattr(file, "file_size", None)
+            if isinstance(declared_size, int) and declared_size > bot.TELEGRAM_DOWNLOAD_MAX_BYTES:
+                # Заранее большой размер — без скачивания, с честным отказом выше.
+                raise _MediaTooLargeError(declared_size, bot.TELEGRAM_DOWNLOAD_MAX_BYTES)
             session = await bot._get_telegram_session()
             url = f"{bot.TELEGRAM_API_BASE_URL}/file/bot{bot.BOT_TOKEN}/{file_path}"
             async with session.get(url, timeout=timeout or bot.TELEGRAM_MEDIA_TIMEOUT) as resp:
                 resp.raise_for_status()
-                data = await resp.read()
+                data = await _read_capped_telegram_body(resp, url)
                 mime = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip()
             real_mime = _sanitize_mime_type(file_path, mime)
             return data, real_mime
+        except _MediaTooLargeError:
+            # Кап — не сеть: ретрай бессмыслен, пробрасываем сразу.
+            raise
         except Exception as exc:
             last_exc = exc
             if attempt < retries:
@@ -48,6 +63,26 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
     if bot.BOT_TOKEN:
         exc_str = exc_str.replace(bot.BOT_TOKEN, "<TOKEN>")
     raise RuntimeError(f"Network error in download_telegram_file_bytes: {exc_str}") from None
+
+async def _read_capped_telegram_body(resp: Any, url: str) -> bytes:
+    """Тело ответа Telegram с капом: Content-Length врёт/отсутствует —
+    та же проверка потоково по факту (см. кап TikWM-скачиваний)."""
+    import bot
+    content_length = resp.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > bot.TELEGRAM_DOWNLOAD_MAX_BYTES:
+                raise _MediaTooLargeError(int(content_length), bot.TELEGRAM_DOWNLOAD_MAX_BYTES)
+        except ValueError:
+            pass
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(65536):
+        total += len(chunk)
+        if total > bot.TELEGRAM_DOWNLOAD_MAX_BYTES:
+            raise _MediaTooLargeError(total, bot.TELEGRAM_DOWNLOAD_MAX_BYTES)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | None) -> None:
     file_id, mime, _ = _media_file_id_and_mime(source)
@@ -103,6 +138,9 @@ async def _fetch_media(file_id: str, mime: str) -> tuple[bytes, str] | None:
         if final_mime == "application/octet-stream":
             final_mime = _sanitize_mime_type(None, real_mime)
         return data, final_mime
+    except _MediaTooLargeError:
+        # Честный отказ выше по стеку, а не тихое None.
+        raise
     except Exception as exc:
         log.warning("[media] Download media failed for file_id %s: %s", file_id, exc)
         return None

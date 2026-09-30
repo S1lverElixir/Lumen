@@ -61,6 +61,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `TELEGRAM_REQUEST_TIMEOUT` | `45s` | Timeout for HTTP calls to the Telegram API. |
 | `TELEGRAM_AI_TIMEOUT` | `45s` | Budget for the Gemini retry after `MALFORMED_FUNCTION_CALL` inside the main chat route (capped by the remaining `ROUTE_TOTAL_BUDGET_SEC`). Not used by `/tts` — that lives on `TTS_SYNTH_TIMEOUT_SEC`. |
 | `TELEGRAM_MEDIA_TIMEOUT` | `25s` | Timeout for downloading media files from Telegram. |
+| `TELEGRAM_DOWNLOAD_MAX_BYTES` | `20971520` (20 MB) | Cap on a single Telegram download (Bot API doesn't serve bigger files via `getFile`); bigger files are refused before downloading with an honest user-facing message. |
 | `TELEGRAM_GET_FILE_TIMEOUT` | `15s` | Timeout for the `getFile` metadata call before a download. |
 | `TTS_MAX_CHARS` | `800` | Size of one `/tts` synthesis chunk; up to `TTS_MAX_PARTS` (5) chunks are synthesized, so the accepted maximum is `TTS_MAX_CHARS × TTS_MAX_PARTS` (4000 by default). |
 | `TTS_SYNTH_TIMEOUT_SEC` | `60s` | Timeout for a single TTS synthesis call. Also passed into the SDK as `http_options.timeout`, so a hung provider cannot hold the chat lock. |
@@ -88,6 +89,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | Variable | Default | Purpose |
 |---|---|---|
 | `TIKTOK_DOWNLOAD_MAX_BYTES` | `75 MB` | Hard cap on any single downloaded TikTok file (video, slide, cover or music), aborted mid-stream if exceeded. |
+| `TIKTOK_SLIDESHOW_MAX_BYTES` | `200 MB` | Total RAM cap for one slideshow post; slides past it are skipped (a typical post is under 50 MB). |
 | `TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY` | `8` | Max slideshow slides downloaded in parallel; keeps one large post from hogging the shared HTTP connection pool. |
 | `TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY` | `4` | Max concurrent `ffprobe`/`ffmpeg` processes when probing "live" video slides in a slideshow. |
 

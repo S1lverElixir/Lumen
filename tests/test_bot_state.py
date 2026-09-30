@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 import asyncio
 import bot
+import pytest
 import contextlib
 import json
 import logging
@@ -1147,8 +1148,8 @@ def test_process_media_group_buffers_cleanup_on_cancel():
 def test_process_media_group_buffers_fetches_extras_in_parallel_keeping_order(monkeypatch):
     # Скачивание осталось параллельным (после проверки лимита, до обработки).
     monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
-    # Альбом качается параллельно: медленное первое фото не должно задерживать остальные,
-    # а порядок вложений обязан совпасть с порядком сообщений.
+    # Альбом качается параллельно, но bounded семафором (аудит D1): in-flight
+    # память ограничена, а порядок вложений обязан совпасть с порядком сообщений.
     chat_id = 999961
     user = SimpleNamespace(id=778)
 
@@ -1185,8 +1186,8 @@ def test_process_media_group_buffers_fetches_extras_in_parallel_keeping_order(mo
     bot._mg_buffers["mg2"] = msgs
     try:
         asyncio.run(bot._process_media_group_buffers("mg2"))
-        # Все 4 доп. фото качались одновременно, а не по очереди.
-        assert max_concurrent == 4
+        # Три доп. фото in-flight одновременно (семафор), четвёртое ждёт слота.
+        assert max_concurrent == 3
         assert [b for b, _ in captured["extra"]] == [b"file_1", b"file_2", b"file_3", b"file_4"]
     finally:
         bot._fetch_media = original_fetch
@@ -2442,3 +2443,151 @@ def test_acquire_chat_lock_retakes_after_registry_swap(monkeypatch):
             lock.release()
     finally:
         bot._chat_locks.pop(chat_id, None)
+
+
+# ─────────────── B1: капы размеров (D1) ───────────────
+
+def test_download_refuses_oversize_by_declared_size(monkeypatch):
+    # Аудит D1/A6-1: заявленный размер больше капа — отказ до скачивания.
+    import lumen_media_flow
+
+    async def fake_get_file(file_id):
+        return SimpleNamespace(file_path="photos/x.jpg", file_size=10 ** 12)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("no network for oversize file")
+
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(get_file=fake_get_file))
+    monkeypatch.setattr(bot, "_get_telegram_session", must_not_run)
+    with pytest.raises(lumen_media_flow._MediaTooLargeError):
+        asyncio.run(bot._download_telegram_file_bytes("fid"))
+
+
+def test_download_aborts_mid_stream_over_cap(monkeypatch):
+    # Аудит D1/A6-1: враньё в Content-Length — потоковый кап по факту.
+    import lumen_media_flow
+    from tests.bot_test_helpers import _FakeDownloadContent
+
+    async def fake_get_file(file_id):
+        return SimpleNamespace(file_path="photos/x.jpg", file_size=None)
+
+    class _Resp:
+        status = 200
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+    _Resp.content = _FakeDownloadContent([b"y" * (2 * 1024 * 1024)] * 3)
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            return _Resp()
+
+    async def fake_session():
+        return _Session()
+
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(get_file=fake_get_file))
+    monkeypatch.setattr(bot, "_get_telegram_session", fake_session)
+    monkeypatch.setattr(bot, "TELEGRAM_DOWNLOAD_MAX_BYTES", 1024 * 1024)
+    with pytest.raises(lumen_media_flow._MediaTooLargeError):
+        asyncio.run(bot._download_telegram_file_bytes("fid"))
+
+
+def test_oversize_attachment_gets_honest_refusal(monkeypatch):
+    # Аудит D1: большой файл — понятный текст, а не слепой ответ.
+    chat_id = 999982
+    sent = {}
+
+    async def fake_to_tmp(source):
+        raise bot._MediaTooLargeError(10 ** 12, 20 * 1024 * 1024)
+
+    async def fake_reply(message, text, **kwargs):
+        sent["text"] = text
+
+    monkeypatch.setattr(bot, "_download_message_attachment_to_tmp", fake_to_tmp)
+    monkeypatch.setattr(bot, "_safe_reply", fake_reply)
+    bot.get_state(chat_id)["lang"] = "ru"
+    msg = _FakeIncomingMessage(chat_id)
+    msg.text = None
+    msg.caption = None
+    msg.photo = [SimpleNamespace(file_id="big", mime_type="video/mp4")]
+    msg.from_user = SimpleNamespace(id=555)
+    try:
+        asyncio.run(bot._handle_message_core(msg))
+        assert "20" in sent.get("text", "") and "большой" in sent["text"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_album_skips_files_over_running_total(monkeypatch):
+    # Аудит D1/A4-04: суммарный кап extra-файлов альбома.
+    import lumen_message_core
+    monkeypatch.setattr(lumen_message_core, "_ALBUM_EXTRA_MAX_BYTES", 100)
+
+    async def big_fetch(fid, mime):
+        return (b"z" * 60, mime)
+
+    async def allow_all(message):
+        return False
+
+    seen = {}
+
+    async def fake_core(message, extra_media=None):
+        seen["extra"] = extra_media
+
+    monkeypatch.setattr(bot, "_fetch_media", big_fetch)
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", allow_all)
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    chat_id = 999983
+    try:
+        asyncio.run(lumen_message_core._process_media_group_buffers_locked(
+            [_album_message(chat_id, caption="опиши")] +
+            [_album_message(chat_id, file_id=f"f{i}") for i in range(4)]
+        ))
+        assert seen["extra"] is not None and len(seen["extra"]) == 1
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_album_downloads_bounded_concurrency(monkeypatch):
+    # Аудит D1/A6-2: in-flight скачивания альбома ограничены семафором.
+    import lumen_message_core
+    live = {"cur": 0, "max": 0}
+
+    async def slow_fetch(fid, mime):
+        live["cur"] += 1
+        live["max"] = max(live["max"], live["cur"])
+        try:
+            await asyncio.sleep(0.02)
+            return (b"z", mime)
+        finally:
+            live["cur"] -= 1
+
+    async def allow_all(message):
+        return False
+
+    seen = {}
+
+    async def fake_core(message, extra_media=None):
+        seen["extra"] = extra_media
+
+    monkeypatch.setattr(bot, "_fetch_media", slow_fetch)
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", allow_all)
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    chat_id = 999984
+    try:
+        asyncio.run(lumen_message_core._process_media_group_buffers_locked(
+            [_album_message(chat_id, caption="опиши")] +
+            [_album_message(chat_id, file_id=f"f{i}") for i in range(9)]
+        ))
+        assert live["max"] <= 3
+        assert seen["extra"] is not None and len(seen["extra"]) == 9
+    finally:
+        bot.chat_state.pop(chat_id, None)

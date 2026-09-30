@@ -43,6 +43,12 @@ from lumen_security import _looks_like_injection_probe
 
 log = logging.getLogger("bot")
 
+# Суммарный кап extra-файлов альбома: 9 файлов по 20МБ + base64 давали ~250МБ
+# в RAM (аудит D1, 30.09.2026). Обычный альбом — десятки МБ.
+_ALBUM_EXTRA_MAX_BYTES = 100 * 1024 * 1024
+# Параллельных скачиваний альбома: ограничивает in-flight память (3×20МБ).
+_ALBUM_FETCH_CONCURRENCY = 3
+
 async def _process_media_group_buffers(mgid: str) -> None:
     import bot
     messages: list = []
@@ -116,18 +122,44 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
             continue
         targets.append((fid, mime, src))
     # Качаем параллельно, а не по очереди: альбом из 9 фото иначе ждал бы до ~10-20с последовательных скачиваний.
-    fetched_list = await asyncio.gather(*(bot._fetch_media(fid, mime) for fid, mime, _ in targets))
+    fetched_list: list = [None] * len(targets)
+    # Семафор режет in-flight память, суммарный кап — накопленную (аудит D1, 30.09.2026).
+    _album_fetch_semaphore = asyncio.Semaphore(_ALBUM_FETCH_CONCURRENCY)
+
+    async def _fetch_one_bounded(fid: str, mime: str) -> tuple[bytes, str] | None:
+        async with _album_fetch_semaphore:
+            return await bot._fetch_media(fid, mime)
+
+    try:
+        fetched_list = list(await asyncio.gather(
+            *(_fetch_one_bounded(fid, mime) for fid, mime, _ in targets),
+            return_exceptions=True,
+        ))
+    except Exception:
+        pass
     skipped = 0
+    too_big = 0
+    extra_bytes = 0
     for (fid, mime, src), fetched in zip(targets, fetched_list):
-        if fetched:
-            extra_media.append(fetched)
-            # Регрессия: файлы альбома пишем в recent_media_ids, иначе "что на втором фото" не найдёт их.
-            bot._save_media_to_history(src, album_state, album_user_id)
-        else:
+        if isinstance(fetched, bot._MediaTooLargeError):
+            too_big += 1
+            continue
+        if not fetched or isinstance(fetched, BaseException):
             skipped += 1
+            continue
+        if extra_bytes + len(fetched[0]) > _ALBUM_EXTRA_MAX_BYTES:
+            skipped += 1
+            continue
+        extra_bytes += len(fetched[0])
+        extra_media.append(fetched)
+        # Файлы альбома — в recent_media_ids, иначе последующие вопросы их не найдут.
+        bot._save_media_to_history(src, album_state, album_user_id)
     if skipped:
         # Упавшие слайды молча выпадали и анализ шёл по части файлов.
         log.warning("[album] Skipped %d of %d files: download failed, analysing the rest.", skipped, len(targets))
+    if too_big:
+        # Большие отклонены капом: честный отказ пользователю — из _handle_message_core.
+        log.warning("[album] Skipped %d of %d files: over the download size cap.", too_big, len(targets))
     await bot._handle_message_core(main_msg, extra_media=extra_media or None)
 
 def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
@@ -356,9 +388,15 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             await bot._send_pick_question(message, pick_scenario, clean_prompt)
             return
 
-    med_path, med_mime, med_name, media_tuple = await bot._resolve_incoming_media(
-        message, state, clean_prompt, is_private=is_private,
-    )
+    media_too_big_mb = 0
+    try:
+        med_path, med_mime, med_name, media_tuple = await bot._resolve_incoming_media(
+            message, state, clean_prompt, is_private=is_private,
+        )
+    except bot._MediaTooLargeError as exc:
+        # Файл больше капа скачивания: честный отказ ниже вместо слепого ответа.
+        med_path, med_name, media_tuple = None, "", None
+        media_too_big_mb = max(1, round(exc.cap_bytes / (1024 * 1024)))
 
     # Голос/аудио: сначала дешёвая транскрибация — дальше текст идёт общим роутингом по
     # сценарию (тяжесть/свежесть определяются по сказанному). Не вышло — падает в прежний
@@ -386,7 +424,10 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
          src = _msg_media_source(message)
          if src is not None and type(src).__name__ != "Sticker":
               # Вложение было, но скачать/распознать не вышло — честно говорим, а не "Слушаю" в пустоту.
-              await bot._safe_reply(message, bot._model_error_text("fallback", bot._chat_lang(message.chat.id)))
+              if media_too_big_mb:
+                   await bot._safe_reply(message, bot._t(message.chat.id, "media_too_big", limit_mb=media_too_big_mb))
+              else:
+                   await bot._safe_reply(message, bot._model_error_text("fallback", bot._chat_lang(message.chat.id)))
               return
          if mentioned:
               await bot._tg_call(message.reply, bot._t(message.chat.id, "status_listening"))

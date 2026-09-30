@@ -303,6 +303,9 @@ for env_name in ("OWNER_ID", "BOT_OWNER_ID", "ADMIN_ID", "TELEGRAM_OWNER_ID"):
 TELEGRAM_REQUEST_TIMEOUT = _env_number("TELEGRAM_REQUEST_TIMEOUT", 45, min_value=1)
 TELEGRAM_AI_TIMEOUT = _env_number("TELEGRAM_AI_TIMEOUT", 45, min_value=1)
 TELEGRAM_MEDIA_TIMEOUT = _env_number("TELEGRAM_MEDIA_TIMEOUT", 25, min_value=1)
+# Потолок скачивания из Telegram: Bot API не отдаёт файлы больше 20МБ через
+# getFile/путь (аудит D1, 30.09.2026) — большее отклоняем до скачивания.
+TELEGRAM_DOWNLOAD_MAX_BYTES = _env_number("TELEGRAM_DOWNLOAD_MAX_BYTES", 20 * 1024 * 1024, cast=int, min_value=1024 * 1024)
 # Раньше было захардкожено как 15.0 прямо внутри _download_telegram_file_bytes —
 # несогласованно с остальными таймаутами, которые все конфигурируются через env.
 TELEGRAM_GET_FILE_TIMEOUT = _env_number("TELEGRAM_GET_FILE_TIMEOUT", 15, min_value=1)
@@ -378,6 +381,9 @@ _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY
 # Лимит скачивания слайдов 8: 35 слайдов иначе занимают весь пул сессии (limit=40) и стопорят другие чаты (аудит 04.09.2026).
 TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = _env_number("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", 8, cast=int, min_value=1)
 _tiktok_slide_download_semaphore = asyncio.Semaphore(TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
+# Общий кап RAM на один пост: 35 слайдов по 75МБ в памяти (до ~2.6ГБ) роняли
+# контейнер для всех чатов (аудит D1, 30.09.2026). Обычный пост весит до 50МБ.
+TIKTOK_SLIDESHOW_MAX_BYTES = _env_number("TIKTOK_SLIDESHOW_MAX_BYTES", 200 * 1024 * 1024, cast=int, min_value=1024 * 1024)
 
 # Состояние/квоты/локи живут в lumen_chat_state.py (P2): здесь только реэкспорт
 # имён (те же объекты — тесты мутируют bot.chat_state/bot.GLOBAL_QUOTA как раньше).
@@ -522,6 +528,7 @@ from lumen_rich import (
     _edit_message_quietly,
 )
 from lumen_media_flow import (
+    _MediaTooLargeError,
     _download_telegram_file_bytes,
     _save_media_to_history,
     _download_message_attachment_to_tmp,
@@ -839,6 +846,7 @@ __all__ = [
     "_delete_message_quietly",
     "_edit_message_quietly",
     "_download_telegram_file_bytes",
+    "_MediaTooLargeError",
     "_save_media_to_history",
     "_download_message_attachment_to_tmp",
     "_fetch_media",
