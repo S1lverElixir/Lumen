@@ -606,6 +606,18 @@ def test_match_pick_request_rejects_detailed_or_unrelated():
     assert bot.match_pick_request("придумай игру для компании") == "games"
 
 
+def test_match_pick_request_rejects_verb_forms_of_igrat():
+    # Аудит A6-6: префикс "игр" ловил глаголы — "кто играет" не запрос игры.
+    assert bot.match_pick_request("посоветуй кто играет сегодня") is None
+
+
+def test_match_pick_request_accepts_game_nouns_and_infinitives():
+    # Сторож: существительные и инфинитивы по-прежнему ведут в games.
+    assert bot.match_pick_request("придумай игру для компании") == "games"
+    assert bot.match_pick_request("посоветуй игры") == "games"
+    assert bot.match_pick_request("посоветуй во что поиграть") == "games"
+
+
 def test_pick_question_sent_instead_of_ai_route(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "посоветуй фильм"

@@ -21,7 +21,8 @@ log = logging.getLogger("bot")
 
 def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sample_width: int = 2) -> bytes:
     import wave
-    if pcm_data.startswith(b'RIFF'):
+    # Доверяем только настоящему WAV-заголовку: префикс RIFF есть и у WEBP/AVI.
+    if pcm_data.startswith(b'RIFF') and pcm_data[8:12] == b'WAVE':
         return pcm_data
     wav_buf = io.BytesIO()
     with wave.open(wav_buf, 'wb') as wav_file:

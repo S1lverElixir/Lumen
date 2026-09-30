@@ -118,11 +118,17 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
         targets.append((fid, mime, src))
     # Качаем параллельно, а не по очереди: альбом из 9 фото иначе ждал бы до ~10-20с последовательных скачиваний.
     fetched_list = await asyncio.gather(*(bot._fetch_media(fid, mime) for fid, mime, _ in targets))
+    skipped = 0
     for (fid, mime, src), fetched in zip(targets, fetched_list):
         if fetched:
             extra_media.append(fetched)
             # Регрессия: файлы альбома пишем в recent_media_ids, иначе "что на втором фото" не найдёт их.
             bot._save_media_to_history(src, album_state, album_user_id)
+        else:
+            skipped += 1
+    if skipped:
+        # Упавшие слайды молча выпадали и анализ шёл по части файлов.
+        log.warning("[album] Skipped %d of %d files: download failed, analysing the rest.", skipped, len(targets))
     await bot._handle_message_core(main_msg, extra_media=extra_media or None)
 
 def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:

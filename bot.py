@@ -574,6 +574,19 @@ from lumen_errors import (
 # Буферы альбомов/медиа-групп
 _mg_buffers: dict[str, list[Message]] = {}
 _mg_tasks: dict[str, asyncio.Task] = {}
+# Живых медиагрупп единицы (каждая живёт 0.8с); сотни distinct mgid — флуд.
+# Потолок только против раздувания задач и памяти, легитимные альбомы не задевает.
+_MG_TRACK_CAP = 200
+
+def _mg_evict_if_full() -> None:
+    """Вытесняет старейшие медиагруппы сверх потолка (задача отменяется —
+    её сообщения уже утеряны флудом, ждать нечего)."""
+    while len(_mg_buffers) > _MG_TRACK_CAP:
+        oldest = next(iter(_mg_buffers))
+        _mg_buffers.pop(oldest, None)
+        task = _mg_tasks.pop(oldest, None)
+        if task is not None and not task.done():
+            task.cancel()
 
 # _inflight_tasks — общий набор fire-and-forget задач (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое); main() дренирует при остановке.
 _inflight_tasks: set[asyncio.Task] = set()
@@ -1155,6 +1168,7 @@ async def handle_message(message: Message) -> None:
     if message.media_group_id:
         mgid = message.media_group_id
         _mg_buffers.setdefault(mgid, []).append(message)
+        _mg_evict_if_full()
         if mgid not in _mg_tasks or _mg_tasks[mgid].done():
              _mg_tasks[mgid] = _track_inflight_task(asyncio.create_task(_process_media_group_buffers(mgid)))
         return

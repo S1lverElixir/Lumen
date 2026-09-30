@@ -2344,3 +2344,49 @@ def test_strip_trigger_content_with_prefix_and_reply_fallback():
     assert lumen_message_core._strip_trigger_content("нарисуй: кота", "нарисуй", msg) == "кота"
     assert lumen_message_core._strip_trigger_content("нарисуй это", "нарисуй", msg) == "закат над морем"
     assert lumen_message_core._strip_trigger_content("озвучь", "озвучь", msg) == "закат над морем"
+
+
+def test_album_logs_skipped_files(monkeypatch, caplog):
+    # Аудит A6-9: упавшие слайды тихо выпадали, анализ шёл по части файлов.
+    import logging
+    import lumen_message_core
+
+    async def flaky_fetch(fid, mime):
+        return (b"bytes", mime) if fid == "fid1" else None
+
+    async def allow_all(message):
+        return False
+
+    seen = {}
+
+    async def fake_core(message, extra_media=None):
+        seen["extra"] = extra_media
+
+    monkeypatch.setattr(bot, "_fetch_media", flaky_fetch)
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", allow_all)
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    chat_id = 999964
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot"):
+            asyncio.run(lumen_message_core._process_media_group_buffers_locked([
+                _album_message(chat_id, caption="опиши"),
+                _album_message(chat_id, file_id="fid1"),
+                _album_message(chat_id, file_id="fid2"),
+            ]))
+        assert seen["extra"] == [(b"bytes", "image/jpeg")]
+        assert "Skipped 1 of 2" in caplog.text
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_mg_evict_if_full_bounds_buffers():
+    # Аудит A1-5: флуд distinct mgid растил задачи и память без края.
+    try:
+        for i in range(250):
+            bot._mg_buffers[f"mg{i}"] = []
+        bot._mg_evict_if_full()
+        assert len(bot._mg_buffers) == bot._MG_TRACK_CAP
+        assert "mg0" not in bot._mg_buffers
+    finally:
+        bot._mg_buffers.clear()
+        bot._mg_tasks.clear()

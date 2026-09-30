@@ -405,3 +405,11 @@ def test_inline_tts_refuses_beyond_parts_cap_without_sending():
         bot.client = original_client
         bot.bot = original_bot
 
+
+def test_pcm_to_wav_rejects_non_wav_riff():
+    # Аудит A6-11: префиксу RIFF верили вслепую — у WEBP/AVI он тоже есть.
+    import lumen_tts
+    out = lumen_tts.pcm_to_wav(b"RIFF....WEBP....")
+    assert out.startswith(b"RIFF") and out[8:12] == b"WAVE"
+    assert lumen_tts.pcm_to_wav(b"RIFFxxxxWAVE....") == b"RIFFxxxxWAVE...."
+
