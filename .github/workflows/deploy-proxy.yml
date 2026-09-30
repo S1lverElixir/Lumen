@@ -1,0 +1,74 @@
+name: Deploy proxy
+
+# Деплой Deno-прокси только после зелёного CI и только если менялся proxy/
+# (аудит, 30.09.2026): раньше прокси выкатывался вручную из дашборда, код и
+# деплой рассинхронизировались. Ждём воркфлоу "CI", как sync-to-hf.yml.
+# Нужны секреты репозитория:
+#   DENO_DEPLOY_TOKEN          — токен из Deno Deploy (проект → Settings → Access Tokens)
+#   DENO_PROXY_PROJECT         — имя основного проекта прокси в Deno Deploy
+#   DENO_PROXY_PROJECT_FALLBACK — имя резервного проекта прокси в Deno Deploy
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  # Ручной запуск из вкладки Actions — например, чтобы выложить текущий код
+  # после добавления секретов, без правок в proxy/.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Два CI подряд — деплоим по очереди, идущий деплой не отменяем.
+concurrency:
+  group: deno-proxy-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Авто: только пуши в ЭТОТ репозиторий с зелёным CI (та же защита от форков, что в sync-to-hf.yml).
+    # Вручную: всегда (для ручного запуска и нужен отдельный пункт).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Тот коммит, что проверялся CI (см. sync-to-hf.yml); при ручном
+          # запуске — текущий main.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Check proxy changes
+        id: proxy_changed
+        # При ручном запуске всегда деплоим (иначе было бы нечего запускать).
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check proxy changes on CI trigger
+        id: proxy_changed_ci
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          # Мержи в main — merge-коммиты: дифф с первым родителем показывает весь PR.
+          if git diff --name-only HEAD~1 HEAD | grep -q '^proxy/'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to primary proxy
+        if: steps.proxy_changed.outputs.changed == 'true' || steps.proxy_changed_ci.outputs.changed == 'true'
+        uses: denoland/deployctl@v1
+        with:
+          project: ${{ secrets.DENO_PROXY_PROJECT }}
+          entrypoint: proxy/proxy.ts
+
+      - name: Deploy to fallback proxy
+        if: steps.proxy_changed.outputs.changed == 'true' || steps.proxy_changed_ci.outputs.changed == 'true'
+        uses: denoland/deployctl@v1
+        with:
+          project: ${{ secrets.DENO_PROXY_PROJECT_FALLBACK }}
+          entrypoint: proxy/proxy.ts
