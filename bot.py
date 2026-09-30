@@ -1219,6 +1219,10 @@ from lumen_message_core import (
     _process_raw_update,
 )
 
+# setWebhook: попыток с экспоненциальным бэкоффом от базы (аудит D4, 30.09.2026).
+SETWEBHOOK_MAX_ATTEMPTS = 5
+SETWEBHOOK_BACKOFF_SEC = 5.0
+
 async def _webhook_startup() -> None:
     # Синхронное дисковое чтение в потоке: иначе старт стопорит приём /webhook.
     await asyncio.to_thread(load_state_from_disk)
@@ -1293,26 +1297,45 @@ async def _webhook_startup() -> None:
         except Exception as exc:
             log.warning("[webhook] deleteWebhook failed (will need manual setup): %s", exc)
 
-        try:
-            await asyncio.wait_for(
-                telegram_api_call("setWebhook", {
-                    "url": webhook_url,
-                    "secret_token": WEBHOOK_SECRET,
-                    # drop_pending_updates=True — решение владельца (27.09.2026): после
-                    # простоя не отвечать пачкой на старые сообщения. Цена — сообщения,
-                    # пришедшие пока бот лежал, теряются.
-                    "drop_pending_updates": True,
-                    "allowed_updates": ALLOWED_UPDATES,
-                }, request_timeout=15.0),
-                timeout=18.0
-            )
+        # setWebhook с ретраями и экспоненциальным бэкоффом: провал без ретрая
+        # оставлял тихий мёртвый бот (аудит D4, 30.09.2026). После исчерпания —
+        # RuntimeError наверх: main останавливает сервер и выходит кодом 1,
+        # чтобы платформа перезапустила контейнер, а не служила пустоту.
+        webhook_ok = False
+        backoff = SETWEBHOOK_BACKOFF_SEC
+        for attempt in range(1, SETWEBHOOK_MAX_ATTEMPTS + 1):
+            try:
+                await asyncio.wait_for(
+                    telegram_api_call("setWebhook", {
+                        "url": webhook_url,
+                        "secret_token": WEBHOOK_SECRET,
+                        # drop_pending_updates=True — решение владельца (27.09.2026): после
+                        # простоя не отвечать пачкой на старые сообщения. Цена — сообщения,
+                        # пришедшие пока бот лежал, теряются.
+                        "drop_pending_updates": True,
+                        "allowed_updates": ALLOWED_UPDATES,
+                    }, request_timeout=15.0),
+                    timeout=18.0
+                )
+                webhook_ok = True
+                break
+            except Exception as exc:
+                log.warning(
+                    "[webhook] setWebhook attempt %d/%d failed: %s",
+                    attempt, SETWEBHOOK_MAX_ATTEMPTS, exc,
+                )
+                if attempt < SETWEBHOOK_MAX_ATTEMPTS:
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+        if webhook_ok:
             log.info("[webhook] Webhook registered successfully: %s", webhook_url)
-        except Exception as exc:
+        else:
             # Секрет в лог не подставляем — готовая ссылка живёт в /webhook_url (Bearer ADMIN_PANEL_KEY, не query).
-            log.warning(
-                '[webhook] setWebhook failed — register it manually via: curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://.../webhook_url (get ADMIN_PANEL_KEY via curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys if you don\'t have it handy): %s',
-                exc,
+            log.error(
+                '[webhook] setWebhook failed after %d attempts — register it manually via: curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://.../webhook_url (get ADMIN_PANEL_KEY via curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys if you don\'t have it handy)',
+                SETWEBHOOK_MAX_ATTEMPTS,
             )
+            return False
 
         cmd_payloads = [
             {"commands": [{"command": c.command, "description": c.description} for c in commands]}
@@ -1338,8 +1361,11 @@ async def _webhook_startup() -> None:
             log.info("[webhook] Bot commands set successfully.")
         else:
             log.warning("[webhook] Bot commands were not set for any language.")
+        return webhook_ok
 
-    await try_setup()
+    setup_ok = await try_setup()
+    if not setup_ok:
+        raise RuntimeError("setWebhook failed after retries — refusing to serve a dead webhook")
 
     log.info("[webhook] Bot is running in webhook mode. Updates arrive via POST /webhook")
     # Суточные перепроверки моделей в часовом цикле: истёкшее промо иначе видно
@@ -1414,7 +1440,21 @@ async def main() -> None:
     )
     server = uvicorn.Server(srv_config)
     try:
-        await server.serve()
+        serve_task = asyncio.create_task(server.serve(), name="uvicorn_serve")
+        done, _pending = await asyncio.wait(
+            {startup_task, serve_task}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        # Стартап бесконечный (часовой цикл в хвосте): завершился — значит упал.
+        # Раньше падение было тихим (await только в finally) — процесс служил
+        # /webhook, который Telegram не вызывал (аудит D4, 30.09.2026).
+        if startup_task in done and not startup_task.cancelled():
+            exc = startup_task.exception()
+            if exc is not None:
+                log.error("[webhook] Startup failed, stopping the server: %s", exc)
+                server.should_exit = True
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await serve_task
+                raise SystemExit(1) from exc
     finally:
         startup_task.cancel()
         flush_task.cancel()
