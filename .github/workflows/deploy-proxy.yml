@@ -65,6 +65,8 @@ jobs:
         with:
           project: ${{ secrets.DENO_PROXY_PROJECT }}
           entrypoint: proxy/proxy.ts
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
 
       - name: Deploy to fallback proxy
         if: steps.proxy_changed.outputs.changed == 'true' || steps.proxy_changed_ci.outputs.changed == 'true'
@@ -72,3 +74,5 @@ jobs:
         with:
           project: ${{ secrets.DENO_PROXY_PROJECT_FALLBACK }}
           entrypoint: proxy/proxy.ts
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
