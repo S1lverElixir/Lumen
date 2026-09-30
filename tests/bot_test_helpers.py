@@ -34,6 +34,34 @@ class _FakeResolveSession:
         return self._get_response
 
 
+class _FakeChainResolveResponse:
+    def __init__(self, status: int, url: str = "", headers=None):
+        self.status = status
+        self.url = url
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+class _FakeChainResolveSession:
+    """head()/get() по карте URL с записью kwargs — для проверки ручной цепочки редиректов."""
+    def __init__(self, mapping: dict):
+        self._mapping = mapping
+        self.calls = []
+
+    def head(self, url, *args, **kwargs):
+        self.calls.append(("head", url, dict(kwargs)))
+        return self._mapping[url][0]
+
+    def get(self, url, *args, **kwargs):
+        self.calls.append(("get", url, dict(kwargs)))
+        return self._mapping[url][1]
+
+
 class _FakeExc(Exception):
     def __init__(self, msg, status_code=None):
         super().__init__(msg)
@@ -276,8 +304,13 @@ class _FakeTikTokBot:
 
 class _FakeTikTokResponse:
     def __init__(self, status=200, json_body=None):
+        import json as _json
         self.status = status
         self._json_body = json_body or {}
+        # Честный фейк: настоящий aiohttp парсит .json() из тела — контент
+        # выводим из того же json, чтобы код шёл боевым путём чтения с капом.
+        self.headers = {}
+        self.content = _FakeDownloadContent([_json.dumps(self._json_body).encode("utf-8")])
 
     async def __aenter__(self):
         return self
@@ -304,9 +337,15 @@ class _FakeTikTokSession:
 
 class _FakeTikwmApiResponse:
     def __init__(self, status=200, json_body=None, body_bytes=b""):
+        import json as _json
         self.status = status
         self._json_body = json_body or {}
         self._body_bytes = body_bytes
+        # Честный фейк (см. _FakeTikTokResponse): контент из json, если байты не заданы.
+        self.headers = {}
+        self.content = _FakeDownloadContent(
+            [body_bytes] if body_bytes else [_json.dumps(self._json_body).encode("utf-8")]
+        )
 
     async def __aenter__(self):
         return self

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -93,8 +94,8 @@ def _chunk_tiktok_media_items(items: list, chunk_size: int = TELEGRAM_MEDIA_GROU
 
 
 def _looks_like_video_bytes(data: bytes) -> bool:
-    """Видео или картинка — по "ftyp" на смещении 4: Content-Type от TikWM недостоверен, поле в JSON не помечено."""
-    return len(data) >= 12 and data[4:8] == b"ftyp"
+    """Видео или картинка — по "ftyp" на смещении 4 (MP4) или сигнатуре EBML в начале (WebM): Content-Type от TikWM недостоверен, поле в JSON не помечено."""
+    return len(data) >= 12 and (data[4:8] == b"ftyp" or data[:4] == b"\x1a\x45\xdf\xa3")
 
 
 def _slideshow_slide_urls(media_data: dict, images_to_fetch: list[str]) -> list[str]:
@@ -120,7 +121,10 @@ def _tiktok_video_candidates(media_data: dict) -> list[dict[str, Any]]:
         raw_url = media_data.get(url_key)
         if not raw_url:
             continue
-        if not raw_url.startswith("http"):
+        if raw_url.startswith("//"):
+            # Протокол-относительный URL чиним как https, иначе ниже склеилось бы в битый "https://www.tikwm.com//host/path".
+            raw_url = "https:" + raw_url
+        elif not raw_url.startswith("http"):
             raw_url = "https://www.tikwm.com" + raw_url
         try:
             size_bytes = int(media_data.get(size_key) or 0)
@@ -151,6 +155,28 @@ async def _tikwm_throttle() -> None:
                 await _sleep(wait)
                 now = time.monotonic()
         _tikwm_last_request_ts = now
+
+
+async def _read_capped_body(resp: aiohttp.ClientResponse, url: str) -> bytes | None:
+    # JSON TikWM обязан быть маленьким: читаем с тем же капом, что бинарные
+    # скачивания, иначе скомпрометированный прокси льёт в память без края.
+    content_length = resp.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > TIKTOK_DOWNLOAD_MAX_BYTES:
+                log.warning("[tikwm] Refusing %s: Content-Length %s exceeds the %d byte cap.", url, content_length, TIKTOK_DOWNLOAD_MAX_BYTES)
+                return None
+        except ValueError:
+            pass
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(65536):
+        total += len(chunk)
+        if total > TIKTOK_DOWNLOAD_MAX_BYTES:
+            log.warning("[tikwm] Aborting %s: exceeded the %d byte cap mid-stream.", url, TIKTOK_DOWNLOAD_MAX_BYTES)
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def _fetch_tikwm_media_data(
@@ -185,7 +211,14 @@ async def _fetch_tikwm_media_data(
                 async with session.get(api_url, timeout=12, headers=api_headers) as r:
                     if r.status == 200:
                         all_attempts_403_empty = False
-                        res = await r.json(content_type=None)
+                        raw_body = await _read_capped_body(r, api_url)
+                        if raw_body is None:
+                            continue
+                        try:
+                            res = json.loads(raw_body.decode("utf-8"))
+                        except Exception as e:
+                            log.warning("[tikwm] Endpoint %s returned undecodable JSON: %s", api_url, e)
+                            continue
                         if res.get("code") == 0 and isinstance(res.get("data"), dict):
                             log.info("[tikwm] Successfully fetched media data from %s", api_url)
                             return res.get("data")
@@ -254,7 +287,9 @@ def _write_mp3_tags(path: str, title: str, artist: str, cover: bytes | None) -> 
 def _env_number_or_default(name: str, default: int) -> int:
     try:
         import bot
-        return int(bot._env_number(name, default, cast=int, min_value=1024))
+        # bot._env_number уже кастует и режет мусор дефолтом; здесь только
+        # отложенный импорт (bot.py импортирует этот модуль) и страховка.
+        return bot._env_number(name, default, cast=int, min_value=1024)
     except Exception:
         return default
 TIKTOK_DOWNLOAD_MAX_BYTES = _env_number_or_default("TIKTOK_DOWNLOAD_MAX_BYTES", 75 * 1024 * 1024)
@@ -319,7 +354,7 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
     if scheme not in ("http", "https"):
         log.warning("[download] Refusing non-HTTP(S) URL (scheme=%r).", scheme)
         return None
-    if not _host_resolves_to_public(urllib.parse.urlsplit(url).hostname):
+    if not await asyncio.to_thread(_host_resolves_to_public, urllib.parse.urlsplit(url).hostname):
         log.warning("[download] Refusing non-public host for URL %r.", url)
         return None
     if headers is None:
@@ -333,7 +368,8 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
         for _ in range(_DOWNLOAD_MAX_REDIRECTS + 1):
             async with session.get(current_url, headers=headers, timeout=60, allow_redirects=False) as resp:
                 if resp.status in _DOWNLOAD_REDIRECT_STATUSES:
-                    next_url = _checked_redirect_url(current_url, resp.headers.get("Location"))
+                    # Резолв хопа тоже в потоке: внутри getaddrinfo, loop не стопорим.
+                    next_url = await asyncio.to_thread(_checked_redirect_url, current_url, resp.headers.get("Location"))
                     if next_url is None:
                         return None
                     current_url = next_url
@@ -345,7 +381,7 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
                 # проверен выше. Проверку оставляем как последний рубеж.
                 final_url = getattr(resp, "url", None)
                 final_host = urllib.parse.urlsplit(str(final_url)).hostname if final_url is not None else None
-                if final_host is not None and not _host_resolves_to_public(final_host):
+                if final_host is not None and not await asyncio.to_thread(_host_resolves_to_public, final_host):
                     log.warning("[download] Refusing redirect to non-public host %r.", final_host)
                     return None
                 # Content-Length — быстрый отказ ДО скачивания (сервер может соврать/не прислать — ниже та же проверка потоково по факту).
@@ -436,9 +472,14 @@ async def _probe_video_dimensions(path: str) -> tuple[int, int, int]:
         for line in stdout.decode(errors="replace").splitlines():
             line = line.strip()
             if line.startswith("width="):
-                width = int(float(line.split("=", 1)[1] or 0))
+                raw_w = line.split("=", 1)[1]
+                # "N/A" раньше ронял float() и вместе с ним валидный duration всего пробинга.
+                if raw_w and raw_w != "N/A":
+                    width = int(float(raw_w))
             elif line.startswith("height="):
-                height = int(float(line.split("=", 1)[1] or 0))
+                raw_h = line.split("=", 1)[1]
+                if raw_h and raw_h != "N/A":
+                    height = int(float(raw_h))
             elif line.startswith("duration="):
                 raw = line.split("=", 1)[1]
                 if raw and raw != "N/A":
@@ -482,13 +523,18 @@ async def _probe_and_thumbnail_from_path(path: str) -> tuple[int, int, int, byte
     return duration, width, height, thumb_bytes
 
 
+def _write_file_sync(path: str, data: bytes) -> None:
+    with open(path, "wb") as f:
+        f.write(data)
+
+
 async def _probe_and_thumbnail_from_bytes(video_bytes: bytes) -> tuple[int, int, int, bytes | None]:
     """То же для байтов видео в памяти (видео-слайды): ffprobe/ffmpeg умеют только файлы — пишем во временный файл."""
     try:
         with tempfile.TemporaryDirectory() as tdir:
             raw_path = os.path.join(tdir, "slide.mp4")
-            with open(raw_path, "wb") as f:
-                f.write(video_bytes)
+            # Запись до 50МБ в потоке: в loop стопорила всех.
+            await asyncio.to_thread(_write_file_sync, raw_path, video_bytes)
             return await _probe_and_thumbnail_from_path(raw_path)
     except Exception as probe_exc:
         log.warning("[tiktok] Video-slide metadata probe failed, sending without: %s", probe_exc)
@@ -511,25 +557,47 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Upgrade-Insecure-Requests": "1"
     }
-    try:
-        async with session.head(url, allow_redirects=True, timeout=8, headers=headers) as resp:
-             if resp.status < 400:
-                  resolved = str(resp.url)
-                  if _looks_like_resolved_tiktok_url(resolved):
-                       return resolved
-    except Exception as e:
-         log.warning("[tiktok] HEAD resolution failed: %s", e)
+    # Редиректы разбираем вручную через _checked_redirect_url: aiohttp
+    # с allow_redirects=True сходил бы на следующий хоп до проверки хоста.
+    current_url = url
+    for _ in range(_DOWNLOAD_MAX_REDIRECTS + 1):
+        try:
+            async with session.head(current_url, allow_redirects=False, timeout=8, headers=headers) as resp:
+                if resp.status in _DOWNLOAD_REDIRECT_STATUSES:
+                    next_url = await asyncio.to_thread(_checked_redirect_url, current_url, resp.headers.get("Location"))
+                    if next_url is None:
+                        break
+                    current_url = next_url
+                    continue
+                if resp.status < 400:
+                    resolved = str(resp.url)
+                    if _looks_like_resolved_tiktok_url(resolved):
+                        return resolved
+                break
+        except Exception as e:
+            log.warning("[tiktok] HEAD resolution failed: %s", e)
+            break
 
+    current_url = url
     try:
-        async with session.get(url, allow_redirects=True, timeout=10, headers=headers) as resp:
-             resolved = str(resp.url)
-             if not _looks_like_resolved_tiktok_url(resolved):
-                   # Битый URL после GET тоже логируем — иначе остаётся только малопонятный 403 уже на стороне TikWM.
-                  log.warning(
-                       "[tiktok] Resolving short link %s didn't yield anything that looks like a post URL via either HEAD or GET (result: %s) — passing it through as-is, TikWM may reject it.", url, resolved,
-                  )
-             return resolved
+        for _ in range(_DOWNLOAD_MAX_REDIRECTS + 1):
+            async with session.get(current_url, allow_redirects=False, timeout=10, headers=headers) as resp:
+                if resp.status in _DOWNLOAD_REDIRECT_STATUSES:
+                    next_url = await asyncio.to_thread(_checked_redirect_url, current_url, resp.headers.get("Location"))
+                    if next_url is None:
+                        break
+                    current_url = next_url
+                    continue
+                # Тело осознанно не читаем: нужен только итоговый URL, соединение
+                # просто закроется — капа не требуется, байты не качаем.
+                resolved = str(resp.url)
+                if not _looks_like_resolved_tiktok_url(resolved):
+                    # Битый URL после GET тоже логируем — иначе остаётся только малопонятный 403 уже на стороне TikWM.
+                    log.warning(
+                        "[tiktok] Resolving short link %s didn't yield anything that looks like a post URL via either HEAD or GET (result: %s) — passing it through as-is, TikWM may reject it.", url, resolved,
+                    )
+                return resolved
     except Exception as e:
-         log.warning("[tiktok] GET resolution failed: %s", e)
+        log.warning("[tiktok] GET resolution failed: %s", e)
 
     return url

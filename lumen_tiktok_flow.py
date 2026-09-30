@@ -26,11 +26,24 @@ from lumen_tiktok import (
     _looks_like_video_bytes,
     _slideshow_slide_urls,
     _tiktok_video_candidates,
+    _write_file_sync,
     TikTokUserFacingError,
     _tiktok_music_page_id,
 )
 
 log = logging.getLogger("bot")
+
+
+def _write_and_tag_mp3_sync(path: str, music_bytes: bytes, title: str, artist: str, cover: bytes | None) -> None:
+    import bot
+    with open(path, "wb") as f:
+        f.write(music_bytes)
+    bot._write_mp3_tags(path, title, artist, cover)
+
+
+def _read_file_sync(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
 
 async def _send_tiktok_music(session, media_data: dict, message: Message, author: str, headers: dict) -> None:
     import bot
@@ -125,12 +138,10 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          try:
               with tempfile.TemporaryDirectory() as tmp_dir:
                    tmp_mp3_path = os.path.join(tmp_dir, "music.mp3")
-                   with open(tmp_mp3_path, "wb") as f:
-                        f.write(music_bytes)
-                   bot._write_mp3_tags(tmp_mp3_path, cleaned_title, performer_name, cover_bytes)
+                   # Запись и теги — синхронные и тяжёлые (до 50МБ): в поток, loop не стопорим.
+                   await asyncio.to_thread(_write_and_tag_mp3_sync, tmp_mp3_path, music_bytes, cleaned_title, performer_name, cover_bytes)
                    if os.path.exists(tmp_mp3_path) and os.path.getsize(tmp_mp3_path) > 0:
-                        with open(tmp_mp3_path, "rb") as f:
-                             tagged_music_bytes = f.read()
+                        tagged_music_bytes = await asyncio.to_thread(_read_file_sync, tmp_mp3_path)
                         # Длительность — явно: без неё Telegram показывает 0:00 (та же история, что была с видео).
                         music_duration = await bot._probe_audio_duration(tmp_mp3_path)
          except Exception as tag_err:
@@ -320,8 +331,8 @@ async def _send_tiktok_single_video(
               try:
                    with tempfile.TemporaryDirectory() as tdir:
                         raw_path = os.path.join(tdir, "raw_tiktok.mp4")
-                        with open(raw_path, "wb") as f:
-                             f.write(video_bytes)
+                        # Запись до 50МБ в потоке: в loop стопорила всех.
+                        await asyncio.to_thread(_write_file_sync, raw_path, video_bytes)
                         # Длительность/размеры — явно: TikTok-контейнер Telegram сам не всегда разбирает (иначе "файл" 0:00).
                         duration, width, height = await bot._probe_video_dimensions(raw_path)
                         thumb_bytes = await bot._generate_video_thumbnail(raw_path, duration)
