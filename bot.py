@@ -303,6 +303,9 @@ for env_name in ("OWNER_ID", "BOT_OWNER_ID", "ADMIN_ID", "TELEGRAM_OWNER_ID"):
 TELEGRAM_REQUEST_TIMEOUT = _env_number("TELEGRAM_REQUEST_TIMEOUT", 45, min_value=1)
 TELEGRAM_AI_TIMEOUT = _env_number("TELEGRAM_AI_TIMEOUT", 45, min_value=1)
 TELEGRAM_MEDIA_TIMEOUT = _env_number("TELEGRAM_MEDIA_TIMEOUT", 25, min_value=1)
+# Потолок скачивания из Telegram: Bot API не отдаёт файлы больше 20МБ через
+# getFile/путь (аудит D1, 30.09.2026) — большее отклоняем до скачивания.
+TELEGRAM_DOWNLOAD_MAX_BYTES = _env_number("TELEGRAM_DOWNLOAD_MAX_BYTES", 20 * 1024 * 1024, cast=int, min_value=1024 * 1024)
 # Раньше было захардкожено как 15.0 прямо внутри _download_telegram_file_bytes —
 # несогласованно с остальными таймаутами, которые все конфигурируются через env.
 TELEGRAM_GET_FILE_TIMEOUT = _env_number("TELEGRAM_GET_FILE_TIMEOUT", 15, min_value=1)
@@ -338,6 +341,10 @@ TTS_MAX_CHARS = _env_number("TTS_MAX_CHARS", 800, cast=int, min_value=1)
 # уходил в поток без таймаута и без http_options у клиента, и зависший Google
 # держал лок чата бесконечно (аудит 26.09.2026).
 TTS_SYNTH_TIMEOUT_SEC = _env_number("TTS_SYNTH_TIMEOUT_SEC", 60, min_value=1)
+# Общий дедлайн на все чанки мультичанкового TTS: зависший синтез иначе держал
+# per-chat lock без края (аудит D2, 30.09.2026). Худший чанк ~100с (60 синтез +
+# 30 ffmpeg + 10 probe), типичные 5 чанков укладываются с запасом.
+TTS_TOTAL_BUDGET_SEC = _env_number("TTS_TOTAL_BUDGET_SEC", 240, min_value=30)
 _PROCESS_START_MONOTONIC = time.monotonic()
 # ── Тайминги автоматического маршрутизатора моделей (см. секцию "автоматический
 # выбор модели" ниже) ──
@@ -378,6 +385,9 @@ _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY
 # Лимит скачивания слайдов 8: 35 слайдов иначе занимают весь пул сессии (limit=40) и стопорят другие чаты (аудит 04.09.2026).
 TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = _env_number("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", 8, cast=int, min_value=1)
 _tiktok_slide_download_semaphore = asyncio.Semaphore(TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
+# Общий кап RAM на один пост: 35 слайдов по 75МБ в памяти (до ~2.6ГБ) роняли
+# контейнер для всех чатов (аудит D1, 30.09.2026). Обычный пост весит до 50МБ.
+TIKTOK_SLIDESHOW_MAX_BYTES = _env_number("TIKTOK_SLIDESHOW_MAX_BYTES", 200 * 1024 * 1024, cast=int, min_value=1024 * 1024)
 
 # Состояние/квоты/локи живут в lumen_chat_state.py (P2): здесь только реэкспорт
 # имён (те же объекты — тесты мутируют bot.chat_state/bot.GLOBAL_QUOTA как раньше).
@@ -522,6 +532,7 @@ from lumen_rich import (
     _edit_message_quietly,
 )
 from lumen_media_flow import (
+    _MediaTooLargeError,
     _download_telegram_file_bytes,
     _save_media_to_history,
     _download_message_attachment_to_tmp,
@@ -839,6 +850,7 @@ __all__ = [
     "_delete_message_quietly",
     "_edit_message_quietly",
     "_download_telegram_file_bytes",
+    "_MediaTooLargeError",
     "_save_media_to_history",
     "_download_message_attachment_to_tmp",
     "_fetch_media",
@@ -1207,6 +1219,10 @@ from lumen_message_core import (
     _process_raw_update,
 )
 
+# setWebhook: попыток с экспоненциальным бэкоффом от базы (аудит D4, 30.09.2026).
+SETWEBHOOK_MAX_ATTEMPTS = 5
+SETWEBHOOK_BACKOFF_SEC = 5.0
+
 async def _webhook_startup() -> None:
     # Синхронное дисковое чтение в потоке: иначе старт стопорит приём /webhook.
     await asyncio.to_thread(load_state_from_disk)
@@ -1281,26 +1297,45 @@ async def _webhook_startup() -> None:
         except Exception as exc:
             log.warning("[webhook] deleteWebhook failed (will need manual setup): %s", exc)
 
-        try:
-            await asyncio.wait_for(
-                telegram_api_call("setWebhook", {
-                    "url": webhook_url,
-                    "secret_token": WEBHOOK_SECRET,
-                    # drop_pending_updates=True — решение владельца (27.09.2026): после
-                    # простоя не отвечать пачкой на старые сообщения. Цена — сообщения,
-                    # пришедшие пока бот лежал, теряются.
-                    "drop_pending_updates": True,
-                    "allowed_updates": ALLOWED_UPDATES,
-                }, request_timeout=15.0),
-                timeout=18.0
-            )
+        # setWebhook с ретраями и экспоненциальным бэкоффом: провал без ретрая
+        # оставлял тихий мёртвый бот (аудит D4, 30.09.2026). После исчерпания —
+        # RuntimeError наверх: main останавливает сервер и выходит кодом 1,
+        # чтобы платформа перезапустила контейнер, а не служила пустоту.
+        webhook_ok = False
+        backoff = SETWEBHOOK_BACKOFF_SEC
+        for attempt in range(1, SETWEBHOOK_MAX_ATTEMPTS + 1):
+            try:
+                await asyncio.wait_for(
+                    telegram_api_call("setWebhook", {
+                        "url": webhook_url,
+                        "secret_token": WEBHOOK_SECRET,
+                        # drop_pending_updates=True — решение владельца (27.09.2026): после
+                        # простоя не отвечать пачкой на старые сообщения. Цена — сообщения,
+                        # пришедшие пока бот лежал, теряются.
+                        "drop_pending_updates": True,
+                        "allowed_updates": ALLOWED_UPDATES,
+                    }, request_timeout=15.0),
+                    timeout=18.0
+                )
+                webhook_ok = True
+                break
+            except Exception as exc:
+                log.warning(
+                    "[webhook] setWebhook attempt %d/%d failed: %s",
+                    attempt, SETWEBHOOK_MAX_ATTEMPTS, exc,
+                )
+                if attempt < SETWEBHOOK_MAX_ATTEMPTS:
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+        if webhook_ok:
             log.info("[webhook] Webhook registered successfully: %s", webhook_url)
-        except Exception as exc:
+        else:
             # Секрет в лог не подставляем — готовая ссылка живёт в /webhook_url (Bearer ADMIN_PANEL_KEY, не query).
-            log.warning(
-                '[webhook] setWebhook failed — register it manually via: curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://.../webhook_url (get ADMIN_PANEL_KEY via curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys if you don\'t have it handy): %s',
-                exc,
+            log.error(
+                '[webhook] setWebhook failed after %d attempts — register it manually via: curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://.../webhook_url (get ADMIN_PANEL_KEY via curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys if you don\'t have it handy)',
+                SETWEBHOOK_MAX_ATTEMPTS,
             )
+            return False
 
         cmd_payloads = [
             {"commands": [{"command": c.command, "description": c.description} for c in commands]}
@@ -1326,8 +1361,11 @@ async def _webhook_startup() -> None:
             log.info("[webhook] Bot commands set successfully.")
         else:
             log.warning("[webhook] Bot commands were not set for any language.")
+        return webhook_ok
 
-    await try_setup()
+    setup_ok = await try_setup()
+    if not setup_ok:
+        raise RuntimeError("setWebhook failed after retries — refusing to serve a dead webhook")
 
     log.info("[webhook] Bot is running in webhook mode. Updates arrive via POST /webhook")
     # Суточные перепроверки моделей в часовом цикле: истёкшее промо иначе видно
@@ -1402,7 +1440,21 @@ async def main() -> None:
     )
     server = uvicorn.Server(srv_config)
     try:
-        await server.serve()
+        serve_task = asyncio.create_task(server.serve(), name="uvicorn_serve")
+        done, _pending = await asyncio.wait(
+            {startup_task, serve_task}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        # Стартап бесконечный (часовой цикл в хвосте): завершился — значит упал.
+        # Раньше падение было тихим (await только в finally) — процесс служил
+        # /webhook, который Telegram не вызывал (аудит D4, 30.09.2026).
+        if startup_task in done and not startup_task.cancelled():
+            exc = startup_task.exception()
+            if exc is not None:
+                log.error("[webhook] Startup failed, stopping the server: %s", exc)
+                server.should_exit = True
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await serve_task
+                raise SystemExit(1) from exc
     finally:
         startup_task.cancel()
         flush_task.cancel()

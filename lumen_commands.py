@@ -313,9 +313,25 @@ async def inline_tts(message: Message, text: str) -> None:
         )
         return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_voicing"))
+    # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
+    deadline = time.monotonic() + bot.TTS_TOTAL_BUDGET_SEC
+    shortened = False
     try:
         # Весь синтез ДО отправки: упавший кусок — одна ошибка вместо рваного "пол-ответа + ошибка".
-        voices = [await _synthesize_tts_voice(chunk) for chunk in chunks]
+        voices = []
+        for chunk in chunks:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                shortened = True
+                break
+            try:
+                voices.append(await asyncio.wait_for(_synthesize_tts_voice(chunk), timeout=remaining))
+            except asyncio.TimeoutError:
+                shortened = True
+                break
+        if not voices:
+            # Даже первый кусок не уложился — честная ошибка, а не пустота.
+            raise RuntimeError("TTS total budget exceeded before the first chunk")
     except Exception as exc:
         log.exception("TTS synthesis failed:")
         # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
@@ -344,6 +360,9 @@ async def inline_tts(message: Message, text: str) -> None:
         )
         if sent is None:
             raise RuntimeError("Telegram send_voice failed: connection timeout or proxy unavailable")
+    if shortened:
+        # Обрезка по общему дедлайну — говорим прямо, что озвучено начало.
+        await bot._safe_reply(message, bot._t(message.chat.id, "tts_shortened"))
 
 async def cmd_tts(message: Message) -> None:
     import bot

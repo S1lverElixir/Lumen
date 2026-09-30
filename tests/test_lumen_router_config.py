@@ -161,8 +161,11 @@ def test_build_route_plain_text_prefers_groq_to_save_quotas():
 
 
 def test_build_route_heavy_plain_text_uses_strong_openrouter_models_first():
+    # ОБНОВЛЕНО (аудит D3, 30.09.2026): тяжёлый текст идёт через Groq головой
+    # (свободные 1000/день экономят scarce-квоты OR/Gemini), дальше сильные OR.
     route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime=None, is_heavy=True, needs_freshness=False)
-    assert route[0] == ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free")
+    assert route[0] == ("groq", "qwen/qwen3.8-27b")
+    assert route[2] == ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free")
 
 
 def test_build_route_image_without_freshness_prefers_openrouter_vision():
@@ -186,6 +189,9 @@ def test_build_route_image_with_freshness_forces_gemini_search_chain():
     # См. обновлённый GEMINI_SEARCH_CHAIN (24.07.2026) — реальная квота на search
     # grounding подтверждена только у Gemini 2.5, не у 3.x lite-моделей.
     assert route[0][1] == "gemini-2.5-flash"
+    # ОБНОВЛЕНО (аудит D3, 30.09.2026): дальше vision OpenRouter резервом без
+    # поиска — раньше при исчерпании Gemini пользователь получал ошибку квоты.
+    assert any(p == "openrouter" for p, _ in route)
 
 
 def test_or_route_excludes_uncensored_and_dead_models():

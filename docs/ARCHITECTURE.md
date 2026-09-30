@@ -16,9 +16,9 @@ Routing is fully automatic: the router builds a fresh candidate list for every m
 
 - **A YouTube or website link** → Gemini only. It's the only provider that can read page content (`url_context`) or analyze a video by URL.
 - **A video or audio attachment** → video goes to Gemini only (OpenRouter's multimodal models only accept images as base64). Voice/audio is first transcribed cheaply (Groq Whisper) and the text joins the normal routing below; if transcription fails or is unavailable, the audio goes to Gemini as before.
-- **An image attachment, no live-info need** → free OpenRouter vision models first, Gemini as a reserve.
+- **An image attachment, no live-info need** → free OpenRouter vision models first, Gemini as a reserve. With a freshness need, Gemini search models go first and OpenRouter vision stays as a fallback.
 - **Needs current information** (a lightweight keyword heuristic: "now," "today," "price," "who is currently...") → Gemini, prioritizing the models with a real search-grounding quota, then OpenRouter as a reserve, Groq last (knowledge-only answer if both are down).
-- **Plain text, no attachments, no freshness need** (the most common case) → Groq first (1000 free requests/day: Qwen, then gpt-oss), then OpenRouter. Heavier requests (code, multi-step reasoning, caught by another lightweight heuristic) skip Groq entirely and start at the stronger free OpenRouter models, Gemini as reserve.
+- **Plain text, no attachments, no freshness need** (the most common case) → Groq first (1000 free requests/day: Qwen, then gpt-oss), then OpenRouter. Heavier requests (code, multi-step reasoning, caught by another lightweight heuristic) also start at Groq to spare the scarcer OpenRouter/Gemini quotas, then go to the stronger free OpenRouter models, Gemini as reserve.
 
 The reasoning: Gemini's free quota (roughly 20 requests per day for the flagship model) is the scarcest resource in the system, so it's only spent where a capability unique to Gemini is actually needed. Everything else, the bulk of ordinary messages, runs on Groq (1000/day) and OpenRouter's free tiers.
 

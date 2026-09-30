@@ -223,14 +223,26 @@ async def _try_send_tiktok_slideshow(
          ))
           # Качаем слайды параллельно gather; конкурентность режем семафором, чтобы не занимать весь пул сессии.
          fetch_urls = _slideshow_slide_urls(media_data, images_to_fetch)
+         # Общий кап RAM на пост: больше не качаем и остаток пропускаем.
+         post_budget = [bot.TIKTOK_SLIDESHOW_MAX_BYTES]
 
          async def _download_slide_bounded(slide_url: str) -> bytes | None:
               async with bot._tiktok_slide_download_semaphore:
-                   return await bot._download_url_bin(session, slide_url, headers=headers)
+                   if post_budget[0] <= 0:
+                        return None
+                   data = await bot._download_url_bin(session, slide_url, headers=headers)
+                   if data:
+                        post_budget[0] -= len(data)
+                        if post_budget[0] < 0:
+                             return None
+                   return data
 
          downloaded = list(await asyncio.gather(
               *(_download_slide_bounded(u) for u in fetch_urls)
          ))
+         skipped_slides = sum(1 for b in downloaded if not b)
+         if skipped_slides:
+              log.warning("[tiktok] Slideshow: %d of %d slides skipped (failed or over the post size cap).", skipped_slides, len(downloaded))
          video_indices = [idx for idx, b in enumerate(downloaded) if b and _looks_like_video_bytes(b)]
          if video_indices:
               log.info('[tiktok] In the slideshow, %d of %d slides were recognized as video (live_images/magic bytes).', len(video_indices), len(downloaded))
@@ -322,7 +334,12 @@ async def _send_tiktok_single_video(
                    status_msg = bot._t(message.chat.id, "tiktok_dl_plain")
               await bot._edit_message_quietly(status, status_msg)
 
-              video_bytes = await bot._download_url_bin(session, candidate["url"], headers=headers)
+              video_bytes = await bot._download_url_bin(
+                  session, candidate["url"], headers=headers,
+                  # Видео больше лимита отправки всё равно не уйдёт — режем капом
+                  # отправки, а не общим 75МБ (аудит A7-5: 50-75МБ качались зря).
+                  cap_bytes=bot.TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES,
+              )
               if not video_bytes:
                    continue
 

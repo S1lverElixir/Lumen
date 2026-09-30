@@ -465,3 +465,52 @@ def test_message_mentions_bot_without_chat_returns_false():
 
     assert bot.message_mentions_bot(_NoChatMessage()) is False
 
+
+def test_webhook_setup_retries_then_raises(monkeypatch):
+    # Аудит D4: провал setWebhook без ретрая давал тихий мёртвый бот — теперь
+    # ретраи с бэкоффом и явный отказ вместо молчания.
+    sleeps = []
+
+    async def fast_sleep(delay):
+        sleeps.append(delay)
+
+    async def always_fail(method, *args, **kwargs):
+        if method == "getMe":
+            return {"username": "testbot"}
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bot.asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(bot, "SETWEBHOOK_MAX_ATTEMPTS", 3)
+    _patch_startup(monkeypatch, always_fail)
+    with pytest.raises(RuntimeError, match="setWebhook"):
+        asyncio.run(bot._webhook_startup())
+    assert sleeps == [1.5, 5.0, 10.0]
+
+
+def test_webhook_setup_succeeds_after_retries(monkeypatch):
+    # Сторож: два провала подряд — третий регистрирует, стартап живёт дальше.
+    calls = {"hook": 0}
+    sleeps = []
+
+    async def fast_sleep(delay):
+        sleeps.append(delay)
+        if len(sleeps) > 3:
+            raise asyncio.CancelledError
+
+    async def flaky(method, *args, **kwargs):
+        if method == "getMe":
+            return {"username": "testbot"}
+        if method == "setWebhook":
+            calls["hook"] += 1
+            if calls["hook"] < 3:
+                raise RuntimeError("boom")
+            return True
+        return {}
+
+    monkeypatch.setattr(bot.asyncio, "sleep", fast_sleep)
+    _patch_startup(monkeypatch, flaky)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(bot._webhook_startup())
+    assert calls["hook"] == 3
+    assert sleeps == [1.5, 5.0, 10.0, 3600]
+
