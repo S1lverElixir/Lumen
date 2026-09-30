@@ -1080,6 +1080,9 @@ def clean_mention(text: str) -> str:
 # см. импорт _looks_like_injection_probe/_INJECTION_PROBE_REPLY там же.
 
 def message_mentions_bot(message: Message) -> bool:
+    # chat None (сырой апдейт без чата) — упоминания искать негде, апдейт не роняем.
+    if message.chat is None:
+        return False
     if message.chat.type == ChatType.PRIVATE:
          return True
     t = message.text or message.caption or ""
@@ -1204,7 +1207,8 @@ from lumen_message_core import (
 )
 
 async def _webhook_startup() -> None:
-    load_state_from_disk()
+    # Синхронное дисковое чтение в потоке: иначе старт стопорит приём /webhook.
+    await asyncio.to_thread(load_state_from_disk)
     log.info("Bot startup: webhook mode.")
     _check_temporary_free_models_expiry()
     _check_unconfirmed_model_quotas()
@@ -1306,16 +1310,21 @@ async def _webhook_startup() -> None:
             }
             for code, cmds in localized_commands
         ]
+        commands_ok = False
         for cmd_payload in cmd_payloads:
             try:
                 await asyncio.wait_for(
                     telegram_api_call("setMyCommands", cmd_payload, request_timeout=15.0),
                     timeout=18.0
                 )
+                commands_ok = True
             except Exception as exc:
                 log.warning("[webhook] setMyCommands failed (%s): %s", cmd_payload.get("language_code", "default"), exc)
-        else:
+        # for-else без break врал бы об успехе при провале всех языков.
+        if commands_ok:
             log.info("[webhook] Bot commands set successfully.")
+        else:
+            log.warning("[webhook] Bot commands were not set for any language.")
 
     await try_setup()
 
@@ -1325,18 +1334,22 @@ async def _webhook_startup() -> None:
     _last_daily_check_date = date.today()
     while True:
         await asyncio.sleep(3600)
-        _cleanup_rate_limit_dict()
-        _evict_orphan_chat_locks()
-        # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
-        # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
-        _reset_quota_if_new_day()
-        today = date.today()
-        if today != _last_daily_check_date:
-            _last_daily_check_date = today
-            _check_temporary_free_models_expiry()
-            _check_unconfirmed_model_quotas()
-            _check_scheduled_removals_due()
-            await _probe_or_model_liveness()
+        try:
+            _cleanup_rate_limit_dict()
+            _evict_orphan_chat_locks()
+            # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
+            # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
+            _reset_quota_if_new_day()
+            today = date.today()
+            if today != _last_daily_check_date:
+                _last_daily_check_date = today
+                _check_temporary_free_models_expiry()
+                _check_unconfirmed_model_quotas()
+                _check_scheduled_removals_due()
+                await _probe_or_model_liveness()
+        except Exception:
+            # Упавший тик не убивает цикл: иначе чистки и квоты вставали бы навсегда.
+            log.exception("[webhook] Hourly maintenance tick failed, next tick in an hour")
 
 async def _drain_inflight_tasks() -> None:
     """Даёт фоновым задачам апдейтов шанс завершиться штатно при остановке
@@ -1353,8 +1366,19 @@ async def _drain_inflight_tasks() -> None:
             t.cancel()
         await asyncio.gather(*still_pending, return_exceptions=True)
 
+def _require_bot_token() -> str:
+    # Пустой токен раньше умирал внутри Bot() с TokenValidationError и рестартами:
+    # выходим сразу с понятной причиной.
+    if not BOT_TOKEN:
+        log.error("[setup] BOT_TOKEN пуст — задайте BOT_TOKEN/TELEGRAM_BOT_TOKEN и перезапустите.")
+        raise SystemExit(1)
+    return BOT_TOKEN
+
+
 async def main() -> None:
     global bot, client
+
+    _require_bot_token()
 
     # Сессия с принудительным IPv4 и таймаутами под HF Space.
     if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
@@ -1392,10 +1416,11 @@ async def main() -> None:
         # последним тиком и остановкой процесса терялись бы при рестарте.
         # Флаги — канонически в lumen_chat_state (P2): множества общие объектом,
         # bool-флаги читаем из модуля, т.к. bot-привязки после выноса stale.
+        # Синхронная запись в потоке: loop уже дренирует задачи, висеть нельзя.
         if _dirty_chat_ids or lumen_chat_state._index_dirty or _pending_chat_deletions:
-            _flush_state_now()
+            await asyncio.to_thread(_flush_state_now)
         if lumen_chat_state._quota_dirty:
-            save_global_quota()
+            await asyncio.to_thread(save_global_quota)
         await _close_sessions()
 
 if __name__ == "__main__":
