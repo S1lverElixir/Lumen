@@ -347,9 +347,11 @@ def _checked_redirect_url(current_url: str, location: str | None) -> str | None:
     return next_url
 
 
-async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: dict | None = None) -> bytes | None:
+async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: dict | None = None, *, cap_bytes: int | None = None) -> bytes | None:
     # URL — из JSON чужого сервиса (TikWM): качаем только http(s) (AUD-D-003)
-    # и только с публичных адресов (SSRF-гард ниже).
+    # и только с публичных адресов (SSRF-гард ниже). cap_bytes — отдельный кап
+    # вызывающего (видео режем лимитом отправки Telegram, а не общим 75МБ).
+    cap = cap_bytes if cap_bytes is not None else TIKTOK_DOWNLOAD_MAX_BYTES
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme not in ("http", "https"):
         log.warning("[download] Refusing non-HTTP(S) URL (scheme=%r).", scheme)
@@ -388,8 +390,8 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
                 content_length = resp.headers.get("Content-Length")
                 if content_length is not None:
                     try:
-                        if int(content_length) > TIKTOK_DOWNLOAD_MAX_BYTES:
-                            log.warning("[download] Refusing to download %s: Content-Length %s exceeds the %d byte cap.", current_url, content_length, TIKTOK_DOWNLOAD_MAX_BYTES)
+                        if int(content_length) > cap:
+                            log.warning("[download] Refusing to download %s: Content-Length %s exceeds the %d byte cap.", current_url, content_length, cap)
                             return None
                     except ValueError:
                         pass
@@ -397,8 +399,8 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
                 total = 0
                 async for chunk in resp.content.iter_chunked(65536):
                     total += len(chunk)
-                    if total > TIKTOK_DOWNLOAD_MAX_BYTES:
-                        log.warning("[download] Aborting download of %s: exceeded the %d byte cap mid-stream.", current_url, TIKTOK_DOWNLOAD_MAX_BYTES)
+                    if total > cap:
+                        log.warning("[download] Aborting download of %s: exceeded the %d byte cap mid-stream.", current_url, cap)
                         return None
                     chunks.append(chunk)
                 return b"".join(chunks)

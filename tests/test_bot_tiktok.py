@@ -523,7 +523,7 @@ def test_handle_tiktok_single_video_happy_path():
     async def fake_resolve(session, url):
         return url  # ссылка уже "разрешена", не короткая
 
-    async def fake_download_url_bin(session, url, headers=None):
+    async def fake_download_url_bin(session, url, headers=None, cap_bytes=None):
         return b"\x00" * 100  # не видео-байты (не ftyp) — не важно для этого теста
 
     async def fake_probe_dims(path):
@@ -589,7 +589,7 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
     async def fake_resolve(session, url):
         return url
 
-    async def fake_download_url_bin(session, url, headers=None):
+    async def fake_download_url_bin(session, url, headers=None, cap_bytes=None):
         return video_bytes
 
     async def fake_probe_and_thumbnail(item_bytes):
@@ -663,7 +663,7 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
     async def fake_resolve(session, url):
         return url
 
-    async def fake_download_url_bin(session, url, headers=None):
+    async def fake_download_url_bin(session, url, headers=None, cap_bytes=None):
         nonlocal current_concurrent, max_concurrent_seen
         async with lock:
             current_concurrent += 1
@@ -1449,7 +1449,7 @@ def test_single_video_status_deleted_after_music():
     async def fake_resolve(session, url):
         return url
 
-    async def fake_download_url_bin(session, url, headers=None):
+    async def fake_download_url_bin(session, url, headers=None, cap_bytes=None):
         return b"\x00" * 100
 
     async def fake_probe_dims(path):
@@ -1624,6 +1624,15 @@ def test_tiktok_video_candidates_protocol_relative_url():
 def test_looks_like_video_bytes_true_for_webm_ebml():
     # A7-9: WebM-слайд раньше принимался за фото.
     assert bot._looks_like_video_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 16) is True
+
+
+def test_download_url_bin_honors_caller_cap():
+    # Аудит A7-5: видео режем лимитом отправки (50МБ), а не общим 75МБ.
+    mapping = {"http://8.8.8.8/v.mp4": _FakeDownloadResponse([b"123456789012345"])}
+    session = _RedirectDownloadSession(mapping)
+    result = asyncio.run(lumen_tiktok._download_url_bin(
+        session, "http://8.8.8.8/v.mp4", cap_bytes=10))
+    assert result is None
 
 
 def test_slideshow_stops_at_post_budget(monkeypatch):

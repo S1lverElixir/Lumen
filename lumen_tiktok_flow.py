@@ -334,7 +334,12 @@ async def _send_tiktok_single_video(
                    status_msg = bot._t(message.chat.id, "tiktok_dl_plain")
               await bot._edit_message_quietly(status, status_msg)
 
-              video_bytes = await bot._download_url_bin(session, candidate["url"], headers=headers)
+              video_bytes = await bot._download_url_bin(
+                  session, candidate["url"], headers=headers,
+                  # Видео больше лимита отправки всё равно не уйдёт — режем капом
+                  # отправки, а не общим 75МБ (аудит A7-5: 50-75МБ качались зря).
+                  cap_bytes=bot.TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES,
+              )
               if not video_bytes:
                    continue
 
