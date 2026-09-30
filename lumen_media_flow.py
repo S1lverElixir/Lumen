@@ -12,7 +12,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from lumen_chat_state import MAX_MEDIA_RECENT_IDS
+from lumen_chat_state import MAX_MEDIA_BUCKETS_PER_CHAT, MAX_MEDIA_RECENT_IDS
 from lumen_media import (
     _sanitize_mime_type,
     _media_file_id_and_mime,
@@ -54,8 +54,19 @@ def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | No
     if not file_id or user_id is None:
         return
     buckets: dict[str, deque] = state.setdefault("recent_media_ids", {})
+    if not isinstance(buckets, dict):
+        buckets = {}
+        state["recent_media_ids"] = buckets
     key = str(user_id)
-    recent = buckets.setdefault(key, deque(maxlen=MAX_MEDIA_RECENT_IDS))
+    if key in buckets:
+        # Поднимаем активный бакет в хвост: вытеснение ниже бьёт по давно неактивным.
+        buckets[key] = buckets.pop(key)
+    elif len(buckets) >= MAX_MEDIA_BUCKETS_PER_CHAT:
+        buckets.pop(next(iter(buckets)))
+    recent = buckets.get(key)
+    if not isinstance(recent, deque):
+        recent = deque(maxlen=MAX_MEDIA_RECENT_IDS)
+        buckets[key] = recent
     if not recent or recent[-1][0] != file_id:
         recent.append((file_id, mime or "application/octet-stream"))
 
