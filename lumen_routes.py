@@ -822,6 +822,10 @@ async def _run_route(
     # Порядок провайдеров — по первому появлению в маршруте (для прежних двухпровайдерных маршрутов то же самое: голова + второй).
     provider_order = list(dict.fromkeys(p for p, _ in route))
 
+    # Учёт дневных лимитов пользователя — только дошедшие до модели ответы.
+    def _count_user_answer(provider_name: str) -> None:
+        bot._record_user_daily(bot._user_key_for_message(message), gemini=(provider_name == "gemini"))
+
     # Стримим только голову маршрута; плейсхолдер "…" переиспользуем под финальный текст следующей модели, а не сносим.
     tried_stream_model: str | None = None
     tried_stream_provider: str | None = None
@@ -832,6 +836,7 @@ async def _run_route(
             streamed, placeholder = await bot._try_gemini_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (gemini:%s)', chat_id, head_model)
+                _count_user_answer("gemini")
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "gemini"
             reusable_placeholder = placeholder
@@ -839,6 +844,7 @@ async def _run_route(
             streamed, placeholder = await bot._try_openrouter_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (openrouter:%s)', chat_id, head_model)
+                _count_user_answer("openrouter")
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "openrouter"
             reusable_placeholder = placeholder
@@ -846,6 +852,7 @@ async def _run_route(
             streamed, placeholder = await bot._try_groq_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (groq:%s)', chat_id, head_model)
+                _count_user_answer("groq")
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "groq"
             reusable_placeholder = placeholder
@@ -883,7 +890,9 @@ async def _run_route(
                     await bot._delete_message_quietly(reusable_placeholder)
                 reusable_placeholder = None
                 if reused:
+                    _count_user_answer(provider)
                     return ans, True
+            _count_user_answer(provider)
             return ans, False
         except asyncio.CancelledError:
             # Отмена посреди ответа: плейсхолдер чистим, отмену пробрасываем —

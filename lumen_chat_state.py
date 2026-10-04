@@ -185,6 +185,19 @@ def _reset_quota_if_new_day() -> None:
                 entry["used"] = 0
                 entry["exhausted_at"] = None
                 entry["cooldown_until"] = None
+    # Пользовательские счётчики — те же сутки: нули всем, bonus переживает
+    # (задел под платное продление). Без bonus записи не нужны до первого
+    # завтрашнего сообщения — иначе словарь рос бы навсегда.
+    bucket = GLOBAL_QUOTA.get(USER_DAILY_KEY)
+    if isinstance(bucket, dict):
+        kept = {}
+        for uid, entry in bucket.items():
+            if isinstance(entry, dict) and int(entry.get("bonus") or 0) > 0:
+                entry["total"] = 0
+                entry["gemini"] = 0
+                entry["tts"] = 0
+                kept[uid] = entry
+        GLOBAL_QUOTA[USER_DAILY_KEY] = kept
     GLOBAL_QUOTA["quota_day"] = today
     if had_previous:
         log.info('[quota] New day started (%s) — used/exhausted_at counters reset for all models.', today)
@@ -208,6 +221,23 @@ def load_global_quota() -> None:
                         GLOBAL_QUOTA[provider] = loaded[provider]
                     else:
                         log.warning("[quota] Skip provider %s: expected dict, got %s", provider, type(loaded[provider]).__name__)
+            # Пользовательские счётчики переживают рестарт тем же файлом/ключом.
+            raw_bucket = loaded.get(USER_DAILY_KEY)
+            if isinstance(raw_bucket, dict):
+                clean: dict[str, Any] = {}
+                for uid, entry in raw_bucket.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    try:
+                        clean[str(uid)] = {
+                            "total": max(0, int(entry.get("total") or 0)),
+                            "gemini": max(0, int(entry.get("gemini") or 0)),
+                            "tts": max(0, int(entry.get("tts") or 0)),
+                            "bonus": max(0, int(entry.get("bonus") or 0)),
+                        }
+                    except (TypeError, ValueError):
+                        continue
+                GLOBAL_QUOTA[USER_DAILY_KEY] = clean
             if "quota_day" in loaded:
                 GLOBAL_QUOTA["quota_day"] = loaded["quota_day"]
         _state_load_failed = False
@@ -795,6 +825,118 @@ def _record_quota_usage(provider: str, model_id: str, *, service: bool = False) 
     e["exhausted_at"] = None
     e["cooldown_until"] = None
     bot.mark_quota_dirty()
+
+# ── Дневные лимиты на пользователя (по user_id, не по чату) ──
+# Хранятся внутри GLOBAL_QUOTA["user_daily"]: тот же персистентный файл/ключ и
+# тот же пакетный флаш раз в FLUSH_INTERVAL_SEC — отдельной записи в Upstash на
+# каждое сообщение нет. Границы суток — те же, что у квоты (quota_day, PT).
+USER_DAILY_KEY = "user_daily"
+# Потолок записей за сутки: легитимных пользователей в день на порядок меньше.
+MAX_USER_DAILY_KEYS = 20000
+
+
+def _user_daily_entry(user_id: int | None) -> dict[str, Any]:
+    """Живая запись счётчиков пользователя (создаёт при первом обращении)."""
+    import bot
+    bot._reset_quota_if_new_day()
+    bucket = GLOBAL_QUOTA.setdefault(USER_DAILY_KEY, {})
+    key = str(user_id)
+    entry = bucket.get(key)
+    if not isinstance(entry, dict):
+        entry = {}
+        bucket[key] = entry
+    else:
+        # Недавнее использование — в конец: вытеснение ниже сносит давно молчавших.
+        bucket[key] = bucket.pop(key)
+    for field in ("total", "gemini", "tts", "bonus"):
+        try:
+            entry[field] = max(0, int(entry.get(field) or 0))
+        except (TypeError, ValueError):
+            entry[field] = 0
+    # bonus — задел под платное продление, сам платёж не реализован.
+    if len(bucket) > MAX_USER_DAILY_KEYS:
+        drop = len(bucket) - int(MAX_USER_DAILY_KEYS * 0.9)
+        for old in list(bucket)[:drop]:
+            bucket.pop(old, None)
+    return entry
+
+
+def _user_daily_limit(user_id: int | None, kind: str) -> int:
+    """Эффективный лимит с учётом bonus-задела (база env + bonus)."""
+    import bot
+    base = {
+        "total": bot.DAILY_USER_MESSAGE_LIMIT,
+        "gemini": bot.DAILY_USER_GEMINI_LIMIT,
+        "tts": bot.DAILY_USER_TTS_LIMIT,
+    }[kind]
+    try:
+        return int(base) + int((_user_daily_entry(user_id).get("bonus") or 0))
+    except Exception:
+        return int(base)
+
+
+def _user_daily_total_exhausted(user_id: int | None) -> bool:
+    """Исчерпан ли общий дневной лимит. Владелец и неопределённый автор — без лимита."""
+    import bot
+    if user_id is None or bot._is_owner(user_id):
+        return False
+    entry = _user_daily_entry(user_id)
+    return int(entry.get("total") or 0) >= _user_daily_limit(user_id, "total")
+
+
+def _user_daily_gemini_exhausted(user_id: int | None) -> bool:
+    import bot
+    if user_id is None or bot._is_owner(user_id):
+        return False
+    entry = _user_daily_entry(user_id)
+    return int(entry.get("gemini") or 0) >= _user_daily_limit(user_id, "gemini")
+
+
+def _user_daily_tts_exhausted(user_id: int | None) -> bool:
+    import bot
+    if user_id is None or bot._is_owner(user_id):
+        return False
+    entry = _user_daily_entry(user_id)
+    return int(entry.get("tts") or 0) >= _user_daily_limit(user_id, "tts")
+
+
+def _record_user_daily(user_id: int | None, *, gemini: bool = False, tts: bool = False) -> None:
+    """Учёт ответа модели: total всегда, gemini/tts — по факту провайдера.
+    Только успехи: отказы по лимиту и неудачные вызовы сюда не доходят."""
+    import bot
+    if user_id is None or bot._is_owner(user_id):
+        return
+    entry = _user_daily_entry(user_id)
+    entry["total"] = int(entry.get("total") or 0) + 1
+    if gemini:
+        entry["gemini"] = int(entry.get("gemini") or 0) + 1
+    if tts:
+        entry["tts"] = int(entry.get("tts") or 0) + 1
+    bot.mark_quota_dirty()
+
+
+def _user_key_for_message(message: Any) -> int | None:
+    """user_id автора или ближайший устойчивый идентификатор (как у rate limit)."""
+    if message is None:
+        return None
+    from_user = getattr(message, "from_user", None)
+    if from_user is not None and getattr(from_user, "id", None) is not None:
+        return from_user.id
+    sender_chat = getattr(message, "sender_chat", None)
+    if sender_chat is not None and getattr(sender_chat, "id", None) is not None:
+        return sender_chat.id
+    chat = getattr(message, "chat", None)
+    return getattr(chat, "id", None) if chat is not None else None
+
+
+def _user_daily_reset_in() -> tuple[int, int]:
+    """Часы и минуты до сброса суток (для текста отказа по общему лимиту)."""
+    import bot
+    try:
+        secs = float(bot._quota_day_reset_in_sec())
+    except Exception:
+        return 0, 0
+    return int(secs // 3600), int((secs % 3600) // 60)
 
 # Сколько свежих сообщений точно не трогаем при обрезке (остальное уходит в саммари).
 HISTORY_SUMMARIZE_KEEP = 80

@@ -2591,3 +2591,178 @@ def test_album_downloads_bounded_concurrency(monkeypatch):
         assert seen["extra"] is not None and len(seen["extra"]) == 9
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+# ─────────────── Дневные лимиты на пользователя ───────────────
+
+def test_user_daily_record_counts_by_provider(monkeypatch):
+    # Новое: учёт успешных ответов с разбивкой total/gemini; старые тесты
+    # GLOBAL_QUOTA эту разбивку не покрывают.
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 2)
+    monkeypatch.setattr(bot, "DAILY_USER_GEMINI_LIMIT", 1)
+    uid = 999888771
+    try:
+        bot._record_user_daily(uid)
+        assert bot._user_daily_total_exhausted(uid) is False
+        assert bot._user_daily_gemini_exhausted(uid) is False
+        bot._record_user_daily(uid, gemini=True)
+        assert bot._user_daily_total_exhausted(uid) is True
+        assert bot._user_daily_gemini_exhausted(uid) is True
+        assert bot._user_daily_tts_exhausted(uid) is False
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+
+
+def test_user_daily_owner_and_unknown_are_unlimited():
+    # Новое: владелец не ограничен и не оставляет записей — регрессия
+    # "владелец заблокирован собственными лимитами".
+    original_owner = bot.OWNER_ID
+    uid = 999888772
+    try:
+        bot.OWNER_ID = uid
+        bot._record_user_daily(uid, gemini=True, tts=True)
+        assert bot._user_daily_total_exhausted(uid) is False
+        assert bot._user_daily_gemini_exhausted(uid) is False
+        assert bot._user_daily_tts_exhausted(uid) is False
+        assert str(uid) not in bot.GLOBAL_QUOTA.get("user_daily", {})
+    finally:
+        bot.OWNER_ID = original_owner
+    assert bot._user_daily_total_exhausted(None) is False
+
+
+def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
+    # Новое: те же сутки, что у квоты; bonus переживает полночь (задел под оплату).
+    import lumen_chat_state as lcs
+    orig_throttle = lcs._last_quota_check_monotonic
+    orig_dirty = lcs._quota_dirty
+    try:
+        bot.GLOBAL_QUOTA["user_daily"] = {
+            "111": {"total": 30, "gemini": 5, "tts": 5, "bonus": 0},
+            "222": {"total": 30, "gemini": 5, "tts": 5, "bonus": 10},
+        }
+        bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
+        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        bot._reset_quota_if_new_day()
+        assert bot.GLOBAL_QUOTA["user_daily"] == {"222": {"total": 0, "gemini": 0, "tts": 0, "bonus": 10}}
+        assert bot._user_daily_total_exhausted(111) is False
+    finally:
+        bot.GLOBAL_QUOTA.pop("user_daily", None)
+        lcs._last_quota_check_monotonic = orig_throttle
+        lcs._quota_dirty = orig_dirty
+
+
+@pytest.mark.parametrize("incoming,expected", [
+    (
+        {"user_daily": {"777": {"total": 29, "gemini": 5, "tts": 1, "bonus": 0}}},
+        {"777": {"total": 29, "gemini": 5, "tts": 1, "bonus": 0}},
+    ),
+    ({}, {}),
+    (
+        {"user_daily": {"bad": "мусор", "ok": {"total": 2}}},
+        {"ok": {"total": 2, "gemini": 0, "tts": 0, "bonus": 0}},
+    ),
+    (
+        {"user_daily": {"neg": {"total": -5, "bonus": 3}}},
+        {"neg": {"total": 0, "gemini": 0, "tts": 0, "bonus": 3}},
+    ),
+])
+def test_load_global_quota_restores_user_daily(incoming, expected):
+    # Новое: счётчики переживают рестарт; битые записи отбрасываются, а не роняют загрузку.
+    full = {"gemini": {}, "openrouter": {}, "groq": {}, "quota_day": bot._current_quota_day()}
+    full.update(incoming)
+    real = json.loads(json.dumps(bot.GLOBAL_QUOTA))
+    try:
+        with patch("bot._storage_read_text", return_value=json.dumps(full)):
+            bot.load_global_quota()
+        assert bot.GLOBAL_QUOTA.get("user_daily", {}) == expected
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real)
+
+
+def test_user_daily_reset_in_within_day_bounds():
+    # Новое: время до сброса — часы/минуты до полуночи PT, всегда в пределах суток.
+    hours, mins = bot._user_daily_reset_in()
+    assert 0 <= hours < 24 and 0 <= mins < 60
+
+
+def test_core_refuses_when_user_daily_total_exhausted(rate_guard_setup, monkeypatch):
+    # Новое: исчерпанный общий лимит — отказ до вызова моделей, с временем сброса.
+    message = rate_guard_setup()
+    message.text = "привет, как дела"
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    bot._record_user_daily(456)
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    async def fail_route(*args, **kwargs):
+        raise AssertionError("model must not be called for an exhausted user")
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    monkeypatch.setattr(bot, "_run_route", fail_route)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert len(replies) == 1 and "1/1" in replies[0]
+        # Отказ не считается: счётчик не вырос.
+        assert bot._user_daily_entry(456)["total"] == 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
+        bot.chat_state.pop(123, None)
+
+
+def test_core_falls_back_without_gemini_and_marks_no_search(rate_guard_setup, monkeypatch):
+    # Новое: свежесть без ссылок при исчерпанном Gemini идёт через Groq/OpenRouter
+    # с пометкой "без поиска".
+    message = rate_guard_setup()
+    message.text = "что нового сегодня"
+    monkeypatch.setattr(bot, "DAILY_USER_GEMINI_LIMIT", 1)
+    bot._record_user_daily(456, gemini=True)
+    captured = {}
+    replies = []
+
+    async def fake_route(chat_id, ai_prompt, route, msg, **kwargs):
+        captured["route"] = route
+        captured["allow_stream"] = kwargs.get("allow_stream")
+        return "свежий ответ", False
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert captured["route"] and all(p != "gemini" for p, _ in captured["route"])
+        assert captured["allow_stream"] is False
+        assert len(replies) == 1
+        assert replies[0].startswith(bot._t(123, "fallback_no_search"))
+        assert replies[0].endswith("свежий ответ")
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
+        bot.chat_state.pop(123, None)
+
+
+def test_core_refuses_youtube_when_gemini_exhausted(rate_guard_setup, monkeypatch):
+    # Новое: YouTube читает только Gemini — при исчерпанном лимите понятный отказ.
+    message = rate_guard_setup()
+    message.text = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    monkeypatch.setattr(bot, "DAILY_USER_GEMINI_LIMIT", 1)
+    bot._record_user_daily(456, gemini=True)
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    async def fail_route(*args, **kwargs):
+        raise AssertionError("gemini-only request must not reach models")
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    monkeypatch.setattr(bot, "_run_route", fail_route)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert len(replies) == 1 and "1/1" in replies[0]
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
+        bot.chat_state.pop(123, None)

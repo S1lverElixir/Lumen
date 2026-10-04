@@ -460,6 +460,33 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         [f"{p}:{m}" for p, m in route],
     )
 
+    # Дневные лимиты на пользователя — до скачивания/маршрута уже поздно, но до
+    # вызова моделей: отказы и неудачи не считаются, только успешные ответы.
+    uid = bot._user_key_for_message(message)
+    if bot._user_daily_total_exhausted(uid):
+        entry = bot._user_daily_entry(uid)
+        hours, mins = bot._user_daily_reset_in()
+        await bot._safe_reply(message, bot._t(
+            message.chat.id, "user_daily_total",
+            used=entry.get("total", 0), limit=bot._user_daily_limit(uid, "total"),
+            hours=hours, mins=mins,
+        ))
+        return
+    no_search_note = False
+    if bot._user_daily_gemini_exhausted(uid):
+        non_gemini = [(p, m) for p, m in route if p != "gemini"]
+        if not non_gemini:
+            # Ссылки, YouTube, видео/аудио и документы читает только Gemini.
+            entry = bot._user_daily_entry(uid)
+            await bot._safe_reply(message, bot._t(
+                message.chat.id, "user_daily_gemini",
+                used=entry.get("gemini", 0), limit=bot._user_daily_limit(uid, "gemini"),
+            ))
+            return
+        route = non_gemini
+        # Свежесть без Gemini — честная пометка, что ответ без поиска.
+        no_search_note = needs_freshness
+
     ai_prompt = clean_prompt
     if (
         media_tuple is None
@@ -472,8 +499,9 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
     gemini_media_list = gemini_media_list or None
     # Стриминг ("живой" эффект печати) имеет смысл только для простого
-    # текстового обмена без вложений/YouTube — см. _run_route.
-    allow_stream = not gemini_media_list and not youtube_url_to_analyze
+    # текстового обмена без вложений/YouTube — см. _run_route. При пометке
+    # "без поиска" стрим гасим: она дописывается к готовому ответу.
+    allow_stream = not gemini_media_list and not youtube_url_to_analyze and not no_search_note
     try:
         ans, reply_already_sent = await bot._run_route(
             message.chat.id, ai_prompt, route, message,
@@ -481,6 +509,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
             deadline=route_deadline,
         )
+        if no_search_note:
+            ans = bot._t(message.chat.id, "fallback_no_search") + "\n\n" + ans
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
         # Успешный ответ закрывает флаг обрыва (добивка тоже считается успехом).

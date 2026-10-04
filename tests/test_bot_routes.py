@@ -1693,3 +1693,51 @@ def test_run_route_cleans_placeholder_on_cancel(monkeypatch):
     finally:
         bot.chat_state.pop(999970, None)
 
+
+def test_run_route_records_user_daily_on_gemini_success():
+    # Новое: _run_route — единственная воронка учёта; успех Gemini растит оба счётчика.
+    from types import SimpleNamespace
+    chat_id = 999305
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777011)
+
+    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None):
+        return "Ответ от Gemini"
+
+    original = bot.ask_gemini
+    bot.ask_gemini = fake_ask_gemini
+    try:
+        ans, sent = asyncio.run(bot._run_route(
+            chat_id, "привет", [("gemini", "gemini-3.8-flash")], incoming, allow_stream=False,
+        ))
+        assert ans == "Ответ от Gemini" and sent is False
+        entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("777011")
+        assert entry is not None and entry["total"] == 1 and entry["gemini"] == 1
+    finally:
+        bot.ask_gemini = original
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777011", None)
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_run_route_failure_records_no_user_daily():
+    # Новое, пара к предыдущему: неудачный вызов не считается.
+    from types import SimpleNamespace
+    chat_id = 999306
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777012)
+
+    async def failing_ask(*args, **kwargs):
+        raise bot.OpenRouterAPIError("сломано", status_code=500)
+
+    original = bot.ask_openrouter_text
+    bot.ask_openrouter_text = failing_ask
+    try:
+        with pytest.raises(bot.OpenRouterAPIError):
+            asyncio.run(bot._run_route(
+                chat_id, "привет", [("openrouter", "m1")], incoming, allow_stream=False,
+            ))
+        assert "777012" not in bot.GLOBAL_QUOTA.get("user_daily", {})
+    finally:
+        bot.ask_openrouter_text = original
+        bot.chat_state.pop(chat_id, None)
+

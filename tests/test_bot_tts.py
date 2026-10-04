@@ -477,3 +477,59 @@ def test_inline_tts_sends_partial_with_shortened_note(monkeypatch):
     finally:
         bot.chat_state.pop(999987, None)
 
+
+def test_inline_tts_refuses_when_user_tts_limit_exhausted(monkeypatch):
+    # Новое: исчерпанный TTS-лимит — отказ до синтеза, модель не вызывается.
+    incoming = _FakeIncomingMessage(999988)
+    incoming.message_id = 12352
+    incoming.from_user = SimpleNamespace(id=777013)
+    monkeypatch.setattr(bot, "DAILY_USER_TTS_LIMIT", 1)
+    bot._record_user_daily(777013, tts=True)
+
+    async def fail_generate(*args, **kwargs):
+        raise AssertionError("synthesis must not run for an exhausted user")
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fail_generate)
+    monkeypatch.setattr(bot, "client", fake_client)
+    monkeypatch.setattr(bot, "bot", _FakeVoiceBot())
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    try:
+        asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+        assert len(replies) == 1 and "1/1" in replies[0]
+        # Отказ не считается: счётчик не вырос.
+        assert bot._user_daily_entry(777013)["tts"] == 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777013", None)
+        bot.chat_state.pop(999988, None)
+
+
+def test_inline_tts_records_user_daily_on_success(monkeypatch):
+    # Новое: успешная озвучка растит total+tts (пара к test_inline_tts_records_quota_usage_on_success).
+    fake_wav_bytes = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 64
+
+    def fake_generate_content(*, model, contents, config=None):
+        return _fake_tts_response(fake_wav_bytes)
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
+    incoming = _FakeIncomingMessage(999989)
+    incoming.message_id = 12353
+    incoming.from_user = SimpleNamespace(id=777014)
+    monkeypatch.setattr(bot, "client", fake_client)
+    monkeypatch.setattr(bot, "bot", _FakeVoiceBot())
+    try:
+        asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+        entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("777014")
+        assert entry is not None
+        assert entry["total"] == 1 and entry["tts"] == 1 and entry["gemini"] == 0
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777014", None)
+        bot.chat_state.pop(999989, None)
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
+

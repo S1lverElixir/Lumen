@@ -316,6 +316,24 @@ async def inline_tts(message: Message, text: str) -> None:
             bot._t(message.chat.id, "tts_too_long", limit=bot.TTS_MAX_CHARS * TTS_MAX_PARTS, length=len(text)),
         )
         return
+    # Дневные лимиты пользователя: общий и отдельный на озвучку (он же тратит квоту Gemini TTS).
+    uid = bot._user_key_for_message(message)
+    if bot._user_daily_total_exhausted(uid):
+        entry = bot._user_daily_entry(uid)
+        hours, mins = bot._user_daily_reset_in()
+        await bot._safe_reply(message, bot._t(
+            message.chat.id, "user_daily_total",
+            used=entry.get("total", 0), limit=bot._user_daily_limit(uid, "total"),
+            hours=hours, mins=mins,
+        ))
+        return
+    if bot._user_daily_tts_exhausted(uid):
+        entry = bot._user_daily_entry(uid)
+        await bot._safe_reply(message, bot._t(
+            message.chat.id, "user_daily_tts",
+            used=entry.get("tts", 0), limit=bot._user_daily_limit(uid, "tts"),
+        ))
+        return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_voicing"))
     # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
     deadline = time.monotonic() + bot.TTS_TOTAL_BUDGET_SEC
@@ -364,6 +382,8 @@ async def inline_tts(message: Message, text: str) -> None:
         )
         if sent is None:
             raise RuntimeError("Telegram send_voice failed: connection timeout or proxy unavailable")
+    # Один запрос — один счёт: чанки одного сообщения не множат дневной расход.
+    bot._record_user_daily(uid, tts=True)
     if shortened:
         # Обрезка по общему дедлайну — говорим прямо, что озвучено начало.
         await bot._safe_reply(message, bot._t(message.chat.id, "tts_shortened"))

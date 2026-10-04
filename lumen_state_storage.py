@@ -151,6 +151,18 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
 
 # ─────────────────── дата для сброса дневной квоты ───────────────────
 
+def _quota_day_reset_in_sec() -> float:
+    """Секунд до полуночи America/Los_Angeles — через столько обнулятся
+    суточные счётчики. Та же зона, что у _current_quota_day выше."""
+    from datetime import timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("America/Los_Angeles"))
+    except Exception:
+        now = datetime.now(timezone.utc)
+    nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(0.0, (nxt - now).total_seconds())
+
 def _current_quota_day() -> str:
     """Дата (ISO, YYYY-MM-DD) для определения "новых суток" в целях сброса квоты.
     Google обнуляет дневные RPD-лимиты по полуночи Pacific Time — используем ту

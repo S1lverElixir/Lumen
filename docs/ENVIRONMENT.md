@@ -68,6 +68,9 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `TTS_TOTAL_BUDGET_SEC` | `240s` | Total deadline for all chunks of one multi-chunk TTS request; past it the text is cut and the user is told only the beginning was voiced. |
 | `RATE_LIMIT_MAX_REQUESTS` | `5` | Max requests per user within `RATE_LIMIT_WINDOW_SEC`. |
 | `RATE_LIMIT_WINDOW_SEC` | `30s` | Sliding window width for rate limiting. |
+| `DAILY_USER_MESSAGE_LIMIT` | `30` | Max model answers per user per day (day boundary: midnight America/Los_Angeles, same as quota). Only successful model answers count; `/reset`/`/lang`/`/start`, failed calls and limit denials don't. `OWNER_ID` is unlimited. |
+| `DAILY_USER_GEMINI_LIMIT` | `5` | Of the above, max answers that actually went through Gemini (links, YouTube, video/audio, fresh data with search). Past it, links/YouTube/video are refused, the rest is served via Groq/OpenRouter (fresh data marked as answered without search). |
+| `DAILY_USER_TTS_LIMIT` | `5` | Max `/tts` voicings per user per day (counts toward `DAILY_USER_MESSAGE_LIMIT` too). |
 | `ROUTE_MODEL_TIMEOUT_SEC` | `22s` | Timeout for a single attempt at a single model. No retries: any failure moves straight to the next model. |
 | `ROUTE_TOTAL_BUDGET_SEC` | `40s` | Total time budget for the whole routing chain of one message, across all providers (Gemini, OpenRouter, Groq). |
 | `DRAW_TOTAL_BUDGET_SEC` | `120s` | Same idea, for the `/draw` fallback chain across image models. |

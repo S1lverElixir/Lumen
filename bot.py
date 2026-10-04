@@ -345,6 +345,11 @@ TTS_SYNTH_TIMEOUT_SEC = _env_number("TTS_SYNTH_TIMEOUT_SEC", 60, min_value=1)
 # per-chat lock без края (аудит D2, 30.09.2026). Худший чанк ~100с (60 синтез +
 # 30 ffmpeg + 10 probe), типичные 5 чанков укладываются с запасом.
 TTS_TOTAL_BUDGET_SEC = _env_number("TTS_TOTAL_BUDGET_SEC", 240, min_value=30)
+# Дневные лимиты на пользователя (по user_id): всего сообщений, из них через
+# Gemini (ссылки/YouTube/медиа/свежесть с поиском) и отдельно озвучка /tts.
+DAILY_USER_MESSAGE_LIMIT = _env_number("DAILY_USER_MESSAGE_LIMIT", 30, cast=int, min_value=1)
+DAILY_USER_GEMINI_LIMIT = _env_number("DAILY_USER_GEMINI_LIMIT", 5, cast=int, min_value=1)
+DAILY_USER_TTS_LIMIT = _env_number("DAILY_USER_TTS_LIMIT", 5, cast=int, min_value=1)
 _PROCESS_START_MONOTONIC = time.monotonic()
 # ── Тайминги автоматического маршрутизатора моделей (см. секцию "автоматический
 # выбор модели" ниже) ──
@@ -454,6 +459,16 @@ from lumen_chat_state import (
     _quota_entry,
     _mark_quota_exhausted,
     _record_quota_usage,
+    USER_DAILY_KEY,
+    MAX_USER_DAILY_KEYS,
+    _user_daily_entry,
+    _user_daily_limit,
+    _user_daily_total_exhausted,
+    _user_daily_gemini_exhausted,
+    _user_daily_tts_exhausted,
+    _record_user_daily,
+    _user_key_for_message,
+    _user_daily_reset_in,
     _trim_history,
 )
 
@@ -662,6 +677,7 @@ from lumen_state_storage import (
     CHAT_STATE_SCHEMA_VERSION,
     _serialize_chat_state,
     _current_quota_day,
+    _quota_day_reset_in_sec,
 )
 
 
@@ -805,6 +821,17 @@ __all__ = [
     # Прямые имена lumen_state_storage для тестов.
     "_serialize_chat_state",
     "_current_quota_day",
+    "_quota_day_reset_in_sec",
+    "USER_DAILY_KEY",
+    "MAX_USER_DAILY_KEYS",
+    "_user_daily_entry",
+    "_user_daily_limit",
+    "_user_daily_total_exhausted",
+    "_user_daily_gemini_exhausted",
+    "_user_daily_tts_exhausted",
+    "_record_user_daily",
+    "_user_key_for_message",
+    "_user_daily_reset_in",
     # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
     "GEMINI_TTS_MODELS",
     "FISH_AUDIO_TTS_MODEL",
