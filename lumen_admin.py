@@ -121,6 +121,19 @@ async def webhook_handler(request: Request) -> Any:
         log.warning("[webhook] Failed to process incoming update: %s", exc)
     return {"ok": True}
 
+async def probe_url(session: Any, url: str, *, timeout_sec: float = 6.0, redact: str = "") -> dict[str, Any]:
+    """Один GET-зонд: та же логика и тот же формат результата для /diag и /selftest."""
+    start = time.time()
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout_sec)) as resp:
+            return {"status": resp.status, "elapsed_sec": round(time.time() - start, 2), "ok": True}
+    except Exception as exc:
+        elapsed = round(time.time() - start, 2)
+        exc_str = str(exc) or repr(exc) or type(exc).__name__
+        if redact:
+            exc_str = exc_str.replace(redact, "<TOKEN>")
+        return {"error": exc_str, "elapsed_sec": elapsed, "ok": False}
+
 @app.get("/diag")
 async def network_diagnostics(request: Request) -> dict[str, Any]:
     """Проверяет исходящую сетевую доступность различных хостов из контейнера.
@@ -157,16 +170,7 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
     diag_budget = float(os.getenv("DIAG_TOTAL_BUDGET_SEC", "25"))
 
     async def _probe(name: str, url: str) -> tuple[str, dict[str, Any]]:
-        start = time.time()
-        try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6.0)) as resp:
-                return name, {"status": resp.status, "elapsed_sec": round(time.time() - start, 2), "ok": True}
-        except Exception as exc:
-            elapsed = round(time.time() - start, 2)
-            exc_str = str(exc) or repr(exc) or type(exc).__name__
-            if bot_token:
-                exc_str = exc_str.replace(bot_token, "<TOKEN>")
-            return name, {"error": exc_str, "elapsed_sec": elapsed, "ok": False}
+        return name, await probe_url(session, url, timeout_sec=6.0, redact=bot_token or "")
 
     tasks = {asyncio.create_task(_probe(name, url)): name for name, url in targets.items()}
     done, pending = await asyncio.wait(tasks, timeout=diag_budget)

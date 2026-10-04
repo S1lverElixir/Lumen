@@ -115,12 +115,13 @@ All three endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/a
 | `/tts [text]` | anyone | Reads text out loud. |
 | `/lang` | anyone in DMs; group admins/owner in groups | Bot language menu (system messages; AI answers always follow your language). |
 
-Two more owner-only commands stay out of the menu on purpose, since they surface internal details that shouldn't be visible in a group chat:
+Three more owner-only commands stay out of the menu on purpose, since they surface internal details that shouldn't be visible in a group chat:
 
 | Command | Access | Purpose |
 |---|---|---|
 | `/stats` | bot owner, DMs only | Active chat count, process uptime, per-model quota usage. |
 | `/logs` | bot owner, DMs only | Sends `bot.log` with secrets redacted. |
+| `/selftest [gemini]` | bot owner, DMs only, max once a minute | Live probe of route heads (Groq, light OpenRouter, Telegram proxy, TikWM; Gemini only with the `gemini` argument). Successful probes count against quota. |
 
 In groups the bot keeps recent messages (up to 100) as context and sends them to the model providers together with the question; `/reset` (group admins/owner) clears them.
 

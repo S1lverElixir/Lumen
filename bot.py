@@ -665,6 +665,7 @@ from lumen_admin import (
     get_webhook_url,
     webhook_handler,
     network_diagnostics,
+    probe_url,
     export_state,
 )
 
@@ -731,6 +732,7 @@ __all__ = [
     "get_webhook_url",
     "webhook_handler",
     "network_diagnostics",
+    "probe_url",
     "export_state",
     # Имена из lumen_streaming.py код bot.py сам не читает — они нужны как `bot.X`
     # существующим тестам и `_run_route` ниже.
@@ -789,6 +791,7 @@ __all__ = [
     "ask_openrouter_text",
     "ask_openrouter_multimodal",
     "ask_groq_text",
+    "selftest_llm_head",
     "_transcribe_audio",
     "_gemini_history_contents",
     "_build_gemma_identity_contents",
@@ -1040,6 +1043,7 @@ from lumen_routes import (
     ask_openrouter_text,
     ask_openrouter_multimodal,
     ask_groq_text,
+    selftest_llm_head,
     _transcribe_audio,
     _gemini_history_contents,
     _build_gemma_identity_contents,
@@ -1190,6 +1194,7 @@ from lumen_commands import (
     handle_lang_callback,
     cmd_logs,
     cmd_stats,
+    cmd_selftest,
     _build_version,
     _webhook_info_text,
     _process_memory_text,
@@ -1205,6 +1210,7 @@ dp.message.register(cmd_lang, Command("lang"))
 dp.callback_query.register(handle_lang_callback, F.data.startswith("lang:"))
 dp.message.register(cmd_logs, Command("logs"))
 dp.message.register(cmd_stats, Command("stats"))
+dp.message.register(cmd_selftest, Command("selftest"))
 dp.callback_query.register(handle_pick_callback, F.data.startswith("pick:"))
 
 

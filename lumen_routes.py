@@ -357,6 +357,77 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     bot._record_quota_usage("groq", model_trial)
     return answer
 
+_SELFTEST_PING_TEXT = "Reply with exactly: ok"
+
+def _selftest_short_error(exc: BaseException) -> str:
+    """Короткий однострочник для строки /selftest: без ID моделей и простыней."""
+    text = f"{exc.__class__.__name__}: {exc}".strip()
+    return " ".join(text.split())[:120] or exc.__class__.__name__
+
+async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool, str, float]:
+    """Одна крошечная проба в голову маршрута (groq/openrouter/gemini) для /selftest.
+
+    Успех честно пишется в квоту тем же _record_quota_usage, что у настоящих
+    ответов; неуспех квоту не трогает (как в ask_*). Историю чата не трогаем —
+    проба не должна оседать в контексте владельца. Никогда не кидает: неуспех
+    возвращается кортежем (False, причина, секунды)."""
+    import bot
+    from lumen_router_config import _GROQ_LIGHT_ORDER
+    start = time.monotonic()
+    try:
+        if provider == "groq":
+            model = _GROQ_LIGHT_ORDER[0]
+            messages = [{"role": "system", "content": ""}, {"role": "user", "content": _SELFTEST_PING_TEXT}]
+
+            async def _groq_probe_request(payload: dict, dl: float | None):
+                return await bot._groq_request("chat/completions", "POST", json_body=payload, deadline=dl)
+
+            _ans, used = await _chat_completion_chain(
+                messages, [model], model, request_fn=_groq_probe_request,
+                provider="groq", deadline=start + bot.ROUTE_MODEL_TIMEOUT_SEC,
+                log_label="groq", chat_id=chat_id,
+            )
+            bot._record_quota_usage("groq", used)
+            return True, "", round(time.monotonic() - start, 2)
+        if provider == "openrouter":
+            model = _OR_LIGHT_ORDER[0]
+            messages = [{"role": "system", "content": ""}, {"role": "user", "content": _SELFTEST_PING_TEXT}]
+
+            async def _or_probe_request(payload: dict, dl: float | None):
+                return await bot._or_request("chat/completions", "POST", json_body=payload, deadline=dl)
+
+            _ans, used = await _chat_completion_chain(
+                messages, [model], model, request_fn=_or_probe_request,
+                provider="openrouter", deadline=start + bot.ROUTE_MODEL_TIMEOUT_SEC,
+                log_label="or", chat_id=chat_id,
+            )
+            bot._record_quota_usage("openrouter", used)
+            return True, "", round(time.monotonic() - start, 2)
+        if provider == "gemini":
+            # Квота самая дефицитная — проба минимальная: голый текст без системного
+            # промпта и истории (в отличие от ask_gemini, чистит только живость).
+            model = GEMINI_DEFAULT_CHAIN[0]
+            deadline = start + bot.ROUTE_MODEL_TIMEOUT_SEC
+            contents = [types.Content(role="user", parts=[types.Part.from_text(text=_SELFTEST_PING_TEXT)])]
+            call_contents, gconfig = bot._build_gemini_call_config(model, contents)
+            resp = await asyncio.wait_for(
+                bot.client.aio.models.generate_content(model=model, contents=call_contents, config=gconfig),
+                timeout=max(1.0, deadline - time.monotonic()),
+            )
+            ans = await bot._extract_gemini_answer_text(
+                resp, model_id=model, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
+            if not ans.strip():
+                raise RuntimeError(f"Model {model} returned an empty response")
+            _gpt, _gct, _gtt = _usage_from_gemini_response(resp)
+            _log_llm_usage(chat_id=chat_id, provider="gemini", model_id=model,
+                           prompt=_gpt, completion=_gct, total=_gtt)
+            _record_model_latency(_model_speed_key("gemini", model), total_sec=time.monotonic() - start)
+            bot._record_quota_usage("gemini", model)
+            return True, "", round(time.monotonic() - start, 2)
+        raise ValueError(f"unknown selftest provider: {provider}")
+    except Exception as exc:
+        return False, _selftest_short_error(exc), round(time.monotonic() - start, 2)
+
 async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int, deadline: float | None = None) -> str | None:
     """Голос/аудио в текст через Groq Whisper (дешевле Gemini-квоты на порядок). None при
     любой неудаче — вызывающий код молча идёт прежним путём (аудио напрямую в Gemini).

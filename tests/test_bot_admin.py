@@ -514,3 +514,29 @@ def test_webhook_setup_succeeds_after_retries(monkeypatch):
     assert calls["hook"] == 3
     assert sleeps == [1.5, 5.0, 10.0, 3600]
 
+
+def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():
+    # Общий зонд /diag и /selftest: успех — статус, неуспех — текст без секрета.
+    class _FakeResp:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _FakeSession:
+        def get(self, url, **kwargs):
+            return _FakeResp()
+
+    class _BoomSession:
+        def get(self, url, **kwargs):
+            raise RuntimeError("net down, token abc123")
+
+    ok = asyncio.run(bot.probe_url(_FakeSession(), "http://x"))
+    assert ok["ok"] is True and ok["status"] == 200 and ok["elapsed_sec"] >= 0
+    err = asyncio.run(bot.probe_url(_BoomSession(), "http://x", redact="abc123"))
+    assert err["ok"] is False
+    assert "abc123" not in err["error"] and "<TOKEN>" in err["error"]
+

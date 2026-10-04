@@ -1278,3 +1278,151 @@ def test_inline_tts_send_failure_raises(monkeypatch):
             asyncio.run(bot.inline_tts(incoming, "привет"))
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def _make_selftest_message(chat_id, user_id, text="/selftest", group=False):
+    incoming = _FakeIncomingMessage(chat_id)
+    if group:
+        incoming.chat.type = bot.ChatType.GROUP
+    incoming.from_user = SimpleNamespace(id=user_id)
+    incoming.text = text
+    return incoming
+
+
+def _setup_selftest_fakes(monkeypatch, fail_heads=()):
+    # Фейковые пробы голов и сети + захват ответа. Возвращает (calls, fake_tg_call).
+    import lumen_commands
+    calls = []
+
+    async def fake_head(provider, *, chat_id=None):
+        calls.append(provider)
+        if provider in fail_heads:
+            return False, "boom-500", 0.5
+        return True, "", 0.1
+
+    async def fake_session():
+        return SimpleNamespace()
+
+    async def fake_probe(session, url, *, timeout_sec=6.0, redact=""):
+        return {"status": 200, "elapsed_sec": 0.2, "ok": True}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        fake_tg_call.text = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "selftest_llm_head", fake_head)
+    monkeypatch.setattr(bot, "_get_http_session", fake_session)
+    monkeypatch.setattr(bot, "probe_url", fake_probe)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(lumen_commands, "_SELFTEST_LAST_RUN_MONOTONIC", 0.0)
+    return calls, fake_tg_call
+
+
+def test_cmd_selftest_denies_non_owner_without_probing(monkeypatch):
+    # Чужой не должен даже запускать пробы: иначе любой сливал бы квоту и видел внутрянку.
+    monkeypatch.setattr(bot, "OWNER_ID", 111001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    incoming = _make_selftest_message(999701, 222002)
+    asyncio.run(bot.cmd_selftest(incoming))
+    assert fake_tg_call.text == bot._t(999701, "stats_deny")
+    assert calls == []
+
+
+def test_cmd_selftest_group_only_for_owner(monkeypatch):
+    # ID моделей в группы не отдаём: команда в группах только отказывает, проб нет.
+    from lumen_router_config import _GROQ_LIGHT_ORDER, _OR_LIGHT_ORDER, GEMINI_DEFAULT_CHAIN
+    monkeypatch.setattr(bot, "OWNER_ID", 333001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    incoming = _make_selftest_message(999702, 333001, group=True)
+    asyncio.run(bot.cmd_selftest(incoming))
+    assert fake_tg_call.text == bot._t(999702, "selftest_group_only")
+    assert calls == []
+    for mid in list(_GROQ_LIGHT_ORDER) + list(_OR_LIGHT_ORDER) + list(GEMINI_DEFAULT_CHAIN):
+        assert mid not in fake_tg_call.text
+
+
+def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
+    # Без паузы владелец случайно выжигал бы квоту повторными тапами.
+    monkeypatch.setattr(bot, "OWNER_ID", 444001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999703, 444001)))
+    assert calls == ["groq", "openrouter"]
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999703, 444001)))
+    assert calls == ["groq", "openrouter"]
+    assert fake_tg_call.text == bot._t(999703, "selftest_cooldown", sec=60)
+
+
+def test_cmd_selftest_default_skips_gemini_and_hides_model_ids(monkeypatch):
+    # Дефолт без gemini бережёт самую дефицитную квоту; ID моделей в ответе нет.
+    from lumen_router_config import _GROQ_LIGHT_ORDER, _OR_LIGHT_ORDER, GEMINI_DEFAULT_CHAIN
+    monkeypatch.setattr(bot, "OWNER_ID", 555001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999704, 555001)))
+    assert calls == ["groq", "openrouter"]
+    assert bot._t(999704, "selftest_gemini_skipped") in fake_tg_call.text
+    for mid in list(_GROQ_LIGHT_ORDER) + list(_OR_LIGHT_ORDER) + list(GEMINI_DEFAULT_CHAIN):
+        assert mid not in fake_tg_call.text
+
+
+def test_cmd_selftest_with_gemini_arg_probes_gemini(monkeypatch):
+    # Явный аргумент включает пробу Gemini.
+    monkeypatch.setattr(bot, "OWNER_ID", 666001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999705, 666001, "/selftest gemini")))
+    assert calls == ["groq", "openrouter", "gemini"]
+    assert bot._t(999705, "selftest_gemini_skipped") not in fake_tg_call.text
+
+
+def test_cmd_selftest_reports_failed_head(monkeypatch):
+    # Упавшая голова — строка FAIL с причиной, а не молчание или падение команды.
+    monkeypatch.setattr(bot, "OWNER_ID", 777001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch, fail_heads=("groq",))
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999706, 777001)))
+    assert "Groq: FAIL" in fake_tg_call.text
+    assert "boom-500" in fake_tg_call.text
+    assert "OpenRouter: OK" in fake_tg_call.text
+
+
+def test_selftest_llm_head_openrouter_success_targets_head_and_counts_quota(monkeypatch):
+    # Честный учёт: успешная проба идёт ровно в голову лёгкого маршрута и +1 в квоту.
+    import lumen_model_speed
+    import lumen_routes
+    from lumen_router_config import _OR_LIGHT_ORDER
+    head = _OR_LIGHT_ORDER[0]
+    seen = {}
+
+    async def fake_or(path, method="GET", *, json_body=None, deadline=None):
+        seen["model"] = (json_body or {}).get("model")
+        return {"choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 4001, "completion_tokens": 2, "total_tokens": 4003}}
+
+    monkeypatch.setattr(bot, "_or_request", fake_or)
+    before = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    ema_before = dict(lumen_model_speed._latency_ema)
+    try:
+        ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("openrouter", chat_id=1))
+    finally:
+        lumen_model_speed._latency_ema.clear()
+        lumen_model_speed._latency_ema.update(ema_before)
+    assert ok is True and detail == "" and elapsed >= 0
+    assert seen["model"] == head
+    after = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    assert after == before + 1
+    bot.GLOBAL_QUOTA["openrouter"][head]["used"] = before
+
+
+def test_selftest_llm_head_openrouter_error_returns_false_without_quota(monkeypatch):
+    # Неуспех квоту не трогает (как в ask_*): иначе ошибка стоила бы как ответ.
+    import lumen_routes
+    from lumen_router_config import _OR_LIGHT_ORDER
+    head = _OR_LIGHT_ORDER[0]
+
+    async def boom(path, method="GET", *, json_body=None, deadline=None):
+        raise RuntimeError("boom-429")
+
+    monkeypatch.setattr(bot, "_or_request", boom)
+    before = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("openrouter", chat_id=1))
+    assert ok is False and "boom-429" in detail and elapsed >= 0
+    after = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    assert after == before

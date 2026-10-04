@@ -648,6 +648,70 @@ async def cmd_stats(message: Message) -> None:
     await bot._tg_call(message.reply, text, parse_mode=ParseMode.HTML)
 
 
+_SELFTEST_LAST_RUN_MONOTONIC = 0.0
+SELFTEST_COOLDOWN_SEC = 60.0
+
+def _selftest_row(label: str, ok: bool, detail: str, elapsed: float) -> str:
+    """Одна строка итога без ID моделей (в группы команда не ходит вовсе)."""
+    base = f"{label}: {'OK' if ok else 'FAIL'} ({elapsed:.1f}s)"
+    return base if ok or not detail else f"{base} — {detail}"
+
+async def cmd_selftest(message: Message) -> None:
+    """Живая проверка голов маршрутов: по крошечной пробе в Groq, лёгкий OpenRouter
+    и сеть (прокси Telegram, TikWM) логикой /diag. Gemini — только по явному
+    аргументу, квота самая дефицитная. Только владелец, только личка, не чаще
+    раза в минуту. Успешные пробы честно пишутся в квоту."""
+    import bot
+    global _SELFTEST_LAST_RUN_MONOTONIC
+    if not bot._is_owner(message.from_user.id if message.from_user else None):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_group_only"))
+        return
+    now = time.monotonic()
+    wait = SELFTEST_COOLDOWN_SEC - (now - _SELFTEST_LAST_RUN_MONOTONIC)
+    if wait > 0:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_cooldown", sec=int(wait) + 1))
+        return
+    # Метку ставим до проб: повторный вызов во время долгой проверки тоже ждёт.
+    _SELFTEST_LAST_RUN_MONOTONIC = now
+    args = (getattr(message, "text", "") or "").split()
+    want_gemini = len(args) > 1 and args[1].split("@")[0].lower() == "gemini"
+    rows: list[str] = []
+    summary: list[str] = []
+    for provider, label in (("groq", "Groq"), ("openrouter", "OpenRouter")):
+        ok, detail, elapsed = await bot.selftest_llm_head(provider, chat_id=message.chat.id)
+        rows.append(_selftest_row(label, ok, detail, elapsed))
+        summary.append(f"{provider}={'ok' if ok else 'FAIL'}/{elapsed:.1f}s")
+    if want_gemini:
+        ok, detail, elapsed = await bot.selftest_llm_head("gemini", chat_id=message.chat.id)
+        rows.append(_selftest_row("Gemini", ok, detail, elapsed))
+        summary.append(f"gemini={'ok' if ok else 'FAIL'}/{elapsed:.1f}s")
+    try:
+        session = await bot._get_http_session()
+        token = bot.BOT_TOKEN or ""
+        proxy_url = bot.TELEGRAM_API_BASE_URL + "/bot" + (token[:6] if token else "x") + "/getMe"
+        net = await asyncio.gather(
+            bot.probe_url(session, proxy_url, timeout_sec=6.0, redact=token),
+            bot.probe_url(session, "https://www.tikwm.com", timeout_sec=6.0),
+        )
+    except Exception as exc:
+        net = [
+            {"ok": False, "elapsed_sec": 0.0, "error": f"{exc.__class__.__name__}"},
+            {"ok": False, "elapsed_sec": 0.0, "error": f"{exc.__class__.__name__}"},
+        ]
+    for label, res in (("TG-proxy", net[0]), ("TikWM", net[1])):
+        detail = "" if res.get("ok") else str(res.get("error") or res.get("status") or "error")[:120]
+        rows.append(_selftest_row(label, bool(res.get("ok")), detail, float(res.get("elapsed_sec") or 0.0)))
+        summary.append(f"{label}={'ok' if res.get('ok') else 'FAIL'}")
+    text = bot._t(message.chat.id, "selftest_header") + "\n" + "\n".join(rows)
+    if not want_gemini:
+        text += "\n" + bot._t(message.chat.id, "selftest_gemini_skipped")
+    await bot._tg_call(message.reply, text)
+    log.info("[selftest] chat=%s gemini_arg=%s %s", message.chat.id, want_gemini, " ".join(summary))
+
+
 _BUILD_VERSION_CACHED: str | None = None
 
 
