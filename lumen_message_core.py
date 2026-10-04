@@ -304,6 +304,31 @@ def _strip_trigger_content(clean_prompt: str, trigger: str, message: Message) ->
     return content
 
 
+def _direct_attachment_needs_gemini(message: Message) -> bool:
+    """Видео/аудио/документ (не картинка) во вложении или реплае — такое поздно
+    отдавать только Gemini, скачивание заранее бесполезно при исчерпанном лимите."""
+    for msg in (message, getattr(message, "reply_to_message", None)):
+        if msg is None:
+            continue
+        # Имя атрибута уже говорит о категории без скачивания (и без опоры на
+        # имя класса — в тестах лежат даблы, у aiogram свои типы).
+        for attr in ("video", "video_note", "animation", "voice", "audio"):
+            if getattr(msg, attr, None):
+                return True
+        src = _msg_media_source(msg)
+        if src is None:
+            continue
+        if type(src).__name__ in ("Video", "VideoNote", "Animation", "Voice", "Audio"):
+            return True
+        _, mime, _ = _media_file_id_and_mime(src)
+        m = (mime or "").lower()
+        if m.startswith(("video/", "audio/")):
+            return True
+        if type(src).__name__ == "Document" and not m.startswith("image/"):
+            return True
+    return False
+
+
 async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
     import bot
     t = message.text or message.caption or ""
@@ -333,6 +358,17 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             message.chat.id, "user_daily_total",
             used=(_early_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid_early, "total", _early_entry),
             hours=hours, mins=mins,
+        ))
+        return
+
+    # Видео/аудио при исчерпанном Gemini отказываем до скачивания: поздняя
+    # проверка после маршрута уже скачала бы файл и пожгла транскрибацию.
+    # Картинки пропускаем — их отдаст Groq/OpenRouter через поздний фолбэк.
+    if bot._user_daily_gemini_exhausted(uid_early, _early_entry) and _direct_attachment_needs_gemini(message):
+        bot._record_stats_event("daily_limit_denials")
+        await bot._safe_reply(message, bot._t(
+            message.chat.id, "user_daily_gemini",
+            used=(_early_entry or {}).get("gemini", 0), limit=bot._user_daily_limit(uid_early, "gemini", _early_entry),
         ))
         return
 

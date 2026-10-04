@@ -552,6 +552,10 @@ async def cmd_stats(message: Message) -> None:
     # Счётчики — по датам Google (сброс в _reset_quota_if_new_day проверяем перед отрисовкой: фоновый тик мог не успеть, а used копились через рестарты).
     bot._reset_quota_if_new_day()
 
+    # Вебхук опрашиваем параллельно со сборкой текста: иначе висящий API
+    # держал бы всю команду до 10с уже после готовой статистики.
+    _webhook_task = asyncio.ensure_future(_webhook_info_text())
+
     total_chats = len(bot.chat_state)
     # "Активные" — с живой активностью за сутки по настенным часам (monotonic
     # сбрасывался рестартом и считал активными всех). Без метки — неактивен.
@@ -608,7 +612,7 @@ async def cmd_stats(message: Message) -> None:
     proxy_line = bot._tg_proxy_breaker.status_text()
 
     quota_day = bot.GLOBAL_QUOTA.get("quota_day") or "—"
-    webhook_text = await _webhook_info_text()
+    webhook_text = await _webhook_task
 
     text = (
         f"<b>Статистика Lumen</b>\n"
@@ -644,12 +648,20 @@ async def cmd_stats(message: Message) -> None:
     await bot._tg_call(message.reply, text, parse_mode=ParseMode.HTML)
 
 
+_BUILD_VERSION_CACHED: str | None = None
+
+
 def _build_version() -> str:
     """Короткий хеш сборки для /stats: env сборки, иначе git, иначе unknown."""
+    global _BUILD_VERSION_CACHED
+    # git-вызов блокирует loop до 5с — считаем один раз за жизнь процесса.
+    if _BUILD_VERSION_CACHED is not None:
+        return _BUILD_VERSION_CACHED
     for env_name in ("LUMEN_BUILD_VERSION", "BUILD_VERSION", "GIT_COMMIT", "COMMIT_SHA"):
         raw = os.getenv(env_name, "").strip()
         if raw:
-            return raw[:12]
+            _BUILD_VERSION_CACHED = raw[:12]
+            return _BUILD_VERSION_CACHED
     try:
         proc = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -657,9 +669,11 @@ def _build_version() -> str:
         )
         sha = (proc.stdout or "").strip()
         if proc.returncode == 0 and sha:
-            return sha[:12]
+            _BUILD_VERSION_CACHED = sha[:12]
+            return _BUILD_VERSION_CACHED
     except Exception:
         pass
+    _BUILD_VERSION_CACHED = "unknown"
     return "unknown"
 
 

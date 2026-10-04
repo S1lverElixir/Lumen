@@ -2874,3 +2874,36 @@ def test_core_refuses_youtube_when_gemini_exhausted(rate_guard_setup, monkeypatc
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
         bot.chat_state.pop(123, None)
+
+
+def test_core_refuses_video_before_download_when_gemini_exhausted(rate_guard_setup, monkeypatch):
+    # Защищает ранний отказ для видео/аудио: поздняя проверка скачала бы файл
+    # и пожгла транскрибацию перед отказом. Регрессия — возврат проверки под
+    # скачивание. Старые тесты гоняют только текстовые/YouTube-отказы.
+    from types import SimpleNamespace as _NS
+    message = rate_guard_setup()
+    message.text = "смотри"
+    message.video = _NS(file_id="vid123")
+    monkeypatch.setattr(bot, "DAILY_USER_GEMINI_LIMIT", 1)
+    bot._record_user_daily(456, gemini=True)
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    async def fail_download(*args, **kwargs):
+        raise AssertionError("exhausted user media must not be downloaded")
+
+    async def fail_route(*args, **kwargs):
+        raise AssertionError("gemini-only request must not reach models")
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    monkeypatch.setattr(bot, "_run_route", fail_route)
+    monkeypatch.setattr(bot, "_download_message_attachment_to_tmp", fail_download)
+    monkeypatch.setattr(bot, "_fetch_media", fail_download)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert len(replies) == 1 and "1/1" in replies[0]
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
+        bot.chat_state.pop(123, None)

@@ -286,8 +286,31 @@ def test_cmd_stats_truncation_keeps_html_valid(monkeypatch):
         lcs.chat_state.pop(chat_id, None)
 
 
-def test_match_trigger_prefix_finds_draw_trigger():
-    assert bot._match_trigger_prefix("нарисуй кота на пляже", bot.DRAW_TRIGGER_PREFIXES) == "нарисуй"
+def test_build_version_caches_git_call(monkeypatch):
+    # Защищает кеш версии: git-вызов блокирует loop до 5с, без кеша каждый
+    # /stats стопает бота. Регрессия — прямой subprocess при каждом вызове.
+    import lumen_commands as lc
+    monkeypatch.setattr(lc, "_BUILD_VERSION_CACHED", None)
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "abc1234\n"
+
+    def fake_run(*args, **kwargs):
+        calls.append(1)
+        return _Proc()
+
+    monkeypatch.setattr(lc.subprocess, "run", fake_run)
+    try:
+        assert lc._build_version() == "abc1234"
+        assert lc._build_version() == "abc1234"
+        assert len(calls) == 1
+    finally:
+        monkeypatch.setattr(lc, "_BUILD_VERSION_CACHED", None)
+
+
+def test_match_trigger_prefix_finds_draw_trigger():    assert bot._match_trigger_prefix("нарисуй кота на пляже", bot.DRAW_TRIGGER_PREFIXES) == "нарисуй"
 
 
 def test_match_trigger_prefix_finds_tts_trigger():
