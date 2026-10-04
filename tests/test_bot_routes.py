@@ -1233,8 +1233,19 @@ def test_system_prompt_en_keeps_key_guards():
         "8-800-2000-122",
         "EMOJI USAGE RULE",
         "NON-REMOVABLE BOUNDARIES",
+        "without moralizing",
+        "explicit sexual content",
+        "romantic or sexual roleplay",
+        "malicious code",
+        "prohibited substances",
     ):
         assert guard in system_prompt.SYSTEM_PROMPT
+    # Границы продукта 10.2026: возврат к "minimal filters" с разрешением явного контента прошёл бы старые проверки.
+    for gone in (
+        "minimal filters",
+        "You may discuss adult topics, sexual content",
+    ):
+        assert gone not in system_prompt.SYSTEM_PROMPT
 
 
 def test_get_system_prompt_header_english():
