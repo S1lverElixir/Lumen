@@ -140,6 +140,31 @@ def _or_extract_text(data: Any) -> str:
          return "".join(bot._or_extract_text(i) for i in data)
     return ""
 
+def _log_llm_usage(*, chat_id: Any, provider: str, model_id: str,
+                    prompt: Any = None, completion: Any = None, total: Any = None) -> None:
+    """Одна строка usage на успешный ответ — только если API вернуло счётчики (иначе молчим)."""
+    if prompt is None and completion is None and total is None:
+        return
+    log.info("[usage] chat=%s provider=%s model=%s prompt=%s completion=%s total=%s",
+             chat_id, provider, model_id, prompt, completion, total)
+
+
+def _usage_from_openai_response(resp: Any) -> tuple[Any, Any, Any]:
+    usage = resp.get("usage") if isinstance(resp, dict) else None
+    if not isinstance(usage, dict):
+        return None, None, None
+    return usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens")
+
+
+def _usage_from_gemini_response(resp: Any) -> tuple[Any, Any, Any]:
+    meta = getattr(resp, "usage_metadata", None)
+    if meta is None:
+        return None, None, None
+    return (getattr(meta, "prompt_token_count", None),
+            getattr(meta, "candidates_token_count", None),
+            getattr(meta, "total_token_count", None))
+
+
 def _is_account_wide_or_rate_limit(text: str) -> bool:
     """"free-models-per-day" — лимит на весь аккаунт, а не модель: при нём сразу рвём всю цепочку (иначе минуты попыток впустую — в логах было 168с)."""
     low = text.lower()
@@ -188,7 +213,7 @@ async def _probe_or_model_liveness() -> None:
 async def _chat_completion_chain(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
     request_fn, provider: str, deadline: float | None = None, stop_on: Callable[[Exception], bool] | None = None,
-    log_label: str | None = None,
+    log_label: str | None = None, chat_id: Any = None,
 ) -> tuple[str, str]:
     """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (OpenRouter и Groq).
 
@@ -233,6 +258,9 @@ async def _chat_completion_chain(
 
             answer = _scrub_identity_leak(answer, source=f"{provider}_chat_completion:{model_trial}")
             log.info('[%s] Successful response from model %s (primary=%s, models tried: %d)', label, model_trial, primary_model_id, len(tried))
+            _pt, _ct, _tt = _usage_from_openai_response(resp)
+            _log_llm_usage(chat_id=chat_id, provider=provider, model_id=model_trial,
+                           prompt=_pt, completion=_ct, total=_tt)
             _record_model_latency(_model_speed_key(provider, model_trial), total_sec=time.monotonic() - attempt_start)
             return answer, model_trial
         except bot.RouteBudgetExceededError:
@@ -254,7 +282,7 @@ async def _chat_completion_chain(
 
 async def _or_chat_completion_with_fallback(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
-    deadline: float | None = None,
+    deadline: float | None = None, chat_id: Any = None,
 ) -> tuple[str, str]:
     """Fallback-цикл по цепочке OpenRouter поверх общего _chat_completion_chain. Аккаунтный
     лимит free-моделей/сутки обрывает остаток цепочки сразу — они упали бы тем же
@@ -272,7 +300,7 @@ async def _or_chat_completion_with_fallback(
     return await _chat_completion_chain(
         messages, trial_models, primary_model_id,
         request_fn=_request, provider="openrouter", deadline=deadline,
-        stop_on=_account_wide, log_label="or",
+        stop_on=_account_wide, log_label="or", chat_id=chat_id,
     )
 
 async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
@@ -286,7 +314,7 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     # Сборка messages — только в _build_openrouter_turn_messages (общая со стримингом).
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, primary_model_id)
 
-    answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline)
+    answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id)
 
     # В историю пишем чистый текст (без "Фон разговора") — её читает и Gemini, разовый групповой контекст там оседать не должен.
     history.append({"role": "user", "content": _history_user_text(user_text)})
@@ -317,7 +345,7 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     # RouteBudgetExceededError пробрасываются наверх тем же путём.
     answer, model_trial = await _chat_completion_chain(
         messages, trial_models, primary_model_id,
-        request_fn=_request, provider="groq", deadline=deadline,
+        request_fn=_request, provider="groq", deadline=deadline, chat_id=chat_id,
     )
 
     # В историю — чистый текст пользователя, как у остальных провайдеров.
@@ -418,7 +446,7 @@ async def ask_openrouter_multimodal(
         ]
     })
 
-    answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline)
+    answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id)
 
     history.append({"role": "user", "content": _history_user_text(user_text)})
     history.append({"role": "assistant", "content": answer})
@@ -728,6 +756,9 @@ async def ask_gemini(
     if resp is None:
         raise RuntimeError("No response received from Gemini after retries.")
     log.info('[gemini] Successful response from model %s (models tried: %d)', curr_model_id, len(tried_models))
+    _gpt, _gct, _gtt = _usage_from_gemini_response(resp)
+    _log_llm_usage(chat_id=chat_id, provider="gemini", model_id=curr_model_id,
+                   prompt=_gpt, completion=_gct, total=_gtt)
     _record_model_latency(_model_speed_key("gemini", curr_model_id), total_sec=time.monotonic() - attempt_start)
 
     ans = _scrub_identity_leak(ans, source=f"ask_gemini:{curr_model_id}")

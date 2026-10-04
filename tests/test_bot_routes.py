@@ -1741,3 +1741,85 @@ def test_run_route_failure_records_no_user_daily():
         bot.ask_openrouter_text = original
         bot.chat_state.pop(chat_id, None)
 
+
+def test_gemini_success_logs_token_usage_when_api_returns_it(caplog):
+    # Что защищает: единственную точку калибровки лимитов по логам для Gemini
+    # (usage_metadata.prompt_token_count/candidates_token_count/total_token_count).
+    # Регрессия: тихий дроп usage при рефакторинге ask_gemini — счётчики пропадут из
+    # логов, лимиты не на чем калибровать. Старые тесты проверяют только текст/историю.
+    import logging
+    from types import SimpleNamespace
+    chat_id = 999901
+
+    def fake_generate_content(*, model, contents, config=None):
+        resp = _FakeGeminiResponse(text="Привет!")
+        resp.usage_metadata = SimpleNamespace(prompt_token_count=10, candidates_token_count=20, total_token_count=30)
+        return resp
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        with caplog.at_level(logging.INFO, logger="bot"):
+            answer = asyncio.run(bot.ask_gemini(chat_id, "Привет"))
+        assert answer == "Привет!"
+        usage_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[usage]")]
+        assert len(usage_lines) == 1
+        line = usage_lines[0]
+        assert f"chat={chat_id}" in line and "provider=gemini" in line
+        assert "prompt=10" in line and "completion=20" in line and "total=30" in line
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        caplog.clear()
+
+
+def test_gemini_success_logs_no_usage_line_without_metadata(caplog):
+    # Пара к предыдущему: если API usage не вернуло — строка [usage] не пишется,
+    # лог не засоряется пустышками. Старые тесты такого не проверяют.
+    import logging
+    chat_id = 999902
+
+    def fake_generate_content(*, model, contents, config=None):
+        return _FakeGeminiResponse(text="Привет!")
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        with caplog.at_level(logging.INFO, logger="bot"):
+            asyncio.run(bot.ask_gemini(chat_id, "Привет"))
+        assert not [r for r in caplog.records if r.getMessage().startswith("[usage]")]
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        caplog.clear()
+
+
+def test_openrouter_success_logs_token_usage_when_api_returns_it(caplog, monkeypatch):
+    # Что защищает: точку калибровки для OpenRouter/Groq (поле usage.prompt_tokens/
+    # completion_tokens/total_tokens — общий цикл _chat_completion_chain, один тест
+    # покрывает обоих). Регрессия: потеря usage при правках цикла. Старые тесты
+    # мокают ответы без usage и строку [usage] не ищут.
+    import logging
+    chat_id = 999903
+
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": [{"message": {"content": "ответ"}}],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33}}
+
+    monkeypatch.setattr(bot, "_or_request", fake_or_request)
+    try:
+        with caplog.at_level(logging.INFO, logger="bot"):
+            asyncio.run(bot.ask_openrouter_text(chat_id, "привет", model_chain=["m1"]))
+        usage_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[usage]")]
+        assert len(usage_lines) == 1
+        line = usage_lines[0]
+        assert f"chat={chat_id}" in line and "provider=openrouter" in line and "model=m1" in line
+        assert "prompt=11" in line and "completion=22" in line and "total=33" in line
+    finally:
+        bot.chat_state.pop(chat_id, None)
+        caplog.clear()
+
