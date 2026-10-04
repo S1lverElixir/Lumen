@@ -207,6 +207,14 @@ STRINGS: dict[str, dict[str, str]] = {
             "Питай що завгодно — я слухаю."
         ),
     },
+    "group_history_notice": {
+        "be": "У групах захоўваю апошнія паведамленні (да 100) як кантэкст і адпраўляю іх пастаўшчыкам мадэляў разам з тваім пытаннем.",
+        "en": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
+        "es": "En los grupos guardo los mensajes recientes (hasta 100) como contexto y los envío a los proveedores de modelos junto con tu pregunta.",
+        "kk": "Топтарда соңғы хабарламаларды (100-ге дейін) контекст ретінде сақтаймын және оларды сұрағыңмен бірге модель провайдерлеріне жіберемін.",
+        "ru": "В группах сохраняю недавние сообщения (до 100) как контекст и отправляю их провайдерам моделей вместе с вопросом.",
+        "uk": "У групах зберігаю останні повідомлення (до 100) як контекст і надсилаю їх провайдерам моделей разом із запитанням.",
+    },
     # ── Подсказки пустых команд ──
     "draw_empty": {
         "be": "Пазнач тэкст пасля каманды /draw. Прыклад: /draw касмічная станцыя",
@@ -726,6 +734,7 @@ PACK_PT: dict[str, str] = {
         "Envie um link — baixo o vídeo ou as fotos sem marcas d'água.\n\n"
         "Pergunte o que quiser — estou ouvindo."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Adicione texto após o comando /draw. Exemplo: /draw estação espacial",
     "tts_empty": "Adicione texto após o comando /tts. Exemplo: /tts Bom dia",
     "tts_too_long": "Texto muito longo para conversão em voz (limite de {limit} caracteres, agora {length}). Encurte o texto e tente de novo.",
@@ -810,6 +819,7 @@ PACK_AR: dict[str, str] = {
         "أرسل رابطًا — سأحمّل الفيديو أو الصور دون علامات مائية.\n\n"
         "اسأل ما تشاء — أنا أستمع."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "أضف نصًا بعد الأمر /draw. مثال: /draw محطة فضائية",
     "tts_empty": "أضف نصًا بعد الأمر /tts. مثال: /tts صباح الخير",
     "tts_too_long": "النص طويل جدًا للتحويل إلى صوت (الحد {limit} حرفًا، الآن {length}). اختصر النص وحاول مجددًا.",
@@ -894,6 +904,7 @@ PACK_TR: dict[str, str] = {
         "Bağlantı gönder — videoyu veya fotoğrafları filigransız indireyim.\n\n"
         "Ne istersen sor — dinliyorum."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "/draw komutundan sonra metin yaz. Örnek: /draw uzay istasyonu",
     "tts_empty": "/tts komutundan sonra metin yaz. Örnek: /tts Günaydın",
     "tts_too_long": "Metin seslendirme için çok uzun (limit {limit} karakter, şimdi {length}). Metni kısaltıp tekrar dene.",
@@ -978,6 +989,7 @@ PACK_DE: dict[str, str] = {
         "Link schicken — ich lade Video oder Fotos ohne Wasserzeichen herunter.\n\n"
         "Frag einfach — ich höre zu."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Text nach dem Befehl /draw angeben. Beispiel: /draw Raumstation",
     "tts_empty": "Text nach dem Befehl /tts angeben. Beispiel: /tts Guten Tag",
     "tts_too_long": "Text ist zu lang zum Vertonen (Limit {limit} Zeichen, jetzt {length}). Text kürzen und erneut versuchen.",
@@ -1062,6 +1074,7 @@ PACK_FR: dict[str, str] = {
         "Envoie un lien — je téléchargerai la vidéo ou les photos sans filigrane.\n\n"
         "Demande ce que tu veux — j'écoute."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Ajoute du texte après la commande /draw. Exemple : /draw station spatiale",
     "tts_empty": "Ajoute du texte après la commande /tts. Exemple : /tts Bonjour",
     "tts_too_long": "Texte trop long pour la voix (limite de {limit} caractères, actuellement {length}). Raccourcis le texte et réessaie.",
@@ -1146,6 +1159,7 @@ PACK_IT: dict[str, str] = {
         "Invia un link — scaricherò il video o le foto senza watermark.\n\n"
         "Chiedi pure — ti ascolto."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Aggiungi testo dopo il comando /draw. Esempio: /draw stazione spaziale",
     "tts_empty": "Aggiungi testo dopo il comando /tts. Esempio: /tts Buongiorno",
     "tts_too_long": "Testo troppo lungo per la voce (limite di {limit} caratteri, ora {length}). Accorcia il testo e riprova.",
@@ -1230,6 +1244,7 @@ PACK_HI: dict[str, str] = {
         "लिंक भेजो — वीडियो या फ़ोटो बिना वॉटरमार्क डाउनलोड कर दूंगा।\n\n"
         "कुछ भी पूछो — सुन रहा हूं।"
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "/draw कमांड के बाद टेक्स्ट लिखो। उदाहरण: /draw अंतरिक्ष स्टेशन",
     "tts_empty": "/tts कमांड के बाद टेक्स्ट लिखो। उदाहरण: /tts नमस्ते",
     "tts_too_long": "टेक्स्ट आवाज़ के लिए बहुत लंबा है (सीमा {limit} अक्षर, अभी {length})। टेक्स्ट छोटा करके फिर कोशिश करो।",
@@ -1314,6 +1329,7 @@ PACK_ID: dict[str, str] = {
         "Kirim tautan — akan kuunduh video atau fotonya tanpa watermark.\n\n"
         "Tanya apa saja — aku mendengarkan."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Tambahkan teks setelah perintah /draw. Contoh: /draw stasiun luar angkasa",
     "tts_empty": "Tambahkan teks setelah perintah /tts. Contoh: /tts Selamat pagi",
     "tts_too_long": "Teks terlalu panjang untuk diucapkan (batas {limit} karakter, sekarang {length}). Persingkat teks dan coba lagi.",
@@ -1398,6 +1414,7 @@ PACK_MS: dict[str, str] = {
         "Hantar pautan — saya akan muat turun video atau fotonya tanpa tera air.\n\n"
         "Tanya apa sahaja — saya mendengar."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Tambah teks selepas perintah /draw. Contoh: /draw stesen angkasa",
     "tts_empty": "Tambah teks selepas perintah /tts. Contoh: /tts Selamat pagi",
     "tts_too_long": "Teks terlalu panjang untuk diucapkan (had {limit} aksara, kini {length}). Pendekkan teks dan cuba lagi.",
@@ -1482,6 +1499,7 @@ PACK_VI: dict[str, str] = {
         "Gửi liên kết — mình sẽ tải video hoặc ảnh không watermark.\n\n"
         "Hỏi gì cũng được — mình đang nghe."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Thêm chữ sau lệnh /draw. Ví dụ: /draw trạm vũ trụ",
     "tts_empty": "Thêm chữ sau lệnh /tts. Ví dụ: /tts Chào buổi sáng",
     "tts_too_long": "Chữ quá dài để đọc thành tiếng (giới hạn {limit} ký tự, hiện tại {length}). Rút ngắn chữ rồi thử lại.",
@@ -1566,6 +1584,7 @@ PACK_TH: dict[str, str] = {
         "ส่งลิงก์มา — จะดาวน์โหลดวิดีโอหรือรูปภาพแบบไม่มีลายน้ำ\n\n"
         "ถามอะไรมาก็ได้ — กำลังฟัง"
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "เพิ่มข้อความหลังคำสั่ง /draw ตัวอย่าง: /draw สถานีอวกาศ",
     "tts_empty": "เพิ่มข้อความหลังคำสั่ง /tts ตัวอย่าง: /tts สวัสดีตอนเช้า",
     "tts_too_long": "ข้อความยาวเกินไปสำหรับการอ่านออกเสียง (จำกัด {limit} ตัวอักษร ตอนนี้ {length}) ย่อข้อความแล้วลองใหม่",
@@ -1650,6 +1669,7 @@ PACK_FA: dict[str, str] = {
         "لینک بفرست — ویدیو یا عکس‌ها را بدون واترمارک دانلود می‌کنم.\n\n"
         "هر چه می‌خواهی بپرس — گوش می‌دهم."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "بعد از دستور /draw متن بنویس. مثال: /draw ایستگاه فضایی",
     "tts_empty": "بعد از دستور /tts متن بنویس. مثال: /tts صبح بخیر",
     "tts_too_long": "متن برای گفتار خیلی طولانی است (سقف {limit} نویسه، الان {length}). متن را کوتاه کن و دوباره تلاش کن.",
@@ -1734,6 +1754,7 @@ PACK_UR: dict[str, str] = {
         "لنک بھیجو — ویڈیو یا تصاویر بغیر واٹرمارک ڈاؤن لوڈ کر دوں گا۔\n\n"
         "کچھ بھی پوچھو — سن رہا ہوں۔"
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "/draw کمانڈ کے بعد متن لکھو۔ مثال: /draw خلائی اسٹیشن",
     "tts_empty": "/tts کمانڈ کے بعد متن لکھو۔ مثال: /tts صبح بخیر",
     "tts_too_long": "متن آواز کے لیے بہت لمبا ہے (حد {limit} حروف، ابھی {length})۔ متن چھوٹا کر کے پھر کوشش کرو۔",
@@ -1818,6 +1839,7 @@ PACK_UZ: dict[str, str] = {
         "Havola yubor — videoni yoki fotolarni suv belgisiz yuklab beraman.\n\n"
         "Xohlaganingni so'ra — eshityapman."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "/draw buyrug'idan keyin matn yoz. Masalan: /draw kosmik stansiya",
     "tts_empty": "/tts buyrug'idan keyin matn yoz. Masalan: /tts Xayrli tong",
     "tts_too_long": "Matn ovozlash uchun juda uzun (limit {limit} belgi, hozir {length}). Matnni qisqartirib qayta urin.",
@@ -1902,6 +1924,7 @@ PACK_BN: dict[str, str] = {
         "লিংক পাঠাও — ভিডিও বা ছবি ওয়াটারমার্ক ছাড়া ডাউনলোড করে দেব।\n\n"
         "যা খুশি জিজ্ঞেস করো — শুনছি।"
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "/draw কমান্ডের পর টেক্সট লেখো। উদাহরণ: /draw মহাকাশ স্টেশন",
     "tts_empty": "/tts কমান্ডের পর টেক্সট লেখো। উদাহরণ: /tts সুপ্রভাত",
     "tts_too_long": "টেক্সট কণ্ঠের জন্য অনেক লম্বা (সীমা {limit} অক্ষর, এখন {length})। টেক্সট ছোট করে আবার চেষ্টা করো।",
@@ -1986,6 +2009,7 @@ PACK_FIL: dict[str, str] = {
         "Mag-send ng link — ida-download ko ang video o mga photo nang walang watermark.\n\n"
         "Magtanong ka lang — nakikinig ako."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Magdagdag ng text pagkatapos ng /draw. Halimbawa: /draw istasyon ng kalawakan",
     "tts_empty": "Magdagdag ng text pagkatapos ng /tts. Halimbawa: /tts Magandang umaga",
     "tts_too_long": "Masyadong mahaba ang text para basahin (limit {limit} character, ngayon {length}). Paikliin ang text at subukan uli.",
@@ -2070,6 +2094,7 @@ PACK_PL: dict[str, str] = {
         "Wyślij link — pobiorę film lub zdjęcia bez znaków wodnych.\n\n"
         "Pytaj o co chcesz — słucham."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Dopisz tekst po komendzie /draw. Przykład: /draw stacja kosmiczna",
     "tts_empty": "Dopisz tekst po komendzie /tts. Przykład: /tts Dzień dobry",
     "tts_too_long": "Tekst jest za długi do odczytania (limit {limit} znaków, teraz {length}). Skróć tekst i spróbuj ponownie.",
@@ -2154,6 +2179,7 @@ PACK_NL: dict[str, str] = {
         "Stuur een link — ik download de video of foto's zonder watermerk.\n\n"
         "Vraag maar — ik luister."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Voeg tekst toe na het commando /draw. Voorbeeld: /draw ruimtestation",
     "tts_empty": "Voeg tekst toe na het commando /tts. Voorbeeld: /tts Goedemorgen",
     "tts_too_long": "Tekst is te lang om uit te spreken (limiet {limit} tekens, nu {length}). Kort de tekst in en probeer opnieuw.",
@@ -2238,6 +2264,7 @@ PACK_ZU: dict[str, str] = {
         "Thumela isixhumanisi — ngizolanda ividiyo noma izithombe ngaphandle kwe-watermark.\n\n"
         "Buza noma yini — ngilalele."
     ),
+    "group_history_notice": "In groups I keep recent messages (up to 100) as context and send them to the model providers together with your question.",
     "draw_empty": "Nezela umbiko ngemva komyalo /draw. Isibonelo: /draw isiteshi sasemkhathini",
     "tts_empty": "Nezela umbiko ngemva komyalo /tts. Isibonelo: /tts Sawubona ekuseni",
     "tts_too_long": "Umbiko mude kakhulu ukufundwa (umkhawulo {limit} izinhlamvu, manje {length}). Finyeza umbiko bese uzama futhi.",

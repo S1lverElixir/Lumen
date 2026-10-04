@@ -387,6 +387,38 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones(monkeypat
     assert "Попробуй прямо сейчас" in _lang_t_direct("ru", "start_text")
 
 
+@pytest.mark.parametrize("chat_type,is_group", [
+    (bot.ChatType.PRIVATE, False),
+    (bot.ChatType.GROUP, True),
+    (bot.ChatType.SUPERGROUP, True),
+])
+def test_cmd_start_group_notice_only_in_groups(monkeypatch, chat_type, is_group):
+    # Пометка про фон группы (до 100 сообщений уходит провайдерам) терялась бы молча:
+    # старые тесты гоняли /start только в личке.
+    captured = {}
+
+    class _FakeStartMessage:
+        chat = SimpleNamespace(id=9101, type=chat_type)
+
+        async def reply(self, text, **kwargs):
+            captured["text"] = text
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
+    try:
+        asyncio.run(bot.cmd_start(_FakeStartMessage()))
+        text = captured["text"]
+        from lumen_lang import t as _lang_t_direct
+        notice = _lang_t_direct("en", "group_history_notice")
+        if is_group:
+            assert notice in text
+            assert "100" in text
+        else:
+            assert notice not in text
+    finally:
+        bot.chat_state.pop(9101, None)
+
+
 def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
     chat_id = 999430
     captured_model = []

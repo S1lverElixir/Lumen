@@ -122,6 +122,8 @@ Two more owner-only commands stay out of the menu on purpose, since they surface
 | `/stats` | bot owner, DMs only | Active chat count, process uptime, per-model quota usage. |
 | `/logs` | bot owner, DMs only | Sends `bot.log` with secrets redacted. |
 
+In groups the bot keeps recent messages (up to 100) as context and sends them to the model providers together with the question; `/reset` (group admins/owner) clears them.
+
 ## Testing
 
 ```bash

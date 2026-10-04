@@ -50,9 +50,13 @@ async def cmd_start(message: Message) -> None:
     # бесконечные ответы в группе, расходуя прокси-трафик (аудит 26.09.2026).
     if await bot._reject_rate_limited_message(message):
         return
+    text = bot._t(message.chat.id, "start_text")
+    if message.chat.type != ChatType.PRIVATE:
+        # В группах контекст честно виден: фон чата (до 100 сообщений) уходит провайдерам вместе с вопросом.
+        text += "\n\n" + bot._t(message.chat.id, "group_history_notice")
     await bot._tg_call(
         message.reply,
-        bot._t(message.chat.id, "start_text"),
+        text,
         parse_mode=ParseMode.HTML,
     )
 
