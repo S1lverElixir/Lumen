@@ -350,6 +350,32 @@ TTS_TOTAL_BUDGET_SEC = _env_number("TTS_TOTAL_BUDGET_SEC", 240, min_value=30)
 DAILY_USER_MESSAGE_LIMIT = _env_number("DAILY_USER_MESSAGE_LIMIT", 30, cast=int, min_value=1)
 DAILY_USER_GEMINI_LIMIT = _env_number("DAILY_USER_GEMINI_LIMIT", 5, cast=int, min_value=1)
 DAILY_USER_TTS_LIMIT = _env_number("DAILY_USER_TTS_LIMIT", 5, cast=int, min_value=1)
+# Суточные лимиты провайдеров для /stats: раньше хардкоды 50/1000 жили в самой
+# команде и расходились бы с реальностью при смене тарифа.
+OPENROUTER_DAILY_LIMIT = _env_number("OPENROUTER_DAILY_LIMIT", 50, cast=int, min_value=1)
+GROQ_DAILY_LIMIT = _env_number("GROQ_DAILY_LIMIT", 1000, cast=int, min_value=1)
+
+
+def _parse_gemini_daily_limits(raw: str) -> dict[str, int]:
+    """Разбирает GEMINI_DAILY_LIMITS вида "model=limit,model=limit" (RPD из
+    дашборда AI Studio, у каждой модели свой). Мусор молча пропускает."""
+    out: dict[str, int] = {}
+    for chunk in (raw or "").split(","):
+        name, sep, val = chunk.partition("=")
+        name = name.strip()
+        if not sep or not name:
+            continue
+        try:
+            num = int(val.strip())
+        except (TypeError, ValueError):
+            continue
+        if num >= 1:
+            out[name] = num
+    return out
+
+
+# Пусто — как раньше: у Gemini общего лимита нет, показываем только расход.
+GEMINI_DAILY_LIMITS: dict[str, int] = _parse_gemini_daily_limits(os.getenv("GEMINI_DAILY_LIMITS", ""))
 _PROCESS_START_MONOTONIC = time.monotonic()
 # ── Тайминги автоматического маршрутизатора моделей (см. секцию "автоматический
 # выбор модели" ниже) ──
@@ -459,6 +485,10 @@ from lumen_chat_state import (
     _quota_entry,
     _mark_quota_exhausted,
     _record_quota_usage,
+    STATS_KEY,
+    _stats_entry,
+    _record_stats_event,
+    _last_storage_write_ts,
     USER_DAILY_KEY,
     MAX_USER_DAILY_KEYS,
     _user_daily_entry,
@@ -814,6 +844,10 @@ __all__ = [
     "_flush_dirty_state_once",
     "_prune_old_chats",
     "_quota_entry",
+    "STATS_KEY",
+    "_stats_entry",
+    "_record_stats_event",
+    "_last_storage_write_ts",
     # Локи чатов код bot.py берёт через acquire_chat_lock; оба имени ниже —
     # только для `bot.X` в тестах.
     "get_chat_lock",
@@ -901,6 +935,10 @@ __all__ = [
     "clean_mention",
     "inline_draw",
     "inline_tts",
+    "_build_version",
+    "_webhook_info_text",
+    "_process_memory_text",
+    "_storage_backend_text",
     "_send_pick_question",
     "DEFAULT_GEMINI_MODEL",
     "_looks_like_heavy_query",
@@ -1150,6 +1188,10 @@ from lumen_commands import (
     handle_lang_callback,
     cmd_logs,
     cmd_stats,
+    _build_version,
+    _webhook_info_text,
+    _process_memory_text,
+    _storage_backend_text,
     _send_pick_question,
     handle_pick_callback,
 )

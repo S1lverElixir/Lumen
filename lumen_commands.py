@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import secrets
+import subprocess
 import tempfile
 import time
 from types import SimpleNamespace
@@ -122,6 +123,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
             )
             if sent is None:
                 raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
+            # Суточный счётчик /stats: картинка ушла пользователю.
+            bot._record_stats_event("answers_sent")
         else:
             if rate_limited:
                 raise RuntimeError("image generation service overloaded with requests") from last_error
@@ -321,6 +324,8 @@ async def inline_tts(message: Message, text: str) -> None:
     if bot._user_daily_total_exhausted(uid):
         entry = bot._user_daily_entry(uid)
         hours, mins = bot._user_daily_reset_in()
+        # Суточный счётчик /stats: отказ по лимиту, озвучки не будет.
+        bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
             message.chat.id, "user_daily_total",
             used=entry.get("total", 0), limit=bot._user_daily_limit(uid, "total"),
@@ -329,6 +334,7 @@ async def inline_tts(message: Message, text: str) -> None:
         return
     if bot._user_daily_tts_exhausted(uid):
         entry = bot._user_daily_entry(uid)
+        bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
             message.chat.id, "user_daily_tts",
             used=entry.get("tts", 0), limit=bot._user_daily_limit(uid, "tts"),
@@ -384,6 +390,7 @@ async def inline_tts(message: Message, text: str) -> None:
             raise RuntimeError("Telegram send_voice failed: connection timeout or proxy unavailable")
     # Один запрос — один счёт: чанки одного сообщения не множат дневной расход.
     bot._record_user_daily(uid, tts=True)
+    bot._record_stats_event("answers_sent")
     if shortened:
         # Обрезка по общему дедлайну — говорим прямо, что озвучено начало.
         await bot._safe_reply(message, bot._t(message.chat.id, "tts_shortened"))
@@ -546,12 +553,15 @@ async def cmd_stats(message: Message) -> None:
     bot._reset_quota_if_new_day()
 
     total_chats = len(bot.chat_state)
-    # "Активные" — с живой активностью за сутки, а не все записи в памяти (те копятся до пруна на 5000).
-    _active_cutoff = time.monotonic() - 24 * 3600
-    active_chats = sum(
-        1 for s in bot.chat_state.values()
-        if isinstance(s, dict) and s.get("last_activity", 0) >= _active_cutoff
-    )
+    # "Активные" — с живой активностью за сутки по настенным часам (monotonic
+    # сбрасывался рестартом и считал активными всех). Без метки — неактивен.
+    _active_cutoff = time.time() - 24 * 3600
+
+    def _is_active(s: Any) -> bool:
+        ts = s.get("last_activity") if isinstance(s, dict) else None
+        return isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts >= _active_cutoff
+
+    active_chats = sum(1 for s in bot.chat_state.values() if _is_active(s))
     uptime_sec = int(time.monotonic() - bot._PROCESS_START_MONOTONIC)
     uptime_str = f"{uptime_sec // 3600}ч {(uptime_sec % 3600) // 60}м"
 
@@ -560,16 +570,22 @@ async def cmd_stats(message: Message) -> None:
     _limitTag = _lang_t(_stats_lang, "stats_limit_used")
     _noData = _lang_t(_stats_lang, "stats_no_data")
 
-    def _quota_section(quota: dict, daily_limit: int | None) -> str:
+    def _quota_section(quota: dict, daily_limit: int | None, per_model_limits: dict | None = None) -> str:
         # Показываем только модели с движением (расход или метка исчерпания) — нули по
         # давно мёртвым моделям копятся в хранилище через рестарты и превращали вывод в простыню.
         items = sorted(quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
         used_total = sum(int(e.get("used") or 0) for _, e in items)
         active = [(mid, e) for mid, e in items if (e.get("used") or 0) or e.get("exhausted_at")]
-        lines = [
-            f"  • {mid}: {e.get('used', 0)}{_limitTag if e.get('exhausted_at') else ''}"
-            for mid, e in active
-        ]
+        lines = []
+        for mid, e in active:
+            line = f"  • {mid}: {e.get('used', 0)}"
+            # Лимит Gemini — только где задан в env (у каждой модели свой RPD).
+            _mlim = (per_model_limits or {}).get(mid)
+            if isinstance(_mlim, int) and not isinstance(_mlim, bool) and _mlim > 0:
+                line += f" / {_mlim}"
+            if e.get('exhausted_at'):
+                line += _limitTag
+            lines.append(line)
         idle = len(items) - len(active)
         if idle:
             lines.append(f"  …и ещё {idle} без обращений")
@@ -579,28 +595,123 @@ async def cmd_stats(message: Message) -> None:
         lines.append(total)
         return "\n".join(lines) or _noData
 
-    gemini_text = _quota_section(gemini_quota, None)
-    # OpenRouter — дневной лимит free-моделей 50 (с $10 — 1000, тогда остаток врёт в меньшую сторону).
-    or_text = _quota_section(bot.GLOBAL_QUOTA.get("openrouter", {}), 50)
-    # Groq — дневной лимит free-плана 1000 запросов (калибровка 21.09.2026).
-    groq_text = _quota_section(bot.GLOBAL_QUOTA.get("groq", {}), 1000)
+    gemini_text = _quota_section(gemini_quota, None, bot.GEMINI_DAILY_LIMITS)
+    or_text = _quota_section(bot.GLOBAL_QUOTA.get("openrouter", {}), bot.OPENROUTER_DAILY_LIMIT)
+    groq_text = _quota_section(bot.GLOBAL_QUOTA.get("groq", {}), bot.GROQ_DAILY_LIMIT)
+
+    # Суточные счётчики: уникальные пользователи — только числом, без ID.
+    _day_stats = bot._stats_entry()
+    _day_users = bot.GLOBAL_QUOTA.get(bot.USER_DAILY_KEY)
+    day_users = len(_day_users) if isinstance(_day_users, dict) else 0
 
     # Состояние прокси — из самого breaker'а (раньше команда лезла в четыре глобала напрямую).
     proxy_line = bot._tg_proxy_breaker.status_text()
 
     quota_day = bot.GLOBAL_QUOTA.get("quota_day") or "—"
+    webhook_text = await _webhook_info_text()
 
     text = (
-        f"<b>Статистика Lumen</b>\n\n"
+        f"<b>Статистика Lumen</b>\n"
+        f"Сборка: {_build_version()}\n"
         f"Активных чатов (24ч): {active_chats} (всего: {total_chats})\n"
         f"Аптайм процесса: {uptime_str}\n"
-        f"Счётчики квоты за сутки: {quota_day} (America/Los_Angeles, сбрасываются автоматически)\n\n"
+        f"Счётчики квоты за сутки: {quota_day} (America/Los_Angeles, сбрасываются автоматически)\n"
+        f"Пользователей за сутки: {day_users}\n"
+        f"Сообщений получено: {_day_stats.get('messages_received', 0)}, ответов отправлено: {_day_stats.get('answers_sent', 0)}\n"
+        f"Все модели отказали: {_day_stats.get('all_failed', 0)}, "
+        f"переключений на резерв: {_day_stats.get('fallbacks', 0)}, "
+        f"отказов по лимиту: {_day_stats.get('daily_limit_denials', 0)}\n\n"
         f"<b>Gemini — запросов по моделям:</b>\n{gemini_text}\n\n"
         f"<b>OpenRouter — запросов по моделям:</b>\n{or_text}\n\n"
-        f"<b>Groq — запросов по моделям:</b>\n{groq_text}"
+        f"<b>Groq — запросов по моделям:</b>\n{groq_text}\n\n"
+        f"Вебхук: {webhook_text}\n"
+        f"Память: {_process_memory_text()}\n"
+        f"Хранилище: {_storage_backend_text()}"
         f"{proxy_line}"
     )
+    # Короткий вывод для одного сообщения: обрезка вместо падения отправки по 400.
+    if len(text) > bot.TG_MAX_LEN:
+        text = text[:bot.TG_MAX_LEN - 1] + "…"
     await bot._tg_call(message.reply, text, parse_mode=ParseMode.HTML)
+
+
+def _build_version() -> str:
+    """Короткий хеш сборки для /stats: env сборки, иначе git, иначе unknown."""
+    for env_name in ("LUMEN_BUILD_VERSION", "BUILD_VERSION", "GIT_COMMIT", "COMMIT_SHA"):
+        raw = os.getenv(env_name, "").strip()
+        if raw:
+            return raw[:12]
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        sha = (proc.stdout or "").strip()
+        if proc.returncode == 0 and sha:
+            return sha[:12]
+    except Exception:
+        pass
+    return "unknown"
+
+
+_WEBHOOK_INFO_TIMEOUT_SEC = 10.0
+
+
+async def _webhook_info_text() -> str:
+    """Строка про вебхук для /stats: очередь и последняя ошибка, иначе н/д."""
+    import bot
+    try:
+        if bot.bot is None:
+            return "н/д"
+        info = await asyncio.wait_for(bot.bot.get_webhook_info(), timeout=_WEBHOOK_INFO_TIMEOUT_SEC)
+    except Exception:
+        # Сбой/таймаут не роняют всю статистику: показываем н/д.
+        return "н/д"
+    try:
+        pending = getattr(info, "pending_update_count", None)
+        if isinstance(pending, bool) or not isinstance(pending, int):
+            return "н/д"
+        err_msg = (getattr(info, "last_error_message", None) or "").strip()
+        if len(err_msg) > 120:
+            err_msg = err_msg[:117] + "..."
+        if err_msg:
+            return f"pending={pending}, ошибка: {err_msg}"
+        return f"pending={pending}, ошибок нет"
+    except Exception:
+        return "н/д"
+
+
+def _process_memory_text() -> str:
+    """RSS процесса для /stats: сначала текущий (Linux), иначе пик, иначе н/д."""
+    try:
+        with open("/proc/self/statm", encoding="utf-8") as fh:
+            rss_pages = int(fh.read().split()[1])
+        mb = rss_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
+        return f"{mb:.0f} МБ"
+    except Exception:
+        pass
+    try:
+        import resource
+        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        # macOS отдаёт байты, Linux — килобайты; на Windows модуля нет вообще.
+        if getattr(os, "uname", None) is not None and os.uname().sysname == "Darwin":
+            rss /= 1024 * 1024
+        else:
+            rss /= 1024
+        return f"{rss:.0f} МБ"
+    except Exception:
+        return "н/д"
+
+
+def _storage_backend_text() -> str:
+    """Бэкенд хранилища и время последней успешной записи для /stats."""
+    import bot
+    backend = "Upstash" if bot.USE_UPSTASH else "локальный диск"
+    ts = bot._last_storage_write_ts()
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
+        when = time.strftime("%d.%m %H:%M", time.localtime(ts))
+        return f"{backend}, запись: {when}"
+    return f"{backend}, записей пока не было"
 
 
 async def _send_pick_question(message: Message, scenario: str, original_text: str) -> None:

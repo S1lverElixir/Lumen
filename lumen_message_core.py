@@ -306,6 +306,8 @@ def _strip_trigger_content(clean_prompt: str, trigger: str, message: Message) ->
 
 async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
     import bot
+    # Суточный счётчик /stats: любое дошедшее до ядра сообщение, включая фон групп.
+    bot._record_stats_event("messages_received")
     t = message.text or message.caption or ""
     is_private = message.chat.type == ChatType.PRIVATE
     is_guest = bot.is_guest_message(message)
@@ -466,6 +468,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     if bot._user_daily_total_exhausted(uid):
         entry = bot._user_daily_entry(uid)
         hours, mins = bot._user_daily_reset_in()
+        # Суточный счётчик /stats: отказ по лимиту, ответа модели не будет.
+        bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
             message.chat.id, "user_daily_total",
             used=entry.get("total", 0), limit=bot._user_daily_limit(uid, "total"),
@@ -478,6 +482,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         if not non_gemini:
             # Ссылки, YouTube, видео/аудио и документы читает только Gemini.
             entry = bot._user_daily_entry(uid)
+            bot._record_stats_event("daily_limit_denials")
             await bot._safe_reply(message, bot._t(
                 message.chat.id, "user_daily_gemini",
                 used=entry.get("gemini", 0), limit=bot._user_daily_limit(uid, "gemini"),

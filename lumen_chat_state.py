@@ -109,6 +109,22 @@ def _chat_storage_path(chat_id: int) -> Path:
     import bot
     return _lumen_chat_storage_path(bot._storage_config(), chat_id)
 
+# Момент последней успешной записи в хранилище для /stats (только память
+# процесса: после рестарта — None до первого удачного флаша, это нормально).
+_LAST_STORAGE_WRITE_TS: float | None = None
+
+
+def _note_storage_write() -> None:
+    """Фиксирует успешную запись (см. выше). Вызывать только при успехе."""
+    global _LAST_STORAGE_WRITE_TS
+    _LAST_STORAGE_WRITE_TS = time.time()
+
+
+def _last_storage_write_ts() -> float | None:
+    """Когда хранилище последний раз приняло запись, None — ещё ни разу."""
+    return _LAST_STORAGE_WRITE_TS
+
+
 # Реальный код здесь, а не обёртки над storage: иначе тесты не перехватили бы вызовы через bot._storage_*.
 def _save_chat_to_storage(chat_id: int, state: dict[str, Any]) -> bool:
     """True/False для повтора во флаше: раньше сбой молча терял историю до рестарта."""
@@ -116,6 +132,7 @@ def _save_chat_to_storage(chat_id: int, state: dict[str, Any]) -> bool:
     try:
         payload = json.dumps(_serialize_chat_state(state), ensure_ascii=False)
         bot._storage_write_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id), payload)
+        _note_storage_write()
         return True
     except Exception as exc:
         log.warning("[state] Saving chat %s failed: %s", chat_id, exc)
@@ -126,6 +143,7 @@ def _delete_chat_storage(chat_id: int) -> bool:
     import bot
     try:
         bot._storage_delete_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id))
+        _note_storage_write()
         return True
     except Exception as exc:
         log.warning("[state] Deleting chat %s failed: %s", chat_id, exc)
@@ -198,6 +216,13 @@ def _reset_quota_if_new_day() -> None:
                 entry["tts"] = 0
                 kept[uid] = entry
         GLOBAL_QUOTA[USER_DAILY_KEY] = kept
+    # Суточные счётчики /stats — те же сутки: в ноль вместе с остальным.
+    stats = GLOBAL_QUOTA.get(STATS_KEY)
+    if isinstance(stats, dict):
+        for field in _STATS_FIELDS:
+            stats[field] = 0
+    else:
+        GLOBAL_QUOTA[STATS_KEY] = {field: 0 for field in _STATS_FIELDS}
     GLOBAL_QUOTA["quota_day"] = today
     if had_previous:
         log.info('[quota] New day started (%s) — used/exhausted_at counters reset for all models.', today)
@@ -240,6 +265,16 @@ def load_global_quota() -> None:
                 GLOBAL_QUOTA[USER_DAILY_KEY] = clean
             if "quota_day" in loaded:
                 GLOBAL_QUOTA["quota_day"] = loaded["quota_day"]
+            # Суточные счётчики /stats переживают рестарт тем же файлом/ключом.
+            raw_stats = loaded.get(STATS_KEY)
+            if isinstance(raw_stats, dict):
+                clean_stats: dict[str, Any] = {}
+                for field in _STATS_FIELDS:
+                    try:
+                        clean_stats[field] = max(0, int(raw_stats.get(field) or 0))
+                    except (TypeError, ValueError):
+                        clean_stats[field] = 0
+                GLOBAL_QUOTA[STATS_KEY] = clean_stats
         _state_load_failed = False
     except Exception as exc:
         # Чтение/разбор упали — память недостоверна, перезапись запрещена (см. флаг).
@@ -258,6 +293,7 @@ def save_global_quota() -> None:
         return
     try:
         bot._storage_write_text("lumen:global_quota", GLOBAL_QUOTA_FILE, json.dumps(GLOBAL_QUOTA, ensure_ascii=False))
+        _note_storage_write()
     except Exception as exc:
         log.warning("[quota] Failed to save global quota: %s", exc)
 
@@ -325,11 +361,23 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         "history": history,
         "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
         "recent_media_ids": media_buckets,
-        "last_activity": time.monotonic(),
+        # Настенные часы, а не monotonic: тот сбрасывается рестартом и делал все
+        # чаты "активными" в /stats. Снимкам без метки — 0: такой чат неактивен.
+        "last_activity": _restore_last_activity(s),
         # Язык переживает рестарт: сериализатор его пишет, а восстановление
         # раньше теряло (прод-баг: /lang слетал при каждом деплое).
         "lang": normalize_lang(s.get("lang")),
     }
+
+
+def _restore_last_activity(s: dict[str, Any]) -> float:
+    """Метка из снимка или 0 для старых записей без неё (см. выше)."""
+    raw = s.get("last_activity")
+    if isinstance(raw, bool):
+        return 0.0
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    return 0.0
 
 def _save_chat_index() -> bool:
     """True/False для повтора в _flush_state_now: раньше неуспех молча терялся (аудит A5-1)."""
@@ -337,6 +385,7 @@ def _save_chat_index() -> bool:
     try:
         ids = sorted(chat_state.keys())
         bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, json.dumps(ids))
+        _note_storage_write()
         return True
     except Exception as exc:
         log.warning("[state] Saving chat index failed: %s", exc)
@@ -347,6 +396,7 @@ def _save_chat_index_payload(payload: str) -> bool:
     import bot
     try:
         bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, payload)
+        _note_storage_write()
         return True
     except Exception as exc:
         log.warning("[state] Saving chat index failed: %s", exc)
@@ -357,6 +407,7 @@ def _save_quota_payload(payload: str) -> bool:
     import bot
     try:
         bot._storage_write_text("lumen:global_quota", GLOBAL_QUOTA_FILE, payload)
+        _note_storage_write()
         return True
     except Exception as exc:
         log.warning("[quota] Failed to save global quota: %s", exc)
@@ -395,6 +446,7 @@ def _save_chat_payload(chat_id: int, payload: str) -> bool:
     import bot
     try:
         bot._storage_write_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id), payload)
+        _note_storage_write()
         return True
     except Exception as exc:
         log.warning("[state] Saving chat %s failed: %s", chat_id, exc)
@@ -643,14 +695,16 @@ def get_state(chat_id: int) -> dict[str, Any]:
             "history": [],
             "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
             "recent_media_ids": {},
-            "last_activity": time.monotonic(),
+            # Настенные часы: monotonic обнуляется рестартом и ломал /stats.
+            "last_activity": time.time(),
         }
         # Новый chat_id должен попасть в индекс (см. per-chat хранилище выше) —
         # иначе после рестарта его данные будут недостижимы: собственный ключ
         # существует, но индекс о нём не знает.
         bot._mark_new_chat_id(chat_id)
     else:
-        chat_state[chat_id]["last_activity"] = time.monotonic()
+        # Настенные часы: monotonic обнуляется рестартом и ломал /stats.
+        chat_state[chat_id]["last_activity"] = time.time()
     if len(chat_state) > MAX_CHAT_LIMIT:
          bot._prune_old_chats()
     return chat_state[chat_id]
@@ -824,6 +878,45 @@ def _record_quota_usage(provider: str, model_id: str, *, service: bool = False) 
     e["used"] = int(e.get("used") or 0) + 1
     e["exhausted_at"] = None
     e["cooldown_until"] = None
+    bot.mark_quota_dirty()
+
+# ── Суточные счётчики для /stats (получено/отвечено/отказы) ──
+# Лежат внутри GLOBAL_QUOTA: тот же файл/ключ и тот же флаш, отдельной записи
+# на каждое сообщение нет. Границы суток — те же (quota_day, PT).
+STATS_KEY = "stats"
+_STATS_FIELDS = (
+    "messages_received",
+    "answers_sent",
+    "all_failed",
+    "fallbacks",
+    "daily_limit_denials",
+)
+
+
+def _stats_entry() -> dict[str, Any]:
+    """Живая запись суточных счётчиков (создаёт с нулями при первом обращении)."""
+    import bot
+    bot._reset_quota_if_new_day()
+    stats = GLOBAL_QUOTA.get(STATS_KEY)
+    if not isinstance(stats, dict):
+        stats = {}
+        GLOBAL_QUOTA[STATS_KEY] = stats
+    for field in _STATS_FIELDS:
+        try:
+            stats[field] = max(0, int(stats.get(field) or 0))
+        except (TypeError, ValueError):
+            stats[field] = 0
+    return stats
+
+
+def _record_stats_event(name: str) -> None:
+    """Плюс один к счётчику name. Чужие имена игнорирует: опечатка в вызове не
+    должна раздувать персистентный словарь."""
+    import bot
+    if name not in _STATS_FIELDS:
+        return
+    entry = _stats_entry()
+    entry[name] = int(entry.get(name) or 0) + 1
     bot.mark_quota_dirty()
 
 # ── Дневные лимиты на пользователя (по user_id, не по чату) ──

@@ -72,7 +72,7 @@ def test_cmd_stats_counts_only_recently_active_chats():
     original_tg_call = bot._tg_call
     real_quota = dict(bot.GLOBAL_QUOTA)
     real_states = dict(bot.chat_state)
-    now = time.monotonic()
+    now = time.time()
     bot.OWNER_ID = 777002
     bot._tg_call = fake_tg_call
     bot.GLOBAL_QUOTA.clear()
@@ -81,10 +81,12 @@ def test_cmd_stats_counts_only_recently_active_chats():
     bot.chat_state.update({
         111: {"history": [], "last_activity": now - 3600},
         222: {"history": [], "last_activity": now - 25 * 3600},
+        # Запись без метки (старый снимок) — неактивна, а не "только что".
+        333: {"history": []},
     })
     try:
         asyncio.run(bot.cmd_stats(incoming))
-        assert "Активных чатов (24ч): 1 (всего: 2)" in sent["text"]
+        assert "Активных чатов (24ч): 1 (всего: 3)" in sent["text"]
     finally:
         bot.OWNER_ID = original_owner
         bot._tg_call = original_tg_call
@@ -93,8 +95,15 @@ def test_cmd_stats_counts_only_recently_active_chats():
         bot.chat_state.clear()
         bot.chat_state.update(real_states)
     # Проф-вид /stats: нули по мёртвым моделям не мусорят, у каждого провайдера итог и остаток лимита.
-def test_cmd_stats_hides_idle_models_and_shows_totals():
+@pytest.mark.parametrize("or_limit,groq_limit", [(50, 1000), (100, 10)])
+def test_cmd_stats_hides_idle_models_and_shows_totals(monkeypatch, or_limit, groq_limit):
     # Проф-вид /stats: нули по мёртвым моделям не мусорят, у каждого провайдера итог и остаток лимита.
+    # Параметризация по лимитам: лимиты 50/1000 живут в env, а не в команде —
+    # смена тарифа без правки кода обязана менять и вывод.
+    monkeypatch.setattr(bot, "OPENROUTER_DAILY_LIMIT", or_limit)
+    monkeypatch.setattr(bot, "GROQ_DAILY_LIMIT", groq_limit)
+    # Лимит Gemini — только где задан в env: одна модель с лимитом, вторая без.
+    monkeypatch.setattr(bot, "GEMINI_DAILY_LIMITS", {"gemini-3.6-flash": 20})
     chat_id = 999811
     incoming = _FakeIncomingMessage(chat_id)
     incoming.from_user = SimpleNamespace(id=777001)
@@ -113,6 +122,7 @@ def test_cmd_stats_hides_idle_models_and_shows_totals():
     bot.GLOBAL_QUOTA.update({
         "gemini": {
             "gemini-3.6-flash": {"used": 3, "exhausted_at": None},
+            "gemini-other": {"used": 1, "exhausted_at": None},
             "gemini-dead-model": {"used": 0, "exhausted_at": None},
         },
         "openrouter": {"nvidia/x:free": {"used": 5, "exhausted_at": None}},
@@ -122,12 +132,14 @@ def test_cmd_stats_hides_idle_models_and_shows_totals():
     try:
         asyncio.run(bot.cmd_stats(incoming))
         text = sent["text"]
-        assert "gemini-3.6-flash: 3" in text
+        assert "gemini-3.6-flash: 3 / 20" in text
+        assert "gemini-other: 1\n" in text
         assert "gemini-dead-model" not in text
         assert "без обращений" in text
-        assert "Σ: 3" in text
-        assert "Σ: 5 / 50 (осталось 45)" in text
-        assert "Σ: 0 / 1000 (осталось 1000)" in text
+        assert "Σ: 4" in text
+        assert f"Σ: 5 / {or_limit} (осталось {max(0, or_limit - 5)})" in text
+        assert f"Σ: 0 / {groq_limit} (осталось {groq_limit})" in text
+        assert len(text) <= bot.TG_MAX_LEN
     finally:
         bot.OWNER_ID = original_owner
         bot._tg_call = original_tg_call
@@ -135,6 +147,101 @@ def test_cmd_stats_hides_idle_models_and_shows_totals():
         bot.GLOBAL_QUOTA.update(real_quota)
         bot.chat_state.pop(chat_id, None)
         lumen_chat_state.chat_state.pop(chat_id, None)
+
+
+def test_cmd_stats_shows_day_counters_webhook_memory_storage_and_fits_limit(monkeypatch):
+    # Что защищает: новый блок /stats (сутки/вебхук/память/хранилище) — без теста
+    # он молча протухает при рефакторинге команды, а нули в нём не отличить от
+    # "счётчики не считаются". Регрессия: счётчики есть в GLOBAL_QUOTA, но команда
+    # их не показывает. Старые тесты проверяют только модели и активные чаты.
+    import lumen_chat_state as lcs
+    chat_id = 999810
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777001)
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    async def fake_webhook_info():
+        return SimpleNamespace(pending_update_count=3, last_error_message="")
+
+    monkeypatch.setattr(bot, "OWNER_ID", 777001)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(get_webhook_info=fake_webhook_info))
+    monkeypatch.setattr(lcs, "_LAST_STORAGE_WRITE_TS", 1728000000.0)
+    real_quota = dict(bot.GLOBAL_QUOTA)
+    bot.GLOBAL_QUOTA.clear()
+    bot.GLOBAL_QUOTA.update({
+        "quota_day": bot._current_quota_day(),
+        "user_daily": {"1": {"total": 2, "gemini": 1, "tts": 0, "bonus": 0}},
+        "stats": {"messages_received": 7, "answers_sent": 5, "all_failed": 1, "fallbacks": 2, "daily_limit_denials": 3},
+    })
+    try:
+        asyncio.run(bot.cmd_stats(incoming))
+        text = sent["text"]
+        assert "Сборка:" in text
+        assert "Пользователей за сутки: 1" in text
+        assert "Сообщений получено: 7, ответов отправлено: 5" in text
+        assert "Все модели отказали: 1" in text
+        assert "переключений на резерв: 2" in text
+        assert "отказов по лимиту: 3" in text
+        assert "Вебхук: pending=3, ошибок нет" in text
+        assert "Память:" in text
+        assert "Хранилище: локальный диск, запись:" in text
+        assert len(text) <= bot.TG_MAX_LEN
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.chat_state.pop(chat_id, None)
+        lcs.chat_state.pop(chat_id, None)
+
+
+def test_cmd_stats_webhook_error_and_failure_paths(monkeypatch):
+    # Что защищает: строки вебхука при ошибке Telegram и при недоступности API —
+    # без теста сбой getWebhookInfo ронял бы всю команду исключением.
+    # Регрессия: необёрнутый await в команде. Старые тесты вебхук не трогают.
+    import lumen_chat_state as lcs
+    chat_id = 999809
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    def _run_with_bot(fake_bot):
+        incoming = _FakeIncomingMessage(chat_id)
+        incoming.from_user = SimpleNamespace(id=777001)
+        monkeypatch.setattr(bot, "OWNER_ID", 777001)
+        monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+        monkeypatch.setattr(bot, "bot", fake_bot)
+        real_quota = dict(bot.GLOBAL_QUOTA)
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update({"quota_day": bot._current_quota_day()})
+        try:
+            asyncio.run(bot.cmd_stats(incoming))
+            return sent["text"]
+        finally:
+            bot.GLOBAL_QUOTA.clear()
+            bot.GLOBAL_QUOTA.update(real_quota)
+            bot.chat_state.pop(chat_id, None)
+            lcs.chat_state.pop(chat_id, None)
+
+    async def _info_with_error():
+        return SimpleNamespace(pending_update_count=1, last_error_message="Bad Gateway")
+
+    text = _run_with_bot(SimpleNamespace(get_webhook_info=_info_with_error))
+    assert "Вебхук: pending=1, ошибка: Bad Gateway" in text
+
+    async def _info_failing():
+        raise RuntimeError("сеть недоступна")
+
+    text = _run_with_bot(SimpleNamespace(get_webhook_info=_info_failing))
+    assert "Вебхук: н/д" in text
+
+    text = _run_with_bot(None)
+    assert "Вебхук: н/д" in text
 
 
 def test_match_trigger_prefix_finds_draw_trigger():

@@ -1742,6 +1742,110 @@ def test_run_route_failure_records_no_user_daily():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_handled_message_grows_provider_quota_user_daily_and_stats(rate_guard_setup, monkeypatch):
+    # Что защищает: воронку учёта после обработанного сообщения (квота
+    # провайдера + user_daily + суточные счётчики /stats одним проходом).
+    # Регрессия: тихий no-count при рефакторинге (не та модель, service-флаг не
+    # там, потеря вызова) — /stats показывает вечные нули, хотя ботом пользуются.
+    # Старые тесты мокают _run_route целиком (расход не проверяют) или проверяют
+    # только ask-уровень без user_daily/stats.
+    from collections import deque
+    message = rate_guard_setup()
+    message.text = "привет, как дела?"
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+    # Стриминг в тестах без сети: гасим попытки, дальше обычный текстовый путь.
+    monkeypatch.setattr(bot, "_try_gemini_streaming", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(bot, "_try_openrouter_streaming", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(bot, "_try_groq_streaming", AsyncMock(return_value=(None, None)))
+
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": [{"message": {"content": "Привет! Как сам?"}}]}
+
+    async def failing_groq_request(path, method="GET", *, json_body=None, deadline=None):
+        raise bot.GroqAPIError("overloaded", status_code=503)
+
+    monkeypatch.setattr(bot, "_or_request", fake_or_request)
+    monkeypatch.setattr(bot, "_groq_request", failing_groq_request)
+    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    before = dict(bot._stats_entry())
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        or_quota = bot.GLOBAL_QUOTA.get("openrouter", {})
+        total_used = sum(int(e.get("used") or 0) for e in or_quota.values() if isinstance(e, dict))
+        assert total_used == 1
+        entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("456")
+        assert entry is not None and entry["total"] == 1
+        after = bot._stats_entry()
+        assert after["messages_received"] - before.get("messages_received", 0) == 1
+        assert after["answers_sent"] - before.get("answers_sent", 0) == 1
+        assert after["fallbacks"] - before.get("fallbacks", 0) == 1
+        assert after.get("all_failed", 0) == before.get("all_failed", 0)
+    finally:
+        bot.chat_state.pop(123, None)
+
+
+def test_run_route_counts_fallback_and_total_failure(monkeypatch):
+    # Что защищает: счётчики переключений на резерв и полного отказа маршрута.
+    # Регрессия: отказ провайдера не считается (забытый вызов в except) — /stats
+    # врёт про надёжность. Старые тесты проверяют только сам фолбэк/исключение.
+    from types import SimpleNamespace
+    chat_id = 999307
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777013)
+
+    async def failing_ask(*args, **kwargs):
+        raise bot.OpenRouterAPIError("сломано", status_code=500)
+
+    async def ok_ask(*args, **kwargs):
+        return "ok"
+
+    before = dict(bot._stats_entry())
+    monkeypatch.setattr(bot, "ask_openrouter_text", failing_ask)
+    monkeypatch.setattr(bot, "ask_groq_text", ok_ask)
+    ans, sent = asyncio.run(bot._run_route(
+        chat_id, "привет", [("openrouter", "m1"), ("groq", "m2")], incoming, allow_stream=False,
+    ))
+    assert ans == "ok" and sent is False
+    mid = dict(bot._stats_entry())
+    assert mid["fallbacks"] - before.get("fallbacks", 0) == 1
+    assert mid["answers_sent"] - before.get("answers_sent", 0) == 1
+    assert mid.get("all_failed", 0) == before.get("all_failed", 0)
+
+    monkeypatch.setattr(bot, "ask_groq_text", failing_ask)
+    with pytest.raises(bot.OpenRouterAPIError):
+        asyncio.run(bot._run_route(
+            chat_id, "привет", [("openrouter", "m1"), ("groq", "m2")], incoming, allow_stream=False,
+        ))
+    after = bot._stats_entry()
+    assert after["fallbacks"] - mid.get("fallbacks", 0) == 1
+    assert after["all_failed"] - mid.get("all_failed", 0) == 1
+    assert after.get("answers_sent", 0) == mid.get("answers_sent", 0)
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777013", None)
+    bot.chat_state.pop(chat_id, None)
+
+
+def test_daily_limit_denial_counted_and_refused(rate_guard_setup, monkeypatch):
+    # Что защищает: счётчик отказов по дневному лимиту вместе с самим отказом.
+    # Регрессия: отказ есть, а счётчик не растёт — /stats врёт. Старые тесты
+    # проверяют только тексты отказов и фолбэк на резерв, но не счётчик.
+    message = rate_guard_setup()
+    message.text = "привет, как дела?"
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=(None, "", "", None)))
+    uid = 456
+    entry = bot._user_daily_entry(uid)
+    entry["total"] = bot._user_daily_limit(uid, "total")
+    before = dict(bot._stats_entry())
+    fake_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    asyncio.run(bot._handle_message_core(message))
+    fake_route.assert_not_awaited()
+    after = bot._stats_entry()
+    assert after["daily_limit_denials"] - before.get("daily_limit_denials", 0) == 1
+    bot._safe_reply.assert_awaited_once()
+    bot.chat_state.pop(123, None)
+
+
 def test_gemini_success_logs_token_usage_when_api_returns_it(caplog):
     # Что защищает: единственную точку калибровки лимитов по логам для Gemini
     # (usage_metadata.prompt_token_count/candidates_token_count/total_token_count).

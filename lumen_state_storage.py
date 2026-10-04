@@ -143,6 +143,9 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
         "recent_media_ids": {
             uid: list(dq) for uid, dq in state.get("recent_media_ids", {}).items()
         },
+        # Настенные часы для подсчёта активных в /stats: monotonic сбрасывается
+        # рестартом и делал все чаты "активными", time.time() переживает его.
+        "last_activity": state.get("last_activity", 0.0),
         # Язык системных сообщений чата (см. lumen_lang.py, /lang в bot.py).
         # Старым снимкам без поля соответствует "en" — см. _chat_lang в bot.py.
         "lang": state.get("lang", "en"),

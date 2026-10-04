@@ -1704,6 +1704,95 @@ def test_reset_quota_if_new_day_throttles_repeated_calls():
         lumen_chat_state._last_quota_check_monotonic = original_throttle
 
 
+def test_last_activity_uses_wall_clock_and_survives_serialization():
+    # Что защищает: исправление бага активных чатов (last_activity жил на
+    # monotonic и после рестарта все чаты считались активными). Регрессия:
+    # возврат monotonic — /stats снова врёт. Старый тест проверяет только сам
+    # подсчёт, но не источник метки и не её персистентность.
+    cid = 999714
+    before = time.time()
+    state = bot.get_state(cid)
+    after = time.time()
+    try:
+        assert before <= state["last_activity"] <= after
+        assert state["last_activity"] > 1_000_000_000
+        snap = bot._serialize_chat_state(state)
+        assert snap["last_activity"] == state["last_activity"]
+        bot.chat_state.pop(cid, None)
+        bot._restore_single_chat(cid, snap)
+        assert bot.chat_state[cid]["last_activity"] == state["last_activity"]
+        # Старый снимок без метки — 0: такой чат не считается активным.
+        bot._restore_single_chat(cid + 1, {"history": []})
+        assert bot.chat_state[cid + 1]["last_activity"] == 0.0
+    finally:
+        bot.chat_state.pop(cid, None)
+        bot.chat_state.pop(cid + 1, None)
+        bot._dirty_chat_ids.discard(cid)
+        bot._dirty_chat_ids.discard(cid + 1)
+
+
+def test_stats_counters_reset_on_new_day():
+    # Что защищает: обнуление суточных счётчиков /stats в полночь PT вместе с
+    # остальной квотой. Регрессия: счётчики не сброшены — вчерашние цифры
+    # показываются как сегодняшние. Сброс провайдеров покрыт соседним тестом.
+    import lumen_chat_state as lcs
+    orig_throttle = lcs._last_quota_check_monotonic
+    had_stats = "stats" in bot.GLOBAL_QUOTA
+    old_stats = dict(bot.GLOBAL_QUOTA.get("stats") or {})
+    old_day = bot.GLOBAL_QUOTA.get("quota_day")
+    try:
+        bot.GLOBAL_QUOTA["stats"] = {"messages_received": 9, "answers_sent": 8, "all_failed": 1, "fallbacks": 2, "daily_limit_denials": 3}
+        bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
+        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        bot._reset_quota_if_new_day()
+        assert bot._stats_entry() == {"messages_received": 0, "answers_sent": 0, "all_failed": 0, "fallbacks": 0, "daily_limit_denials": 0}
+    finally:
+        if had_stats:
+            bot.GLOBAL_QUOTA["stats"] = old_stats
+        else:
+            bot.GLOBAL_QUOTA.pop("stats", None)
+        bot.GLOBAL_QUOTA["quota_day"] = old_day
+        lcs._last_quota_check_monotonic = orig_throttle
+
+
+def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
+    # Что защищает: персистентность GLOBAL_QUOTA целиком (провайдеры + user_daily
+    # + stats) через рестарт. Регрессия: поле пишется, но не читается (как было
+    # с groq до внешнего аудита) — /stats обнуляется каждым деплоем. Старый тест
+    # покрывает только восстановление groq.
+    import lumen_chat_state as lcs
+    orig_throttle = lcs._last_quota_check_monotonic
+    real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
+    try:
+        bot.GLOBAL_QUOTA["openrouter"] = {"m1": {"used": 5, "exhausted_at": None, "cooldown_until": None}}
+        bot.GLOBAL_QUOTA["groq"] = {"m2": {"used": 7, "exhausted_at": None, "cooldown_until": None}}
+        bot.GLOBAL_QUOTA["gemini"] = {"m3": {"used": 2, "exhausted_at": None, "cooldown_until": None}}
+        bot.GLOBAL_QUOTA["user_daily"] = {"42": {"total": 3, "gemini": 1, "tts": 0, "bonus": 0}}
+        bot.GLOBAL_QUOTA["stats"] = {"messages_received": 9, "answers_sent": 8, "all_failed": 1, "fallbacks": 2, "daily_limit_denials": 3}
+        bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+        captured = {}
+        monkeypatch.setattr(bot, "_storage_write_text", lambda key, path, text: captured.setdefault("quota", text))
+        lcs._state_load_failed = False
+        bot.save_global_quota()
+        assert "m1" in captured["quota"]
+        # "Рестарт": чистим память и грузим из захваченного снимка.
+        bot.GLOBAL_QUOTA.clear()
+        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: captured["quota"])
+        bot.load_global_quota()
+        assert bot.GLOBAL_QUOTA["openrouter"]["m1"]["used"] == 5
+        assert bot.GLOBAL_QUOTA["groq"]["m2"]["used"] == 7
+        assert bot.GLOBAL_QUOTA["gemini"]["m3"]["used"] == 2
+        assert bot.GLOBAL_QUOTA["user_daily"]["42"]["total"] == 3
+        stats = bot.GLOBAL_QUOTA["stats"]
+        assert (stats["messages_received"], stats["answers_sent"], stats["all_failed"], stats["fallbacks"], stats["daily_limit_denials"]) == (9, 8, 1, 2, 3)
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        lcs._last_quota_check_monotonic = orig_throttle
+        lcs._state_load_failed = False
+
+
 def test_serialize_chat_state_stamps_current_schema_version():
     state = {"image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [], "quota": {}, "recent_media_ids": {}}
     snapshot = bot._serialize_chat_state(state)

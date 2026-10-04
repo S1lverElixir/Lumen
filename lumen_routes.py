@@ -856,6 +856,7 @@ async def _run_route(
     # Учёт дневных лимитов пользователя — только дошедшие до модели ответы.
     def _count_user_answer(provider_name: str) -> None:
         bot._record_user_daily(bot._user_key_for_message(message), gemini=(provider_name == "gemini"))
+        bot._record_stats_event("answers_sent")
 
     # Стримим только голову маршрута; плейсхолдер "…" переиспользуем под финальный текст следующей модели, а не сносим.
     tried_stream_model: str | None = None
@@ -943,9 +944,18 @@ async def _run_route(
                     ai_prompt += bot._NO_MEDIA_NOTE
                 media_note_added = True
             log.warning('[router] Provider %s failed completely (%s), trying the next one on the route, if any.', provider, exc)
+            # Суточный счётчик /stats: дальше по маршруту есть кому ответить.
+            try:
+                _left = provider_order.index(provider) + 1
+            except ValueError:
+                _left = len(provider_order)
+            if any(groups.get(_p) for _p in provider_order[_left:]):
+                bot._record_stats_event("fallbacks")
 
     if reusable_placeholder is not None:
         # Невостребованный плейсхолдер убираем перед raise — иначе "…" повиснет в чате навсегда.
         await bot._delete_message_quietly(reusable_placeholder)
 
+    # Суточный счётчик /stats: маршрут исчерпан, ответа не будет.
+    bot._record_stats_event("all_failed")
     raise last_exc or RuntimeError("No route candidate returned an answer.")

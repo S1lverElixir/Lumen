@@ -49,6 +49,9 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 |---|---|---|
 | `OPENROUTER_API_KEY` / `OPENROUTER_KEY` | — | OpenRouter API key. The chain is built regardless of which keys are set, so a missing key means every OpenRouter candidate fails fast with a logged "is not set" rather than being silently routed around. |
 | `GROQ_API_KEY` | — | Groq API key (free plan, no card: 1000 req/day). Heads plain-text routes; without it those routes fall through to OpenRouter. Also powers voice transcription (Whisper). |
+| `OPENROUTER_DAILY_LIMIT` | `50` | Daily free-model request budget shown in `/stats` (OpenRouter section). Raise it if the plan changes, so the remainder stays honest. |
+| `GROQ_DAILY_LIMIT` | `1000` | Same for Groq (free plan: 1000 req/day). |
+| `GEMINI_DAILY_LIMITS` | — | Per-model Gemini daily limits for `/stats` as `model=limit` pairs (`gemini-2.5-flash=1500`). Models missing here show usage without a limit. |
 | `OPENROUTER_HTTP_REFERER` | `https://t.me/{BOT_USERNAME}` | `HTTP-Referer` header sent with OpenRouter requests. |
 | `OPENROUTER_TITLE` | `BOT_USERNAME` | App title header sent with OpenRouter requests. |
 | `POLLINATIONS_IMAGE_MODEL` | `flux` | Default image-generation model (used only if the prompt doesn't match a more specific style). Renamed from `HF_IMAGE_MODEL` (Sept 2026) — the backend is Pollinations.ai, not Hugging Face; the old name is no longer read. |
