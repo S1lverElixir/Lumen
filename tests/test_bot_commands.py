@@ -244,6 +244,48 @@ def test_cmd_stats_webhook_error_and_failure_paths(monkeypatch):
     assert "Вебхук: н/д" in text
 
 
+def test_cmd_stats_truncation_keeps_html_valid(monkeypatch):
+    # Защищает обрезку длинного /stats: рваный тег ронял бы отправку 400 при
+    # parse_mode=HTML. Регрессия — наивный срез по символам. Старый тест длины
+    # короткий вывод не ловит.
+    import lumen_chat_state as lcs
+    chat_id = 999808
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777001)
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    async def fake_webhook_info():
+        return SimpleNamespace(pending_update_count=0, last_error_message="")
+
+    monkeypatch.setattr(bot, "OWNER_ID", 777001)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(get_webhook_info=fake_webhook_info))
+    real_quota = dict(bot.GLOBAL_QUOTA)
+    many = {f"model-{i:04d}-with-long-name": {"used": 1, "exhausted_at": None} for i in range(400)}
+    bot.GLOBAL_QUOTA.clear()
+    bot.GLOBAL_QUOTA.update({
+        "quota_day": bot._current_quota_day(),
+        "gemini": dict(many),
+        "openrouter": dict(many),
+        "groq": dict(many),
+    })
+    try:
+        asyncio.run(bot.cmd_stats(incoming))
+        text = sent["text"]
+        assert len(text) <= bot.TG_MAX_LEN
+        lt, gt = text.rfind("<"), text.rfind(">")
+        assert not (lt > gt), "обрезка разорвала HTML-тег"
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.chat_state.pop(chat_id, None)
+        lcs.chat_state.pop(chat_id, None)
+
+
 def test_match_trigger_prefix_finds_draw_trigger():
     assert bot._match_trigger_prefix("нарисуй кота на пляже", bot.DRAW_TRIGGER_PREFIXES) == "нарисуй"
 

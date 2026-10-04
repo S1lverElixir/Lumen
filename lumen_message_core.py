@@ -306,8 +306,6 @@ def _strip_trigger_content(clean_prompt: str, trigger: str, message: Message) ->
 
 async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
     import bot
-    # Суточный счётчик /stats: любое дошедшее до ядра сообщение, включая фон групп.
-    bot._record_stats_event("messages_received")
     t = message.text or message.caption or ""
     is_private = message.chat.type == ChatType.PRIVATE
     is_guest = bot.is_guest_message(message)
@@ -324,6 +322,20 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     if await bot._reject_rate_limited_message(message):
         return
 
+    # Общий дневной лимит — до любой обработки и до get_state: отказ не создаёт
+    # ни запись чата, ни запись пользователя, ни messages_received.
+    uid_early = bot._user_key_for_message(message)
+    _early_entry = bot._user_daily_peek(uid_early)
+    if bot._user_daily_total_exhausted(uid_early, _early_entry):
+        hours, mins = bot._user_daily_reset_in()
+        bot._record_stats_event("daily_limit_denials")
+        await bot._safe_reply(message, bot._t(
+            message.chat.id, "user_daily_total",
+            used=(_early_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid_early, "total", _early_entry),
+            hours=hours, mins=mins,
+        ))
+        return
+
     state = bot.get_state(message.chat.id)
 
     # Проверка на ссылки загрузки (TikTok — сразу всегда, даже в группах без упоминания)
@@ -334,8 +346,10 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     youtube_url_to_analyze: str | None = None
     if url:
         if is_tiktok(url):
-             await bot.handle_tiktok(message, url)
-             return
+            # Считаем только дошедшее до обработки: фон и отказы выше не в счёт.
+            bot._record_stats_event("messages_received")
+            await bot.handle_tiktok(message, url)
+            return
         # YouTube/сайт читает сама модель (file_uri/url_context), сервер чужое не качает.
         # Не открылось — скажем честно.
         if is_youtube(url):
@@ -464,33 +478,35 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
 
     # Дневные лимиты на пользователя — до скачивания/маршрута уже поздно, но до
     # вызова моделей: отказы и неудачи не считаются, только успешные ответы.
+    # Проба без создания: иначе отказ заводил бы запись и раздувал day_users.
     uid = bot._user_key_for_message(message)
-    if bot._user_daily_total_exhausted(uid):
-        entry = bot._user_daily_entry(uid)
+    _late_entry = bot._user_daily_peek(uid)
+    if bot._user_daily_total_exhausted(uid, _late_entry):
         hours, mins = bot._user_daily_reset_in()
         # Суточный счётчик /stats: отказ по лимиту, ответа модели не будет.
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
             message.chat.id, "user_daily_total",
-            used=entry.get("total", 0), limit=bot._user_daily_limit(uid, "total"),
+            used=(_late_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _late_entry),
             hours=hours, mins=mins,
         ))
         return
     no_search_note = False
-    if bot._user_daily_gemini_exhausted(uid):
+    if bot._user_daily_gemini_exhausted(uid, _late_entry):
         non_gemini = [(p, m) for p, m in route if p != "gemini"]
         if not non_gemini:
             # Ссылки, YouTube, видео/аудио и документы читает только Gemini.
-            entry = bot._user_daily_entry(uid)
             bot._record_stats_event("daily_limit_denials")
             await bot._safe_reply(message, bot._t(
                 message.chat.id, "user_daily_gemini",
-                used=entry.get("gemini", 0), limit=bot._user_daily_limit(uid, "gemini"),
+                used=(_late_entry or {}).get("gemini", 0), limit=bot._user_daily_limit(uid, "gemini", _late_entry),
             ))
             return
         route = non_gemini
         # Свежесть без Gemini — честная пометка, что ответ без поиска.
         no_search_note = needs_freshness
+    # Дошло до обработки: фон, инъекции и отказы выше уже отсеяны.
+    bot._record_stats_event("messages_received")
 
     ai_prompt = clean_prompt
     if (

@@ -109,8 +109,8 @@ def _chat_storage_path(chat_id: int) -> Path:
     import bot
     return _lumen_chat_storage_path(bot._storage_config(), chat_id)
 
-# Момент последней успешной записи в хранилище для /stats (только память
-# процесса: после рестарта — None до первого удачного флаша, это нормально).
+# Момент последней успешной записи для /stats: дубль в GLOBAL_QUOTA переживает
+# рестарт, иначе после рестарта показывало "записей не было" при живых данных.
 _LAST_STORAGE_WRITE_TS: float | None = None
 
 
@@ -118,11 +118,23 @@ def _note_storage_write() -> None:
     """Фиксирует успешную запись (см. выше). Вызывать только при успехе."""
     global _LAST_STORAGE_WRITE_TS
     _LAST_STORAGE_WRITE_TS = time.time()
+    try:
+        GLOBAL_QUOTA["last_storage_write_ts"] = _LAST_STORAGE_WRITE_TS
+    except Exception:
+        pass
 
 
 def _last_storage_write_ts() -> float | None:
     """Когда хранилище последний раз приняло запись, None — ещё ни разу."""
-    return _LAST_STORAGE_WRITE_TS
+    if _LAST_STORAGE_WRITE_TS is not None:
+        return _LAST_STORAGE_WRITE_TS
+    try:
+        ts = GLOBAL_QUOTA.get("last_storage_write_ts")
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
+            return float(ts)
+    except Exception:
+        pass
+    return None
 
 
 # Реальный код здесь, а не обёртки над storage: иначе тесты не перехватили бы вызовы через bot._storage_*.
@@ -210,7 +222,14 @@ def _reset_quota_if_new_day() -> None:
     if isinstance(bucket, dict):
         kept = {}
         for uid, entry in bucket.items():
-            if isinstance(entry, dict) and int(entry.get("bonus") or 0) > 0:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                bonus = int(entry.get("bonus") or 0)
+            except (TypeError, ValueError):
+                # Мусор в bonus не роняет сброс суток, считается нулём.
+                bonus = 0
+            if bonus > 0:
                 entry["total"] = 0
                 entry["gemini"] = 0
                 entry["tts"] = 0
@@ -275,6 +294,9 @@ def load_global_quota() -> None:
                     except (TypeError, ValueError):
                         clean_stats[field] = 0
                 GLOBAL_QUOTA[STATS_KEY] = clean_stats
+            raw_ts = loaded.get("last_storage_write_ts")
+            if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool) and raw_ts > 0:
+                GLOBAL_QUOTA["last_storage_write_ts"] = float(raw_ts)
         _state_load_failed = False
     except Exception as exc:
         # Чтение/разбор упали — память недостоверна, перезапись запрещена (см. флаг).
@@ -954,7 +976,18 @@ def _user_daily_entry(user_id: int | None) -> dict[str, Any]:
     return entry
 
 
-def _user_daily_limit(user_id: int | None, kind: str) -> int:
+def _user_daily_peek(user_id: int | None) -> dict[str, Any] | None:
+    """Чтение без создания: проба лимита не заводит запись и не раздувает day_users."""
+    import bot
+    bot._reset_quota_if_new_day()
+    bucket = GLOBAL_QUOTA.get(USER_DAILY_KEY)
+    if not isinstance(bucket, dict):
+        return None
+    entry = bucket.get(str(user_id))
+    return entry if isinstance(entry, dict) else None
+
+
+def _user_daily_limit(user_id: int | None, kind: str, entry: dict[str, Any] | None = None) -> int:
     """Эффективный лимит с учётом bonus-задела (база env + bonus)."""
     import bot
     base = {
@@ -963,34 +996,58 @@ def _user_daily_limit(user_id: int | None, kind: str) -> int:
         "tts": bot.DAILY_USER_TTS_LIMIT,
     }[kind]
     try:
-        return int(base) + int((_user_daily_entry(user_id).get("bonus") or 0))
+        if entry is None:
+            entry = _user_daily_peek(user_id)
+        bonus = int((entry or {}).get("bonus") or 0)
+        return int(base) + max(0, bonus)
     except Exception:
         return int(base)
 
 
-def _user_daily_total_exhausted(user_id: int | None) -> bool:
+def _user_daily_total_exhausted(user_id: int | None, entry: dict[str, Any] | None = None) -> bool:
     """Исчерпан ли общий дневной лимит. Владелец и неопределённый автор — без лимита."""
     import bot
     if user_id is None or bot._is_owner(user_id):
         return False
-    entry = _user_daily_entry(user_id)
-    return int(entry.get("total") or 0) >= _user_daily_limit(user_id, "total")
+    if entry is None:
+        entry = _user_daily_peek(user_id)
+    if entry is None:
+        return False
+    try:
+        used = int(entry.get("total") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    return used >= _user_daily_limit(user_id, "total", entry)
 
 
-def _user_daily_gemini_exhausted(user_id: int | None) -> bool:
+def _user_daily_gemini_exhausted(user_id: int | None, entry: dict[str, Any] | None = None) -> bool:
     import bot
     if user_id is None or bot._is_owner(user_id):
         return False
-    entry = _user_daily_entry(user_id)
-    return int(entry.get("gemini") or 0) >= _user_daily_limit(user_id, "gemini")
+    if entry is None:
+        entry = _user_daily_peek(user_id)
+    if entry is None:
+        return False
+    try:
+        used = int(entry.get("gemini") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    return used >= _user_daily_limit(user_id, "gemini", entry)
 
 
-def _user_daily_tts_exhausted(user_id: int | None) -> bool:
+def _user_daily_tts_exhausted(user_id: int | None, entry: dict[str, Any] | None = None) -> bool:
     import bot
     if user_id is None or bot._is_owner(user_id):
         return False
-    entry = _user_daily_entry(user_id)
-    return int(entry.get("tts") or 0) >= _user_daily_limit(user_id, "tts")
+    if entry is None:
+        entry = _user_daily_peek(user_id)
+    if entry is None:
+        return False
+    try:
+        used = int(entry.get("tts") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    return used >= _user_daily_limit(user_id, "tts", entry)
 
 
 def _record_user_daily(user_id: int | None, *, gemini: bool = False, tts: bool = False) -> None:

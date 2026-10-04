@@ -2719,6 +2719,25 @@ def test_user_daily_owner_and_unknown_are_unlimited():
     assert bot._user_daily_total_exhausted(None) is False
 
 
+def test_user_daily_peek_does_not_create_entry():
+    # Защищает day_users в /stats от раздувания: проба лимита (отказ, чужой
+    # user_id) не должна заводить запись. Регрессия — exhausted через
+    # setdefault: каждый отказ плодил нулевую запись. Старые тесты гоняют
+    # только существующие записи через _record/_entry.
+    uid = 999888773
+    try:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        assert bot._user_daily_peek(uid) is None
+        assert bot._user_daily_total_exhausted(uid) is False
+        assert bot._user_daily_gemini_exhausted(uid) is False
+        assert bot._user_daily_tts_exhausted(uid) is False
+        assert str(uid) not in bot.GLOBAL_QUOTA.get("user_daily", {})
+        bot._record_user_daily(uid)
+        assert str(uid) in bot.GLOBAL_QUOTA.get("user_daily", {})
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+
+
 def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
     # Новое: те же сутки, что у квоты; bonus переживает полночь (задел под оплату).
     import lumen_chat_state as lcs

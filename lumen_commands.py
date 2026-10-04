@@ -320,24 +320,24 @@ async def inline_tts(message: Message, text: str) -> None:
         )
         return
     # Дневные лимиты пользователя: общий и отдельный на озвучку (он же тратит квоту Gemini TTS).
+    # Проба без создания: отказ не заводит запись и не раздувает day_users.
     uid = bot._user_key_for_message(message)
-    if bot._user_daily_total_exhausted(uid):
-        entry = bot._user_daily_entry(uid)
+    _tts_entry = bot._user_daily_peek(uid)
+    if bot._user_daily_total_exhausted(uid, _tts_entry):
         hours, mins = bot._user_daily_reset_in()
         # Суточный счётчик /stats: отказ по лимиту, озвучки не будет.
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
             message.chat.id, "user_daily_total",
-            used=entry.get("total", 0), limit=bot._user_daily_limit(uid, "total"),
+            used=(_tts_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _tts_entry),
             hours=hours, mins=mins,
         ))
         return
-    if bot._user_daily_tts_exhausted(uid):
-        entry = bot._user_daily_entry(uid)
+    if bot._user_daily_tts_exhausted(uid, _tts_entry):
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
             message.chat.id, "user_daily_tts",
-            used=entry.get("tts", 0), limit=bot._user_daily_limit(uid, "tts"),
+            used=(_tts_entry or {}).get("tts", 0), limit=bot._user_daily_limit(uid, "tts", _tts_entry),
         ))
         return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_voicing"))
@@ -629,9 +629,18 @@ async def cmd_stats(message: Message) -> None:
         f"Хранилище: {_storage_backend_text()}"
         f"{proxy_line}"
     )
-    # Короткий вывод для одного сообщения: обрезка вместо падения отправки по 400.
+    # Короткий вывод для одного сообщения: режем по целым строкам, чтобы не
+    # разорвать HTML-тег и не получить 400 от Telegram при parse_mode=HTML.
     if len(text) > bot.TG_MAX_LEN:
-        text = text[:bot.TG_MAX_LEN - 1] + "…"
+        cut = text[:bot.TG_MAX_LEN - 1]
+        nl = cut.rfind("\n")
+        if nl > bot.TG_MAX_LEN // 2:
+            cut = cut[:nl]
+        # Оборванный тег (<b ... без >) — откатываемся до его начала.
+        lt, gt = cut.rfind("<"), cut.rfind(">")
+        if lt > gt:
+            cut = cut[:lt]
+        text = cut.rstrip() + "…"
     await bot._tg_call(message.reply, text, parse_mode=ParseMode.HTML)
 
 
