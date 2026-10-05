@@ -1547,3 +1547,86 @@ def test_banned_list_survives_quota_reload(monkeypatch):
     assert bot._is_banned(606001) is False
     bot.load_global_quota()
     assert bot._is_banned(606001) is True
+
+
+def test_pick_callback_ignores_banned_user(monkeypatch):
+    # Забаненный не отвечает и кнопками: иначе игнор обходился живыми пиками.
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(bot, "OWNER_ID", 106001)
+    bot._ban_user(607001)
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    answered = []
+
+    async def fake_answer(*args, **kwargs):
+        answered.append(True)
+
+    query = SimpleNamespace(
+        data="pick:unknown-token:0",
+        from_user=SimpleNamespace(id=607001),
+        message=None,
+        answer=fake_answer,
+    )
+    asyncio.run(bot.handle_pick_callback(query))
+    assert fake_core.await_count == 0
+    assert answered == [True]
+
+
+def test_selftest_llm_head_gemini_success_counts_quota_and_outcome(monkeypatch):
+    # Проба Gemini как у остальных: успех в квоту и сброс счётчика карантина.
+    import lumen_model_speed
+    import lumen_routes
+    from lumen_router_config import GEMINI_DEFAULT_CHAIN
+    head = GEMINI_DEFAULT_CHAIN[0]
+
+    class _FakeModels:
+        def __init__(self):
+            self.calls = []
+
+        async def generate_content(self, *, model, contents, config=None):
+            self.calls.append(model)
+            return SimpleNamespace(text="ok")
+
+    fake_models = _FakeModels()
+    monkeypatch.setattr(bot, "client", SimpleNamespace(aio=SimpleNamespace(models=fake_models)))
+    before = ((bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) or {}).get("used") or 0
+    ema_before = dict(lumen_model_speed._latency_ema)
+    try:
+        ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("gemini", chat_id=1))
+    finally:
+        lumen_model_speed._latency_ema.clear()
+        lumen_model_speed._latency_ema.update(ema_before)
+    assert ok is True and detail == "" and elapsed >= 0
+    assert fake_models.calls == [head]
+    after = ((bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) or {}).get("used") or 0
+    assert after == before + 1
+    bot.GLOBAL_QUOTA["gemini"][head]["used"] = before
+    assert bot._is_quarantined("gemini", head) is False
+
+
+def test_selftest_llm_head_gemini_empty_feeds_quarantine(monkeypatch):
+    # Пустая проба Gemini тоже плохой исход, как в цепочке.
+    import lumen_router_config
+    import lumen_routes
+    from lumen_router_config import GEMINI_DEFAULT_CHAIN
+    head = GEMINI_DEFAULT_CHAIN[0]
+
+    async def generate_empty(*, model, contents, config=None):
+        return SimpleNamespace(text="")
+
+    fake_client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_empty)))
+    monkeypatch.setattr(bot, "client", fake_client)
+    ok, detail, _elapsed = asyncio.run(lumen_routes.selftest_llm_head("gemini", chat_id=1))
+    assert ok is False and "empty response" in detail
+    assert lumen_router_config._QUARANTINE.get(("gemini", head), {}).get("bad") == 1
+
+
+def test_cmd_banlist_cuts_long_output(monkeypatch):
+    # Сотни банов не роняют команду лимитом Telegram: режем по строкам.
+    monkeypatch.setattr(bot, "OWNER_ID", 107001)
+    sent = _capture_replies(monkeypatch)
+    for uid in range(200001, 200601):
+        bot._ban_user(uid)
+    asyncio.run(bot.cmd_banlist(_make_ban_message(999808, 107001, "/banlist")))
+    assert len(sent["text"]) <= bot.TG_MAX_LEN
+    assert sent["text"].endswith("…")

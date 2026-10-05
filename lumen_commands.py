@@ -787,6 +787,14 @@ async def cmd_banlist(message: Message) -> None:
         await bot._tg_call(message.reply, bot._t(message.chat.id, "banlist_empty"))
         return
     text = bot._t(message.chat.id, "banlist_header") + "\n" + "\n".join(f"• {uid}" for uid in ids)
+    # Список растёт руками, но упереться в лимит Telegram не должен: режем по
+    # строкам, как вывод /stats выше.
+    if len(text) > bot.TG_MAX_LEN:
+        cut = text[:bot.TG_MAX_LEN - 1]
+        nl = cut.rfind("\n")
+        if nl > bot.TG_MAX_LEN // 2:
+            cut = cut[:nl]
+        text = cut.rstrip() + "…"
     await bot._tg_call(message.reply, text)
 
 
@@ -910,6 +918,11 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
 async def handle_pick_callback(query: CallbackQuery) -> None:
     """Кнопки-уточнения: чужие отклоняем, протухшие известные перевыпускаем разок, выбор дописываем к запросу и гоним обычным путём (_handle_message_core)."""
     import bot
+    if query.from_user is not None and bot._is_banned(query.from_user.id):
+        # Забаненный и кнопками не отвечает: иначе игнор обходился живыми пиками.
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
     data = query.data or ""
     if not data.startswith("pick:"):
         return

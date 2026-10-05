@@ -364,7 +364,7 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
 _SELFTEST_PING_TEXT = "Reply with exactly: ok"
 
 def _selftest_short_error(exc: BaseException) -> str:
-    """Короткий однострочник для строки /selftest: без ID моделей и простыней."""
+    """Короткий однострочник для строки /selftest (только личка — ID моделей тут допустимы)."""
     text = f"{exc.__class__.__name__}: {exc}".strip()
     return " ".join(text.split())[:120] or exc.__class__.__name__
 
@@ -421,7 +421,10 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
             ans = await bot._extract_gemini_answer_text(
                 resp, model_id=model, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
             if not ans.strip():
+                bot._record_model_outcome("gemini", model, bad=True)
                 raise RuntimeError(f"Model {model} returned an empty response")
+            # Та же честность, что у остальных проб: успех сбрасывает счётчик.
+            bot._record_model_outcome("gemini", model, bad=_detect_garbled_mix(ans))
             _gpt, _gct, _gtt = _usage_from_gemini_response(resp)
             _log_llm_usage(chat_id=chat_id, provider="gemini", model_id=model,
                            prompt=_gpt, completion=_gct, total=_gtt)
