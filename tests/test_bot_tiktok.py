@@ -103,110 +103,56 @@ def test_tiktok_video_candidates_empty_when_nothing_available():
     assert bot._tiktok_video_candidates({}) == []
 
 
-def test_original_sound_label_russian():
-    assert bot._original_sound_label("ru") == "Оригинальный звук"
-
-
-def test_original_sound_label_ukrainian():
-    assert bot._original_sound_label("uk") == "Оригінальний звук"
-
-
-def test_original_sound_label_belarusian():
-    assert bot._original_sound_label("be") == "Арыгінальны гук"
-
-
-def test_original_sound_label_english():
-    assert bot._original_sound_label("en") == "Original sound"
-
-
-def test_original_sound_label_strips_region_subtag():
-    # Telegram может прислать региональный вариант ("en-US", "pt-BR") — берём
-    # только первичный языковой подтег до дефиса.
-    assert bot._original_sound_label("en-US") == "Original sound"
-    assert bot._original_sound_label("pt-BR") == "Som original"
-
-
-def test_original_sound_label_falls_back_to_english_for_unknown_code():
-    assert bot._original_sound_label("sw") == "Original sound"
-    assert bot._original_sound_label("xx-YY") == "Original sound"
-
-
-def test_original_sound_label_falls_back_to_english_when_missing():
-    assert bot._original_sound_label(None) == "Original sound"
-    assert bot._original_sound_label("") == "Original sound"
-
-
-def test_original_sound_label_case_insensitive():
-    assert bot._original_sound_label("RU") == "Оригинальный звук"
-
-
-def test_original_sound_label_fallback_chain():
+@pytest.mark.parametrize(("user_lang", "chat_lang", "expected"), [
+    ("ru", None, "Оригинальный звук"),
+    ("uk", None, "Оригінальний звук"),
+    ("be", None, "Арыгінальны гук"),
+    ("en", None, "Original sound"),
+    # Telegram присылает региональный вариант ("en-US", "pt-BR") — только первичный подтег.
+    ("en-US", None, "Original sound"),
+    ("pt-BR", None, "Som original"),
+    ("sw", None, "Original sound"),
+    ("xx-YY", None, "Original sound"),
+    (None, None, "Original sound"),
+    ("", None, "Original sound"),
+    ("RU", None, "Оригинальный звук"),
     # Цепочка: язык отправителя → язык чата (/lang) → английский.
-    assert bot._original_sound_label("de", "uk") == "Originalton"
-    assert bot._original_sound_label(None, "uk") == "Оригінальний звук"
-    assert bot._original_sound_label("sw", "kk") == "Түпнұсқа дыбыс"
-    assert bot._original_sound_label("th", "kk") == "เสียงต้นฉบับ"
-    assert bot._original_sound_label("sw", "xx") == "Original sound"
-    assert bot._original_sound_label(None, None) == "Original sound"
+    ("de", "uk", "Originalton"),
+    (None, "uk", "Оригінальний звук"),
+    ("sw", "kk", "Түпнұсқа дыбыс"),
+    ("th", "kk", "เสียงต้นฉบับ"),
+    ("sw", "xx", "Original sound"),
+])
+def test_original_sound_label(user_lang, chat_lang, expected):
+    assert bot._original_sound_label(user_lang, chat_lang) == expected
 
 
-def test_tiktok_music_page_id_extracts_trailing_numeric_id():
-    url = "https://www.tiktok.com/music/original-sound-7666630127215823637"
-    assert bot._tiktok_music_page_id(url) == "7666630127215823637"
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://www.tiktok.com/music/original-sound-7666630127215823637", "7666630127215823637"),
+    # Реальный случай из логов — слаг на русском языке.
+    ("https://www.tiktok.com/music/оригинальный-звук-7667114246303812385", "7667114246303812385"),
+    ("https://www.tiktok.com/music/original-sound-7666630127215823637/", "7666630127215823637"),
+    ("https://www.tiktok.com/@someuser/video/7370000000000000001", None),
+    ("https://www.tiktok.com/@someuser/photo/7370000000000000002", None),
+    # Именованный трек со своим слагом — числовой ID всё равно находится.
+    ("https://www.tiktok.com/music/Blinding-Lights-6862178485109294850", "6862178485109294850"),
+])
+def test_tiktok_music_page_id(url, expected):
+    assert bot._tiktok_music_page_id(url) == expected
 
 
-def test_tiktok_music_page_id_extracts_id_with_cyrillic_slug():
-    # Реальный найденный в логах случай — слаг на русском языке.
-    url = "https://www.tiktok.com/music/оригинальный-звук-7667114246303812385"
-    assert bot._tiktok_music_page_id(url) == "7667114246303812385"
-
-
-def test_tiktok_music_page_id_handles_trailing_slash():
-    url = "https://www.tiktok.com/music/original-sound-7666630127215823637/"
-    assert bot._tiktok_music_page_id(url) == "7666630127215823637"
-
-
-def test_tiktok_music_page_id_none_for_regular_video_link():
-    url = "https://www.tiktok.com/@someuser/video/7370000000000000001"
-    assert bot._tiktok_music_page_id(url) is None
-
-
-def test_tiktok_music_page_id_none_for_photo_post_link():
-    url = "https://www.tiktok.com/@someuser/photo/7370000000000000002"
-    assert bot._tiktok_music_page_id(url) is None
-
-
-def test_tiktok_music_page_id_none_for_named_track_slug():
-    # Именованные треки/песни тоже используют /music/, просто со своим слагом —
-    # функция всё равно должна найти числовой ID (сама эвристика "сработает ли
-    # скачивание" находится не здесь, а в handle_tiktok_sound).
-    url = "https://www.tiktok.com/music/Blinding-Lights-6862178485109294850"
-    assert bot._tiktok_music_page_id(url) == "6862178485109294850"
-
-
-def test_looks_like_resolved_tiktok_url_true_for_proper_video_url():
-    assert bot._looks_like_resolved_tiktok_url("https://www.tiktok.com/@someuser/video/7370000000000000001") is True
-
-
-def test_looks_like_resolved_tiktok_url_true_for_proper_photo_url():
-    assert bot._looks_like_resolved_tiktok_url("https://www.tiktok.com/@someuser/photo/7370000000000000002") is True
-
-
-def test_looks_like_resolved_tiktok_url_false_for_empty_username():
-    # Точно тот URL, что реально ушёл в TikWM и получил 403 в реальном инциденте.
-    assert bot._looks_like_resolved_tiktok_url("https://www.tiktok.com/@/photo/7512093374153772309") is False
-
-
-def test_looks_like_resolved_tiktok_url_false_for_bare_at_sign_without_post():
-    # Просто "@" где-то в строке (например голая страница профиля без поста, или
-    # случайное совпадение) — раньше проходило старую слабую проверку.
-    assert bot._looks_like_resolved_tiktok_url("https://www.tiktok.com/@someuser") is False
-    assert bot._looks_like_resolved_tiktok_url("https://www.tiktok.com/some-page?ref=@video") is False
-
-
-def test_looks_like_resolved_tiktok_url_false_for_empty_or_none():
-    assert bot._looks_like_resolved_tiktok_url("") is False
-    assert bot._looks_like_resolved_tiktok_url(None) is False
+@pytest.mark.parametrize(("url", "expected"), [
+    ("https://www.tiktok.com/@someuser/video/7370000000000000001", True),
+    ("https://www.tiktok.com/@someuser/photo/7370000000000000002", True),
+    # Тот URL с пустым юзернеймом, что реально ушёл в TikWM и получил 403.
+    ("https://www.tiktok.com/@/photo/7512093374153772309", False),
+    ("https://www.tiktok.com/@someuser", False),
+    ("https://www.tiktok.com/some-page?ref=@video", False),
+    ("", False),
+    (None, False),
+])
+def test_looks_like_resolved_tiktok_url(url, expected):
+    assert bot._looks_like_resolved_tiktok_url(url) is expected
 
 
 def test_resolve_tiktok_short_falls_through_to_get_when_head_gives_malformed_url():
@@ -243,99 +189,65 @@ def test_resolve_tiktok_short_returns_get_result_even_if_still_malformed():
     assert result == "https://www.tiktok.com/@/photo/999"
 
 
-def test_slideshow_slide_urls_prefers_live_images_when_present():
-    media_data = {"live_images": ["https://tikwm.com/live0.mp4", ""]}
-    images_to_fetch = ["https://tikwm.com/photo0.jpg", "https://tikwm.com/photo1.jpg"]
-    assert bot._slideshow_slide_urls(media_data, images_to_fetch) == [
-        "https://tikwm.com/live0.mp4", "https://tikwm.com/photo1.jpg",
-    ]
+@pytest.mark.parametrize(("media_data", "images", "expected"), [
+    (
+        {"live_images": ["https://tikwm.com/live0.mp4", ""]},
+        ["https://tikwm.com/photo0.jpg", "https://tikwm.com/photo1.jpg"],
+        ["https://tikwm.com/live0.mp4", "https://tikwm.com/photo1.jpg"],
+    ),
+    (
+        {},
+        ["https://tikwm.com/photo0.jpg", "https://tikwm.com/photo1.jpg"],
+        ["https://tikwm.com/photo0.jpg", "https://tikwm.com/photo1.jpg"],
+    ),
+    (
+        {"live_images": ["https://tikwm.com/live0.mp4"]},
+        ["https://tikwm.com/photo0.jpg", "https://tikwm.com/photo1.jpg"],
+        ["https://tikwm.com/live0.mp4", "https://tikwm.com/photo1.jpg"],
+    ),
+    (
+        {"live_images": "not-a-list"},
+        ["https://tikwm.com/photo0.jpg"],
+        ["https://tikwm.com/photo0.jpg"],
+    ),
+])
+def test_slideshow_slide_urls(media_data, images, expected):
+    assert bot._slideshow_slide_urls(media_data, images) == expected
 
 
-def test_slideshow_slide_urls_falls_back_when_live_images_absent():
-    images_to_fetch = ["https://tikwm.com/photo0.jpg", "https://tikwm.com/photo1.jpg"]
-    assert bot._slideshow_slide_urls({}, images_to_fetch) == images_to_fetch
-
-
-def test_slideshow_slide_urls_falls_back_when_live_images_shorter():
-    media_data = {"live_images": ["https://tikwm.com/live0.mp4"]}
-    images_to_fetch = ["https://tikwm.com/photo0.jpg", "https://tikwm.com/photo1.jpg"]
-    assert bot._slideshow_slide_urls(media_data, images_to_fetch) == [
-        "https://tikwm.com/live0.mp4", "https://tikwm.com/photo1.jpg",
-    ]
-
-
-def test_slideshow_slide_urls_ignores_non_list_live_images():
-    media_data = {"live_images": "not-a-list"}
-    images_to_fetch = ["https://tikwm.com/photo0.jpg"]
-    assert bot._slideshow_slide_urls(media_data, images_to_fetch) == images_to_fetch
-
-
-def test_looks_like_video_bytes_true_for_mp4_ftyp_signature():
+@pytest.mark.parametrize(("payload", "expected"), [
     # Реальная сигнатура начала MP4/MOV-контейнера: 4 байта размера бокса + "ftyp".
-    mp4_header = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
-    assert bot._looks_like_video_bytes(mp4_header) is True
+    (b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom", True),
+    # A7-9: WebM-слайд раньше принимался за фото.
+    (b"\x1a\x45\xdf\xa3" + b"\x00" * 16, True),
+    (b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00", False),
+    (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR", False),
+    (b"\x00\x00\x00\x18fty", False),
+    (b"", False),
+])
+def test_looks_like_video_bytes(payload, expected):
+    assert bot._looks_like_video_bytes(payload) is expected
 
 
-def test_looks_like_video_bytes_false_for_jpeg():
-    jpeg_header = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00"
-    assert bot._looks_like_video_bytes(jpeg_header) is False
-
-
-def test_looks_like_video_bytes_false_for_png():
-    png_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-    assert bot._looks_like_video_bytes(png_header) is False
-
-
-def test_looks_like_video_bytes_false_for_too_short_input():
-    assert bot._looks_like_video_bytes(b"\x00\x00\x00\x18fty") is False
-
-
-def test_looks_like_video_bytes_false_for_empty_bytes():
-    assert bot._looks_like_video_bytes(b"") is False
-
-
-def test_chunk_tiktok_media_items_exact_multiple_of_ten():
-    items = list(range(20))
-    chunks = bot._chunk_tiktok_media_items(items)
-    assert [len(c) for c in chunks] == [10, 10]
-    assert sum(chunks, []) == items
-
-
-def test_chunk_tiktok_media_items_avoids_trailing_single_item_at_eleven():
-    items = list(range(11))
-    chunks = bot._chunk_tiktok_media_items(items)
-    assert [len(c) for c in chunks] == [9, 2]
-    for c in chunks:
-        assert 2 <= len(c) <= 10
-    assert sum(chunks, []) == items
-
-
-def test_chunk_tiktok_media_items_avoids_trailing_single_item_at_twenty_one():
-    items = list(range(21))
-    chunks = bot._chunk_tiktok_media_items(items)
-    assert [len(c) for c in chunks] == [10, 9, 2]
-    for c in chunks:
-        assert 2 <= len(c) <= 10
-    assert sum(chunks, []) == items
-
-
-def test_chunk_tiktok_media_items_avoids_trailing_single_item_at_tiktok_max_thirty_one():
-    items = list(range(31))
-    chunks = bot._chunk_tiktok_media_items(items)
-    for c in chunks:
-        assert 2 <= len(c) <= 10
-    assert sum(chunks, []) == items
-
-
-def test_chunk_tiktok_media_items_no_borrow_needed_at_thirty_five():
+@pytest.mark.parametrize(("n_items", "expected"), [
+    (20, [10, 10]),
+    (11, [9, 2]),
+    (21, [10, 9, 2]),
+    # Хвост-одиночка на максимуме TikTok недопустим, точный расклад не фиксируем.
+    (31, None),
     # Официальный максимум TikTok (35) кратен 10 с остатком 5 — переноса не требуется.
-    items = list(range(35))
+    (35, [10, 10, 10, 5]),
+    (0, []),
+])
+def test_chunk_tiktok_media_items(n_items, expected):
+    items = list(range(n_items))
     chunks = bot._chunk_tiktok_media_items(items)
-    assert [len(c) for c in chunks] == [10, 10, 10, 5]
-
-
-def test_chunk_tiktok_media_items_empty_list():
-    assert bot._chunk_tiktok_media_items([]) == []
+    if expected is not None:
+        assert [len(c) for c in chunks] == expected
+    else:
+        for c in chunks:
+            assert 2 <= len(c) <= 10
+    assert sum(chunks, []) == items
 
 
 def test_chunk_tiktok_media_items_single_item_not_split_further():
@@ -1619,11 +1531,6 @@ def test_tiktok_video_candidates_protocol_relative_url():
     # A7-8: "//host/path" раньше склеивался в битый tikwm-URL.
     candidates = bot._tiktok_video_candidates({"play": "//cdn.tikwm.com/v.mp4", "size": 1})
     assert candidates[0]["url"] == "https://cdn.tikwm.com/v.mp4"
-
-
-def test_looks_like_video_bytes_true_for_webm_ebml():
-    # A7-9: WebM-слайд раньше принимался за фото.
-    assert bot._looks_like_video_bytes(b"\x1a\x45\xdf\xa3" + b"\x00" * 16) is True
 
 
 def test_download_url_bin_honors_caller_cap():
