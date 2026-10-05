@@ -35,7 +35,7 @@ from lumen_router_config import (
     GEMINI_DEFAULT_CHAIN,
     _looks_like_heavy_query,
 )
-from lumen_security import _scrub_identity_leak
+from lumen_security import _scrub_identity_leak, _detect_garbled_mix
 
 # Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
 _TRANSCRIPT_MAX_CHARS = 4000
@@ -254,9 +254,13 @@ async def _chat_completion_chain(
             answer = answer.strip()
             if not answer:
                 # Пустой ответ — повод попробовать следующую модель (прод 17.09.2026: юзер дважды увидел "Empty response").
+                bot._record_model_outcome(provider, model_trial, bad=True)
                 raise RuntimeError(f"Model {model_trial} returned an empty response")
 
             answer = _scrub_identity_leak(answer, source=f"{provider}_chat_completion:{model_trial}")
+            # Каша-каша тоже считается плохим (доставляется как есть, как раньше),
+            # успех сбрасывает счётчик карантина.
+            bot._record_model_outcome(provider, model_trial, bad=_detect_garbled_mix(answer))
             log.info('[%s] Successful response from model %s (primary=%s, models tried: %d)', label, model_trial, primary_model_id, len(tried))
             _pt, _ct, _tt = _usage_from_openai_response(resp)
             _log_llm_usage(chat_id=chat_id, provider=provider, model_id=model_trial,
@@ -777,6 +781,7 @@ async def ask_gemini(
             ans = ans.strip()
             if not ans:
                 # Пустой ответ — пробуем следующую модель (прод 17.09.2026: юзер увидел буквальное "Empty response").
+                bot._record_model_outcome("gemini", curr_model_id, bad=True)
                 raise RuntimeError(f"Model {curr_model_id} returned an empty response")
             break
         except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
@@ -833,6 +838,7 @@ async def ask_gemini(
     _record_model_latency(_model_speed_key("gemini", curr_model_id), total_sec=time.monotonic() - attempt_start)
 
     ans = _scrub_identity_leak(ans, source=f"ask_gemini:{curr_model_id}")
+    bot._record_model_outcome("gemini", curr_model_id, bad=_detect_garbled_mix(ans))
 
     hist.append({"role": "user", "content": _history_user_text(user_text)})
     hist.append({"role": "assistant", "content": ans})

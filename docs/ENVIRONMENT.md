@@ -75,6 +75,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `DAILY_USER_GEMINI_LIMIT` | `5` | Of the above, max answers that actually went through Gemini (links, YouTube, video/audio, fresh data with search). Past it, links/YouTube/video are refused, the rest is served via Groq/OpenRouter (fresh data marked as answered without search). |
 | `DAILY_USER_TTS_LIMIT` | `5` | Max `/tts` voicings per user per day (counts toward `DAILY_USER_MESSAGE_LIMIT` too). |
 | `ROUTE_MODEL_TIMEOUT_SEC` | `22s` | Timeout for a single attempt at a single model. No retries: any failure moves straight to the next model. |
+| `MODEL_QUARANTINE_BAD_LIMIT` | `3` | How many consecutive bad responses (empty or garbled) put a model in temporary quarantine until the end of the quota day. A good response resets the counter; the last available model of a route is never quarantined. In-memory only. |
 | `ROUTE_TOTAL_BUDGET_SEC` | `40s` | Total time budget for the whole routing chain of one message, across all providers (Gemini, OpenRouter, Groq). |
 | `DRAW_TOTAL_BUDGET_SEC` | `120s` | Same idea, for the `/draw` fallback chain across image models. |
 | `CHAT_LOCK_TIMEOUT_SEC` | `45s` | How long an incoming message waits for that chat's lock before replying "busy". Deliberately shorter than `DRAW_TOTAL_BUDGET_SEC`: a second message during a long drawing gets "busy" instead of hanging. Shared by normal messages, pick-buttons and albums. |

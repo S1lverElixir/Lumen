@@ -605,6 +605,9 @@ from lumen_router_config import (
     _looks_like_heavy_query,
     _looks_like_freshness_query,
     _build_route,
+    _record_model_outcome,
+    _is_quarantined,
+    _quarantine_status,
 )
 # Слой ошибок живёт в lumen_errors.py (P2): здесь только реэкспорт имён.
 from lumen_errors import (
@@ -949,6 +952,9 @@ __all__ = [
     "_looks_like_heavy_query",
     "_looks_like_freshness_query",
     "_build_route",
+    "_record_model_outcome",
+    "_is_quarantined",
+    "_quarantine_status",
     "_maybe_alert_gemini_exhausted",
     "mark_state_dirty",
     "get_state",

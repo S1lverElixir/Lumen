@@ -27,6 +27,7 @@ from lumen_security import (
     _IDENTITY_LEAK_FALLBACK,
     _INJECTED_PAYLOAD_ECHO_FALLBACK,
     _detect_injected_payload_echo,
+    _detect_garbled_mix,
     _detect_identity_leak,
     _scrub_identity_leak,
 )
@@ -429,6 +430,7 @@ async def _run_streaming_reply(
 
     # Пустой full_text сюда не доходит — ветки "Empty response" нет.
     final_answer = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
+    bot._record_model_outcome(provider, model_id, bad=_detect_garbled_mix(full_text.strip()))
     hist.append({"role": "user", "content": _history_user_text(user_text)})
     hist.append({"role": "assistant", "content": final_answer})
     # Тот же _trim_history, что в нестриминговых путях (см. комментарий выше).

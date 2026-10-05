@@ -24,12 +24,16 @@ from unittest.mock import AsyncMock
 
 import bot
 import lumen_limits
+import lumen_router_config
 
 
 @pytest.fixture(autouse=True)
 def _bot_global_state_guard():
     """Снимок наиболее часто вручную сохраняемых модульных глобалов bot.py перед
     каждым тестом и восстановление после (аудит техдолга, август 2026).
+    Карантин моделей (lumen_router_config._QUARANTINE) тоже снимается: пустые
+    ответы в тестах честно пишут в счётчик, без сброса один и тот же фейковый
+    ID за три теста ушёл бы в карантин и начал фильтровать маршруты.
 
     Десятки тестов в test_bot_*.py вручную сохраняли/восстанавливали
     bot.chat_state/bot.GLOBAL_QUOTA/bot.client/bot.bot в try/finally — рабочий, но
@@ -48,6 +52,7 @@ def _bot_global_state_guard():
     import bot as _bot_module
     chat_state_snapshot = copy.deepcopy(_bot_module.chat_state)
     quota_snapshot = copy.deepcopy(_bot_module.GLOBAL_QUOTA)
+    quarantine_snapshot = copy.deepcopy(lumen_router_config._QUARANTINE)
     client_snapshot = _bot_module.client
     bot_snapshot = _bot_module.bot
     yield
@@ -55,6 +60,8 @@ def _bot_global_state_guard():
     _bot_module.chat_state.update(chat_state_snapshot)
     _bot_module.GLOBAL_QUOTA.clear()
     _bot_module.GLOBAL_QUOTA.update(quota_snapshot)
+    lumen_router_config._QUARANTINE.clear()
+    lumen_router_config._QUARANTINE.update(quarantine_snapshot)
     _bot_module.client = client_snapshot
     _bot_module.bot = bot_snapshot
 

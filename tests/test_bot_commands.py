@@ -1426,3 +1426,22 @@ def test_selftest_llm_head_openrouter_error_returns_false_without_quota(monkeypa
     assert ok is False and "boom-429" in detail and elapsed >= 0
     after = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
     assert after == before
+
+
+def test_cmd_stats_shows_quarantine(monkeypatch):
+    # Карантин виден владельцу в /stats: иначе объезд модели выглядел бы магией.
+    monkeypatch.setattr(bot, "OWNER_ID", 888001)
+    for _ in range(3):
+        bot._record_model_outcome("openrouter", "qs-model:free", bad=True)
+    incoming = _FakeIncomingMessage(999707)
+    incoming.from_user = SimpleNamespace(id=888001)
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    asyncio.run(bot.cmd_stats(incoming))
+    assert "Карантин моделей" in sent["text"]
+    assert "qs-model:free" in sent["text"]

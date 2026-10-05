@@ -602,6 +602,13 @@ async def cmd_stats(message: Message) -> None:
     gemini_text = _quota_section(gemini_quota, None, bot.GEMINI_DAILY_LIMITS)
     or_text = _quota_section(bot.GLOBAL_QUOTA.get("openrouter", {}), bot.OPENROUTER_DAILY_LIMIT)
     groq_text = _quota_section(bot.GLOBAL_QUOTA.get("groq", {}), bot.GROQ_DAILY_LIMIT)
+    _quarantined_now = bot._quarantine_status()
+    if _quarantined_now:
+        quarantine_text = "\n".join(
+            f"  • {provider}/{mid}: {bad} плохих подряд (до конца суток)" for provider, mid, bad in _quarantined_now
+        )
+    else:
+        quarantine_text = "  нет"
 
     # Суточные счётчики: уникальные пользователи — только числом, без ID.
     _day_stats = bot._stats_entry()
@@ -628,6 +635,7 @@ async def cmd_stats(message: Message) -> None:
         f"<b>Gemini — запросов по моделям:</b>\n{gemini_text}\n\n"
         f"<b>OpenRouter — запросов по моделям:</b>\n{or_text}\n\n"
         f"<b>Groq — запросов по моделям:</b>\n{groq_text}\n\n"
+        f"<b>Карантин моделей:</b>\n{quarantine_text}\n\n"
         f"Вебхук: {webhook_text}\n"
         f"Память: {_process_memory_text()}\n"
         f"Хранилище: {_storage_backend_text()}"
