@@ -35,7 +35,7 @@ from lumen_router_config import (
     GEMINI_DEFAULT_CHAIN,
     _looks_like_heavy_query,
 )
-from lumen_security import _scrub_identity_leak, _detect_garbled_mix
+from lumen_security import _scrub_identity_leak, _detect_garbled_mix, _is_garbled_echo
 
 # Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
 _TRANSCRIPT_MAX_CHARS = 4000
@@ -213,7 +213,7 @@ async def _probe_or_model_liveness() -> None:
 async def _chat_completion_chain(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
     request_fn, provider: str, deadline: float | None = None, stop_on: Callable[[Exception], bool] | None = None,
-    log_label: str | None = None, chat_id: Any = None,
+    log_label: str | None = None, chat_id: Any = None, user_text: str | None = None,
 ) -> tuple[str, str]:
     """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (OpenRouter и Groq).
 
@@ -259,8 +259,10 @@ async def _chat_completion_chain(
 
             answer = _scrub_identity_leak(answer, source=f"{provider}_chat_completion:{model_trial}")
             # Каша-каша тоже считается плохим (доставляется как есть, как раньше),
-            # успех сбрасывает счётчик карантина.
-            bot._record_model_outcome(provider, model_trial, bad=_detect_garbled_mix(answer))
+            # успех сбрасывает счётчик карантина. Повтор смешанных токенов за
+            # пользователем — эхо, а не каша модели, в счётчик не идёт.
+            mush = _detect_garbled_mix(answer) and not _is_garbled_echo(answer, user_text)
+            bot._record_model_outcome(provider, model_trial, bad=mush)
             log.info('[%s] Successful response from model %s (primary=%s, models tried: %d)', label, model_trial, primary_model_id, len(tried))
             _pt, _ct, _tt = _usage_from_openai_response(resp)
             _log_llm_usage(chat_id=chat_id, provider=provider, model_id=model_trial,
@@ -286,7 +288,7 @@ async def _chat_completion_chain(
 
 async def _or_chat_completion_with_fallback(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
-    deadline: float | None = None, chat_id: Any = None,
+    deadline: float | None = None, chat_id: Any = None, user_text: str | None = None,
 ) -> tuple[str, str]:
     """Fallback-цикл по цепочке OpenRouter поверх общего _chat_completion_chain. Аккаунтный
     лимит free-моделей/сутки обрывает остаток цепочки сразу — они упали бы тем же
@@ -304,7 +306,7 @@ async def _or_chat_completion_with_fallback(
     return await _chat_completion_chain(
         messages, trial_models, primary_model_id,
         request_fn=_request, provider="openrouter", deadline=deadline,
-        stop_on=_account_wide, log_label="or", chat_id=chat_id,
+        stop_on=_account_wide, log_label="or", chat_id=chat_id, user_text=user_text,
     )
 
 async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
@@ -318,7 +320,7 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     # Сборка messages — только в _build_openrouter_turn_messages (общая со стримингом).
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, primary_model_id)
 
-    answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id)
+    answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id, user_text=user_text)
 
     # В историю пишем чистый текст (без "Фон разговора") — её читает и Gemini, разовый групповой контекст там оседать не должен.
     history.append({"role": "user", "content": _history_user_text(user_text)})
@@ -349,7 +351,7 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     # RouteBudgetExceededError пробрасываются наверх тем же путём.
     answer, model_trial = await _chat_completion_chain(
         messages, trial_models, primary_model_id,
-        request_fn=_request, provider="groq", deadline=deadline, chat_id=chat_id,
+        request_fn=_request, provider="groq", deadline=deadline, chat_id=chat_id, user_text=user_text,
     )
 
     # В историю — чистый текст пользователя, как у остальных провайдеров.
@@ -389,7 +391,7 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
             _ans, used = await _chat_completion_chain(
                 messages, [model], model, request_fn=_groq_probe_request,
                 provider="groq", deadline=start + bot.ROUTE_MODEL_TIMEOUT_SEC,
-                log_label="groq", chat_id=chat_id,
+                log_label="groq", chat_id=chat_id, user_text=_SELFTEST_PING_TEXT,
             )
             bot._record_quota_usage("groq", used)
             return True, "", round(time.monotonic() - start, 2)
@@ -403,7 +405,7 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
             _ans, used = await _chat_completion_chain(
                 messages, [model], model, request_fn=_or_probe_request,
                 provider="openrouter", deadline=start + bot.ROUTE_MODEL_TIMEOUT_SEC,
-                log_label="or", chat_id=chat_id,
+                log_label="or", chat_id=chat_id, user_text=_SELFTEST_PING_TEXT,
             )
             bot._record_quota_usage("openrouter", used)
             return True, "", round(time.monotonic() - start, 2)
@@ -424,7 +426,9 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
                 bot._record_model_outcome("gemini", model, bad=True)
                 raise RuntimeError(f"Model {model} returned an empty response")
             # Та же честность, что у остальных проб: успех сбрасывает счётчик.
-            bot._record_model_outcome("gemini", model, bad=_detect_garbled_mix(ans))
+            # Пинг без смешанных токенов — эху тут браться негде, проверка для единообразия.
+            bot._record_model_outcome("gemini", model,
+                                      bad=_detect_garbled_mix(ans) and not _is_garbled_echo(ans, _SELFTEST_PING_TEXT))
             _gpt, _gct, _gtt = _usage_from_gemini_response(resp)
             _log_llm_usage(chat_id=chat_id, provider="gemini", model_id=model,
                            prompt=_gpt, completion=_gct, total=_gtt)
@@ -524,7 +528,7 @@ async def ask_openrouter_multimodal(
         ]
     })
 
-    answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id)
+    answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id, user_text=user_text)
 
     history.append({"role": "user", "content": _history_user_text(user_text)})
     history.append({"role": "assistant", "content": answer})
@@ -841,7 +845,8 @@ async def ask_gemini(
     _record_model_latency(_model_speed_key("gemini", curr_model_id), total_sec=time.monotonic() - attempt_start)
 
     ans = _scrub_identity_leak(ans, source=f"ask_gemini:{curr_model_id}")
-    bot._record_model_outcome("gemini", curr_model_id, bad=_detect_garbled_mix(ans))
+    bot._record_model_outcome("gemini", curr_model_id,
+                              bad=_detect_garbled_mix(ans) and not _is_garbled_echo(ans, user_text))
 
     hist.append({"role": "user", "content": _history_user_text(user_text)})
     hist.append({"role": "assistant", "content": ans})

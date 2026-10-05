@@ -148,20 +148,36 @@ def _token_scripts(token: str) -> set[str]:
     return scripts
 
 
-def _detect_garbled_mix(text: str) -> bool:
-    """True при 3+ смешанных токенах от 100 символов. Короткие не смотрим — там шум выше пользы."""
+def _garbled_mixed_tokens(text: str) -> list[str]:
+    """Смешанные токены (2+ письменности внутри одного): сырьё детектора и проверки эха."""
     if not text or len(text) < _MUSH_MIN_TEXT_LEN:
-        return False
+        return []
     stripped = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     stripped = re.sub(r"`[^`\n]+`", " ", stripped)
     stripped = re.sub(r"https?://\S+", " ", stripped)
-    mixed = 0
+    mixed: list[str] = []
     for token in re.findall(r"[^\W_]+", stripped, flags=re.UNICODE):
         if len(_token_scripts(token)) >= 2:
-            mixed += 1
-            if mixed >= _MUSH_MIN_MIXED_TOKENS:
-                return True
-    return False
+            mixed.append(token)
+            if len(mixed) >= _MUSH_MIN_MIXED_TOKENS:
+                break
+    return mixed
+
+
+def _detect_garbled_mix(text: str) -> bool:
+    """True при 3+ смешанных токенах от 100 символов. Короткие не смотрим — там шум выше пользы."""
+    return len(_garbled_mixed_tokens(text)) >= _MUSH_MIN_MIXED_TOKENS
+
+
+def _is_garbled_echo(answer: str, user_text: str | None) -> bool:
+    """Эхо за пользователем, а не каша модели: все смешанные токены уже были в запросе."""
+    if not user_text:
+        return False
+    mixed = _garbled_mixed_tokens(answer)
+    if not mixed:
+        return False
+    low_user = user_text.lower()
+    return all(token.lower() in low_user for token in mixed)
 
 
 def _scrub_identity_leak(text: str, *, source: str) -> str:
