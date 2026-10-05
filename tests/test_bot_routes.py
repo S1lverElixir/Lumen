@@ -457,6 +457,64 @@ def test_or_empty_response_falls_through_to_next_model(monkeypatch):
     assert calls == ["m1:free", "m2:free"]
 
 
+def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
+    # Три пустых подряд в одну голову — карантин (реальная регрессия: мёртвая голова
+    # жевала бы каждую попытку до конца суток вместо объезда после третьей).
+    async def fake_empty(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": []}
+
+    monkeypatch.setattr(bot, "_or_request", fake_empty)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="empty response"):
+            asyncio.run(bot._or_chat_completion_with_fallback(messages, ["qe:free"], "qe:free"))
+    assert bot._is_quarantined("openrouter", "qe:free") is True
+
+
+def test_chain_garbled_response_delivered_but_feeds_quarantine(monkeypatch):
+    # Каша доставляется как раньше (без подмены), но в счётчик идёт: три таких —
+    # и голова в карантине.
+    mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
+    assert len(mush) >= 100
+
+    async def fake_mush(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": [{"message": {"content": mush}}]}
+
+    monkeypatch.setattr(bot, "_or_request", fake_mush)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+    for _ in range(3):
+        answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["qm:free"], "qm:free"))
+        assert (answer, used) == (mush, "qm:free")
+    assert bot._is_quarantined("openrouter", "qm:free") is True
+
+
+def test_chain_echoed_mix_does_not_feed_quarantine(monkeypatch):
+    # Тот же mush, но токены уже были в запросе: модель повторила за
+    # пользователем — это эхо, карантин не кормим (иначе любой клал бы модели).
+    mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
+    user_text = "повтори за мной: dataданные fileфайл testтест и дальше своими словами"
+
+    async def fake_mush(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": [{"message": {"content": mush}}]}
+
+    monkeypatch.setattr(bot, "_or_request", fake_mush)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+    for _ in range(5):
+        answer, used = asyncio.run(
+            bot._or_chat_completion_with_fallback(messages, ["qe2:free"], "qe2:free", user_text=user_text))
+        assert (answer, used) == (mush, "qe2:free")
+    assert bot._is_quarantined("openrouter", "qe2:free") is False
+
+
 def test_attempt_timeout_caps_by_remaining_route_budget():
     # Регрессия (аудит 26.09.2026): каждая попытка ждала полные ROUTE_MODEL_TIMEOUT_SEC,
     # поэтому маршрут держал лок чата до 40+22с вместо заявленных 40с.

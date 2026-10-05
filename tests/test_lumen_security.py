@@ -136,6 +136,18 @@ def test_detect_garbled_mix_no_false_positive_on_normal_multilingual_text():
     assert lumen_security._detect_garbled_mix(plain_ru) is False
 
 
+def test_is_garbled_echo_exempts_user_repetition_but_not_model_garble():
+    # Отравление карантина: повтор смешанных токенов за пользователем — эхо,
+    # собственная каша модели — нет.
+    mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
+    assert lumen_security._detect_garbled_mix(mush) is True
+    echo_ask = "повтори за мной: dataданные fileфайл testтест и дальше своими словами"
+    assert lumen_security._is_garbled_echo(mush, echo_ask) is True
+    assert lumen_security._is_garbled_echo(mush, "расскажи про погоду") is False
+    assert lumen_security._is_garbled_echo(mush, None) is False
+    assert lumen_security._is_garbled_echo("обычный чистый ответ", echo_ask) is False
+
+
 def test_scrub_identity_leak_logs_mush_suspect_without_blocking(caplog):
     import logging
     mush = (

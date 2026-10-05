@@ -294,6 +294,16 @@ def load_global_quota() -> None:
                     except (TypeError, ValueError):
                         clean_stats[field] = 0
                 GLOBAL_QUOTA[STATS_KEY] = clean_stats
+            # Владельческая блокировка переживает рестарт тем же файлом/ключом.
+            raw_banned = loaded.get(BANNED_KEY)
+            if isinstance(raw_banned, dict):
+                clean_banned: dict[str, Any] = {}
+                for uid, ts in raw_banned.items():
+                    try:
+                        clean_banned[str(int(uid))] = max(0, int(ts or 0))
+                    except (TypeError, ValueError):
+                        continue
+                GLOBAL_QUOTA[BANNED_KEY] = clean_banned
             raw_ts = loaded.get("last_storage_write_ts")
             if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool) and raw_ts > 0:
                 GLOBAL_QUOTA["last_storage_write_ts"] = float(raw_ts)
@@ -834,6 +844,55 @@ def _is_owner(user_id: int | None) -> bool:
     """Владелец по OWNER_ID; названий моделей никому не показываем (см. автороутер)."""
     import bot
     return bot.OWNER_ID is not None and user_id is not None and user_id == bot.OWNER_ID
+
+# ── Владельческая блокировка (/ban): тот же персистентный файл/ключ, что квота.
+BANNED_KEY = "banned_users"
+
+def _banned_map() -> dict[str, Any]:
+    import bot
+    raw = bot.GLOBAL_QUOTA.get(BANNED_KEY)
+    if not isinstance(raw, dict):
+        raw = {}
+        bot.GLOBAL_QUOTA[BANNED_KEY] = raw
+    return raw
+
+def _is_banned(user_id: int | None) -> bool:
+    """Заблокирован ли пользователь. Владельца забанить нельзя — всегда False."""
+    import bot
+    if user_id is None or bot._is_owner(user_id):
+        return False
+    return str(user_id) in _banned_map()
+
+def _ban_user(user_id: int) -> bool:
+    """True если добавился сейчас, False если уже был (или это владелец)."""
+    import bot
+    if bot._is_owner(user_id):
+        return False
+    entry = _banned_map()
+    if str(user_id) in entry:
+        return False
+    entry[str(user_id)] = int(time.time())
+    bot.mark_quota_dirty()
+    return True
+
+def _unban_user(user_id: int) -> bool:
+    """True если был в списке и убран."""
+    import bot
+    if str(user_id) not in _banned_map():
+        return False
+    del _banned_map()[str(user_id)]
+    bot.mark_quota_dirty()
+    return True
+
+def _banned_list() -> list[int]:
+    """ID по возрастанию — для /banlist."""
+    ids = []
+    for key in _banned_map():
+        try:
+            ids.append(int(key))
+        except (TypeError, ValueError):
+            continue
+    return sorted(ids)
 
 async def _notify_owner(text: str) -> None:
     """ЛС владельцу о редких важных событиях; с троттлингом у вызывателя, никогда не кидает."""

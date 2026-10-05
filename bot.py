@@ -481,6 +481,11 @@ from lumen_chat_state import (
     _evict_orphan_chat_locks,
     _is_owner,
     _notify_owner,
+    BANNED_KEY,
+    _is_banned,
+    _ban_user,
+    _unban_user,
+    _banned_list,
     _is_privileged_in_chat,
     _quota_entry,
     _mark_quota_exhausted,
@@ -605,6 +610,9 @@ from lumen_router_config import (
     _looks_like_heavy_query,
     _looks_like_freshness_query,
     _build_route,
+    _record_model_outcome,
+    _is_quarantined,
+    _quarantine_status,
 )
 # Слой ошибок живёт в lumen_errors.py (P2): здесь только реэкспорт имён.
 from lumen_errors import (
@@ -665,6 +673,7 @@ from lumen_admin import (
     get_webhook_url,
     webhook_handler,
     network_diagnostics,
+    probe_url,
     export_state,
 )
 
@@ -731,6 +740,7 @@ __all__ = [
     "get_webhook_url",
     "webhook_handler",
     "network_diagnostics",
+    "probe_url",
     "export_state",
     # Имена из lumen_streaming.py код bot.py сам не читает — они нужны как `bot.X`
     # существующим тестам и `_run_route` ниже.
@@ -789,6 +799,7 @@ __all__ = [
     "ask_openrouter_text",
     "ask_openrouter_multimodal",
     "ask_groq_text",
+    "selftest_llm_head",
     "_transcribe_audio",
     "_gemini_history_contents",
     "_build_gemma_identity_contents",
@@ -882,6 +893,11 @@ __all__ = [
     "GLOBAL_QUOTA",
     "_is_owner",
     "_is_privileged_in_chat",
+    "BANNED_KEY",
+    "_is_banned",
+    "_ban_user",
+    "_unban_user",
+    "_banned_list",
     "_mark_quota_exhausted",
     "_mark_rate_limited",
     "_record_quota_usage",
@@ -946,6 +962,9 @@ __all__ = [
     "_looks_like_heavy_query",
     "_looks_like_freshness_query",
     "_build_route",
+    "_record_model_outcome",
+    "_is_quarantined",
+    "_quarantine_status",
     "_maybe_alert_gemini_exhausted",
     "mark_state_dirty",
     "get_state",
@@ -1040,6 +1059,7 @@ from lumen_routes import (
     ask_openrouter_text,
     ask_openrouter_multimodal,
     ask_groq_text,
+    selftest_llm_head,
     _transcribe_audio,
     _gemini_history_contents,
     _build_gemma_identity_contents,
@@ -1190,6 +1210,10 @@ from lumen_commands import (
     handle_lang_callback,
     cmd_logs,
     cmd_stats,
+    cmd_selftest,
+    cmd_ban,
+    cmd_unban,
+    cmd_banlist,
     _build_version,
     _webhook_info_text,
     _process_memory_text,
@@ -1205,6 +1229,10 @@ dp.message.register(cmd_lang, Command("lang"))
 dp.callback_query.register(handle_lang_callback, F.data.startswith("lang:"))
 dp.message.register(cmd_logs, Command("logs"))
 dp.message.register(cmd_stats, Command("stats"))
+dp.message.register(cmd_selftest, Command("selftest"))
+dp.message.register(cmd_ban, Command("ban"))
+dp.message.register(cmd_unban, Command("unban"))
+dp.message.register(cmd_banlist, Command("banlist"))
 dp.callback_query.register(handle_pick_callback, F.data.startswith("pick:"))
 
 
@@ -1236,6 +1264,11 @@ async def global_error_handler(event: Any) -> bool:
 
 @dp.message()
 async def handle_message(message: Message) -> None:
+    # Владельческая блокировка: ни ответа, ни контекста группы, ни счётчиков —
+    # отсекаем раньше всего, включая медиагруппы и пассивный фон.
+    if message.from_user is not None and _is_banned(message.from_user.id):
+        return
+
     if message.media_group_id:
         mgid = message.media_group_id
         _mg_buffers.setdefault(mgid, []).append(message)

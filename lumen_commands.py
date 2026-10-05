@@ -602,6 +602,13 @@ async def cmd_stats(message: Message) -> None:
     gemini_text = _quota_section(gemini_quota, None, bot.GEMINI_DAILY_LIMITS)
     or_text = _quota_section(bot.GLOBAL_QUOTA.get("openrouter", {}), bot.OPENROUTER_DAILY_LIMIT)
     groq_text = _quota_section(bot.GLOBAL_QUOTA.get("groq", {}), bot.GROQ_DAILY_LIMIT)
+    _quarantined_now = bot._quarantine_status()
+    if _quarantined_now:
+        quarantine_text = "\n".join(
+            f"  • {provider}/{mid}: {bad} плохих подряд (до конца суток)" for provider, mid, bad in _quarantined_now
+        )
+    else:
+        quarantine_text = "  нет"
 
     # Суточные счётчики: уникальные пользователи — только числом, без ID.
     _day_stats = bot._stats_entry()
@@ -628,6 +635,7 @@ async def cmd_stats(message: Message) -> None:
         f"<b>Gemini — запросов по моделям:</b>\n{gemini_text}\n\n"
         f"<b>OpenRouter — запросов по моделям:</b>\n{or_text}\n\n"
         f"<b>Groq — запросов по моделям:</b>\n{groq_text}\n\n"
+        f"<b>Карантин моделей:</b>\n{quarantine_text}\n\n"
         f"Вебхук: {webhook_text}\n"
         f"Память: {_process_memory_text()}\n"
         f"Хранилище: {_storage_backend_text()}"
@@ -646,6 +654,148 @@ async def cmd_stats(message: Message) -> None:
             cut = cut[:lt]
         text = cut.rstrip() + "…"
     await bot._tg_call(message.reply, text, parse_mode=ParseMode.HTML)
+
+
+_SELFTEST_LAST_RUN_MONOTONIC = 0.0
+SELFTEST_COOLDOWN_SEC = 60.0
+
+def _selftest_row(label: str, ok: bool, detail: str, elapsed: float) -> str:
+    """Одна строка итога без ID моделей (в группы команда не ходит вовсе)."""
+    base = f"{label}: {'OK' if ok else 'FAIL'} ({elapsed:.1f}s)"
+    return base if ok or not detail else f"{base} — {detail}"
+
+async def cmd_selftest(message: Message) -> None:
+    """Живая проверка голов маршрутов: по крошечной пробе в Groq, лёгкий OpenRouter
+    и сеть (прокси Telegram, TikWM) логикой /diag. Gemini — только по явному
+    аргументу, квота самая дефицитная. Только владелец, только личка, не чаще
+    раза в минуту. Успешные пробы честно пишутся в квоту."""
+    import bot
+    global _SELFTEST_LAST_RUN_MONOTONIC
+    if not bot._is_owner(message.from_user.id if message.from_user else None):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_group_only"))
+        return
+    now = time.monotonic()
+    wait = SELFTEST_COOLDOWN_SEC - (now - _SELFTEST_LAST_RUN_MONOTONIC)
+    if wait > 0:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_cooldown", sec=int(wait) + 1))
+        return
+    # Метку ставим до проб: повторный вызов во время долгой проверки тоже ждёт.
+    _SELFTEST_LAST_RUN_MONOTONIC = now
+    args = (getattr(message, "text", "") or "").split()
+    want_gemini = len(args) > 1 and args[1].split("@")[0].lower() == "gemini"
+    rows: list[str] = []
+    summary: list[str] = []
+    for provider, label in (("groq", "Groq"), ("openrouter", "OpenRouter")):
+        ok, detail, elapsed = await bot.selftest_llm_head(provider, chat_id=message.chat.id)
+        rows.append(_selftest_row(label, ok, detail, elapsed))
+        summary.append(f"{provider}={'ok' if ok else 'FAIL'}/{elapsed:.1f}s")
+    if want_gemini:
+        ok, detail, elapsed = await bot.selftest_llm_head("gemini", chat_id=message.chat.id)
+        rows.append(_selftest_row("Gemini", ok, detail, elapsed))
+        summary.append(f"gemini={'ok' if ok else 'FAIL'}/{elapsed:.1f}s")
+    try:
+        session = await bot._get_http_session()
+        token = bot.BOT_TOKEN or ""
+        proxy_url = bot.TELEGRAM_API_BASE_URL + "/bot" + (token[:6] if token else "x") + "/getMe"
+        net = await asyncio.gather(
+            bot.probe_url(session, proxy_url, timeout_sec=6.0, redact=token),
+            bot.probe_url(session, "https://www.tikwm.com", timeout_sec=6.0),
+        )
+    except Exception as exc:
+        net = [
+            {"ok": False, "elapsed_sec": 0.0, "error": f"{exc.__class__.__name__}"},
+            {"ok": False, "elapsed_sec": 0.0, "error": f"{exc.__class__.__name__}"},
+        ]
+    for label, res in (("TG-proxy", net[0]), ("TikWM", net[1])):
+        detail = "" if res.get("ok") else str(res.get("error") or res.get("status") or "error")[:120]
+        rows.append(_selftest_row(label, bool(res.get("ok")), detail, float(res.get("elapsed_sec") or 0.0)))
+        summary.append(f"{label}={'ok' if res.get('ok') else 'FAIL'}")
+    text = bot._t(message.chat.id, "selftest_header") + "\n" + "\n".join(rows)
+    if not want_gemini:
+        text += "\n" + bot._t(message.chat.id, "selftest_gemini_skipped")
+    await bot._tg_call(message.reply, text)
+    log.info("[selftest] chat=%s gemini_arg=%s %s", message.chat.id, want_gemini, " ".join(summary))
+
+
+def _ban_target_id(message: Message) -> int | None:
+    """ID цели /ban//unban: ответ на сообщение или числовой аргумент."""
+    replied = getattr(message, "reply_to_message", None)
+    replied_user = getattr(replied, "from_user", None) if replied is not None else None
+    replied_id = getattr(replied_user, "id", None)
+    if isinstance(replied_id, int) and not isinstance(replied_id, bool):
+        return replied_id
+    args = (getattr(message, "text", "") or "").split()[1:]
+    if args:
+        raw = args[0].split("@")[0].lstrip("+")
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+async def cmd_ban(message: Message) -> None:
+    """Владельческая блокировка (только владелец, только личка)."""
+    import bot
+    if not bot._is_owner(message.from_user.id if message.from_user else None):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_group_only"))
+        return
+    target = _ban_target_id(message)
+    if target is None:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_usage"))
+        return
+    if bot._is_owner(target):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_owner_refuse"))
+        return
+    bot._ban_user(target)
+    await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_done", user_id=target))
+    log.info("[ban] Owner banned user %s", target)
+
+async def cmd_unban(message: Message) -> None:
+    """Снятие владельческой блокировки (только владелец, только личка)."""
+    import bot
+    if not bot._is_owner(message.from_user.id if message.from_user else None):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_group_only"))
+        return
+    target = _ban_target_id(message)
+    if target is None:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_usage"))
+        return
+    if bot._unban_user(target):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "unban_done", user_id=target))
+        log.info("[ban] Owner unbanned user %s", target)
+    else:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "unban_missing", user_id=target))
+
+async def cmd_banlist(message: Message) -> None:
+    """Список заблокированных (только владелец, только личка)."""
+    import bot
+    if not bot._is_owner(message.from_user.id if message.from_user else None):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_group_only"))
+        return
+    ids = bot._banned_list()
+    if not ids:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "banlist_empty"))
+        return
+    text = bot._t(message.chat.id, "banlist_header") + "\n" + "\n".join(f"• {uid}" for uid in ids)
+    # Список растёт руками, но упереться в лимит Telegram не должен: режем по
+    # строкам, как вывод /stats выше.
+    if len(text) > bot.TG_MAX_LEN:
+        cut = text[:bot.TG_MAX_LEN - 1]
+        nl = cut.rfind("\n")
+        if nl > bot.TG_MAX_LEN // 2:
+            cut = cut[:nl]
+        text = cut.rstrip() + "…"
+    await bot._tg_call(message.reply, text)
 
 
 _BUILD_VERSION_CACHED: str | None = None
@@ -768,6 +918,11 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
 async def handle_pick_callback(query: CallbackQuery) -> None:
     """Кнопки-уточнения: чужие отклоняем, протухшие известные перевыпускаем разок, выбор дописываем к запросу и гоним обычным путём (_handle_message_core)."""
     import bot
+    if query.from_user is not None and bot._is_banned(query.from_user.id):
+        # Забаненный и кнопками не отвечает: иначе игнор обходился живыми пиками.
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
     data = query.data or ""
     if not data.startswith("pick:"):
         return

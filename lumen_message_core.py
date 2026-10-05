@@ -598,6 +598,10 @@ async def _process_raw_update(raw_update: dict) -> None:
         if isinstance(guest, dict):
             try:
                  msg_obj = Message.model_validate(guest, context={"bot": bot})
+                 guest_user = getattr(msg_obj, "from_user", None)
+                 if guest_user is not None and bot._is_banned(guest_user.id):
+                     # Гость в бане — тот же игнор, что у обычных сообщений.
+                     return
                  gq_id = guest.get("guest_query_id")
                  if gq_id is not None and not getattr(msg_obj, "guest_query_id", None):
                      with contextlib.suppress(Exception):

@@ -2283,6 +2283,36 @@ def test_guest_update_holds_per_chat_lock(monkeypatch):
     assert events == [("lock_for", 123), "acquire", "core", "release"]
 
 
+def test_guest_update_from_banned_user_never_reaches_core(monkeypatch):
+    # Гостевой путь шёл мимо гейта бана в handle_message: забаненный гость
+    # получал ответы, квоту и контекст.
+    import lumen_message_core
+    monkeypatch.setattr(bot, "OWNER_ID", 108001)
+    bot._ban_user(608001)
+    events = []
+    fake_msg = SimpleNamespace(chat=SimpleNamespace(id=124),
+                               guest_query_id="g1",
+                               from_user=SimpleNamespace(id=608001))
+
+    class _StubMessage:
+        @staticmethod
+        def model_validate(data, context=None):
+            return fake_msg
+
+    async def fake_core(message):
+        events.append("core")
+
+    async def fake_acquire(chat_id, timeout):
+        events.append(("lock_for", chat_id))
+        raise AssertionError("lock must not be taken for a banned guest")
+
+    monkeypatch.setattr(lumen_message_core, "Message", _StubMessage)
+    monkeypatch.setattr(bot, "acquire_chat_lock", fake_acquire)
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    asyncio.run(bot._process_raw_update({"guest_message": {"message_id": 2, "guest_query_id": "g1"}}))
+    assert events == []
+
+
 def test_voice_transcription_shares_route_deadline(rate_guard_setup, monkeypatch):
     # Аудит A4-03: транскрибация жила вне бюджета маршрута — дедлайн один на оба этапа.
     message = rate_guard_setup()

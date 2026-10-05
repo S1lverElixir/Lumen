@@ -729,3 +729,52 @@ def test_quota_exhausted_logs_broken_state_loudly(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="bot"):
         assert lumen_router_config._is_quota_exhausted("openrouter", "m") is False
     assert "Quota state unreadable" in caplog.text
+
+
+def test_quarantine_triggers_after_three_consecutive_bad_and_skips_model(caplog):
+    # Три плохих подряд — карантин до конца суток: роутер объезжает модель.
+    import bot
+    with caplog.at_level("WARNING", logger="bot"):
+        for _ in range(3):
+            bot._record_model_outcome("openrouter", "q-model:free", bad=True)
+    assert bot._is_quarantined("openrouter", "q-model:free") is True
+    assert "[quarantine]" in caplog.text
+    assert bot._quarantine_status() == [("openrouter", "q-model:free", 3)]
+    from lumen_router_config import _OR_LIGHT_ORDER
+    route = [m for m in _OR_LIGHT_ORDER if m != "q-model:free"] + ["q-model:free"]
+    assert "q-model:free" not in lumen_router_config._skip_exhausted("openrouter", route)
+
+
+def test_quarantine_never_empties_route_and_success_resets(caplog):
+    # Последняя доступная модель не карантинится де-факто: пустой маршрут не возвращаем.
+    import bot
+    for _ in range(5):
+        bot._record_model_outcome("groq", "only-model", bad=True)
+    assert bot._is_quarantined("groq", "only-model") is True
+    assert lumen_router_config._skip_exhausted("groq", ["only-model"]) == ["only-model"]
+    bot._record_model_outcome("groq", "only-model", bad=False)
+    assert bot._is_quarantined("groq", "only-model") is False
+    assert bot._quarantine_status() == []
+
+
+def test_quarantine_resets_on_quota_day_change(monkeypatch):
+    # Карантин только до конца суток квоты: новый день — чистый счётчик.
+    import bot
+    monkeypatch.setattr(bot, "_current_quota_day", lambda: "2099-01-01")
+    for _ in range(3):
+        bot._record_model_outcome("openrouter", "day-model:free", bad=True)
+    assert bot._is_quarantined("openrouter", "day-model:free") is True
+    monkeypatch.setattr(bot, "_current_quota_day", lambda: "2099-01-02")
+    assert bot._is_quarantined("openrouter", "day-model:free") is False
+    assert bot._quarantine_status() == []
+
+
+def test_quarantine_threshold_reads_env(monkeypatch):
+    # N из env: при 2 карантин наступает раньше (дефолт 3 проверен выше).
+    import bot
+    monkeypatch.setenv("MODEL_QUARANTINE_BAD_LIMIT", "2")
+    assert lumen_router_config._quarantine_threshold() == 2
+    bot._record_model_outcome("openrouter", "env-model:free", bad=True)
+    assert bot._is_quarantined("openrouter", "env-model:free") is False
+    bot._record_model_outcome("openrouter", "env-model:free", bad=True)
+    assert bot._is_quarantined("openrouter", "env-model:free") is True

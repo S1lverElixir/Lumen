@@ -1278,3 +1278,355 @@ def test_inline_tts_send_failure_raises(monkeypatch):
             asyncio.run(bot.inline_tts(incoming, "привет"))
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def _make_selftest_message(chat_id, user_id, text="/selftest", group=False):
+    incoming = _FakeIncomingMessage(chat_id)
+    if group:
+        incoming.chat.type = bot.ChatType.GROUP
+    incoming.from_user = SimpleNamespace(id=user_id)
+    incoming.text = text
+    return incoming
+
+
+def _setup_selftest_fakes(monkeypatch, fail_heads=()):
+    # Фейковые пробы голов и сети + захват ответа. Возвращает (calls, fake_tg_call).
+    import lumen_commands
+    calls = []
+
+    async def fake_head(provider, *, chat_id=None):
+        calls.append(provider)
+        if provider in fail_heads:
+            return False, "boom-500", 0.5
+        return True, "", 0.1
+
+    async def fake_session():
+        return SimpleNamespace()
+
+    async def fake_probe(session, url, *, timeout_sec=6.0, redact=""):
+        return {"status": 200, "elapsed_sec": 0.2, "ok": True}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        fake_tg_call.text = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "selftest_llm_head", fake_head)
+    monkeypatch.setattr(bot, "_get_http_session", fake_session)
+    monkeypatch.setattr(bot, "probe_url", fake_probe)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(lumen_commands, "_SELFTEST_LAST_RUN_MONOTONIC", 0.0)
+    return calls, fake_tg_call
+
+
+def test_cmd_selftest_denies_non_owner_without_probing(monkeypatch):
+    # Чужой не должен даже запускать пробы: иначе любой сливал бы квоту и видел внутрянку.
+    monkeypatch.setattr(bot, "OWNER_ID", 111001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    incoming = _make_selftest_message(999701, 222002)
+    asyncio.run(bot.cmd_selftest(incoming))
+    assert fake_tg_call.text == bot._t(999701, "stats_deny")
+    assert calls == []
+
+
+def test_cmd_selftest_group_only_for_owner(monkeypatch):
+    # ID моделей в группы не отдаём: команда в группах только отказывает, проб нет.
+    from lumen_router_config import _GROQ_LIGHT_ORDER, _OR_LIGHT_ORDER, GEMINI_DEFAULT_CHAIN
+    monkeypatch.setattr(bot, "OWNER_ID", 333001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    incoming = _make_selftest_message(999702, 333001, group=True)
+    asyncio.run(bot.cmd_selftest(incoming))
+    assert fake_tg_call.text == bot._t(999702, "selftest_group_only")
+    assert calls == []
+    for mid in list(_GROQ_LIGHT_ORDER) + list(_OR_LIGHT_ORDER) + list(GEMINI_DEFAULT_CHAIN):
+        assert mid not in fake_tg_call.text
+
+
+def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
+    # Без паузы владелец случайно выжигал бы квоту повторными тапами.
+    monkeypatch.setattr(bot, "OWNER_ID", 444001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999703, 444001)))
+    assert calls == ["groq", "openrouter"]
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999703, 444001)))
+    assert calls == ["groq", "openrouter"]
+    assert fake_tg_call.text == bot._t(999703, "selftest_cooldown", sec=60)
+
+
+def test_cmd_selftest_default_skips_gemini_and_hides_model_ids(monkeypatch):
+    # Дефолт без gemini бережёт самую дефицитную квоту; ID моделей в ответе нет.
+    from lumen_router_config import _GROQ_LIGHT_ORDER, _OR_LIGHT_ORDER, GEMINI_DEFAULT_CHAIN
+    monkeypatch.setattr(bot, "OWNER_ID", 555001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999704, 555001)))
+    assert calls == ["groq", "openrouter"]
+    assert bot._t(999704, "selftest_gemini_skipped") in fake_tg_call.text
+    for mid in list(_GROQ_LIGHT_ORDER) + list(_OR_LIGHT_ORDER) + list(GEMINI_DEFAULT_CHAIN):
+        assert mid not in fake_tg_call.text
+
+
+def test_cmd_selftest_with_gemini_arg_probes_gemini(monkeypatch):
+    # Явный аргумент включает пробу Gemini.
+    monkeypatch.setattr(bot, "OWNER_ID", 666001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999705, 666001, "/selftest gemini")))
+    assert calls == ["groq", "openrouter", "gemini"]
+    assert bot._t(999705, "selftest_gemini_skipped") not in fake_tg_call.text
+
+
+def test_cmd_selftest_reports_failed_head(monkeypatch):
+    # Упавшая голова — строка FAIL с причиной, а не молчание или падение команды.
+    monkeypatch.setattr(bot, "OWNER_ID", 777001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch, fail_heads=("groq",))
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999706, 777001)))
+    assert "Groq: FAIL" in fake_tg_call.text
+    assert "boom-500" in fake_tg_call.text
+    assert "OpenRouter: OK" in fake_tg_call.text
+
+
+def test_selftest_llm_head_openrouter_success_targets_head_and_counts_quota(monkeypatch):
+    # Честный учёт: успешная проба идёт ровно в голову лёгкого маршрута и +1 в квоту.
+    import lumen_model_speed
+    import lumen_routes
+    from lumen_router_config import _OR_LIGHT_ORDER
+    head = _OR_LIGHT_ORDER[0]
+    seen = {}
+
+    async def fake_or(path, method="GET", *, json_body=None, deadline=None):
+        seen["model"] = (json_body or {}).get("model")
+        return {"choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 4001, "completion_tokens": 2, "total_tokens": 4003}}
+
+    monkeypatch.setattr(bot, "_or_request", fake_or)
+    before = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    ema_before = dict(lumen_model_speed._latency_ema)
+    try:
+        ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("openrouter", chat_id=1))
+    finally:
+        lumen_model_speed._latency_ema.clear()
+        lumen_model_speed._latency_ema.update(ema_before)
+    assert ok is True and detail == "" and elapsed >= 0
+    assert seen["model"] == head
+    after = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    assert after == before + 1
+    bot.GLOBAL_QUOTA["openrouter"][head]["used"] = before
+
+
+def test_selftest_llm_head_openrouter_error_returns_false_without_quota(monkeypatch):
+    # Неуспех квоту не трогает (как в ask_*): иначе ошибка стоила бы как ответ.
+    import lumen_routes
+    from lumen_router_config import _OR_LIGHT_ORDER
+    head = _OR_LIGHT_ORDER[0]
+
+    async def boom(path, method="GET", *, json_body=None, deadline=None):
+        raise RuntimeError("boom-429")
+
+    monkeypatch.setattr(bot, "_or_request", boom)
+    before = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("openrouter", chat_id=1))
+    assert ok is False and "boom-429" in detail and elapsed >= 0
+    after = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    assert after == before
+
+
+def test_cmd_stats_shows_quarantine(monkeypatch):
+    # Карантин виден владельцу в /stats: иначе объезд модели выглядел бы магией.
+    monkeypatch.setattr(bot, "OWNER_ID", 888001)
+    for _ in range(3):
+        bot._record_model_outcome("openrouter", "qs-model:free", bad=True)
+    incoming = _FakeIncomingMessage(999707)
+    incoming.from_user = SimpleNamespace(id=888001)
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    asyncio.run(bot.cmd_stats(incoming))
+    assert "Карантин моделей" in sent["text"]
+    assert "qs-model:free" in sent["text"]
+
+
+def _make_ban_message(chat_id, user_id, text, group=False, reply_to=None):
+    incoming = _FakeIncomingMessage(chat_id)
+    if group:
+        incoming.chat.type = bot.ChatType.GROUP
+    incoming.from_user = SimpleNamespace(id=user_id)
+    incoming.text = text
+    incoming.reply_to_message = reply_to
+    return incoming
+
+
+def _capture_replies(monkeypatch):
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    return sent
+
+
+def test_ban_flow_by_id_unban_and_list(monkeypatch):
+    # Полный цикл: бан по ID, список, разбан, повторный разбан — мимо.
+    monkeypatch.setattr(bot, "OWNER_ID", 101001)
+    sent = _capture_replies(monkeypatch)
+    assert bot._is_banned(777002) is False
+    asyncio.run(bot.cmd_ban(_make_ban_message(999801, 101001, "/ban 777002")))
+    assert sent["text"] == bot._t(999801, "ban_done", user_id=777002)
+    assert bot._is_banned(777002) is True
+    asyncio.run(bot.cmd_banlist(_make_ban_message(999801, 101001, "/banlist")))
+    assert "777002" in sent["text"]
+    asyncio.run(bot.cmd_unban(_make_ban_message(999801, 101001, "/unban 777002")))
+    assert sent["text"] == bot._t(999801, "unban_done", user_id=777002)
+    assert bot._is_banned(777002) is False
+    asyncio.run(bot.cmd_unban(_make_ban_message(999801, 101001, "/unban 777002")))
+    assert sent["text"] == bot._t(999801, "unban_missing", user_id=777002)
+    asyncio.run(bot.cmd_banlist(_make_ban_message(999801, 101001, "/banlist")))
+    assert sent["text"] == bot._t(999801, "banlist_empty")
+
+
+def test_ban_by_reply_and_usage_and_owner_refuse(monkeypatch):
+    # Цель ответом на сообщение; мусор вместо ID — подсказка; владельца — отказ.
+    monkeypatch.setattr(bot, "OWNER_ID", 102001)
+    sent = _capture_replies(monkeypatch)
+    replied = SimpleNamespace(from_user=SimpleNamespace(id=555003))
+    asyncio.run(bot.cmd_ban(_make_ban_message(999802, 102001, "/ban", reply_to=replied)))
+    assert bot._is_banned(555003) is True
+    asyncio.run(bot.cmd_ban(_make_ban_message(999802, 102001, "/ban вообще")))
+    assert sent["text"] == bot._t(999802, "ban_usage")
+    asyncio.run(bot.cmd_ban(_make_ban_message(999802, 102001, "/ban 102001")))
+    assert sent["text"] == bot._t(999802, "ban_owner_refuse")
+    assert bot._is_banned(102001) is False
+
+
+def test_ban_denies_non_owner_and_group(monkeypatch):
+    # Чужой и группа: только отказ, список не меняется.
+    monkeypatch.setattr(bot, "OWNER_ID", 103001)
+    sent = _capture_replies(monkeypatch)
+    asyncio.run(bot.cmd_ban(_make_ban_message(999803, 999999, "/ban 123")))
+    assert sent["text"] == bot._t(999803, "stats_deny")
+    asyncio.run(bot.cmd_ban(_make_ban_message(999803, 103001, "/ban 123", group=True)))
+    assert sent["text"] == bot._t(999803, "ban_group_only")
+    assert bot._is_banned(123) is False
+
+
+def test_handle_message_ignores_banned_user(monkeypatch):
+    # Заблокированный: ни ответа, ни ядра (там контекст группы и счётчики лимитов).
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(bot, "OWNER_ID", 104001)
+    bot._ban_user(605001)
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+
+    def _msg(chat_type, text="привет"):
+        return SimpleNamespace(
+            media_group_id=None,
+            chat=SimpleNamespace(id=999804, type=chat_type),
+            from_user=SimpleNamespace(id=605001),
+            text=text, caption=None, reply_to_message=None,
+        )
+
+    asyncio.run(bot.handle_message(_msg(bot.ChatType.PRIVATE)))
+    asyncio.run(bot.handle_message(_msg(bot.ChatType.GROUP)))
+    assert fake_core.await_count == 0
+    bot._unban_user(605001)
+    asyncio.run(bot.handle_message(_msg(bot.ChatType.GROUP)))
+    assert fake_core.await_count == 1
+
+
+def test_banned_list_survives_quota_reload(monkeypatch):
+    # Список живёт в том же файле, что квота: рестарт его не сбрасывает.
+    import json
+    monkeypatch.setattr(bot, "OWNER_ID", 105001)
+    bot._ban_user(606001)
+    snapshot = json.dumps(dict(bot.GLOBAL_QUOTA), ensure_ascii=False)
+    monkeypatch.setattr(bot, "_storage_read_text", lambda *args, **kwargs: snapshot)
+    bot.GLOBAL_QUOTA.pop(bot.BANNED_KEY, None)
+    assert bot._is_banned(606001) is False
+    bot.load_global_quota()
+    assert bot._is_banned(606001) is True
+
+
+def test_pick_callback_ignores_banned_user(monkeypatch):
+    # Забаненный не отвечает и кнопками: иначе игнор обходился живыми пиками.
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(bot, "OWNER_ID", 106001)
+    bot._ban_user(607001)
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    answered = []
+
+    async def fake_answer(*args, **kwargs):
+        answered.append(True)
+
+    query = SimpleNamespace(
+        data="pick:unknown-token:0",
+        from_user=SimpleNamespace(id=607001),
+        message=None,
+        answer=fake_answer,
+    )
+    asyncio.run(bot.handle_pick_callback(query))
+    assert fake_core.await_count == 0
+    assert answered == [True]
+
+
+def test_selftest_llm_head_gemini_success_counts_quota_and_outcome(monkeypatch):
+    # Проба Gemini как у остальных: успех в квоту и сброс счётчика карантина.
+    import lumen_model_speed
+    import lumen_routes
+    from lumen_router_config import GEMINI_DEFAULT_CHAIN
+    head = GEMINI_DEFAULT_CHAIN[0]
+
+    class _FakeModels:
+        def __init__(self):
+            self.calls = []
+
+        async def generate_content(self, *, model, contents, config=None):
+            self.calls.append(model)
+            return SimpleNamespace(text="ok")
+
+    fake_models = _FakeModels()
+    monkeypatch.setattr(bot, "client", SimpleNamespace(aio=SimpleNamespace(models=fake_models)))
+    before = ((bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) or {}).get("used") or 0
+    ema_before = dict(lumen_model_speed._latency_ema)
+    try:
+        ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("gemini", chat_id=1))
+    finally:
+        lumen_model_speed._latency_ema.clear()
+        lumen_model_speed._latency_ema.update(ema_before)
+    assert ok is True and detail == "" and elapsed >= 0
+    assert fake_models.calls == [head]
+    after = ((bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) or {}).get("used") or 0
+    assert after == before + 1
+    bot.GLOBAL_QUOTA["gemini"][head]["used"] = before
+    assert bot._is_quarantined("gemini", head) is False
+
+
+def test_selftest_llm_head_gemini_empty_feeds_quarantine(monkeypatch):
+    # Пустая проба Gemini тоже плохой исход, как в цепочке.
+    import lumen_router_config
+    import lumen_routes
+    from lumen_router_config import GEMINI_DEFAULT_CHAIN
+    head = GEMINI_DEFAULT_CHAIN[0]
+
+    async def generate_empty(*, model, contents, config=None):
+        return SimpleNamespace(text="")
+
+    fake_client = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_empty)))
+    monkeypatch.setattr(bot, "client", fake_client)
+    ok, detail, _elapsed = asyncio.run(lumen_routes.selftest_llm_head("gemini", chat_id=1))
+    assert ok is False and "empty response" in detail
+    assert lumen_router_config._QUARANTINE.get(("gemini", head), {}).get("bad") == 1
+
+
+def test_cmd_banlist_cuts_long_output(monkeypatch):
+    # Сотни банов не роняют команду лимитом Telegram: режем по строкам.
+    monkeypatch.setattr(bot, "OWNER_ID", 107001)
+    sent = _capture_replies(monkeypatch)
+    for uid in range(200001, 200601):
+        bot._ban_user(uid)
+    asyncio.run(bot.cmd_banlist(_make_ban_message(999808, 107001, "/banlist")))
+    assert len(sent["text"]) <= bot.TG_MAX_LEN
+    assert sent["text"].endswith("…")

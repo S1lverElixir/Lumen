@@ -7,6 +7,7 @@ lumen_router_config.py — модели и выбор маршрута (Gemini/O
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -266,9 +267,76 @@ def _is_quota_exhausted(provider: str, model_id: str) -> bool:
         return False
 
 def _skip_exhausted(provider: str, models: list[str]) -> list[str]:
-    """Убирает модели с меткой квоты, но никогда не возвращает пустой список: один заведомо мёртвый вариант честнее мгновенного отказа (аудит 26.09.2026)."""
-    alive = [m for m in models if not _is_quota_exhausted(provider, m)]
+    """Убирает модели с меткой квоты и временным карантином, но никогда не возвращает пустой список: один заведомо мёртвый вариант честнее мгновенного отказа (аудит 26.09.2026)."""
+    alive = [m for m in models if not _is_quota_exhausted(provider, m) and not _is_quarantined(provider, m)]
     return alive or list(models)
+
+# ── Временный карантин моделей ──
+# Только в памяти: N плохих ответов подряд (пусто или mush-каша) — и роутер
+# пропускает модель до конца суток квоты. Реестр _OR_MODEL_HEALTH не трогаем:
+# туда только датированные доказательства.
+_QUARANTINE: dict[tuple[str, str], dict[str, Any]] = {}
+
+def _quarantine_threshold() -> int:
+    """Сколько плохих подряд до карантина (MODEL_QUARANTINE_BAD_LIMIT, дефолт 3)."""
+    try:
+        raw = (os.getenv("MODEL_QUARANTINE_BAD_LIMIT", "") or "").strip()
+        value = int(raw) if raw else 3
+    except (TypeError, ValueError):
+        return 3
+    return max(1, value)
+
+def _quarantine_entry(provider: str, model_id: str) -> dict[str, Any]:
+    """Сегодняшняя запись счётчика: смена суток квоты обнуляет молча."""
+    import bot
+    today = bot._current_quota_day()
+    key = (provider, model_id)
+    entry = _QUARANTINE.get(key)
+    if entry is None or entry.get("day") != today:
+        entry = {"bad": 0, "day": today}
+        _QUARANTINE[key] = entry
+    return entry
+
+def _record_model_outcome(provider: str, model_id: str, *, bad: bool) -> None:
+    """Плохой ответ +1 к счётчику (на пороге — карантин с записью в лог),
+    успешный — сбрасывает счётчик."""
+    if not bad:
+        if _QUARANTINE.pop((provider, model_id), None) is not None:
+            log.debug("[quarantine] %s/%s answered well, counter reset.", provider, model_id)
+        return
+    entry = _quarantine_entry(provider, model_id)
+    entry["bad"] = int(entry.get("bad") or 0) + 1
+    if entry["bad"] == _quarantine_threshold():
+        log.warning(
+            "[quarantine] %s/%s quarantined until end of quota day %s after %d consecutive bad responses (empty or garbled).",
+            provider, model_id, entry["day"], entry["bad"],
+        )
+
+def _is_quarantined(provider: str, model_id: str) -> bool:
+    try:
+        import bot
+        entry = _QUARANTINE.get((provider, model_id))
+        return bool(entry and entry.get("day") == bot._current_quota_day()
+                    and int(entry.get("bad") or 0) >= _quarantine_threshold())
+    except Exception as exc:
+        # Тот же fail-open, что у _is_quota_exhausted: битое состояние не должно
+        # молча выкидывать живые модели из маршрута.
+        log.warning("[router] Quarantine state unreadable, treating %s/%s as available: %s", provider, model_id, exc)
+        return False
+
+def _quarantine_status() -> list[tuple[str, str, int]]:
+    """Кто сейчас в карантине: для /stats. Пустые и вчерашние записи не показываем."""
+    try:
+        import bot
+        today = bot._current_quota_day()
+        threshold = _quarantine_threshold()
+        return sorted(
+            (provider, model_id, int(entry.get("bad") or 0))
+            for (provider, model_id), entry in _QUARANTINE.items()
+            if entry.get("day") == today and int(entry.get("bad") or 0) >= threshold
+        )
+    except Exception:
+        return []
 
 def _or_route(models: list[str]) -> list[tuple[str, str]]:
     """Список ID в пары (provider, model_id), минус реестр исключённых и модели с исчерпанной квотой."""

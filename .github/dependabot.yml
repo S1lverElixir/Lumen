@@ -7,14 +7,18 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 3
     groups:
       actions:
         patterns:
           - "*"
+  # pip смотрит все requirements*.txt в каталоге: requirements.txt и
+  # requirements-dev.txt оба покрыты, отдельных записей не нужно.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 3
     groups:
       pip-minor:
         patterns:
