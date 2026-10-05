@@ -354,7 +354,7 @@ def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
 
 # ── Groq (прямой провайдер, не через OpenRouter) ──
 # Калибровка живьём 21.09.2026: Qwen голова (чисто и по делу), gpt-oss второй (представляется ChatGPT и тратит reasoning-токены). Лимиты free: 30 RPM / 1000 RPD / 8K TPM / 200K TPD.
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+# Базовый URL один: bot.GROQ_BASE_URL, дубля здесь нет (аудит 05.10.2026).
 _GROQ_LIGHT_ORDER: list[str] = [
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b",

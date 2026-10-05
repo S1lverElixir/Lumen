@@ -181,28 +181,6 @@ _PICK_EXACT_TOPICS: dict[str, str] = {
     "игре": "games", "игр": "games", "играть": "games", "поиграть": "games",
 }
 _PICK_MAX_LEN = 60
-PICK_QUESTIONS: dict[str, str] = {
-    "film": "Что сегодня хочется?",
-    "series": "Что сегодня хочется?",
-    "music": "Какое настроение?",
-    "books": "Что сегодня хочется?",
-    "games": "Во что хочется?",
-}
-PICK_OPTIONS: dict[str, list[str]] = {
-    "film": ["Лёгкое и весёлое", "Драма", "Триллер", "Фантастика"],
-    "series": ["Лёгкое и весёлое", "Драма", "Детектив", "Фантастика"],
-    "music": ["Энергичное", "Спокойное", "Грустное", "Весёлое"],
-    "books": ["Фантастика", "Детектив", "Нон-фикшн", "Классика"],
-    "games": ["Экшен", "Стратегия", "RPG", "Головоломка"],
-}
-# Как выбор дописывается к исходному запросу перед обычным маршрутом.
-PICK_CHOICE_TEMPLATES: dict[str, str] = {
-    "film": "{original} (жанр: {choice})",
-    "series": "{original} (жанр: {choice})",
-    "music": "{original} (настроение: {choice})",
-    "books": "{original} (жанр: {choice})",
-    "games": "{original} (жанр: {choice})",
-}
 
 def match_pick_request(text_lower: str) -> str | None:
     """Возвращает id pick-сценария (film/music/...), если текст — вкусовой

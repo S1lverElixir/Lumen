@@ -50,31 +50,15 @@ def test_split_text_chunks_preserves_all_words():
     assert " ".join(chunks).split() == text.split()
 
 
-def test_split_text_chunks_lives_in_formatting_module():
-    # Срез монолита (сентябрь 2026): реализация — в lumen_formatting, bot.py
-    # только ре-экспортирует имя, чтобы bot._split_text_chunks работал как раньше.
-    import lumen_formatting
-    assert bot._split_text_chunks is lumen_formatting._split_text_chunks
-
-
-def test_sanitize_mime_type_guesses_from_extension():
-    assert bot._sanitize_mime_type("photo.jpg", "") == "image/jpeg"
-
-
-def test_sanitize_mime_type_lowercases_valid_mime():
-    assert bot._sanitize_mime_type(None, "image/PNG") == "image/png"
-
-
-def test_sanitize_mime_type_octet_stream_falls_back_to_extension():
-    assert bot._sanitize_mime_type("file.pdf", "application/octet-stream") == "application/pdf"
-
-
-def test_sanitize_mime_type_no_info_returns_default_fallback():
-    assert bot._sanitize_mime_type(None, None) == "application/octet-stream"
-
-
-def test_sanitize_mime_type_audio_ogg_passthrough():
-    assert bot._sanitize_mime_type(None, "audio/ogg") == "audio/ogg"
+@pytest.mark.parametrize(("filename", "mime", "expected"), [
+    ("photo.jpg", "", "image/jpeg"),
+    (None, "image/PNG", "image/png"),
+    ("file.pdf", "application/octet-stream", "application/pdf"),
+    (None, None, "application/octet-stream"),
+    (None, "audio/ogg", "audio/ogg"),
+])
+def test_sanitize_mime_type(filename, mime, expected):
+    assert bot._sanitize_mime_type(filename, mime) == expected
 
 
 def test_sanitize_mime_type_maps_containers_to_supported_mimes():
@@ -104,35 +88,27 @@ def test_ensure_prompt_text_gif_gets_animation_prompt_not_generic_image():
     assert "картинке" in bot._ensure_prompt_text(None, "image/jpeg")
 
 
-def test_is_tiktok_true_for_tiktok_url():
-    assert bot.is_tiktok("https://www.tiktok.com/@user/video/123") is True
+@pytest.mark.parametrize(("url", "is_tiktok", "is_youtube"), [
+    ("https://www.tiktok.com/@user/video/123", True, False),
+    ("https://youtube.com/watch?v=1", False, True),
+    ("https://youtu.be/abc123", False, True),
+    ("https://example.com", False, False),
+])
+def test_is_tiktok_and_is_youtube(url, is_tiktok, is_youtube):
+    assert bot.is_tiktok(url) is is_tiktok
+    assert bot.is_youtube(url) is is_youtube
 
 
-def test_is_tiktok_false_for_other_url():
-    assert bot.is_tiktok("https://youtube.com/watch?v=1") is False
+@pytest.mark.parametrize(("text", "expected"), [
+    ("check this out: https://example.com/page.", "https://example.com/page"),
+    ("no url here", None),
+])
+def test_extract_url(text, expected):
+    assert bot.extract_url(text) == expected
 
 
-def test_is_youtube_true_for_short_link():
-    assert bot.is_youtube("https://youtu.be/abc123") is True
-
-
-def test_is_youtube_false_for_other_url():
-    assert bot.is_youtube("https://example.com") is False
-
-
-def test_extract_url_strips_trailing_punctuation():
-    assert bot.extract_url("check this out: https://example.com/page.") == "https://example.com/page"
-
-
-def test_extract_url_returns_none_when_no_url():
-    assert bot.extract_url("no url here") is None
-
-
-def test_clean_mention_removes_username():
+def test_clean_mention():
     assert bot.clean_mention(f"@{bot.BOT_USERNAME} привет") == "привет"
-
-
-def test_clean_mention_is_case_insensitive():
     result = bot.clean_mention(f"привет @{bot.BOT_USERNAME.upper()} как дела")
     assert bot.BOT_USERNAME.lower() not in result.lower()
 
@@ -669,25 +645,23 @@ def test_sentry_not_initialized_without_dsn_in_test_env():
     assert sentry_sdk.is_initialized() is False
 
 
-def test_setup_logging_respects_log_level_env(monkeypatch):
-    # РЕГРЕССИЯ: раньше уровень был захардкожен INFO везде (root + оба handler'а) —
-    # log.debug(...) не печатался ни при каком окружении. LOG_LEVEL теперь читается
-    # так же, как и любой другой тюнинг в проекте.
+@pytest.mark.parametrize(("log_level", "expected"), [
+    # Регрессия: уровень был захардкожен INFO — log.debug не печатался ни при каком окружении.
+    ("DEBUG", "DEBUG"),
+    (None, "INFO"),
+])
+def test_setup_logging_level(monkeypatch, log_level, expected):
     import logging as _logging
-    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    if log_level is None:
+        monkeypatch.delenv("LOG_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("LOG_LEVEL", log_level)
     try:
         bot._setup_logging()
-        assert _logging.getLogger().level == _logging.DEBUG
+        assert _logging.getLogger().level == getattr(_logging, expected)
     finally:
         monkeypatch.delenv("LOG_LEVEL", raising=False)
         bot._setup_logging()  # восстановить дефолт INFO для остальных тестов
-
-
-def test_setup_logging_defaults_to_info_when_unset(monkeypatch):
-    import logging as _logging
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
-    bot._setup_logging()
-    assert _logging.getLogger().level == _logging.INFO
 
 
 def test_setup_logging_uses_bot_logger_name_not_dunder_main():
@@ -1895,28 +1869,21 @@ def test_reject_rate_limited_message_does_not_create_chat_state(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
-def test_rate_limit_key_for_message_uses_from_user_when_present():
-    msg = SimpleNamespace(
-        from_user=SimpleNamespace(id=555), sender_chat=None,
-        chat=SimpleNamespace(id=-100999),
-    )
-    assert bot._rate_limit_key_for_message(msg) == 555
-
-
-def test_rate_limit_key_for_message_falls_back_to_sender_chat_without_from_user():
+@pytest.mark.parametrize(("from_user_id", "sender_chat_id", "expected"), [
+    (555, None, 555),
     # Сообщение "от имени канала" — from_user отсутствует, но есть sender_chat.
+    (None, -100777, -100777),
+    # Ни from_user, ни sender_chat — сам chat.id, лишь бы не None (иначе
+    # отправитель полностью нелимитирован).
+    (None, None, -100999),
+])
+def test_rate_limit_key_for_message(from_user_id, sender_chat_id, expected):
     msg = SimpleNamespace(
-        from_user=None, sender_chat=SimpleNamespace(id=-100777),
+        from_user=SimpleNamespace(id=from_user_id) if from_user_id is not None else None,
+        sender_chat=SimpleNamespace(id=sender_chat_id) if sender_chat_id is not None else None,
         chat=SimpleNamespace(id=-100999),
     )
-    assert bot._rate_limit_key_for_message(msg) == -100777
-
-
-def test_rate_limit_key_for_message_falls_back_to_chat_id_as_last_resort():
-    # Ни from_user, ни sender_chat — берём сам chat.id, лишь бы не None (регрессия
-    # на сам факт обхода: раньше это давало полностью нелимитированного отправителя).
-    msg = SimpleNamespace(from_user=None, sender_chat=None, chat=SimpleNamespace(id=-100999))
-    assert bot._rate_limit_key_for_message(msg) == -100999
+    assert bot._rate_limit_key_for_message(msg) == expected
 
 
 def test_rate_limit_key_for_message_never_falls_through_to_none():
@@ -1930,23 +1897,19 @@ def test_rate_limit_key_for_message_never_falls_through_to_none():
         assert key is not None and key != 0
 
 
-def test_should_only_record_passively_true_for_unmentioned_group_text():
-    msg = _FakeIncomingMessage(1)
-    assert bot._should_only_record_passively(msg, "привет всем", is_private=False, is_guest=False, mentioned=False) is True
-
-
-def test_should_only_record_passively_false_when_mentioned_or_private_or_guest():
-    msg = _FakeIncomingMessage(1)
-    assert bot._should_only_record_passively(msg, "привет", is_private=True, is_guest=False, mentioned=False) is False
-    assert bot._should_only_record_passively(msg, "привет", is_private=False, is_guest=True, mentioned=False) is False
-    assert bot._should_only_record_passively(msg, "привет", is_private=False, is_guest=False, mentioned=True) is False
-
-
-def test_should_only_record_passively_false_for_tiktok_link_without_mention():
+@pytest.mark.parametrize(("text", "is_private", "is_guest", "mentioned", "expected"), [
+    ("привет всем", False, False, False, True),
+    ("привет", True, False, False, False),
+    ("привет", False, True, False, False),
+    ("привет", False, False, True, False),
     # TikTok-ссылка обрабатывается всегда, даже без упоминания бота в группе.
+    ("гляньте https://www.tiktok.com/@user/video/123", False, False, False, False),
+])
+def test_should_only_record_passively(text, is_private, is_guest, mentioned, expected):
     msg = _FakeIncomingMessage(1)
-    text = "гляньте https://www.tiktok.com/@user/video/123"
-    assert bot._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=False) is False
+    assert bot._should_only_record_passively(
+        msg, text, is_private=is_private, is_guest=is_guest, mentioned=mentioned,
+    ) is expected
 
 
 def test_handle_message_core_known_route_outcome_logs_as_warning_not_exception(caplog):

@@ -13,50 +13,33 @@ lumen_images.py не зависит от Telegram/рантайм-состоян�
 import asyncio
 
 import lumen_images
+import pytest
 
 
 # ─────────────────────────── _pick_image_model ───────────────────────────
 
-def test_pick_image_model_anime():
-    assert lumen_images._pick_image_model("нарисуй девушку в стиле аниме") == "flux-anime"
-    assert lumen_images._pick_image_model("draw a chibi character") == "flux-anime"
-    assert lumen_images._pick_image_model("manga style portrait") == "flux-anime"
 
-
-def test_pick_image_model_fantasy():
-    assert lumen_images._pick_image_model("нарисуй дракона в фэнтезийном замке") == "dreamshaper"
-    assert lumen_images._pick_image_model("concept art of an elf wizard") == "dreamshaper"
-    assert lumen_images._pick_image_model("рыцарь на фоне волшебного леса") == "dreamshaper"
-
-
-def test_pick_image_model_realism():
-    assert lumen_images._pick_image_model("сделай фотореалистичный портрет кота") == "flux-realism"
-    assert lumen_images._pick_image_model("realistic photo of a mountain") == "flux-realism"
-    assert lumen_images._pick_image_model("нарисуй кота как на фото") == "flux-realism"
-
-
-def test_pick_image_model_quick_draft():
-    assert lumen_images._pick_image_model("быстрый набросок логотипа") == "turbo"
-    assert lumen_images._pick_image_model("quick sketch of a car") == "turbo"
-
-
-def test_pick_image_model_falls_back_to_default_for_generic_prompt():
-    assert lumen_images._pick_image_model("космическая станция на орбите Земли") == lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL
-    assert lumen_images._pick_image_model("кот на подоконнике") == lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL
-
-
-def test_pick_image_model_empty_prompt_returns_default():
-    assert lumen_images._pick_image_model("") == lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL
-
-
-def test_pick_image_model_style_keyword_wins_over_quick_keyword():
-    # Стилевой сигнал важнее просьбы "побыстрее", если оба есть в одном промпте —
-    # аниме проверяется раньше черновика/скетча (см. докстринг _pick_image_model).
-    assert lumen_images._pick_image_model("быстро нарисуй аниме-девушку") == "flux-anime"
-
-
-def test_pick_image_model_case_insensitive():
-    assert lumen_images._pick_image_model("АНИМЕ ДЕВУШКА") == "flux-anime"
+@pytest.mark.parametrize(("prompt", "expected"), [
+    ("нарисуй девушку в стиле аниме", "flux-anime"),
+    ("draw a chibi character", "flux-anime"),
+    ("manga style portrait", "flux-anime"),
+    ("нарисуй дракона в фэнтезийном замке", "dreamshaper"),
+    ("concept art of an elf wizard", "dreamshaper"),
+    ("рыцарь на фоне волшебного леса", "dreamshaper"),
+    ("сделай фотореалистичный портрет кота", "flux-realism"),
+    ("realistic photo of a mountain", "flux-realism"),
+    ("нарисуй кота как на фото", "flux-realism"),
+    ("быстрый набросок логотипа", "turbo"),
+    ("quick sketch of a car", "turbo"),
+    ("космическая станция на орбите Земли", lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL),
+    ("кот на подоконнике", lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL),
+    ("", lumen_images.DEFAULT_POLLINATIONS_IMAGE_MODEL),
+    # Стилевой сигнал важнее просьбы "побыстрее": аниме проверяется раньше черновика.
+    ("быстро нарисуй аниме-девушку", "flux-anime"),
+    ("АНИМЕ ДЕВУШКА", "flux-anime"),
+])
+def test_pick_image_model(prompt, expected):
+    assert lumen_images._pick_image_model(prompt) == expected
 
 
 def test_pick_image_model_result_always_a_known_model():

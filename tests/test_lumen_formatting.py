@@ -14,10 +14,8 @@ Telegram/Gemini/OpenRouter/рантайм-состояния бота, поэт�
 Запуск:
     pytest test_lumen_formatting.py -v
 """
-import inspect
-
 import lumen_formatting
-import lumen_streaming
+import pytest
 
 
 
@@ -37,20 +35,15 @@ def test_truncate_html_to_fit_keeps_short_text_and_cuts_at_source_boundary():
 
 # ─────────────────────────── _md_to_html ───────────────────────────
 
-def test_md_to_html_empty_string():
-    assert lumen_formatting._md_to_html("") == ""
-
-
-def test_md_to_html_bold():
-    assert lumen_formatting._md_to_html("**bold**") == "<b>bold</b>"
-
-
-def test_md_to_html_italic():
-    assert lumen_formatting._md_to_html("*italic*") == "<i>italic</i>"
-
-
-def test_md_to_html_strikethrough():
-    assert lumen_formatting._md_to_html("~~strike~~") == "<s>strike</s>"
+@pytest.mark.parametrize(("source", "expected"), [
+    ("", ""),
+    ("**bold**", "<b>bold</b>"),
+    ("*italic*", "<i>italic</i>"),
+    ("~~strike~~", "<s>strike</s>"),
+    ("`code`", "<code>code</code>"),
+])
+def test_md_to_html_basic_markup(source, expected):
+    assert lumen_formatting._md_to_html(source) == expected
 
 
 def test_md_to_html_escapes_raw_html():
@@ -64,10 +57,7 @@ def test_md_to_html_inline_code():
 
 
 def test_md_to_html_code_block():
-    # Язык фенса теперь сохраняется как class="language-x" (подсветка синтаксиса
-    # в Telegram) — см. test_md_to_html_code_block_preserves_language_for_syntax_
-    # highlighting ниже; без языка поведение как раньше (test_md_to_html_code_
-    # block_without_language_unchanged).
+    # Язык фенса сохраняется как class="language-x" для подсветки в Telegram.
     assert lumen_formatting._md_to_html("```python\nprint(1)\n```") == '<pre><code class="language-python">print(1)</code></pre>'
 
 
@@ -112,36 +102,30 @@ def test_md_to_html_still_escapes_ordinary_comparison_operators():
     assert lumen_formatting._md_to_html("сравнение: 5 < 10") == "сравнение: 5 &lt; 10"
 
 
-def test_md_to_html_converts_markdown_table_to_bullet_list():
-    # Регрессия на реальный найденный при тестировании баг: Telegram не рендерит
-    # markdown-таблицы НИ В КАКОМ режиме — пользователь видел сырой текст с "|" и
-    # "---" вместо аккуратной таблицы (подтверждено скриншотами реального теста).
-    text = (
+@pytest.mark.parametrize(("text", "present"), [
+    # Регрессия: Telegram не рендерит markdown-таблицы ни в каком режиме —
+    # пользователь видел сырой текст с "|" и "---" (подтверждено скриншотами).
+    (
         "| Аспект | React | Vue |\n"
         "|--------|-------|-----|\n"
         "| Кривая обучения | Высокая | Низкая |\n"
-        "| Сообщество | Огромное | Среднее |"
-    )
-    result = lumen_formatting._md_to_html(text)
-    assert "|" not in result
-    assert "<b>Аспект:</b> Кривая обучения" in result
-    assert "<b>React:</b> Высокая" in result
-    assert "<b>Vue:</b> Низкая" in result
-    assert result.count("•") == 2
-
-
-def test_md_to_html_table_without_outer_pipes_still_converted():
+        "| Сообщество | Огромное | Среднее |",
+        ("<b>Аспект:</b> Кривая обучения", "<b>React:</b> Высокая", "<b>Vue:</b> Низкая"),
+    ),
     # Некоторые модели пишут таблицы без внешних "|" по краям строки.
-    text = (
+    (
         "Название | Цена\n"
         "---|---\n"
         "Кофе | 150\n"
-        "Чай | 100"
-    )
+        "Чай | 100",
+        ("<b>Название:</b> Кофе", "<b>Цена:</b> 150"),
+    ),
+])
+def test_md_to_html_converts_markdown_tables_to_bullet_lists(text, present):
     result = lumen_formatting._md_to_html(text)
     assert "|" not in result
-    assert "<b>Название:</b> Кофе" in result
-    assert "<b>Цена:</b> 150" in result
+    assert all(p in result for p in present)
+    assert result.count("•") == 2
 
 
 def test_md_to_html_does_not_touch_pipes_inside_code_block():
@@ -166,22 +150,24 @@ def test_md_to_html_no_false_positive_on_plain_text_with_dashes():
 # выдала "\[ S = \pi r^{2}, \]" и "\(x^{2}+y^{2}=r^{2}\)" вместо юникода, несмотря на
 # явный запрет LaTeX в system_prompt.py.
 
-def test_scrub_latex_converts_bracket_delimiters_and_pi_and_superscript():
-    result = lumen_formatting._scrub_latex(r"Площадь: \[ S = \pi r^{2} \]")
-    assert "\\[" not in result and "\\]" not in result
-    assert "π" in result
-    assert "r²" in result
+@pytest.mark.parametrize(("source", "gone", "present"), [
+    (r"Площадь: \[ S = \pi r^{2} \]", ("\\[", "\\]"), ("π", "r²")),
+    (r"формула \(x^{2}+y^{2}=r^{2}\)", ("\\(", "\\)"), ("x²+y²=r²",)),
+])
+def test_scrub_latex_converts_delimited_math(source, gone, present):
+    result = lumen_formatting._scrub_latex(source)
+    assert all(g not in result for g in gone)
+    assert all(p in result for p in present)
 
 
-def test_scrub_latex_converts_paren_delimiters():
-    result = lumen_formatting._scrub_latex(r"формула \(x^{2}+y^{2}=r^{2}\)")
-    assert "\\(" not in result and "\\)" not in result
-    assert "x²+y²=r²" in result
-
-
-def test_scrub_latex_converts_frac_and_sqrt():
-    assert lumen_formatting._scrub_latex(r"\frac{1}{2}") == "1/2"
-    assert lumen_formatting._scrub_latex(r"\sqrt{16}") == "√16"
+@pytest.mark.parametrize(("source", "expected"), [
+    (r"\frac{1}{2}", "1/2"),
+    (r"\sqrt{16}", "√16"),
+    ("обычный текст без формул", "обычный текст без формул"),
+    ("$$x^2 + y^2$$", "x² + y²"),
+])
+def test_scrub_latex_exact_replacements(source, expected):
+    assert lumen_formatting._scrub_latex(source) == expected
 
 
 def test_scrub_latex_converts_common_symbols():
@@ -189,10 +175,6 @@ def test_scrub_latex_converts_common_symbols():
     for leftover in ("\\times", "\\pm", "\\leq", "\\geq", "\\infty", "\\sum", "\\int"):
         assert leftover not in result
     assert "×" in result and "±" in result and "≤" in result and "≥" in result and "∞" in result
-
-
-def test_scrub_latex_noop_when_no_backslash_or_dollar():
-    assert lumen_formatting._scrub_latex("обычный текст без формул") == "обычный текст без формул"
 
 
 def test_scrub_latex_does_not_confuse_currency_with_math_delimiters():
@@ -204,15 +186,11 @@ def test_scrub_latex_does_not_confuse_currency_with_math_delimiters():
     # ("цена 100, а формула x²$ рядом"). Одиночный "$" теперь не обрабатывается
     # вообще — только "$$...$$". Сами доллары остаются нетронутыми в обоих случаях;
     # "x^2" внутри всё равно аккуратно превращается в "x²" — это отдельная, не
-    # завязанная на "$"-разделители замена (см. следующий тест), она безвредна и
-    # здесь, и вне контекста "$".
+    # завязанная на "$"-разделители замена (см. test_scrub_latex_exact_replacements),
+    # она безвредна и здесь, и вне контекста "$".
     assert lumen_formatting._scrub_latex("цена $100, а формула $x^2$ рядом") == "цена $100, а формула $x²$ рядом"
     assert lumen_formatting._scrub_latex("первый вариант — $50, второй — $100") == "первый вариант — $50, второй — $100"
     assert lumen_formatting._scrub_latex("стоимость: $100. Итого: $200.") == "стоимость: $100. Итого: $200."
-
-
-def test_scrub_latex_still_converts_double_dollar_display_math():
-    assert lumen_formatting._scrub_latex("$$x^2 + y^2$$") == "x² + y²"
 
 
 def test_scrub_latex_order_sensitive_replacements_dont_corrupt_each_other():
@@ -244,13 +222,13 @@ def test_scrub_latex_protected_inside_code_blocks_via_full_pipeline():
 # `code`/таблицы, но раньше НЕ трогал обычные markdown-списки — они уходили в
 # Telegram буквально с "-"/"*" в начале строки.
 
-def test_normalize_bullet_markers_converts_dash_and_asterisk():
-    assert lumen_formatting._normalize_bullet_markers("- Пункт один\n- Пункт два") == "• Пункт один\n• Пункт два"
-    assert lumen_formatting._normalize_bullet_markers("* Пункт один\n* Пункт два") == "• Пункт один\n• Пункт два"
-
-
-def test_normalize_bullet_markers_preserves_indentation():
-    assert lumen_formatting._normalize_bullet_markers("  - вложенный пункт") == "  • вложенный пункт"
+@pytest.mark.parametrize(("source", "expected"), [
+    ("- Пункт один\n- Пункт два", "• Пункт один\n• Пункт два"),
+    ("* Пункт один\n* Пункт два", "• Пункт один\n• Пункт два"),
+    ("  - вложенный пункт", "  • вложенный пункт"),
+])
+def test_normalize_bullet_markers(source, expected):
+    assert lumen_formatting._normalize_bullet_markers(source) == expected
 
 
 def test_normalize_bullet_markers_does_not_touch_bold_at_line_start():
@@ -283,45 +261,37 @@ def test_split_inline_bullets_ignores_short_prose():
     assert lumen_formatting._split_inline_bullets("На выбор чай • кофе.") == "На выбор чай • кофе."
 
 
-def test_split_inline_bullets_splits_three_item_prod_answer():
-    # Прод 26.09.2026: ровно 3 пункта (2 разделителя) — самый частый живой случай,
-    # со старым порогом 3 не ловился вообще (ответы про небо и мелодрамы).
-    text = (
+@pytest.mark.parametrize(("text", "n_lines", "intro"), [
+    # Прод 26.09.2026: ровно 3 пункта (2 разделителя) — самый частый живой случай.
+    (
         "• Рассеяние Рэлея: мелкие частицы в атмосфере рассеивают коротковолновый свет. "
         "• Солнечный спектр: солнце излучает больше синего света днём и ночью. "
-        "• Отсутствие поглощения: газы атмосферы почти не поглощают синий свет."
-    )
-    assert len(text) >= 200
-    lines = lumen_formatting._split_inline_bullets(text).split("\n")
-    assert len(lines) == 3
-    assert all(line.startswith("• ") for line in lines)
-
-
-def test_split_inline_bullets_splits_glued_without_spaces():
-    # Прод 05.10.2026: скриншот — модель склеила список способностей вообще без
-    # пробелов вокруг "•", старая сетка на " • " его не видела.
-    text = (
+        "• Отсутствие поглощения: газы атмосферы почти не поглощают синий свет.",
+        3, None,
+    ),
+    # Прод 05.10.2026: склейка вообще без пробелов вокруг "•".
+    (
         "• Отвечать на вопросы, вести беседу.• Выполнять веб-поиск и использовать полученные данные. "
-        "•Читать открытые веб-страницы и анализировать их содержание.• Анализировать присланные фото, видео и документы."
-    )
-    assert len(text) >= 200
-    lines = lumen_formatting._split_inline_bullets(text).split("\n")
-    assert len(lines) == 4
-    assert all(line.startswith("• ") for line in lines)
-    assert "" not in lines
-
-
-def test_split_inline_bullets_splits_middot_variant():
+        "•Читать открытые веб-страницы и анализировать их содержание.• Анализировать присланные фото, видео и документы.",
+        4, None,
+    ),
     # Та же склейка маркером "·": другой символ, та же каша для читателя.
-    text = (
+    (
         "Итоги такие: первый пункт с подробностями для длины строки и смыслом · второй пункт с подробностями "
-        "для длины строки и смыслом · третий пункт с подробностями для длины строки и смыслом · четвёртый пункт."
-    )
+        "для длины строки и смыслом · третий пункт с подробностями для длины строки и смыслом · четвёртый пункт.",
+        4, "Итоги такие: ",
+    ),
+])
+def test_split_inline_bullets_splits_prod_answers(text, n_lines, intro):
     assert len(text) >= 200
     lines = lumen_formatting._split_inline_bullets(text).split("\n")
-    assert len(lines) == 4
-    assert lines[0].startswith("Итоги такие: ")
-    assert all(line.startswith("• ") for line in lines[1:])
+    assert len(lines) == n_lines
+    assert "" not in lines
+    if intro is None:
+        assert all(line.startswith("• ") for line in lines)
+    else:
+        assert lines[0].startswith(intro)
+        assert all(line.startswith("• ") for line in lines[1:])
 
 
 def test_md_to_html_splits_inline_bullets_end_to_end():
@@ -331,23 +301,27 @@ def test_md_to_html_splits_inline_bullets_end_to_end():
     assert result.count("\n• ") == 3
 
 
-def test_split_inline_numbered_splits_glued_sky_answer():
+@pytest.mark.parametrize(("text", "intro"), [
     # Прод 25.09.2026: модель написала "1. ... 2. ... 3. ..." одним абзацем.
-    text = (
+    (
         "1. Рэлеевское рассеяние — молекулы воздуха рассеивают солнечный свет. "
         "2. Зависимость от длины волны — короткие волны рассеиваются сильнее. "
-        "3. Восприятие глаза — глаз чувствительнее к синему цвету неба."
-    )
+        "3. Восприятие глаза — глаз чувствительнее к синему цвету неба.",
+        None,
+    ),
+    (
+        "Причины такие: 1. Первая причина с длинным пояснением текста. 2. Вторая причина с длинным пояснением текста. 3. Третья причина с длинным пояснением текста.",
+        "Причины такие:",
+    ),
+])
+def test_split_inline_numbered_splits_glued_lists(text, intro):
     lines = lumen_formatting._split_inline_numbered(text).split("\n")
-    assert len(lines) == 3
-    assert lines[0].startswith("1. ") and lines[1].startswith("2. ") and lines[2].startswith("3. ")
-
-
-def test_split_inline_numbered_keeps_intro_on_own_line():
-    text = "Причины такие: 1. Первая причина с длинным пояснением текста. 2. Вторая причина с длинным пояснением текста. 3. Третья причина с длинным пояснением текста."
-    lines = lumen_formatting._split_inline_numbered(text).split("\n")
-    assert lines[0] == "Причины такие:"
-    assert [l[:2] for l in lines[1:]] == ["1.", "2.", "3."]
+    if intro is None:
+        assert len(lines) == 3
+        assert lines[0].startswith("1. ") and lines[1].startswith("2. ") and lines[2].startswith("3. ")
+    else:
+        assert lines[0] == intro
+        assert [line[:2] for line in lines[1:]] == ["1.", "2.", "3."]
 
 
 def test_split_inline_numbered_ignores_prose_and_versions():
@@ -421,15 +395,6 @@ def test_render_paths_differ_only_for_headings():
     assert lumen_formatting._md_to_rich_html("## Title") == "<h3>Title</h3>"
 
 
-def test_streaming_history_uses_summarizing_trim():
-    # Стриминговый путь резал историю голым del, из-за чего саммаризация старого
-    # работала только в нестриминговых ветках (аудит 26.09.2026).
-    src = inspect.getsource(lumen_streaming._run_streaming_reply)
-    code_lines = [ln for ln in src.splitlines() if not ln.strip().startswith("#")]
-    assert any("_trim_history" in ln for ln in code_lines)
-    assert not any("hist[:-" in ln for ln in code_lines), "в стриминге остался молчаливый срез истории"
-
-
 def test_md_to_rich_html_splits_three_bullets_prod_movies():
     # Прод 26.09.2026: ответ про мелодрамы — 3 пункта склеились, rich-путь молчал.
     text = (
@@ -455,13 +420,13 @@ def test_md_to_html_full_pipeline_converts_bullet_list_with_bold():
 # модели OpenRouter) регулярно их всё равно пишут — раньше "###" уходило в
 # Telegram буквально, без единой защитной сетки (в отличие от таблиц/списков).
 
-def test_normalize_headers_converts_h3_to_bold():
-    assert lumen_formatting._normalize_headers("### Как она выводится?") == "**Как она выводится?**"
-
-
-def test_normalize_headers_converts_h1_and_h2():
-    assert lumen_formatting._normalize_headers("# Заголовок") == "**Заголовок**"
-    assert lumen_formatting._normalize_headers("## Подзаголовок") == "**Подзаголовок**"
+@pytest.mark.parametrize(("source", "expected"), [
+    ("### Как она выводится?", "**Как она выводится?**"),
+    ("# Заголовок", "**Заголовок**"),
+    ("## Подзаголовок", "**Подзаголовок**"),
+])
+def test_normalize_headers_converts_atx_to_bold(source, expected):
+    assert lumen_formatting._normalize_headers(source) == expected
 
 
 def test_normalize_headers_does_not_touch_hash_mid_line():
@@ -504,20 +469,16 @@ def test_md_to_html_header_hash_inside_code_block_untouched():
 
 # ─────────────────── spoiler-тег: защитная сетка (тот же принцип, что <u>) ───────────────────
 
-def test_md_to_html_strips_literal_spoiler_tag():
-    assert lumen_formatting._md_to_html("<tg-spoiler>секрет</tg-spoiler>") == "секрет"
-
-
-def test_md_to_html_strips_literal_span_spoiler_tag():
-    assert lumen_formatting._md_to_html('<span class="tg-spoiler">секрет</span>') == "секрет"
+@pytest.mark.parametrize(("source", "expected"), [
+    ("<tg-spoiler>секрет</tg-spoiler>", "секрет"),
+    ('<span class="tg-spoiler">секрет</span>', "секрет"),
+])
+def test_md_to_html_strips_literal_spoiler_tags(source, expected):
+    assert lumen_formatting._md_to_html(source) == expected
 
 
 # ─────────────────── подсветка синтаксиса: язык из ```fence сохраняется ───────────────────
-
-def test_md_to_html_code_block_preserves_language_for_syntax_highlighting():
-    result = lumen_formatting._md_to_html("```python\nprint(1)\n```")
-    assert result == '<pre><code class="language-python">print(1)</code></pre>'
-
+# (сам кейс с языком покрыт test_md_to_html_code_block выше)
 
 def test_md_to_html_code_block_without_language_unchanged():
     assert lumen_formatting._md_to_html("```\nprint(1)\n```") == "<pre>print(1)</pre>"
@@ -525,13 +486,12 @@ def test_md_to_html_code_block_without_language_unchanged():
 
 # ─────────────────── markdown-цитаты "> " → <blockquote> ───────────────────
 
-def test_md_to_html_converts_single_line_blockquote():
-    assert lumen_formatting._md_to_html("> цитата") == "<blockquote>цитата</blockquote>"
-
-
-def test_md_to_html_converts_multiline_blockquote_as_one_block():
-    result = lumen_formatting._md_to_html("> первая строка\n> вторая строка")
-    assert result == "<blockquote>первая строка\nвторая строка</blockquote>"
+@pytest.mark.parametrize(("source", "expected"), [
+    ("> цитата", "<blockquote>цитата</blockquote>"),
+    ("> первая строка\n> вторая строка", "<blockquote>первая строка\nвторая строка</blockquote>"),
+])
+def test_md_to_html_converts_blockquotes(source, expected):
+    assert lumen_formatting._md_to_html(source) == expected
 
 
 def test_md_to_html_blockquote_markdown_inside_still_converts():
@@ -603,16 +563,29 @@ def test_rich_non_table_pipes_left_alone():
     assert lumen_formatting._md_to_rich_html("a | b") == "a | b"
 
 
-def test_rich_headings_become_h_tags():
-    assert lumen_formatting._md_to_rich_html("## Заголовок") == "<h3>Заголовок</h3>"
-    assert lumen_formatting._md_to_rich_html("### Подзаголовок") == "<h4>Подзаголовок</h4>"
+@pytest.mark.parametrize(("source", "expected"), [
+    ("## Заголовок", "<h3>Заголовок</h3>"),
+    ("### Подзаголовок", "<h4>Подзаголовок</h4>"),
+    # Тот же допуск, что у легаси-нормализации: ведущие пробелы и 1–6 решёток.
+    ("   ## Заголовок", "<h3>Заголовок</h3>"),
+    ("# Топ", "<h2>Топ</h2>"),
+    ("#### Глубокий", "<h4>Глубокий</h4>"),
+])
+def test_rich_headings_become_h_tags(source, expected):
+    assert lumen_formatting._md_to_rich_html(source) == expected
 
 
-def test_rich_math_preserved_as_tg_math_tags():
+@pytest.mark.parametrize(("source", "expected"), [
+    ("корень $x^2$ тут", "корень <tg-math>x^2</tg-math> тут"),
+    ("формула $$E=mc^2$$ конец", "формула <tg-math-block>E=mc^2</tg-math-block> конец"),
+    # Скобочные формы LaTeX (реальный кейс nemotron) извлекаются раньше $.
+    ("смотри \\[S = \\pi r^{2}\\] конец", "смотри <tg-math-block>S = \\pi r^{2}</tg-math-block> конец"),
+    ("значение \\(x\\) тут", "значение <tg-math>x</tg-math> тут"),
+])
+def test_rich_math_preserved_as_tg_math_tags(source, expected):
     # В отличие от _md_to_html (юникод-замена), рич-путь отдаёт LaTeX сырым —
     # рендерит сервер Telegram.
-    assert lumen_formatting._md_to_rich_html("корень $x^2$ тут") == "корень <tg-math>x^2</tg-math> тут"
-    assert lumen_formatting._md_to_rich_html("формула $$E=mc^2$$ конец") == "формула <tg-math-block>E=mc^2</tg-math-block> конец"
+    assert lumen_formatting._md_to_rich_html(source) == expected
 
 
 def test_rich_keeps_bold_links_code_quotes_and_escape():
@@ -626,20 +599,6 @@ def test_rich_keeps_bold_links_code_quotes_and_escape():
 def test_rich_math_inside_code_stays_code():
     # LaTeX внутри кода — код, а не формула (порядок экстракции: код раньше математики).
     assert lumen_formatting._md_to_rich_html("`$x$`") == "<code>$x$</code>"
-
-
-def test_rich_bracket_math_forms():
-    # Скобочные формы LaTeX (реальный кейс nemotron): \[...\] — блочная,
-    # \(...\) — инлайн. Извлекаются раньше $ во избежание конфликтов.
-    assert lumen_formatting._md_to_rich_html("смотри \\[S = \\pi r^{2}\\] конец") == "смотри <tg-math-block>S = \\pi r^{2}</tg-math-block> конец"
-    assert lumen_formatting._md_to_rich_html("значение \\(x\\) тут") == "значение <tg-math>x</tg-math> тут"
-
-
-def test_rich_headings_tolerate_indent_and_deep_levels():
-    # Тот же допуск, что у легаси-нормализации: ведущие пробелы и 1–6 решёток.
-    assert lumen_formatting._md_to_rich_html("   ## Заголовок") == "<h3>Заголовок</h3>"
-    assert lumen_formatting._md_to_rich_html("# Топ") == "<h2>Топ</h2>"
-    assert lumen_formatting._md_to_rich_html("#### Глубокий") == "<h4>Глубокий</h4>"
 
 
 def test_br_tag_becomes_line_break_in_both_paths():

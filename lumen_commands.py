@@ -1006,11 +1006,6 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer()
         return
-    if not _is_rec_owner(rec):
-        # Та же проверка авторства, что выше до перевыпуска (дубль убран, поведение то же).
-        with contextlib.suppress(Exception):
-            await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
-        return
     # Все проверки пройдены — только теперь забираем токен (см. комментарий у get выше).
     # Без сообщения кнопки не во что упереть: токен не трогаем, иначе тап из инлайн
     # режима сжёг бы чужой выбор без дела.

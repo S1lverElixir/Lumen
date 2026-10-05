@@ -26,21 +26,16 @@ def test_circuit_breaker_starts_closed():
     assert breaker.is_down(time.monotonic()) is False
 
 
-def test_circuit_breaker_does_not_trip_before_threshold():
+@pytest.mark.parametrize(("failures", "tripped"), [(2, False), (3, True)])
+def test_circuit_breaker_trip_threshold(failures, tripped):
     breaker = bot._TelegramProxyCircuitBreaker(cooldown_sec=20.0, trip_threshold=3)
-    assert breaker.note_failure() is False
-    assert breaker.note_failure() is False
-    assert breaker.is_down(time.monotonic()) is False
-
-
-def test_circuit_breaker_trips_at_threshold():
-    breaker = bot._TelegramProxyCircuitBreaker(cooldown_sec=20.0, trip_threshold=3)
-    breaker.note_failure()
-    breaker.note_failure()
-    tripped = breaker.note_failure()
-    assert tripped is True
-    breaker.trip()
-    assert breaker.is_down(time.monotonic()) is True
+    result = False
+    for _ in range(failures):
+        result = breaker.note_failure()
+    assert result is tripped
+    if tripped:
+        breaker.trip()
+    assert breaker.is_down(time.monotonic()) is tripped
 
 
 def test_circuit_breaker_success_resets_consecutive_failures():
@@ -152,40 +147,26 @@ def test_rotate_telegram_proxy_noop_with_single_candidate():
         bot._telegram_proxy_idx = original_idx
 
 
-def test_rotate_telegram_proxy_switches_and_reports_lap_not_done():
+@pytest.mark.parametrize(("start_idx", "expected_idx", "expected_switched", "expected_url"), [
+    # Ещё не замкнули круг — есть смысл пробовать сразу.
+    (0, 1, True, "https://fallback.example.com"),
+    # Уже на резервном — поворот вернёт на primary, круг замкнулся, пора пауза.
+    (1, 0, False, "https://primary.example.com"),
+])
+def test_rotate_telegram_proxy_advances_and_reports_lap(start_idx, expected_idx, expected_switched, expected_url):
     original_candidates = bot._TELEGRAM_PROXY_CANDIDATES
     original_idx = bot._telegram_proxy_idx
     original_base_url = bot.TELEGRAM_API_BASE_URL
     original_bot = bot.bot
     bot._TELEGRAM_PROXY_CANDIDATES = ["https://primary.example.com", "https://fallback.example.com"]
-    bot._telegram_proxy_idx = 0
-    bot.TELEGRAM_API_BASE_URL = "https://primary.example.com"
+    bot._telegram_proxy_idx = start_idx
+    bot.TELEGRAM_API_BASE_URL = "https://primary.example.com" if start_idx == 0 else "https://fallback.example.com"
     bot.bot = None  # без реального aiogram Bot — проверяем только URL-переключение
     try:
         switched = asyncio.run(bot._rotate_telegram_proxy())
-        assert switched is True  # ещё не замкнули круг — есть смысл пробовать сразу
-        assert bot.TELEGRAM_API_BASE_URL == "https://fallback.example.com"
-        assert bot._telegram_proxy_idx == 1
-    finally:
-        bot._TELEGRAM_PROXY_CANDIDATES = original_candidates
-        bot._telegram_proxy_idx = original_idx
-        bot.TELEGRAM_API_BASE_URL = original_base_url
-        bot.bot = original_bot
-
-
-def test_rotate_telegram_proxy_reports_lap_done_after_full_cycle():
-    original_candidates = bot._TELEGRAM_PROXY_CANDIDATES
-    original_idx = bot._telegram_proxy_idx
-    original_base_url = bot.TELEGRAM_API_BASE_URL
-    original_bot = bot.bot
-    bot._TELEGRAM_PROXY_CANDIDATES = ["https://primary.example.com", "https://fallback.example.com"]
-    bot._telegram_proxy_idx = 1  # уже на резервном — следующий поворот вернёт на primary (idx 0)
-    bot.TELEGRAM_API_BASE_URL = "https://fallback.example.com"
-    bot.bot = None
-    try:
-        switched = asyncio.run(bot._rotate_telegram_proxy())
-        assert switched is False  # круг замкнулся — пора паузу включать
-        assert bot._telegram_proxy_idx == 0
+        assert switched is expected_switched
+        assert bot._telegram_proxy_idx == expected_idx
+        assert bot.TELEGRAM_API_BASE_URL == expected_url
     finally:
         bot._TELEGRAM_PROXY_CANDIDATES = original_candidates
         bot._telegram_proxy_idx = original_idx

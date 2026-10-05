@@ -310,50 +310,51 @@ def test_build_version_caches_git_call(monkeypatch):
         monkeypatch.setattr(lc, "_BUILD_VERSION_CACHED", None)
 
 
-def test_match_trigger_prefix_finds_draw_trigger():    assert bot._match_trigger_prefix("нарисуй кота на пляже", bot.DRAW_TRIGGER_PREFIXES) == "нарисуй"
+@pytest.mark.parametrize(("text", "prefixes", "expected"), [
+    ("нарисуй кота на пляже", bot.DRAW_TRIGGER_PREFIXES, "нарисуй"),
+    ("озвучь этот текст пожалуйста", bot.TTS_TRIGGER_PREFIXES, "озвучь"),
+    ("преврати в аудио вот это сообщение", bot.TTS_TRIGGER_PREFIXES, "преврати в аудио"),
+    ("сгенери картинку заката", bot.DRAW_TRIGGER_PREFIXES, "сгенери картинку"),
+    # Разговорные синонимы (сентябрь 2026).
+    ("зачитай этот абзац", bot.TTS_TRIGGER_PREFIXES, "зачитай"),
+    ("зачитай текст договора", bot.TTS_TRIGGER_PREFIXES, "зачитай текст"),
+    ("прочти вслух мою историю", bot.TTS_TRIGGER_PREFIXES, "прочти вслух"),
+    ("сгенерируй мне изображение замка", bot.DRAW_TRIGGER_PREFIXES, "сгенерируй мне изображение"),
+    ("создай мне картинку с котом", bot.DRAW_TRIGGER_PREFIXES, "создай мне картинку"),
+    # Длинная фраза побеждает короткий префикс (порядок списка).
+    ("прочти вслух", bot.TTS_TRIGGER_PREFIXES, "прочти вслух"),
+    # Граница слова и вежливые формы.
+    ("прочтите этот текст", bot.TTS_TRIGGER_PREFIXES, "прочтите"),
+    ("прочтите вслух сказку", bot.TTS_TRIGGER_PREFIXES, "прочтите вслух"),
+    ("озвучьте текст", bot.TTS_TRIGGER_PREFIXES, "озвучьте"),
+    ("нарисуйте кота", bot.DRAW_TRIGGER_PREFIXES, "нарисуйте"),
+    # Английские триггеры из /start.
+    ("draw a cat on the beach", bot.DRAW_TRIGGER_PREFIXES, "draw a"),
+    ("generate an image of a castle", bot.DRAW_TRIGGER_PREFIXES, "generate an image"),
+    ("read this out loud please", bot.TTS_TRIGGER_PREFIXES, "read this out loud"),
+    ("voice this message", bot.TTS_TRIGGER_PREFIXES, "voice this"),
+])
+def test_match_trigger_prefix_finds_triggers(text, prefixes, expected):
+    assert bot._match_trigger_prefix(text, prefixes) == expected
 
 
-def test_match_trigger_prefix_finds_tts_trigger():
-    assert bot._match_trigger_prefix("озвучь этот текст пожалуйста", bot.TTS_TRIGGER_PREFIXES) == "озвучь"
-
-
-def test_match_trigger_prefix_new_synonyms_work():
-    assert bot._match_trigger_prefix("преврати в аудио вот это сообщение", bot.TTS_TRIGGER_PREFIXES) == "преврати в аудио"
-    assert bot._match_trigger_prefix("сгенери картинку заката", bot.DRAW_TRIGGER_PREFIXES) == "сгенери картинку"
-
-
-def test_match_trigger_prefix_no_false_positive_when_trigger_not_at_start():
-    # Триггерное слово упоминается, но НЕ в начале сообщения — не должно срабатывать
-    assert bot._match_trigger_prefix("объясни, как я мог бы нарисовать домик карандашом", bot.DRAW_TRIGGER_PREFIXES) is None
-    assert bot._match_trigger_prefix("что значит слово озвучь на украинском", bot.TTS_TRIGGER_PREFIXES) is None
-
-
-def test_match_trigger_prefix_no_false_positive_for_unrelated_text():
-    assert bot._match_trigger_prefix("привет, как дела?", bot.DRAW_TRIGGER_PREFIXES) is None
-    assert bot._match_trigger_prefix("привет, как дела?", bot.TTS_TRIGGER_PREFIXES) is None
-
-
-def test_match_trigger_prefix_ambiguous_phrases_deliberately_excluded():
-    # "хочу картинку"/"сделай картинку" намеренно НЕ триггеры — легко спутать с
-    # "хочу картинку тебе показать" или правкой уже присланного фото.
-    assert bot._match_trigger_prefix("хочу картинку показать тебе", bot.DRAW_TRIGGER_PREFIXES) is None
-    assert bot._match_trigger_prefix("сделай картинку ярче", bot.DRAW_TRIGGER_PREFIXES) is None
-
-
-def test_match_trigger_prefix_new_voice_and_draw_synonyms():
-    # Расширение синонимов (сентябрь 2026) — разговорные варианты тех же просьб.
-    assert bot._match_trigger_prefix("зачитай этот абзац", bot.TTS_TRIGGER_PREFIXES) == "зачитай"
-    assert bot._match_trigger_prefix("зачитай текст договора", bot.TTS_TRIGGER_PREFIXES) == "зачитай текст"
-    assert bot._match_trigger_prefix("прочти вслух мою историю", bot.TTS_TRIGGER_PREFIXES) == "прочти вслух"
-    assert bot._match_trigger_prefix("сгенерируй мне изображение замка", bot.DRAW_TRIGGER_PREFIXES) == "сгенерируй мне изображение"
-    assert bot._match_trigger_prefix("создай мне картинку с котом", bot.DRAW_TRIGGER_PREFIXES) == "создай мне картинку"
-
-
-def test_match_trigger_prefix_long_phrase_wins_over_short_prefix():
-    # Порядок в списке: "прочти вслух" стоит раньше "прочти" — иначе короткий
-    # префикс съест начало ("прочти" вместо "прочти вслух").
-    assert bot._match_trigger_prefix("озвучь этот текст пожалуйста", bot.TTS_TRIGGER_PREFIXES) == "озвучь"
-    assert bot._match_trigger_prefix("прочти вслух", bot.TTS_TRIGGER_PREFIXES) == "прочти вслух"
+@pytest.mark.parametrize(("text", "prefixes"), [
+    ("объясни, как я мог бы нарисовать домик карандашом", bot.DRAW_TRIGGER_PREFIXES),
+    ("что значит слово озвучь на украинском", bot.TTS_TRIGGER_PREFIXES),
+    ("привет, как дела?", bot.DRAW_TRIGGER_PREFIXES),
+    ("привет, как дела?", bot.TTS_TRIGGER_PREFIXES),
+    # "хочу/сделай картинку" намеренно не триггеры: путаются с правкой присланного фото.
+    ("хочу картинку показать тебе", bot.DRAW_TRIGGER_PREFIXES),
+    ("сделай картинку ярче", bot.DRAW_TRIGGER_PREFIXES),
+    # Граница слова: голый startswith давал мусор ("нарисуйка" — с "нарисуй").
+    ("нарисуйка", bot.DRAW_TRIGGER_PREFIXES),
+    ("how are you", bot.DRAW_TRIGGER_PREFIXES),
+    ("how are you", bot.TTS_TRIGGER_PREFIXES),
+    # Идиома "draw conclusions", а не просьба нарисовать.
+    ("draw some conclusions here", bot.DRAW_TRIGGER_PREFIXES),
+])
+def test_match_trigger_prefix_rejects_non_triggers(text, prefixes):
+    assert bot._match_trigger_prefix(text, prefixes) is None
 
 
 def test_strip_reply_marker_treats_demonstratives_as_empty():
@@ -368,32 +369,6 @@ def test_strip_reply_marker_treats_demonstratives_as_empty():
     assert bot._strip_reply_marker("это.") == ""
     assert bot._strip_reply_marker("это!") == ""
     assert bot._strip_reply_marker("этот текст, пожалуйста") == "этот текст, пожалуйста"
-
-
-def test_match_trigger_prefix_requires_word_boundary_and_polite_forms():
-    # Найдено код-ревью: чистый startswith без границы слова давал мусор —
-    # "прочтите" начиналось с "прочти" (остаток "те..."), "нарисуйка" — с
-    # "нарисуй". Теперь после префикса нужны конец строки/пробел/пунктуация.
-    assert bot._match_trigger_prefix("нарисуйка", bot.DRAW_TRIGGER_PREFIXES) is None
-    assert bot._match_trigger_prefix("прочтите этот текст", bot.TTS_TRIGGER_PREFIXES) == "прочтите"
-    assert bot._match_trigger_prefix("прочтите вслух сказку", bot.TTS_TRIGGER_PREFIXES) == "прочтите вслух"
-    assert bot._match_trigger_prefix("озвучьте текст", bot.TTS_TRIGGER_PREFIXES) == "озвучьте"
-    assert bot._match_trigger_prefix("нарисуйте кота", bot.DRAW_TRIGGER_PREFIXES) == "нарисуйте"
-
-
-def test_match_trigger_prefix_english_triggers():
-    # Внешний аудит: /start обещает "draw a cat"/"read this out loud", а триггеры были только русские.
-    assert bot._match_trigger_prefix("draw a cat on the beach", bot.DRAW_TRIGGER_PREFIXES) == "draw a"
-    assert bot._match_trigger_prefix("generate an image of a castle", bot.DRAW_TRIGGER_PREFIXES) == "generate an image"
-    assert bot._match_trigger_prefix("read this out loud please", bot.TTS_TRIGGER_PREFIXES) == "read this out loud"
-    assert bot._match_trigger_prefix("voice this message", bot.TTS_TRIGGER_PREFIXES) == "voice this"
-    assert bot._match_trigger_prefix("how are you", bot.DRAW_TRIGGER_PREFIXES) is None
-    assert bot._match_trigger_prefix("how are you", bot.TTS_TRIGGER_PREFIXES) is None
-
-
-def test_match_trigger_prefix_rejects_draw_idiom():
-    # Ревью ветки: "draw some" ловил идиому "draw conclusions".
-    assert bot._match_trigger_prefix("draw some conclusions here", bot.DRAW_TRIGGER_PREFIXES) is None
 
 
 def test_tts_trigger_this_with_reply_voices_replied_message(rate_guard_setup):
@@ -478,34 +453,21 @@ def test_draw_trigger_this_with_reply_draws_replied_message(rate_guard_setup):
     bot.inline_draw.assert_awaited_once_with(message, "закат над морем")
 
 
-def test_pick_image_model_detects_anime():
-    assert bot._pick_image_model("нарисуй девушку в стиле аниме") == "flux-anime"
-    assert bot._pick_image_model("draw a chibi character") == "flux-anime"
-
-
-def test_pick_image_model_detects_fantasy():
-    assert bot._pick_image_model("нарисуй дракона в фэнтезийном замке") == "dreamshaper"
-    assert bot._pick_image_model("concept art of an elf wizard") == "dreamshaper"
-
-
-def test_pick_image_model_detects_realism():
-    assert bot._pick_image_model("сделай фотореалистичный портрет кота") == "flux-realism"
-    assert bot._pick_image_model("realistic photo of a mountain") == "flux-realism"
-
-
-def test_pick_image_model_detects_quick_draft():
-    assert bot._pick_image_model("быстрый набросок логотипа") == "turbo"
-
-
-def test_pick_image_model_falls_back_to_default_for_generic_prompt():
-    assert bot._pick_image_model("космическая станция на орбите Земли") == bot.DEFAULT_POLLINATIONS_IMAGE_MODEL
-    assert bot._pick_image_model("") == bot.DEFAULT_POLLINATIONS_IMAGE_MODEL
-
-
-def test_pick_image_model_style_keyword_wins_over_quick_keyword():
-    # Стилевой сигнал важнее просьбы "побыстрее", если оба есть в одном промпте —
-    # см. докстринг _pick_image_model про порядок проверок.
-    assert bot._pick_image_model("быстро нарисуй аниме-девушку") == "flux-anime"
+@pytest.mark.parametrize(("prompt", "expected"), [
+    ("нарисуй девушку в стиле аниме", "flux-anime"),
+    ("draw a chibi character", "flux-anime"),
+    ("нарисуй дракона в фэнтезийном замке", "dreamshaper"),
+    ("concept art of an elf wizard", "dreamshaper"),
+    ("сделай фотореалистичный портрет кота", "flux-realism"),
+    ("realistic photo of a mountain", "flux-realism"),
+    ("быстрый набросок логотипа", "turbo"),
+    ("космическая станция на орбите Земли", bot.DEFAULT_POLLINATIONS_IMAGE_MODEL),
+    ("", bot.DEFAULT_POLLINATIONS_IMAGE_MODEL),
+    # Стилевой сигнал важнее просьбы "побыстрее" (порядок проверок в _pick_image_model).
+    ("быстро нарисуй аниме-девушку", "flux-anime"),
+])
+def test_pick_image_model(prompt, expected):
+    assert bot._pick_image_model(prompt) == expected
 
 
 def test_imgmodel_command_and_callback_removed():
@@ -786,40 +748,32 @@ def test_natural_language_trigger_consumes_one_slot(rate_guard_setup, text, hand
     assert len(lumen_limits.user_rate_limits[456]) == 1
 
 
-def test_match_pick_request_detects_taste_requests():
-    assert bot.match_pick_request("посоветуй фильм") == "film"
-    assert bot.match_pick_request("порекомендуй интересную книгу") == "books"
-    assert bot.match_pick_request("подскажи музыку для тренировки") == "music"
-    assert bot.match_pick_request("накидай сериалов") == "series"
-    assert bot.match_pick_request("придумай игру для компании") == "games"
+@pytest.mark.parametrize(("text", "expected"), [
+    ("посоветуй фильм", "film"),
+    ("порекомендуй интересную книгу", "books"),
+    ("подскажи музыку для тренировки", "music"),
+    ("накидай сериалов", "series"),
+    ("придумай игру для компании", "games"),
     # Английские запросы — тот же детектор (дефолтный язык бота — en).
-    assert bot.match_pick_request("recommend a movie") == "film"
-    assert bot.match_pick_request("suggest music for training") == "music"
-
-
-def test_match_pick_request_rejects_detailed_or_unrelated():
+    ("recommend a movie", "film"),
+    ("suggest music for training", "music"),
+    # Существительные и инфинитивы по-прежнему ведут в games.
+    ("посоветуй игры", "games"),
+    ("посоветуй во что поиграть", "games"),
     # Длинный запрос с деталями — обычным путём в модель, без кнопок.
-    assert bot.match_pick_request("посоветуй фильм про космос, ужасы, 2024 год, длинный список") is None
-    assert bot.match_pick_request("привет, как дела?") is None
-    assert bot.match_pick_request("нарисуй кота") is None
-    assert bot.match_pick_request("") is None
+    ("посоветуй фильм про космос, ужасы, 2024 год, длинный список", None),
+    ("привет, как дела?", None),
+    ("нарисуй кота", None),
+    ("", None),
     # Латиница — только по границам слов: "notebook" — не книги.
-    assert bot.match_pick_request("recommend a notebook") is None
-    # Кириллица — по началу слова: "тигр" — не игры (AUD-E-006), "игру" — игры.
-    assert bot.match_pick_request("посоветуй тигра") is None
-    assert bot.match_pick_request("придумай игру для компании") == "games"
-
-
-def test_match_pick_request_rejects_verb_forms_of_igrat():
-    # Аудит A6-6: префикс "игр" ловил глаголы — "кто играет" не запрос игры.
-    assert bot.match_pick_request("посоветуй кто играет сегодня") is None
-
-
-def test_match_pick_request_accepts_game_nouns_and_infinitives():
-    # Сторож: существительные и инфинитивы по-прежнему ведут в games.
-    assert bot.match_pick_request("придумай игру для компании") == "games"
-    assert bot.match_pick_request("посоветуй игры") == "games"
-    assert bot.match_pick_request("посоветуй во что поиграть") == "games"
+    ("recommend a notebook", None),
+    # Кириллица — по началу слова: "тигр" — не игры (AUD-E-006).
+    ("посоветуй тигра", None),
+    # Префикс "игр" не ловит глаголы: "кто играет" — не запрос игры.
+    ("посоветуй кто играет сегодня", None),
+])
+def test_match_pick_request(text, expected):
+    assert bot.match_pick_request(text) == expected
 
 
 def test_pick_question_sent_instead_of_ai_route(rate_guard_setup, monkeypatch):
