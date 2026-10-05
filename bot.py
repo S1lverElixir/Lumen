@@ -481,6 +481,11 @@ from lumen_chat_state import (
     _evict_orphan_chat_locks,
     _is_owner,
     _notify_owner,
+    BANNED_KEY,
+    _is_banned,
+    _ban_user,
+    _unban_user,
+    _banned_list,
     _is_privileged_in_chat,
     _quota_entry,
     _mark_quota_exhausted,
@@ -888,6 +893,11 @@ __all__ = [
     "GLOBAL_QUOTA",
     "_is_owner",
     "_is_privileged_in_chat",
+    "BANNED_KEY",
+    "_is_banned",
+    "_ban_user",
+    "_unban_user",
+    "_banned_list",
     "_mark_quota_exhausted",
     "_mark_rate_limited",
     "_record_quota_usage",
@@ -1201,6 +1211,9 @@ from lumen_commands import (
     cmd_logs,
     cmd_stats,
     cmd_selftest,
+    cmd_ban,
+    cmd_unban,
+    cmd_banlist,
     _build_version,
     _webhook_info_text,
     _process_memory_text,
@@ -1217,6 +1230,9 @@ dp.callback_query.register(handle_lang_callback, F.data.startswith("lang:"))
 dp.message.register(cmd_logs, Command("logs"))
 dp.message.register(cmd_stats, Command("stats"))
 dp.message.register(cmd_selftest, Command("selftest"))
+dp.message.register(cmd_ban, Command("ban"))
+dp.message.register(cmd_unban, Command("unban"))
+dp.message.register(cmd_banlist, Command("banlist"))
 dp.callback_query.register(handle_pick_callback, F.data.startswith("pick:"))
 
 
@@ -1248,6 +1264,11 @@ async def global_error_handler(event: Any) -> bool:
 
 @dp.message()
 async def handle_message(message: Message) -> None:
+    # Владельческая блокировка: ни ответа, ни контекста группы, ни счётчиков —
+    # отсекаем раньше всего, включая медиагруппы и пассивный фон.
+    if message.from_user is not None and _is_banned(message.from_user.id):
+        return
+
     if message.media_group_id:
         mgid = message.media_group_id
         _mg_buffers.setdefault(mgid, []).append(message)

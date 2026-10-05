@@ -1445,3 +1445,105 @@ def test_cmd_stats_shows_quarantine(monkeypatch):
     asyncio.run(bot.cmd_stats(incoming))
     assert "Карантин моделей" in sent["text"]
     assert "qs-model:free" in sent["text"]
+
+
+def _make_ban_message(chat_id, user_id, text, group=False, reply_to=None):
+    incoming = _FakeIncomingMessage(chat_id)
+    if group:
+        incoming.chat.type = bot.ChatType.GROUP
+    incoming.from_user = SimpleNamespace(id=user_id)
+    incoming.text = text
+    incoming.reply_to_message = reply_to
+    return incoming
+
+
+def _capture_replies(monkeypatch):
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    return sent
+
+
+def test_ban_flow_by_id_unban_and_list(monkeypatch):
+    # Полный цикл: бан по ID, список, разбан, повторный разбан — мимо.
+    monkeypatch.setattr(bot, "OWNER_ID", 101001)
+    sent = _capture_replies(monkeypatch)
+    assert bot._is_banned(777002) is False
+    asyncio.run(bot.cmd_ban(_make_ban_message(999801, 101001, "/ban 777002")))
+    assert sent["text"] == bot._t(999801, "ban_done", user_id=777002)
+    assert bot._is_banned(777002) is True
+    asyncio.run(bot.cmd_banlist(_make_ban_message(999801, 101001, "/banlist")))
+    assert "777002" in sent["text"]
+    asyncio.run(bot.cmd_unban(_make_ban_message(999801, 101001, "/unban 777002")))
+    assert sent["text"] == bot._t(999801, "unban_done", user_id=777002)
+    assert bot._is_banned(777002) is False
+    asyncio.run(bot.cmd_unban(_make_ban_message(999801, 101001, "/unban 777002")))
+    assert sent["text"] == bot._t(999801, "unban_missing", user_id=777002)
+    asyncio.run(bot.cmd_banlist(_make_ban_message(999801, 101001, "/banlist")))
+    assert sent["text"] == bot._t(999801, "banlist_empty")
+
+
+def test_ban_by_reply_and_usage_and_owner_refuse(monkeypatch):
+    # Цель ответом на сообщение; мусор вместо ID — подсказка; владельца — отказ.
+    monkeypatch.setattr(bot, "OWNER_ID", 102001)
+    sent = _capture_replies(monkeypatch)
+    replied = SimpleNamespace(from_user=SimpleNamespace(id=555003))
+    asyncio.run(bot.cmd_ban(_make_ban_message(999802, 102001, "/ban", reply_to=replied)))
+    assert bot._is_banned(555003) is True
+    asyncio.run(bot.cmd_ban(_make_ban_message(999802, 102001, "/ban вообще")))
+    assert sent["text"] == bot._t(999802, "ban_usage")
+    asyncio.run(bot.cmd_ban(_make_ban_message(999802, 102001, "/ban 102001")))
+    assert sent["text"] == bot._t(999802, "ban_owner_refuse")
+    assert bot._is_banned(102001) is False
+
+
+def test_ban_denies_non_owner_and_group(monkeypatch):
+    # Чужой и группа: только отказ, список не меняется.
+    monkeypatch.setattr(bot, "OWNER_ID", 103001)
+    sent = _capture_replies(monkeypatch)
+    asyncio.run(bot.cmd_ban(_make_ban_message(999803, 999999, "/ban 123")))
+    assert sent["text"] == bot._t(999803, "stats_deny")
+    asyncio.run(bot.cmd_ban(_make_ban_message(999803, 103001, "/ban 123", group=True)))
+    assert sent["text"] == bot._t(999803, "ban_group_only")
+    assert bot._is_banned(123) is False
+
+
+def test_handle_message_ignores_banned_user(monkeypatch):
+    # Заблокированный: ни ответа, ни ядра (там контекст группы и счётчики лимитов).
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(bot, "OWNER_ID", 104001)
+    bot._ban_user(605001)
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+
+    def _msg(chat_type, text="привет"):
+        return SimpleNamespace(
+            media_group_id=None,
+            chat=SimpleNamespace(id=999804, type=chat_type),
+            from_user=SimpleNamespace(id=605001),
+            text=text, caption=None, reply_to_message=None,
+        )
+
+    asyncio.run(bot.handle_message(_msg(bot.ChatType.PRIVATE)))
+    asyncio.run(bot.handle_message(_msg(bot.ChatType.GROUP)))
+    assert fake_core.await_count == 0
+    bot._unban_user(605001)
+    asyncio.run(bot.handle_message(_msg(bot.ChatType.GROUP)))
+    assert fake_core.await_count == 1
+
+
+def test_banned_list_survives_quota_reload(monkeypatch):
+    # Список живёт в том же файле, что квота: рестарт его не сбрасывает.
+    import json
+    monkeypatch.setattr(bot, "OWNER_ID", 105001)
+    bot._ban_user(606001)
+    snapshot = json.dumps(dict(bot.GLOBAL_QUOTA), ensure_ascii=False)
+    monkeypatch.setattr(bot, "_storage_read_text", lambda *args, **kwargs: snapshot)
+    bot.GLOBAL_QUOTA.pop(bot.BANNED_KEY, None)
+    assert bot._is_banned(606001) is False
+    bot.load_global_quota()
+    assert bot._is_banned(606001) is True

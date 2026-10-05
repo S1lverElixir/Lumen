@@ -720,6 +720,76 @@ async def cmd_selftest(message: Message) -> None:
     log.info("[selftest] chat=%s gemini_arg=%s %s", message.chat.id, want_gemini, " ".join(summary))
 
 
+def _ban_target_id(message: Message) -> int | None:
+    """ID цели /ban//unban: ответ на сообщение или числовой аргумент."""
+    replied = getattr(message, "reply_to_message", None)
+    replied_user = getattr(replied, "from_user", None) if replied is not None else None
+    replied_id = getattr(replied_user, "id", None)
+    if isinstance(replied_id, int) and not isinstance(replied_id, bool):
+        return replied_id
+    args = (getattr(message, "text", "") or "").split()[1:]
+    if args:
+        raw = args[0].split("@")[0].lstrip("+")
+        if raw.isdigit():
+            return int(raw)
+    return None
+
+async def cmd_ban(message: Message) -> None:
+    """Владельческая блокировка (только владелец, только личка)."""
+    import bot
+    if not bot._is_owner(message.from_user.id if message.from_user else None):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_group_only"))
+        return
+    target = _ban_target_id(message)
+    if target is None:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_usage"))
+        return
+    if bot._is_owner(target):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_owner_refuse"))
+        return
+    bot._ban_user(target)
+    await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_done", user_id=target))
+    log.info("[ban] Owner banned user %s", target)
+
+async def cmd_unban(message: Message) -> None:
+    """Снятие владельческой блокировки (только владелец, только личка)."""
+    import bot
+    if not bot._is_owner(message.from_user.id if message.from_user else None):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_group_only"))
+        return
+    target = _ban_target_id(message)
+    if target is None:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_usage"))
+        return
+    if bot._unban_user(target):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "unban_done", user_id=target))
+        log.info("[ban] Owner unbanned user %s", target)
+    else:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "unban_missing", user_id=target))
+
+async def cmd_banlist(message: Message) -> None:
+    """Список заблокированных (только владелец, только личка)."""
+    import bot
+    if not bot._is_owner(message.from_user.id if message.from_user else None):
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
+        return
+    if message.chat.type != ChatType.PRIVATE:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "ban_group_only"))
+        return
+    ids = bot._banned_list()
+    if not ids:
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "banlist_empty"))
+        return
+    text = bot._t(message.chat.id, "banlist_header") + "\n" + "\n".join(f"• {uid}" for uid in ids)
+    await bot._tg_call(message.reply, text)
+
+
 _BUILD_VERSION_CACHED: str | None = None
 
 
