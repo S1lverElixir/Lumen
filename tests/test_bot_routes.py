@@ -20,40 +20,25 @@ from tests.bot_test_helpers import (
 )
 
 
-def test_classify_model_error_rate_limit_by_status():
-    assert bot._classify_model_error(429, "") == "rate_limit"
+@pytest.mark.parametrize(("status", "text", "expected"), [
+    (429, "", "rate_limit"),
+    (None, "quota exceeded", "rate_limit"),
+    (402, "", "paid"),
+    (403, "", "forbidden"),
+    (404, "", "unavailable"),
+    (500, "some random error", "other"),
+])
+def test_classify_model_error(status, text, expected):
+    assert bot._classify_model_error(status, text) == expected
 
 
-def test_classify_model_error_rate_limit_by_text():
-    assert bot._classify_model_error(None, "quota exceeded") == "rate_limit"
-
-
-def test_classify_model_error_paid():
-    assert bot._classify_model_error(402, "") == "paid"
-
-
-def test_classify_model_error_forbidden():
-    assert bot._classify_model_error(403, "") == "forbidden"
-
-
-def test_classify_model_error_unavailable():
-    assert bot._classify_model_error(404, "") == "unavailable"
-
-
-def test_classify_model_error_other_for_unknown():
-    assert bot._classify_model_error(500, "some random error") == "other"
-
-
-def test_next_fallback_model_skips_tried():
-    assert bot._next_fallback_model({"a"}, ["a", "b", "c"]) == "b"
-
-
-def test_next_fallback_model_all_tried_returns_none():
-    assert bot._next_fallback_model({"a", "b", "c"}, ["a", "b", "c"]) is None
-
-
-def test_next_fallback_model_none_tried_returns_first():
-    assert bot._next_fallback_model(set(), ["a", "b", "c"]) == "a"
+@pytest.mark.parametrize(("tried", "chain", "expected"), [
+    ({"a"}, ["a", "b", "c"], "b"),
+    ({"a", "b", "c"}, ["a", "b", "c"], None),
+    (set(), ["a", "b", "c"], "a"),
+])
+def test_next_fallback_model(tried, chain, expected):
+    assert bot._next_fallback_model(tried, chain) == expected
 
 
 def test_error_status_reads_status_code_attribute():
@@ -211,13 +196,11 @@ def test_ask_gemini_scrubs_identity_leak_before_storing_history():
         bot.chat_state.pop(chat_id, None)
 
 
-def test_ask_openrouter_text_empty_model_chain_fallback_is_not_dead_model():
+@pytest.mark.parametrize("mode", ["text", "vision"])
+def test_empty_model_chain_falls_back_to_current_order_head(mode):
     # РЕГРЕССИЯ (24.07.2026): раньше запасным вариантом на случай пустого model_chain
-    # в ask_openrouter_text было "meta-llama/llama-3.3-70b-instruct:free" — та же
-    # модель, что подтверждённо снята провайдером с бесплатного тира (см. README,
-    # HTTP 404 "unavailable for free") и по этой же причине уже исключена из
-    # _OR_LIGHT_ORDER/_OR_HEAVY_ORDER. Проверяем, что дефолт теперь ссылается на
-    # актуальный _OR_LIGHT_ORDER, а не на захардкоженную мёртвую модель.
+    # стоял захардкоженный литерал мёртвой модели; теперь дефолт ссылается на голову
+    # актуального ORDER-списка (_OR_LIGHT_ORDER для текста, _OR_VISION_ORDER для vision).
     chat_id = 999401
 
     calls = []
@@ -229,8 +212,13 @@ def test_ask_openrouter_text_empty_model_chain_fallback_is_not_dead_model():
     original = bot._or_chat_completion_with_fallback
     bot._or_chat_completion_with_fallback = fake_or_fallback
     try:
-        asyncio.run(bot.ask_openrouter_text(chat_id, "привет", model_chain=[]))
-        assert calls[0] == [bot._OR_LIGHT_ORDER[0]]
+        if mode == "text":
+            asyncio.run(bot.ask_openrouter_text(chat_id, "привет", model_chain=[]))
+            expected = [bot._OR_LIGHT_ORDER[0]]
+        else:
+            asyncio.run(bot.ask_openrouter_multimodal(chat_id, "привет", (b"fake", "image/jpeg"), "photo.jpg", model_chain=[]))
+            expected = [bot._OR_VISION_ORDER[0]]
+        assert calls[0] == expected
         assert "meta-llama/llama-3.3-70b-instruct:free" not in calls[0]
     finally:
         bot._or_chat_completion_with_fallback = original
@@ -388,15 +376,20 @@ def test_extract_gemini_answer_reports_non_malformed_block_without_retry_state()
     assert "SAFETY" in ans
 
 
-def test_extract_gemini_answer_falls_through_when_retry_raises():
-    # Повтор после битого вызова сам упал (а не просто не влез в бюджет) — тоже
-    # отдаём пусто, чтобы маршрут ушёл на следующую модель. Раньше пользователь
-    # получал "[Ответ заблокирован...]" как готовый ответ и цепочка вставала.
+@pytest.mark.parametrize("retry_outcome", ["raises", "empty"])
+def test_extract_gemini_answer_failed_retry_goes_to_next_model(retry_outcome):
+    # Повтор после битого вызова сам упал (а не просто не влез в бюджет) или
+    # вернул пусто — отдаём пусто, чтобы маршрут ушёл на следующую модель.
+    # Раньше пользователь получал "[Ответ заблокирован...]" как готовый ответ.
     async def retry_raises(*, model, contents, config=None):
         raise RuntimeError("transient 500 on retry")
 
+    async def retry_empty(*, model, contents, config=None):
+        return _FakeGeminiResponse(text="", candidates=[])
+
+    retry_fn = retry_raises if retry_outcome == "raises" else retry_empty
     fake_client = MagicMock()
-    fake_client.aio.models.generate_content = retry_raises
+    fake_client.aio.models.generate_content = retry_fn
     original_client = bot.client
     bot.client = fake_client
     try:
@@ -982,11 +975,14 @@ def test_ask_gemini_raises_when_route_budget_exceeded():
         bot.chat_state.pop(chat_id, None)
 
 
-def test_or_chat_completion_with_fallback_switches_model_on_rate_limit():
+@pytest.mark.parametrize(("status_code", "message"), [(429, "rate limit exceeded"), (403, "forbidden")])
+def test_or_chat_completion_with_fallback_switches_model(status_code, message):
+    # И минутный 429, и "постоянная" на вид 403 не обрывают переход к следующей
+    # модели: при attempts_per_model=1 переход происходит независимо от классификации.
     async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
         model = json_body["model"]
         if model == "model-a":
-            raise bot.OpenRouterAPIError("rate limit exceeded", status_code=429)
+            raise bot.OpenRouterAPIError(message, status_code=status_code)
         return {"choices": [{"message": {"content": "ответ от model-b"}}]}
 
     original = bot._or_request
@@ -998,49 +994,6 @@ def test_or_chat_completion_with_fallback_switches_model_on_rate_limit():
         assert used == "model-b"
     finally:
         bot._or_request = original
-
-
-def test_or_chat_completion_with_fallback_switches_model_on_permanent_looking_error():
-    # Даже "постоянная" на вид ошибка (403 forbidden) не должна обрывать переход
-    # к следующей модели — при attempts_per_model=1 переход к следующей модели
-    # происходит независимо от классификации (см. комментарий в самой функции).
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
-        model = json_body["model"]
-        if model == "model-a":
-            raise bot.OpenRouterAPIError("forbidden", status_code=403)
-        return {"choices": [{"message": {"content": "ответ от model-b"}}]}
-
-    original = bot._or_request
-    bot._or_request = fake_or_request
-    try:
-        messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
-        answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["model-a", "model-b"], "model-a"))
-        assert answer == "ответ от model-b"
-        assert used == "model-b"
-    finally:
-        bot._or_request = original
-
-
-def test_ask_openrouter_multimodal_empty_model_chain_fallback_is_current_vision_order():
-    # РЕГРЕССИЯ (аудит техдолга): раньше здесь стоял захардкоженный литерал
-    # "nvidia/nemotron-nano-12b-v2-vl:free" — тот же класс бага, что уже был найден
-    # и исправлен в ask_openrouter_text (см. test_ask_openrouter_text_empty_model_chain_
-    # fallback_is_not_dead_model выше). Теперь дефолт ссылается на _OR_VISION_ORDER[0].
-    chat_id = 999410
-    calls = []
-
-    async def fake_or_fallback(messages, trial_models, primary_model_id, **kwargs):
-        calls.append(trial_models)
-        return "ответ", trial_models[0]
-
-    original = bot._or_chat_completion_with_fallback
-    bot._or_chat_completion_with_fallback = fake_or_fallback
-    try:
-        asyncio.run(bot.ask_openrouter_multimodal(chat_id, "привет", (b"fake", "image/jpeg"), "photo.jpg", model_chain=[]))
-        assert calls[0] == [bot._OR_VISION_ORDER[0]]
-    finally:
-        bot._or_chat_completion_with_fallback = original
-        bot.chat_state.pop(chat_id, None)
 
 
 def test_ask_openrouter_multimodal_sends_all_album_images_not_just_first():
@@ -1141,26 +1094,27 @@ def test_or_chat_completion_with_fallback_no_longer_accepts_attempts_per_model()
     assert "attempts_per_model" not in sig.parameters
 
 
-def test_or_request_scrubs_api_key_from_network_exception_message():
-    class _FakeSessionRaisingWithKeyInMessage:
+@pytest.mark.parametrize(("request_name", "key_attr", "fake_key", "error_cls"), [
+    ("_or_request", "OPENROUTER_API_KEY", "fake-secret-or-key-123", "OpenRouterAPIError"),
+    ("_groq_request", "GROQ_API_KEY", "fake-groq-key-123", "GroqAPIError"),
+])
+def test_provider_request_scrubs_api_key_from_network_exception_message(
+    monkeypatch, request_name, key_attr, fake_key, error_cls,
+):
+    # Defense-in-depth у обоих провайдеров: ключ не светится в тексте ошибок.
+    class _FakeSessionRaisingWithKey:
         def request(self, *args, **kwargs):
-            raise RuntimeError("connection failed, headers were: Authorization: Bearer fake-secret-or-key-123")
+            raise RuntimeError(f"connection failed, headers: Bearer {fake_key}")
 
     async def fake_get_http_session():
-        return _FakeSessionRaisingWithKeyInMessage()
+        return _FakeSessionRaisingWithKey()
 
-    original_get_session = bot._get_http_session
-    original_key = bot.OPENROUTER_API_KEY
-    bot._get_http_session = fake_get_http_session
-    bot.OPENROUTER_API_KEY = "fake-secret-or-key-123"
-    try:
-        with pytest.raises(bot.OpenRouterAPIError) as exc_info:
-            asyncio.run(bot._or_request("chat/completions", "POST", json_body={"model": "x"}))
-        assert "fake-secret-or-key-123" not in str(exc_info.value)
-        assert "<KEY>" in str(exc_info.value)
-    finally:
-        bot._get_http_session = original_get_session
-        bot.OPENROUTER_API_KEY = original_key
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+    monkeypatch.setattr(bot, key_attr, fake_key)
+    with pytest.raises(getattr(bot, error_cls)) as exc_info:
+        asyncio.run(getattr(bot, request_name)("chat/completions", "POST", json_body={"model": "x"}))
+    assert fake_key not in str(exc_info.value)
+    assert "<KEY>" in str(exc_info.value)
 
 
 def test_probe_or_model_liveness_warns_on_dead_model_pattern(caplog):
@@ -1371,23 +1325,6 @@ def test_groq_request_requires_key(monkeypatch):
         asyncio.run(bot._groq_request("chat/completions", "POST", json_body={"model": "x"}))
 
 
-def test_groq_request_scrubs_api_key_from_network_exception_message(monkeypatch):
-    # Тот же defense-in-depth, что у _or_request: ключ не должен светиться в тексте ошибок.
-    class _FakeSessionRaisingWithKey:
-        def request(self, *args, **kwargs):
-            raise RuntimeError("connection failed, headers: Bearer fake-groq-key-123")
-
-    async def fake_get_http_session():
-        return _FakeSessionRaisingWithKey()
-
-    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-groq-key-123")
-    with pytest.raises(bot.GroqAPIError) as exc_info:
-        asyncio.run(bot._groq_request("chat/completions", "POST", json_body={"model": "x"}))
-    assert "fake-groq-key-123" not in str(exc_info.value)
-    assert "<KEY>" in str(exc_info.value)
-
-
 def test_route_error_reply_text_maps_groq_error():
     # Ошибка Groq — пользовательский текст через общую классификацию, без сырого API.
     exc = bot.GroqAPIError("Rate limit reached", status_code=429)
@@ -1569,53 +1506,28 @@ def test_transcribe_audio_capped_by_own_limit(monkeypatch):
     assert captured["timeout"].total < bot.ROUTE_MODEL_TIMEOUT_SEC
 
 
-def test_ask_openrouter_text_trims_history_with_summary_not_silent_cut(monkeypatch):
+@pytest.mark.parametrize(("ask_name", "stub_name", "answer"), [
+    ("ask_openrouter_text", "_or_chat_completion_with_fallback", "ответ"),
+    ("ask_groq_text", "_groq_request", "ответ groq"),
+])
+def test_text_provider_trims_history_with_summary_not_silent_cut(monkeypatch, ask_name, stub_name, answer):
     # Аудит A4-05: история резалась молчаливым срезом вместо _trim_history с саммари.
     import lumen_chat_state
     from collections import deque
     chat_id = 999811
 
     async def fake_fallback(messages, trial_models, primary_model_id, **kwargs):
-        return "ответ", trial_models[0]
-
-    async def fake_summarize(text):
-        return "итог: погода и коты"
-
-    monkeypatch.setattr(bot, "_or_chat_completion_with_fallback", fake_fallback)
-    monkeypatch.setattr(lumen_chat_state, "_summarize_text", fake_summarize)
-    state = bot.get_state(chat_id)
-    state["history"] = [
-        {"role": "user" if i % 2 == 0 else "assistant", "content": f"сообщение {i}"}
-        for i in range(105)
-    ]
-    state["ctx"] = deque()
-    try:
-        asyncio.run(bot.ask_openrouter_text(chat_id, "новый вопрос", model_chain=["m1"]))
-        history = bot.chat_state[chat_id]["history"]
-        assert len(history) == 81
-        assert history[0]["content"].startswith("[Ранее в диалоге]")
-        assert "погода" in history[0]["content"]
-        assert history[-2:] == [
-            {"role": "user", "content": "новый вопрос"},
-            {"role": "assistant", "content": "ответ"},
-        ]
-    finally:
-        bot.chat_state.pop(chat_id, None)
-
-
-def test_ask_groq_text_trims_history_with_summary_not_silent_cut(monkeypatch):
-    # Тот же молчаливый срез жил в ask_groq_text — фиксим парой (аудит A4-05: везде _trim_history).
-    import lumen_chat_state
-    from collections import deque
-    chat_id = 999812
+        return answer, trial_models[0]
 
     async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
-        return {"choices": [{"message": {"content": "ответ groq"}}]}
+        return {"choices": [{"message": {"content": answer}}]}
+
+    stubs = {"_or_chat_completion_with_fallback": fake_fallback, "_groq_request": fake_groq_request}
 
     async def fake_summarize(text):
         return "итог: погода и коты"
 
-    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, stub_name, stubs[stub_name])
     monkeypatch.setattr(lumen_chat_state, "_summarize_text", fake_summarize)
     state = bot.get_state(chat_id)
     state["history"] = [
@@ -1624,14 +1536,14 @@ def test_ask_groq_text_trims_history_with_summary_not_silent_cut(monkeypatch):
     ]
     state["ctx"] = deque()
     try:
-        asyncio.run(bot.ask_groq_text(chat_id, "новый вопрос", model_chain=["m1"]))
+        asyncio.run(getattr(bot, ask_name)(chat_id, "новый вопрос", model_chain=["m1"]))
         history = bot.chat_state[chat_id]["history"]
         assert len(history) == 81
         assert history[0]["content"].startswith("[Ранее в диалоге]")
         assert "погода" in history[0]["content"]
         assert history[-2:] == [
             {"role": "user", "content": "новый вопрос"},
-            {"role": "assistant", "content": "ответ groq"},
+            {"role": "assistant", "content": answer},
         ]
     finally:
         bot.chat_state.pop(chat_id, None)
@@ -1683,26 +1595,6 @@ def test_run_route_marks_unsupported_media_for_text_fallback(monkeypatch):
         assert "[Служебная пометка" in captured["prompt"]
     finally:
         bot.chat_state.pop(chat_id, None)
-
-
-def test_extract_gemini_answer_empty_retry_goes_to_next_model():
-    # Аудит A4-10: повтор прошёл, но вернул пусто без исчерпания бюджета — это
-    # повод на следующую модель, а не заглушка блокировки как успех.
-    async def retry_empty(*, model, contents, config=None):
-        return _FakeGeminiResponse(text="", candidates=[])
-
-    fake_client = MagicMock()
-    fake_client.aio.models.generate_content = retry_empty
-    original_client = bot.client
-    bot.client = fake_client
-    try:
-        resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="MALFORMED_FUNCTION_CALL")])
-        ans = asyncio.run(bot._extract_gemini_answer_text(
-            resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
-        ))
-        assert ans == ""
-    finally:
-        bot.client = original_client
 
 
 def test_run_route_cleans_placeholder_on_cancel(monkeypatch):
@@ -1882,18 +1774,21 @@ def test_daily_limit_denial_counted_and_refused(rate_guard_setup, monkeypatch):
     bot.chat_state.pop(123, None)
 
 
-def test_gemini_success_logs_token_usage_when_api_returns_it(caplog):
+@pytest.mark.parametrize("with_usage", [True, False])
+def test_gemini_success_logs_token_usage(caplog, with_usage):
     # Что защищает: единственную точку калибровки лимитов по логам для Gemini
     # (usage_metadata.prompt_token_count/candidates_token_count/total_token_count).
     # Регрессия: тихий дроп usage при рефакторинге ask_gemini — счётчики пропадут из
     # логов, лимиты не на чем калибровать. Старые тесты проверяют только текст/историю.
+    # Без usage от API строка [usage] не пишется, лог не засоряется пустышками.
     import logging
     from types import SimpleNamespace
     chat_id = 999901
 
     def fake_generate_content(*, model, contents, config=None):
         resp = _FakeGeminiResponse(text="Привет!")
-        resp.usage_metadata = SimpleNamespace(prompt_token_count=10, candidates_token_count=20, total_token_count=30)
+        if with_usage:
+            resp.usage_metadata = SimpleNamespace(prompt_token_count=10, candidates_token_count=20, total_token_count=30)
         return resp
 
     fake_client = MagicMock()
@@ -1905,33 +1800,13 @@ def test_gemini_success_logs_token_usage_when_api_returns_it(caplog):
             answer = asyncio.run(bot.ask_gemini(chat_id, "Привет"))
         assert answer == "Привет!"
         usage_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[usage]")]
-        assert len(usage_lines) == 1
-        line = usage_lines[0]
-        assert f"chat={chat_id}" in line and "provider=gemini" in line
-        assert "prompt=10" in line and "completion=20" in line and "total=30" in line
-    finally:
-        bot.client = original_client
-        bot.chat_state.pop(chat_id, None)
-        caplog.clear()
-
-
-def test_gemini_success_logs_no_usage_line_without_metadata(caplog):
-    # Пара к предыдущему: если API usage не вернуло — строка [usage] не пишется,
-    # лог не засоряется пустышками. Старые тесты такого не проверяют.
-    import logging
-    chat_id = 999902
-
-    def fake_generate_content(*, model, contents, config=None):
-        return _FakeGeminiResponse(text="Привет!")
-
-    fake_client = MagicMock()
-    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
-    original_client = bot.client
-    bot.client = fake_client
-    try:
-        with caplog.at_level(logging.INFO, logger="bot"):
-            asyncio.run(bot.ask_gemini(chat_id, "Привет"))
-        assert not [r for r in caplog.records if r.getMessage().startswith("[usage]")]
+        if with_usage:
+            assert len(usage_lines) == 1
+            line = usage_lines[0]
+            assert f"chat={chat_id}" in line and "provider=gemini" in line
+            assert "prompt=10" in line and "completion=20" in line and "total=30" in line
+        else:
+            assert usage_lines == []
     finally:
         bot.client = original_client
         bot.chat_state.pop(chat_id, None)
