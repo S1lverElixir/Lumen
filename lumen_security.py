@@ -221,14 +221,6 @@ _INJECTION_PROBE_RE = re.compile(
     re.IGNORECASE,
 )
 
-def _normalize_for_detection(text: str) -> str:
-    # Обход через невидимки/совместимые символы: чистим копию для проверки.
-    if not text:
-        return text
-    norm = unicodedata.normalize("NFKC", text)
-    return "".join(ch for ch in norm if unicodedata.category(ch) != "Cf")
-
-
 def _looks_like_injection_probe(text: str) -> bool:
     """Чистая функция — тестируется отдельно от _handle_message_core."""
     if not text:
