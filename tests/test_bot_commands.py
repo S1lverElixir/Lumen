@@ -1352,6 +1352,15 @@ def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
     assert fake_tg_call.text == bot._t(999703, "selftest_cooldown", sec=60)
 
 
+def test_selftest_short_error_redacts_org_id():
+    # Прод 05.10.2026: текст Groq-ошибки тащил ID организации — внутрянка даже в личке.
+    import lumen_routes
+    err = lumen_routes._selftest_short_error(RuntimeError(
+        "Request too large for model `qwen/qwen3.8-27b` in organization `org_01m321tq18eqksff96hz17m7es` service tier"))
+    assert "org_01m321tq18eqksff96hz17m7es" not in err
+    assert "<ORG>" in err
+
+
 def test_cmd_selftest_default_skips_gemini_and_hides_model_ids(monkeypatch):
     # Дефолт без gemini бережёт самую дефицитную квоту; ID моделей в ответе нет.
     from lumen_router_config import _GROQ_LIGHT_ORDER, _OR_LIGHT_ORDER, GEMINI_DEFAULT_CHAIN

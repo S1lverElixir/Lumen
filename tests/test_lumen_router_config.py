@@ -591,7 +591,6 @@ def test_sept_2026_new_light_models_after_proven_head_before_reserve():
     assert order[0] == "nvidia/nemotron-3.5-lightning:free"
     assert order[-1] == "openrouter/free"
     for model_id in (
-        "nex-agi/nex-n2.5-mini:free",
         "inclusionai/ling-3.0-flash-sante:free", "inclusionai/ling-3.0-flash-fin:free",
         "liquid/lfm-2.5-2.6b:free",
     ):
@@ -606,8 +605,18 @@ def test_inkling_small_excluded_after_agentic_harness_refusal():
     assert "thinkingmachines/inkling-small:free" in lumen_router_config._OR_MODEL_HEALTH
     assert "thinkingmachines/inkling-small:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
     assert "thinkingmachines/inkling-small:free" not in lumen_router_config._OR_LIGHT_ORDER
-    # nex-mini тем же вечером подтверждён живьём — занял его место вторым.
-    assert lumen_router_config._OR_LIGHT_ORDER[1] == "nex-agi/nex-n2.5-mini:free"
+    # nex-mini снят 05.10.2026 (платная отсечка) — второй стала sante.
+    assert lumen_router_config._OR_LIGHT_ORDER[1] == "inclusionai/ling-3.0-flash-sante:free"
+
+
+def test_nex_mini_excluded_after_paid_tier_cutover():
+    # Прод 05.10.2026: та же платная отсечка, что у ling-3.0-flash (тест выше).
+    assert "nex-agi/nex-n2.5-mini:free" in lumen_router_config._OR_MODEL_HEALTH
+    assert "nex-agi/nex-n2.5-mini:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "nex-agi/nex-n2.5-mini:free" not in lumen_router_config._OR_LIGHT_ORDER
+    assert "nex-agi/nex-n2.5-mini:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+    route = lumen_router_config._or_route(["nex-agi/nex-n2.5-mini:free", "nvidia/nemotron-3.5-lightning:free"])
+    assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free"]
 
 
 def test_nemotron_super_demoted_below_ultra_after_second_mush_incident():

@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 from collections import deque
 from datetime import date, datetime
@@ -368,6 +369,8 @@ _SELFTEST_PING_TEXT = "Reply with exactly: ok"
 def _selftest_short_error(exc: BaseException) -> str:
     """Короткий однострочник для строки /selftest (только личка — ID моделей тут допустимы)."""
     text = f"{exc.__class__.__name__}: {exc}".strip()
+    # ID организации провайдера — внутрянка даже для владельца: затираем, как токены.
+    text = re.sub(r"org_[A-Za-z0-9]+", "<ORG>", text)
     return " ".join(text.split())[:120] or exc.__class__.__name__
 
 async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool, str, float]:

@@ -219,6 +219,10 @@ _OR_MODEL_HEALTH: dict[str, _ModelHealthNote] = {
     "thinkingmachines/inkling-small:free": _ModelHealthNote(
         reason="Логи прода 17.09.2026: 'only available on agentic harnesses' — не обслуживает обычные chat-запросы; стояла второй в лёгкой цепочке."
     ),
+    # ── Логи прода 05.10.2026 ──
+    "nex-agi/nex-n2.5-mini:free": _ModelHealthNote(
+        reason="Логи прода 05.10.2026: 'This model is unavailable for free. The paid version is available now' — стояла второй в лёгкой цепочке."
+    ),
 }
 
 # Вычисляется из _OR_MODEL_HEALTH — роутер не должен выбирать эти модели.
@@ -362,11 +366,10 @@ def _groq_route(models: list[str]) -> list[tuple[str, str]]:
 
 
 # ── "Лёгкие" запросы — самый частый маршрут, целиком OpenRouter.
-# Порядок по аудитам 22.08/17.09.2026; nex-mini повышен продом 17.09.2026.
-# НАБЛЮДЕНИЕ 17.09.2026: один ответ nex-mini с вкраплениями чужих языков — при повторе понижать.
+# Порядок по аудитам 22.08/17.09.2026; nex-mini повышен продом 17.09.2026, снят
+# 05.10.2026 (платная отсечка — см. _OR_MODEL_HEALTH): второй стала sante.
 _OR_LIGHT_ORDER: list[str] = [
     "nvidia/nemotron-3.5-lightning:free",
-    "nex-agi/nex-n2.5-mini:free",
     "inclusionai/ling-3.0-flash-sante:free",
     "inclusionai/ling-3.0-flash-fin:free",
     "liquid/lfm-2.5-2.6b:free",
