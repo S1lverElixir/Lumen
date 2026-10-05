@@ -1352,6 +1352,16 @@ def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
     assert fake_tg_call.text == bot._t(999703, "selftest_cooldown", sec=60)
 
 
+def test_cmd_selftest_first_run_after_boot_not_throttled(monkeypatch):
+    # Падение CI на dependabot-PR: monotonic() свежего контейнера меньше 60с,
+    # и ноль как «давно» давал ложный кулдаун первому же запуску.
+    monkeypatch.setattr(bot, "OWNER_ID", 109001)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    monkeypatch.setattr(time, "monotonic", lambda: 42.0)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999809, 109001)))
+    assert calls == ["groq", "openrouter"]
+
+
 def test_selftest_short_error_redacts_org_id():
     # Прод 05.10.2026: текст Groq-ошибки тащил ID организации — внутрянка даже в личке.
     import lumen_routes

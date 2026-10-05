@@ -678,10 +678,13 @@ async def cmd_selftest(message: Message) -> None:
         await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_group_only"))
         return
     now = time.monotonic()
-    wait = SELFTEST_COOLDOWN_SEC - (now - _SELFTEST_LAST_RUN_MONOTONIC)
-    if wait > 0:
-        await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_cooldown", sec=int(wait) + 1))
-        return
+    # Ноль — «ещё ни разу», а не время: monotonic() свежего процесса тоже
+    #тики от загрузки, и 60 − 45 давали ложный кулдаун первому запуску (CI).
+    if _SELFTEST_LAST_RUN_MONOTONIC > 0:
+        wait = SELFTEST_COOLDOWN_SEC - (now - _SELFTEST_LAST_RUN_MONOTONIC)
+        if wait > 0:
+            await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_cooldown", sec=int(wait) + 1))
+            return
     # Метку ставим до проб: повторный вызов во время долгой проверки тоже ждёт.
     _SELFTEST_LAST_RUN_MONOTONIC = now
     args = (getattr(message, "text", "") or "").split()
