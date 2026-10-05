@@ -738,8 +738,6 @@ async def ask_gemini(
     import bot
     state = bot.get_state(chat_id)
     chain = list(model_chain) if model_chain else list(GEMINI_DEFAULT_CHAIN)
-    if not chain:
-        chain = list(GEMINI_DEFAULT_CHAIN)
     if deadline is None:
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
     hist = state.setdefault("history", [])
