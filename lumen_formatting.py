@@ -144,24 +144,35 @@ def _normalize_bullet_markers(text: str) -> str:
 # 2+ разделителя (т.е. уже 3 пункта: прод 26.09.2026 показал, что ровно
 # трёхпунктовые списки — самый частый случай, а с порогом 3 они не ловились).
 # Короткие "чай • кофе" (1 разделитель) и короткие абзацы — обычная проза, не трогаем.
+# Прод 05.10.2026: модель склеила тот же список без пробелов вокруг "•" —
+# сепаратор ловим regex'ом с необязательными пробелами, плюс "·" тем же путём.
 _INLINE_BULLETS_MIN_SEPS = 2
 _INLINE_BULLETS_MIN_LEN = 200
+_INLINE_BULLET_SEP_RE = re.compile(r"\s*[•·]\s*")
+_INLINE_BULLET_START_RE = re.compile(r"\s*[•·]")
 
 def _split_inline_bullets(text: str) -> str:
     lines = text.split("\n")
     skip = _table_block_line_indexes(lines)
     out = []
     for idx, line in enumerate(lines):
+        chunks: list[str] = []
         if (
             idx not in skip
             and len(line) >= _INLINE_BULLETS_MIN_LEN
-            and line.count(" • ") >= _INLINE_BULLETS_MIN_SEPS
+            and len(_INLINE_BULLET_SEP_RE.findall(line)) >= _INLINE_BULLETS_MIN_SEPS
             and not _is_structural_line(line)
         ):
-            head, *items = line.split(" • ")
-            # Первый кусок — вводная фраза ("Вот моменты:"), дальше — пункты.
-            out.append(head.rstrip())
-            out.extend("• " + item.strip() for item in items if item.strip())
+            chunks = [c.strip() for c in _INLINE_BULLET_SEP_RE.split(line)]
+            chunks = [c for c in chunks if c]
+        if len(chunks) >= 2:
+            if _INLINE_BULLET_START_RE.match(line):
+                # Строка начинается с маркера — вводной фразы нет, все куски пункты.
+                out.extend("• " + chunk for chunk in chunks)
+            else:
+                # Первый кусок — вводная фраза ("Вот моменты:"), дальше — пункты.
+                out.append(chunks[0])
+                out.extend("• " + chunk for chunk in chunks[1:])
         else:
             out.append(line)
     return "\n".join(out)

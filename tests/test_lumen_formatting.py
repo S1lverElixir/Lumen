@@ -297,6 +297,33 @@ def test_split_inline_bullets_splits_three_item_prod_answer():
     assert all(line.startswith("• ") for line in lines)
 
 
+def test_split_inline_bullets_splits_glued_without_spaces():
+    # Прод 05.10.2026: скриншот — модель склеила список способностей вообще без
+    # пробелов вокруг "•", старая сетка на " • " его не видела.
+    text = (
+        "• Отвечать на вопросы, вести беседу.• Выполнять веб-поиск и использовать полученные данные. "
+        "•Читать открытые веб-страницы и анализировать их содержание.• Анализировать присланные фото, видео и документы."
+    )
+    assert len(text) >= 200
+    lines = lumen_formatting._split_inline_bullets(text).split("\n")
+    assert len(lines) == 4
+    assert all(line.startswith("• ") for line in lines)
+    assert "" not in lines
+
+
+def test_split_inline_bullets_splits_middot_variant():
+    # Та же склейка маркером "·": другой символ, та же каша для читателя.
+    text = (
+        "Итоги такие: первый пункт с подробностями для длины строки и смыслом · второй пункт с подробностями "
+        "для длины строки и смыслом · третий пункт с подробностями для длины строки и смыслом · четвёртый пункт."
+    )
+    assert len(text) >= 200
+    lines = lumen_formatting._split_inline_bullets(text).split("\n")
+    assert len(lines) == 4
+    assert lines[0].startswith("Итоги такие: ")
+    assert all(line.startswith("• ") for line in lines[1:])
+
+
 def test_md_to_html_splits_inline_bullets_end_to_end():
     items = ["тезис номер %d с подробным раскрытием мысли" % i for i in range(4)]
     text = "Итоги сравнения моделей: " + " • ".join(items)
