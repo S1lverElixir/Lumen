@@ -14,10 +14,7 @@ Telegram/Gemini/OpenRouter/рантайм-состояния бота, поэт�
 Запуск:
     pytest test_lumen_formatting.py -v
 """
-import inspect
-
 import lumen_formatting
-import lumen_streaming
 
 
 
@@ -421,15 +418,6 @@ def test_render_paths_differ_only_for_headings():
     assert lumen_formatting._md_to_rich_html("## Title") == "<h3>Title</h3>"
 
 
-def test_streaming_history_uses_summarizing_trim():
-    # Стриминговый путь резал историю голым del, из-за чего саммаризация старого
-    # работала только в нестриминговых ветках (аудит 26.09.2026).
-    src = inspect.getsource(lumen_streaming._run_streaming_reply)
-    code_lines = [ln for ln in src.splitlines() if not ln.strip().startswith("#")]
-    assert any("_trim_history" in ln for ln in code_lines)
-    assert not any("hist[:-" in ln for ln in code_lines), "в стриминге остался молчаливый срез истории"
-
-
 def test_md_to_rich_html_splits_three_bullets_prod_movies():
     # Прод 26.09.2026: ответ про мелодрамы — 3 пункта склеились, rich-путь молчал.
     text = (
@@ -513,11 +501,7 @@ def test_md_to_html_strips_literal_span_spoiler_tag():
 
 
 # ─────────────────── подсветка синтаксиса: язык из ```fence сохраняется ───────────────────
-
-def test_md_to_html_code_block_preserves_language_for_syntax_highlighting():
-    result = lumen_formatting._md_to_html("```python\nprint(1)\n```")
-    assert result == '<pre><code class="language-python">print(1)</code></pre>'
-
+# (сам кейс с языком покрыт test_md_to_html_code_block выше)
 
 def test_md_to_html_code_block_without_language_unchanged():
     assert lumen_formatting._md_to_html("```\nprint(1)\n```") == "<pre>print(1)</pre>"

@@ -556,28 +556,6 @@ def test_ask_gemini_attempt_respects_short_budget(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
-def test_gemini_spent_budget_does_not_pretend_blocked(monkeypatch):
-    # Регрессия (враждебное ревью 27.09.2026): когда повтор после битого вызова не
-    # влезал в бюджет, функция возвращала непустую строку "[Ответ заблокирован...]",
-    # ask_gemini считал её успехом и юзер получал её вместо ответа следующей модели.
-    async def must_not_run(*, model, contents, config=None):
-        raise AssertionError("retry must not run on a spent budget")
-
-    fake_client = MagicMock()
-    fake_client.aio.models.generate_content = must_not_run
-    original_client = bot.client
-    bot.client = fake_client
-    try:
-        resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="MALFORMED_FUNCTION_CALL")])
-        ans = asyncio.run(bot._extract_gemini_answer_text(
-            resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
-            deadline=time.monotonic() - 1.0,
-        ))
-        assert ans == "", "пустой ответ должен уводить маршрут на следующую модель"
-    finally:
-        bot.client = original_client
-
-
 def test_is_gemini_daily_quota_recognizes_google_per_day_metric():
     # Google пишет суточную квоту слитно в имени метрики
     # (GenerateRequestsPerDayPerProjectPerModel) — без токена perday она

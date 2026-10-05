@@ -50,13 +50,6 @@ def test_split_text_chunks_preserves_all_words():
     assert " ".join(chunks).split() == text.split()
 
 
-def test_split_text_chunks_lives_in_formatting_module():
-    # Срез монолита (сентябрь 2026): реализация — в lumen_formatting, bot.py
-    # только ре-экспортирует имя, чтобы bot._split_text_chunks работал как раньше.
-    import lumen_formatting
-    assert bot._split_text_chunks is lumen_formatting._split_text_chunks
-
-
 def test_sanitize_mime_type_guesses_from_extension():
     assert bot._sanitize_mime_type("photo.jpg", "") == "image/jpeg"
 
