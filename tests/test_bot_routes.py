@@ -874,6 +874,35 @@ def test_ask_gemini_burst_429_only_cools_down_the_model():
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.6-flash", None)
 
 
+@pytest.mark.parametrize(("provider", "exc_cls_name"), [
+    ("openrouter", "OpenRouterAPIError"),
+    ("groq", "GroqAPIError"),
+])
+def test_chat_completion_chain_cools_down_model_on_429(provider, exc_cls_name):
+    # Нестриминговые OpenRouter/Groq не писали cooldown после 429 — зеркалим
+    # стриминг, иначе _is_quota_exhausted их не видит и модель долбят заново.
+    import lumen_routes
+    exc_cls = getattr(bot, exc_cls_name)
+
+    async def boom_429(payload, deadline):
+        raise exc_cls("HTTP 429 rate limit", status_code=429)
+
+    model = f"probe/rl-{provider}:free"
+    bot.GLOBAL_QUOTA.setdefault(provider, {}).pop(model, None)
+    try:
+        with pytest.raises(exc_cls):
+            asyncio.run(lumen_routes._chat_completion_chain(
+                [{"role": "system", "content": ""}, {"role": "user", "content": "hi"}],
+                [model], model, request_fn=boom_429, provider=provider,
+            ))
+        entry = bot.GLOBAL_QUOTA[provider][model]
+        assert entry["exhausted_at"] is None, "минутный всплеск не должен запирать модель до утра"
+        assert entry["cooldown_until"] > time.time()
+        assert lumen_router_config._is_quota_exhausted(provider, model) is True
+    finally:
+        bot.GLOBAL_QUOTA[provider].pop(model, None)
+
+
 def test_ask_gemini_raises_all_models_exhausted_when_entire_chain_429s():
     chat_id = 999011
 

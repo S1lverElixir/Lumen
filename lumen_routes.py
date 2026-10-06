@@ -280,6 +280,17 @@ async def _chat_completion_chain(
                     label, model_trial,
                 )
                 raise
+            # 429 — в карантин/остывку, как стриминг выше: иначе модель долбят
+            # каждым сообщением, а _is_quota_exhausted её не видит.
+            try:
+                _txt = bot._error_text(exc).strip() or exc.__class__.__name__
+                if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":
+                    if bot._is_account_wide_or_rate_limit(_txt.lower()):
+                        bot._mark_quota_exhausted(provider, model_trial)
+                    else:
+                        bot._mark_rate_limited(provider, model_trial)
+            except Exception:
+                pass
             log.warning("[%s] Model %s failed: %s. Switching to next candidate...", label, model_trial, str(last_exc) or last_exc.__class__.__name__)
 
     if last_exc:
