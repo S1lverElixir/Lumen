@@ -1146,6 +1146,69 @@ def test_communicate_process_propagates_communicate_failure():
     asyncio.run(run())
 
 
+def test_communicate_process_bounds_drain_and_reraises_cancel(monkeypatch):
+    # communicate переживает kill: дренаж ограничен, задача снимается, внешняя
+    # отмена пробрасывается, а не глотается продолжением ожидания.
+    import threading
+
+    class _UnkillableProc:
+        def __init__(self):
+            self.killed = False
+            self.returncode = None
+
+        def kill(self):
+            self.killed = True
+
+        async def communicate(self):
+            await asyncio.sleep(3600)
+
+        async def wait(self):
+            return self.returncode
+
+    drain_sec = getattr(lumen_tiktok, "_COMMUNICATE_DRAIN_SEC", 5.0)
+    monkeypatch.setattr(lumen_tiktok, "_COMMUNICATE_DRAIN_SEC", 0.05, raising=False)
+
+    def _timeout_path():
+        # Старый код вис в дренаже вечно — ловим join-таймаутом, сьют не виснет.
+        outcome = {}
+
+        def _target():
+            async def _run():
+                started = time.monotonic()
+                try:
+                    await lumen_tiktok._communicate_process(_UnkillableProc(), timeout=0.05)
+                    outcome["result"] = ("returned", time.monotonic() - started)
+                except asyncio.TimeoutError:
+                    outcome["result"] = ("timeout", time.monotonic() - started)
+                except asyncio.CancelledError:
+                    outcome["result"] = ("cancelled", time.monotonic() - started)
+
+            asyncio.run(_run())
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+        thread.join(timeout=5)
+        return outcome.get("result", ("hung", 5.0))
+
+    async def _cancel_path():
+        proc = _UnkillableProc()
+        task = asyncio.create_task(lumen_tiktok._communicate_process(proc, timeout=30))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2)
+            return "returned"
+        except asyncio.CancelledError:
+            return "cancelled"
+        except asyncio.TimeoutError:
+            return "hung"
+
+    kind, elapsed = _timeout_path()
+    assert kind == "timeout"
+    assert elapsed < drain_sec + 4
+    assert asyncio.run(_cancel_path()) == "cancelled"
+
+
 def test_slideshow_status_uses_localized_key():
     # Статус слайдшоу был захардкожен по-русски — теперь ключ tiktok_dl_slideshow с плейсхолдерами.
     # Проверяем точное равенство строке на языке чата, а не «где-то есть слово

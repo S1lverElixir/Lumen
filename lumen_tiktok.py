@@ -447,6 +447,10 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
     return None
 
 
+# Сколько ждём зависший communicate после kill перед снятием задачи (аудит 06.10.2026).
+_COMMUNICATE_DRAIN_SEC = 5.0
+
+
 async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: float):
     async def finish():
         try:
@@ -457,19 +461,30 @@ async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: flo
     completion = asyncio.create_task(finish())
     try:
         return await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+    except asyncio.TimeoutError:
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-        while not completion.done():
-            try:
-                await asyncio.shield(completion)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        with contextlib.suppress(Exception, asyncio.CancelledError):
-            completion.result()
+        # Дренаж ограничен: communicate, переживший kill, не держит loop вечно.
+        # Результат дренажа уже опоздал (таймаут был) — только подчищаем задачу,
+        # наружу по-прежнему исходный TimeoutError. Внешняя отмена из дренажа
+        # летит сама: CancelledError здесь не ловим.
+        try:
+            await asyncio.wait_for(asyncio.shield(completion), timeout=_COMMUNICATE_DRAIN_SEC)
+        except asyncio.TimeoutError:
+            if completion.done():
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    completion.result()
+            else:
+                completion.cancel()
+        raise
+    except asyncio.CancelledError:
+        # Внешняя отмена не дренаж: глотать её продолжением ожидания нельзя.
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        if not completion.done():
+            completion.cancel()
         raise
 
 
