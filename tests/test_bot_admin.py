@@ -296,6 +296,87 @@ def test_webhook_handler_rejects_invalid_or_missing_secret_and_does_not_dispatch
         bot._process_raw_update = original_process
 
 
+def test_webhook_handler_rejects_oversized_body_before_reading():
+    # Тело сверх капа: отказ до разбора, сырые байты не читаем целиком.
+    import lumen_admin
+    original_secret = bot.WEBHOOK_SECRET
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    try:
+        req = _FakeWebhookRequest(
+            headers={
+                "X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret",
+                "Content-Length": str(lumen_admin.WEBHOOK_MAX_BODY_BYTES + 1),
+            },
+            body={"update_id": 1},
+        )
+        assert asyncio.run(_run_webhook_handler(req)) == {"ok": False}
+        assert req.body_calls == 0
+        # Заголовок соврал (маленький), тело большое — тоже отказ.
+        req2 = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 2},
+        )
+        req2._raw = b"x" * (lumen_admin.WEBHOOK_MAX_BODY_BYTES + 1)
+        assert asyncio.run(_run_webhook_handler(req2)) == {"ok": False}
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+
+
+def test_webhook_denied_log_is_throttled(caplog):
+    # Гроздья отклонений — одной строкой, а не WARNING на каждый запрос в очередь.
+    import logging
+    import lumen_admin
+    orig_count = lumen_admin._webhook_denied_count
+    orig_last = lumen_admin._webhook_denied_last_log
+    lumen_admin._webhook_denied_count = 0
+    lumen_admin._webhook_denied_last_log = 0.0
+    original_secret = bot.WEBHOOK_SECRET
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot"):
+            for _ in range(3):
+                req = _FakeWebhookRequest(
+                    headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"},
+                    body={"update_id": 1},
+                )
+                assert asyncio.run(_run_webhook_handler(req)) == {"ok": False}
+        denied = [r for r in caplog.records if "Rejected" in r.getMessage()]
+        assert len(denied) == 1
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        lumen_admin._webhook_denied_count = orig_count
+        lumen_admin._webhook_denied_last_log = orig_last
+
+
+def test_webhook_handler_returns_503_when_inflight_full(monkeypatch):
+    # Переполнение фоновых задач — 503 с повтором, апдейт не теряется молча.
+    import lumen_admin
+    original_secret = bot.WEBHOOK_SECRET
+    original_bot_obj = bot.bot
+    original_process = bot._process_raw_update
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    bot.bot = object()
+    calls = []
+
+    async def fake_process(raw_update):
+        calls.append(raw_update)
+
+    bot._process_raw_update = fake_process
+    monkeypatch.setattr(lumen_admin, "WEBHOOK_MAX_INFLIGHT_TASKS", 0)
+    try:
+        req = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 1},
+        )
+        result = asyncio.run(_run_webhook_handler(req))
+        assert result.status_code == 503
+        assert calls == []
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        bot.bot = original_bot_obj
+        bot._process_raw_update = original_process
+
+
 def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
     # Апдейт может прийти раньше, чем main() успеет создать глобальный bot (Bot/
     # genai.Client создаются уже после старта uvicorn) — отвечаем 503, чтобы

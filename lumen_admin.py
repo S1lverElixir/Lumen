@@ -103,16 +103,59 @@ async def get_webhook_url(request: Request) -> Any:
         "instruction": "Подставь BOT_TOKEN и WEBHOOK_SECRET вручную и вызови ссылку curl, а не браузером",
     }
 
+# Апдейт Telegram маленький: всё сверх капа отклоняем до разбора.
+WEBHOOK_MAX_BODY_BYTES = 512 * 1024
+# Фоновых задач апдейтов держим ограниченно: переполнение просим повторить.
+WEBHOOK_MAX_INFLIGHT_TASKS = 100
+# Отклонения по секрету/капу гроздьями логируем суммарно, а не по одному.
+_WEBHOOK_DENIED_LOG_INTERVAL_SEC = 60.0
+_webhook_denied_count = 0
+_webhook_denied_last_log = 0.0
+
+
+def _log_webhook_denied(reason: str) -> None:
+    """Троттлинг отказов: каждая строка в SimpleQueue-лог без края, гроздья — одной."""
+    global _webhook_denied_count, _webhook_denied_last_log
+    now = time.monotonic()
+    _webhook_denied_count += 1
+    if now - _webhook_denied_last_log >= _WEBHOOK_DENIED_LOG_INTERVAL_SEC:
+        log.warning(
+            "[webhook] Rejected %d request(s): %s",
+            _webhook_denied_count, reason,
+        )
+        _webhook_denied_count = 0
+        _webhook_denied_last_log = now
+
+
 @app.post("/webhook")
 async def webhook_handler(request: Request) -> Any:
     import bot
+    import json as _json
     token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
     # Пустой секрет невалиден, сравнение в байтах держит не-ASCII без TypeError.
     if not bot.WEBHOOK_SECRET or not token or not hmac.compare_digest(token.encode(), bot.WEBHOOK_SECRET.encode()):
-        log.warning("[webhook] Rejected request with invalid secret token")
+        _log_webhook_denied("invalid secret token")
         return {"ok": False}
+    # Тело апдейта маленькое: отсекаем мусор по заголовку до чтения.
+    content_length = request.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > WEBHOOK_MAX_BODY_BYTES:
+                _log_webhook_denied(f"body larger than the {WEBHOOK_MAX_BODY_BYTES} byte cap")
+                return {"ok": False}
+        except ValueError:
+            pass
+    # Очередь фоновых задач ограничена: переполнение просим повторить позже.
+    if len(bot._inflight_tasks) >= WEBHOOK_MAX_INFLIGHT_TASKS:
+        log.warning("[webhook] Too many in-flight updates (%d), asking Telegram to retry", len(bot._inflight_tasks))
+        return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     try:
-        body = await request.json()
+        raw_body = await request.body()
+        if len(raw_body) > WEBHOOK_MAX_BODY_BYTES:
+            # Заголовок соврал или его не было: сырые байты сверх капа не разбираем.
+            _log_webhook_denied(f"body larger than the {WEBHOOK_MAX_BODY_BYTES} byte cap")
+            return {"ok": False}
+        body = _json.loads(raw_body)
         if bot.bot is not None:
             bot._track_inflight_task(asyncio.create_task(bot._process_raw_update(body)))
         else:

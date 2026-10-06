@@ -264,11 +264,20 @@ class _FakeSessionForSSE:
 
 class _FakeWebhookRequest:
     def __init__(self, headers: dict | None = None, body: dict | None = None):
+        import json as _json
         self.headers = headers or {}
         self._body = body or {}
+        self._raw = _json.dumps(self._body).encode("utf-8")
+        self.json_calls = 0
+        self.body_calls = 0
 
     async def json(self):
+        self.json_calls += 1
         return self._body
+
+    async def body(self):
+        self.body_calls += 1
+        return self._raw
 
 
 async def _run_webhook_handler(req: "_FakeWebhookRequest") -> dict:
