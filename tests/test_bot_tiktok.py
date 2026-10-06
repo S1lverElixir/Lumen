@@ -1409,6 +1409,46 @@ def test_single_video_status_deleted_after_music():
         lumen_tiktok_flow._send_tiktok_music = original_music
 
 
+def test_single_video_send_goes_through_tg_call(monkeypatch):
+    # Отправки идут через _tg_call (breaker/таймаут/RetryAfter), а не напрямую:
+    # при недоступности Telegram прямой send_video не дёргается вообще.
+    import lumen_tiktok_flow
+    direct_calls = []
+
+    class _DirectBot:
+        async def send_video(self, **kwargs):
+            direct_calls.append(kwargs)
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return b"\x00" * 100
+
+    async def fake_probe_dims(path):
+        return 0, 0, 0
+
+    async def fake_thumb(path, duration):
+        return None
+
+    async def fake_tg_call(method, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_probe_video_dimensions", fake_probe_dims)
+    monkeypatch.setattr(bot, "_generate_video_thumbnail", fake_thumb)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", _DirectBot())
+    incoming = _FakeIncomingMessage(999456)
+    incoming.message_id = 1
+    media_data = {"play": "https://tikwm.com/v.mp4", "size": 100, "author": {"nickname": "Nick"}}
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(lumen_tiktok_flow._send_tiktok_single_video(
+                None, media_data, incoming, None, "Nick", {}))
+        assert direct_calls == []
+    finally:
+        bot.chat_state.pop(999456, None)
+
+
 # ─────────────── S9: DNS в потоке, ручные редиректы, капы, N/A, WebM ───────────────
 
 def _fake_public_dns(host, port, *args, **kwargs):
@@ -1642,12 +1682,15 @@ def test_slideshow_stops_at_post_budget(monkeypatch):
     class _FakeTgBot:
         async def send_photo(self, **kwargs):
             calls["photo"] = calls.get("photo", 0) + 1
+            return SimpleNamespace()
 
         async def send_video(self, **kwargs):
             calls["video"] = calls.get("video", 0) + 1
+            return SimpleNamespace()
 
         async def send_media_group(self, **kwargs):
             calls["group"] = calls.get("group", 0) + 1
+            return SimpleNamespace()
 
     async def fake_edit(*args, **kwargs):
         return True
