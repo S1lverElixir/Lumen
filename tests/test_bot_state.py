@@ -402,6 +402,45 @@ def test_flush_dirty_state_once_keeps_dirty_index_and_quota_on_write_failure():
         lumen_chat_state._quota_dirty = False
 
 
+def test_flush_keeps_dirty_flag_when_mutated_during_write():
+    # Гонка флагов: payload построен, запись висит, состояние мутировало —
+    # флаг обязан остаться True, иначе изменение теряется до следующей мутации.
+    import threading
+    bot._dirty_chat_ids.clear()
+    bot._pending_chat_deletions.clear()
+
+    def _run_with_blocking_save(flag_name, save_name, mutate):
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_save(payload):
+            started.set()
+            assert release.wait(timeout=5)
+            return True
+
+        async def _scenario():
+            flush_task = asyncio.create_task(bot._flush_dirty_state_once())
+            assert await asyncio.to_thread(started.wait, 5)
+            mutate()
+            release.set()
+            await flush_task
+
+        setattr(lumen_chat_state, flag_name, True)
+        try:
+            with patch(f"bot.{save_name}", side_effect=blocking_save):
+                asyncio.run(_scenario())
+            assert getattr(lumen_chat_state, flag_name) is True
+        finally:
+            release.set()
+            setattr(lumen_chat_state, flag_name, False)
+
+    lumen_chat_state._quota_dirty = False
+    _run_with_blocking_save("_index_dirty", "_save_chat_index_payload", lumen_chat_state.mark_state_dirty)
+    bot._dirty_chat_ids.clear()
+    lumen_chat_state._index_dirty = False
+    _run_with_blocking_save("_quota_dirty", "_save_quota_payload", lumen_chat_state.mark_quota_dirty)
+
+
 def test_load_state_falls_back_to_legacy_blob_on_corrupt_index():
     # Внешний аудит: битый индекс обнулял восстановление, хотя per-chat файлы целы.
     import json

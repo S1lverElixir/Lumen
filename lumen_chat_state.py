@@ -453,6 +453,11 @@ _dirty_chat_ids: set[int] = set()
 _pending_chat_deletions: set[int] = set()
 _index_dirty = False
 _quota_dirty = False
+# Поколения мутаций под гонку "payload построен — запись висит — состояние
+# изменилось": флаш сбрасывает флаг, только если поколение не выросло за время
+# записи, иначе изменение терялось бы до следующей мутации.
+_index_generation = 0
+_quota_generation = 0
 # Отказ стартовой загрузки: пока стоит, индекс и квоту не перезаписываем,
 # иначе первый флаш затрёт хорошие удалённые данные пустым снимком (аудит A5-2).
 _state_load_failed = False
@@ -494,12 +499,13 @@ def mark_state_dirty(chat_id: int | None = None) -> None:
     Явный chat_id (предпочтительный путь для нового кода) — помечает "грязным"
     ТОЛЬКО этот чат, ничего больше. Вызов БЕЗ chat_id (миграция из старого
     общего блоба) помечает "грязными" вообще все текущие чаты и индекс целиком."""
-    global _index_dirty
+    global _index_dirty, _index_generation
     if chat_id is not None:
         _dirty_chat_ids.add(chat_id)
     else:
         _dirty_chat_ids.update(chat_state.keys())
         _index_dirty = True
+        _index_generation += 1
 
 def _mark_new_chat_id(chat_id: int) -> None:
     """Регистрирует НОВЫЙ chat_id, только что появившийся в chat_state (см.
@@ -507,13 +513,15 @@ def _mark_new_chat_id(chat_id: int) -> None:
     чат без индекса, после рестарта его данные будут недостижимы: per-chat ключ
     существует, но индекс (единственный способ узнать список ID при чтении) о
     нём не знает."""
-    global _index_dirty
+    global _index_dirty, _index_generation
     _dirty_chat_ids.add(chat_id)
     _index_dirty = True
+    _index_generation += 1
 
 def mark_quota_dirty() -> None:
-    global _quota_dirty
+    global _quota_dirty, _quota_generation
     _quota_dirty = True
+    _quota_generation += 1
 
 async def _flush_dirty_state_once() -> None:
     """Тело ОДНОЙ итерации периодического сброса состояния — вынесено из
@@ -565,16 +573,22 @@ async def _flush_dirty_state_once() -> None:
                 log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
             else:
                 index_payload = json.dumps(sorted(chat_state.keys()))
+                started_index_generation = _index_generation
                 if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
-                    _index_dirty = False
+                    # Сбрасываем, только если за время записи никто не мутировал:
+                    # иначе свежий снимок уже устарел и флаг обязан жить дальше.
+                    if _index_generation == started_index_generation:
+                        _index_dirty = False
         if _quota_dirty:
             if _state_load_failed:
                 # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
                 log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
             else:
                 quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
+                started_quota_generation = _quota_generation
                 if await asyncio.to_thread(bot._save_quota_payload, quota_payload):
-                    _quota_dirty = False
+                    if _quota_generation == started_quota_generation:
+                        _quota_dirty = False
     except Exception as exc:
         log.warning('[state] Periodic state flush failed: %s', exc)
 
@@ -777,7 +791,7 @@ def _t_no_create(chat_id: int | None, key: str, **kwargs: Any) -> str:
 
 def _prune_old_chats() -> None:
     import bot
-    global _index_dirty
+    global _index_dirty, _index_generation
     sorted_ids = sorted(chat_state.keys(), key=lambda cid: chat_state[cid].get("last_activity", 0))
     # Лок ЗАНЯТ = в чате идёт ответ. Такой чат вытеснять нельзя: идущий маршрут
     # продолжал бы писать в отвязанный state, а следующее сообщение создало бы
@@ -804,6 +818,7 @@ def _prune_old_chats() -> None:
     if removed_ids:
         # Неизменённые чаты не пачкаем: иначе следующий флаш перезаписывал тысячи лишних ключей.
         _index_dirty = True
+        _index_generation += 1
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
     import bot
