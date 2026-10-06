@@ -89,6 +89,28 @@ def test_check_admin_key_rejects_wrong_or_missing_key():
         bot.ADMIN_PANEL_KEY = original
 
 
+def test_bearer_non_ascii_returns_false_not_500():
+    # compare_digest на str падает TypeError на не-ASCII: отказ без исключения.
+    original = bot.ADMIN_PANEL_KEY
+    bot.ADMIN_PANEL_KEY = "real-admin-key"
+    try:
+        assert bot._check_bearer_token(_FakeAdminRequest(headers={"Authorization": "Bearer café"}), "real-admin-key") is False
+        assert bot._check_admin_key(_FakeAdminRequest(headers={"Authorization": "Bearer café"})) is False
+    finally:
+        bot.ADMIN_PANEL_KEY = original
+
+
+def test_webhook_non_ascii_secret_returns_false_not_500():
+    original = bot.WEBHOOK_SECRET
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    try:
+        req = _FakeWebhookRequest(headers={"X-Telegram-Bot-Api-Secret-Token": "café"}, body={"update_id": 1})
+        result = asyncio.run(_run_webhook_handler(req))
+        assert result == {"ok": False}
+    finally:
+        bot.WEBHOOK_SECRET = original
+
+
 def test_webhook_handler_tracks_dispatched_task_for_shutdown():
     original_secret = bot.WEBHOOK_SECRET
     original_bot_obj = bot.bot

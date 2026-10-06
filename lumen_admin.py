@@ -30,7 +30,8 @@ def _check_bearer_token(request: Request, expected: str) -> bool:
     """Только Bearer-заголовок: секрет в URL светится в логах/истории/Referer (CWE-598)."""
     auth_header = request.headers.get("Authorization", "")
     provided = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
-    return bool(expected) and bool(provided) and hmac.compare_digest(provided, expected)
+    # Сравнение в байтах: str-вариант compare_digest падает TypeError на не-ASCII.
+    return bool(expected) and bool(provided) and hmac.compare_digest(provided.encode(), expected.encode())
 
 def _check_admin_key(request: Request) -> bool:
     import bot
@@ -106,7 +107,8 @@ async def get_webhook_url(request: Request) -> Any:
 async def webhook_handler(request: Request) -> Any:
     import bot
     token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if not hmac.compare_digest(token, bot.WEBHOOK_SECRET):
+    # Пустой секрет невалиден, сравнение в байтах держит не-ASCII без TypeError.
+    if not bot.WEBHOOK_SECRET or not token or not hmac.compare_digest(token.encode(), bot.WEBHOOK_SECRET.encode()):
         log.warning("[webhook] Rejected request with invalid secret token")
         return {"ok": False}
     try:
