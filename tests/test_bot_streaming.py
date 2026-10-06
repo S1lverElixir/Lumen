@@ -35,15 +35,10 @@ def test_stream_wait_caps_chunk_timeout_by_remaining_budget():
 
 
 def _fake_gemini_stream(pieces=None, *, raises=None, hang_sec=0.0):
-    """Мок generate_content_stream по НАСТОЯЩЕМУ контракту google-genai 2.24.0:
-    обычная функция, возвращающая асинхронный генератор (тело SDK — `return
-    stream_generator()`), а НЕ корутина.
-
-    Раньше фейки здесь были `async def ... return gen()`, из-за чего тесты
-    подпирали фиктивное рукопожатие wait_for вокруг вызова: реальный SDK сети
-    в корутине не делает, значит тот таймаут не срабатывал никогда
-    (враждебное ревью 27.09.2026)."""
-    def _stream(*, model, contents, config=None):
+    """Мок generate_content_stream по контракту google-genai 2.27.0:
+    async def, вызов надо ждать (пример из SDK:
+    `async for chunk in await client.aio.models.generate_content_stream(...)`)."""
+    async def _stream(*, model, contents, config=None):
         async def gen():
             if hang_sec:
                 await asyncio.sleep(hang_sec)
@@ -76,19 +71,22 @@ def test_gemini_stream_timeout_covers_a_hanging_first_chunk():
         bot.STREAM_CHUNK_TIMEOUT_SEC = original_cap
 
 
-def test_gemini_stream_call_is_not_awaited():
-    # Контракт SDK: generate_content_stream — обычная функция. Если бы обёртка снова
-    # стала await-ить её, тест падал бы с TypeError, а не проходил вхолостую.
+def test_gemini_stream_call_is_awaited():
+    # Контракт SDK 2.27.0: generate_content_stream это async def, обёртка обязана
+    # ждать вызов. Синхронный мок (старое поведение) даёт TypeError при await.
+    import inspect
+    from google.genai.models import AsyncModels
+    assert inspect.iscoroutinefunction(AsyncModels.generate_content_stream)
     calls = []
 
-    def sync_only(*, model, contents, config=None):
+    async def async_only(*, model, contents, config=None):
         calls.append(model)
         async def gen():
             yield SimpleNamespace(text="ok")
         return gen()
 
     fake_client = MagicMock()
-    fake_client.aio.models.generate_content_stream = sync_only
+    fake_client.aio.models.generate_content_stream = async_only
     original_client = bot.client
     bot.client = fake_client
     try:

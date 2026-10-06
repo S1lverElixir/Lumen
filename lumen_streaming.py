@@ -94,14 +94,11 @@ def _stream_wait(bot: Any, deadline: float | None) -> float:
 async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig, *, deadline: float | None = None):
     """Куски от Gemini (тонкая обёртка над generate_content_stream).
 
-    Рукопожатия как отдельного шага НЕТ намеренно: generate_content_stream
-    возвращает генератор, не делая сети (проверено по исходнику google-genai
-    2.24.0: тело — `return stream_generator()`), поэтому wait_for вокруг вызова
-    ограничивал только мгновенное создание объекта и никогда не срабатывал —
-    витрина таймаута без защиты (враждебное ревью 27.09.2026). Реальную сетевую
-    жду ловлю ниже: первый кусок идёт через __anext__ под тем же _stream_wait."""
+    В google-genai 2.27.0 это async def: вызов надо ждать (пример из SDK:
+    `async for chunk in await client.aio.models.generate_content_stream(...)`).
+    Реальную сетевую жду ловлю ниже: первый кусок идёт через __anext__ под тем же _stream_wait."""
     import bot
-    stream = bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig)
+    stream = await bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig)
     stream_iter = stream.__aiter__()
     try:
         while True:
