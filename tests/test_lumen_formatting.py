@@ -120,6 +120,13 @@ def test_split_chunks_keep_fences_intact():
         assert "```" not in lumen_formatting._md_to_html(chunk)
 
 
+def test_split_chunks_merge_short_fenced_message_back():
+    # Короткое сообщение с кодом едет одним куском, а не тремя.
+    text = "Hi\n```python\nx = 1\n```\nBye"
+    chunks = lumen_formatting._split_text_chunks(text, 4096)
+    assert chunks == [text]
+
+
 def test_md_to_html_link_with_inline_code_has_no_placeholder_leak():
     # Код внутри метки ссылки: плейсхолдер не протекает, оба тега на месте.
     html = lumen_formatting._md_to_html("[`code` текст](https://example.com)")

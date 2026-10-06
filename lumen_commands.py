@@ -341,9 +341,16 @@ async def inline_tts(message: Message, text: str) -> None:
         return
     # Дневные лимиты пользователя: общий и отдельный на озвучку (он же тратит квоту Gemini TTS).
     # Проба без создания: отказ не заводит запись и не раздувает day_users.
+    # Считаем сразу все чанки: каждый — отдельный синтез, иначе длинный текст
+    # уводил бы счётчик за лимит.
     uid = bot._user_key_for_message(message)
     _tts_entry = bot._user_daily_peek(uid)
-    if bot._user_daily_total_exhausted(uid, _tts_entry):
+    try:
+        _tts_over_total = int((_tts_entry or {}).get("total") or 0) + len(chunks) > bot._user_daily_limit(uid, "total", _tts_entry)
+        _tts_over_tts = int((_tts_entry or {}).get("tts") or 0) + len(chunks) > bot._user_daily_limit(uid, "tts", _tts_entry)
+    except (TypeError, ValueError):
+        _tts_over_total = _tts_over_tts = False
+    if bot._user_daily_total_exhausted(uid, _tts_entry) or _tts_over_total:
         hours, mins = bot._user_daily_reset_in()
         # Суточный счётчик /stats: отказ по лимиту, озвучки не будет.
         bot._record_stats_event("daily_limit_denials")
@@ -353,7 +360,7 @@ async def inline_tts(message: Message, text: str) -> None:
             hours=hours, mins=mins,
         ))
         return
-    if bot._user_daily_tts_exhausted(uid, _tts_entry):
+    if bot._user_daily_tts_exhausted(uid, _tts_entry) or _tts_over_tts:
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
             message.chat.id, "user_daily_tts",

@@ -1512,6 +1512,43 @@ def test_single_video_send_goes_through_tg_call(monkeypatch):
         bot.chat_state.pop(999456, None)
 
 
+def test_single_video_send_does_not_retry_transient_failure(monkeypatch):
+    # Повтор отправки после сбоя дал бы дубль: одна попытка, ошибка наружу.
+    import lumen_tiktok_flow
+    attempts = []
+
+    class _FlakyBot:
+        async def send_video(self, **kwargs):
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                raise RuntimeError("connection reset by peer")
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return b"\x00" * 100
+
+    async def fake_probe_dims(path):
+        return 0, 0, 0
+
+    async def fake_thumb(path, duration):
+        return None
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_probe_video_dimensions", fake_probe_dims)
+    monkeypatch.setattr(bot, "_generate_video_thumbnail", fake_thumb)
+    monkeypatch.setattr(bot, "bot", _FlakyBot())
+    incoming = _FakeIncomingMessage(999457)
+    incoming.message_id = 1
+    media_data = {"play": "https://tikwm.com/v.mp4", "size": 100, "author": {"nickname": "Nick"}}
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(lumen_tiktok_flow._send_tiktok_single_video(
+                None, media_data, incoming, None, "Nick", {}))
+        assert len(attempts) == 1
+    finally:
+        bot.chat_state.pop(999457, None)
+
+
 # ─────────────── S9: DNS в потоке, ручные редиректы, капы, N/A, WebM ───────────────
 
 def _fake_public_dns(host, port, *args, **kwargs):

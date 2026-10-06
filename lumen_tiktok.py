@@ -480,9 +480,8 @@ async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: flo
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
         # Дренаж ограничен: communicate, переживший kill, не держит loop вечно.
-        # Результат дренажа уже опоздал (таймаут был) — только подчищаем задачу,
-        # наружу по-прежнему исходный TimeoutError. Внешняя отмена из дренажа
-        # летит сама: CancelledError здесь не ловим.
+        # Ошибка самого дренажа летит как есть (вызывающие ловят широкий
+        # Exception); исходный TimeoutError — когда дренаж просто не уложился.
         try:
             await asyncio.wait_for(asyncio.shield(completion), timeout=_COMMUNICATE_DRAIN_SEC)
         except asyncio.TimeoutError:
@@ -497,7 +496,10 @@ async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: flo
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-        if not completion.done():
+        if completion.done():
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                completion.result()
+        else:
             completion.cancel()
         raise
 

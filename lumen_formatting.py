@@ -727,6 +727,24 @@ def _split_to_fit_html(chunk_md: str, max_len: int) -> list[str]:
     return out
 
 
+def _merge_short_chunks(chunks: list[str], max_len: int) -> list[str]:
+    """Склейка соседних кусков обратно, пока влезают: сегментация по заборам
+    иначе дробила бы каждое короткое сообщение с кодом на три."""
+    merged: list[str] = []
+    acc = ""
+    for chunk in chunks:
+        candidate = chunk if not acc else acc + chunk
+        if _tg_len(_md_to_html(candidate)) <= max_len:
+            acc = candidate
+        else:
+            if acc:
+                merged.append(acc)
+            acc = chunk
+    if acc or not merged:
+        merged.append(acc)
+    return merged
+
+
 def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
     """Разбивает длинный текст на части не длиннее max_len, стараясь резать по
     границам абзацев/строк/предложений, а не посреди слова. Раньше сообщения
@@ -765,7 +783,7 @@ def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
     out: list[str] = []
     for chunk in md_chunks:
         out.extend(_split_to_fit_html(chunk, max_len))
-    return out or [text]
+    return _merge_short_chunks(out, max_len) or [text]
 
 
 def _truncate_html_to_fit(md_text: str, limit: int) -> str:
