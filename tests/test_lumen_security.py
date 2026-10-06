@@ -25,7 +25,26 @@ def test_detect_identity_leak_catches_self_reference_plus_brand():
     assert lumen_security._detect_identity_leak("На самом деле я — Gemma, модель от Google.") is True
     assert lumen_security._detect_identity_leak("I am built on GPT-OSS 120B.") is True
     assert lumen_security._detect_identity_leak("Я создан компанией OpenAI") is True
-    assert lumen_security._detect_identity_leak("This is powered by Anthropic Claude actually") is True
+    # Третье лицо без "я/I" не самоопределение: честный рассказ о чужом стеке.
+    assert lumen_security._detect_identity_leak("This is powered by Anthropic Claude actually") is False
+    assert lumen_security._detect_identity_leak("I am powered by Anthropic Claude") is True
+
+
+def test_detect_identity_leak_based_on_needs_first_person():
+    # Ложные срабатывания: архитектура третьих лиц, не слова бота о себе.
+    assert lumen_security._detect_identity_leak("Его архитектура основана на Google Transformer") is False
+    assert lumen_security._detect_identity_leak("The model is based on Google research") is False
+    assert lumen_security._detect_identity_leak("Я помогу. Его архитектура основана на Google Transformer") is False
+    # От первого лица в том же предложении те же связки ловим как раньше.
+    assert lumen_security._detect_identity_leak("Я основан на Google Gemini") is True
+    assert lumen_security._detect_identity_leak("I am based on Google research") is True
+    assert lumen_security._detect_identity_leak("Меня создала Google") is True
+
+
+def test_detect_identity_leak_literal_matches_whole_token_only():
+    # Полный ID отдельным токеном утечка, слаг внутри длинного слова нет.
+    assert lumen_security._detect_identity_leak("Использую модель gemini-3.5-flash для ответа") is True
+    assert lumen_security._detect_identity_leak("модель gemini-3.8-flashback вышла вчера") is False
 
 
 def test_detect_identity_leak_catches_literal_internal_model_ids():

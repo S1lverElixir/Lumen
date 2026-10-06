@@ -60,12 +60,14 @@ _IDENTITY_LEAK_RE = re.compile(
     rf"|\bя\s+созда(?:н|на)\w*\s+(?:компанией\s+)?{_LEAK_BRAND_TOKENS}\b"
     rf"|\bмен[яе]\s+созда(?:л|ла)\w*\s+{_LEAK_BRAND_TOKENS}\b"
     rf"|\bработаю\s+на\s+(?:базе\s+)?{_LEAK_BRAND_TOKENS}\b"
-    rf"|\bоснован\w*\s+на\s+{_LEAK_BRAND_TOKENS}\b"
+    # "основан на бренде" / "based on бренд" без первого лица не ловим: "Его
+    # архитектура основана на Google Transformer" и "The model is based on
+    # Google research" честные рассказы, не самоопределение (см. ниже проверку
+    # по предложениям с _FIRST_PERSON_RE).
     rf"|\bэт[оауи]\s*(?:модел\w*|нейросет\w*)\s*(?:—|-|:)?\s*{_LEAK_BRAND_TOKENS}\b"
     rf"|\bi\s*(?:am|'m)\s+{_LEAK_BRAND_TOKENS}\b"
-    rf"|\bbuilt\s+on\s+{_LEAK_BRAND_TOKENS}\b"
-    rf"|\bpowered\s+by\s+{_LEAK_BRAND_TOKENS}\b"
-    rf"|\bbased\s+on\s+{_LEAK_BRAND_TOKENS}\b"
+    # "built on / powered by / based on бренд" тоже только от первого лица,
+    # иначе честный рассказ о чужом стеке блокировался целиком.
     rf"|\bi\s+(?:was\s+)?(?:created|made)\s+by\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
     rf"|\bi\s*(?:am|'m)\s+from\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
     rf"|\bmy\s+creators?\s+(?:is|are)\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
@@ -77,6 +79,28 @@ _IDENTITY_LEAK_RE = re.compile(
     rf"|{_LEAK_BRAND_TOKENS}\s*,?\s*а\s+не\s+lumen\b",
     re.IGNORECASE,
 )
+
+# "Основан на" и английские built/powered/based только от первого лица и в
+# пределах одного предложения: иначе "я" из соседней фразы тянуло бы чужой
+# рассказ ("Я помогу. Его архитектура основана на Google Transformer").
+_IDENTITY_BASED_ON_RE = re.compile(
+    rf"\bоснован\w*\s+на\s+{_LEAK_BRAND_TOKENS}\b"
+    rf"|\bbuilt\s+on\s+{_LEAK_BRAND_TOKENS}\b"
+    rf"|\bpowered\s+by\s+{_LEAK_BRAND_TOKENS}\b"
+    rf"|\bbased\s+on\s+{_LEAK_BRAND_TOKENS}\b",
+    re.IGNORECASE,
+)
+_FIRST_PERSON_RE = re.compile(r"\b(я|меня|мне|мной|мною|i|me|my)\b", re.IGNORECASE)
+_SENTENCE_SPLIT_RE = re.compile(r"[.!?…\n]+")
+
+# Точные ID моделей ловим как отдельные токены, а не подстрокой: слаг внутри
+# более длинного слова ("gemini-3.8-flashback") утечкой не считаем.
+_LEAK_LITERAL_RE = re.compile(
+    r"(?<![\w/:.\-])(?:" + "|".join(
+        re.escape(lit) for lit in sorted(_LEAK_LITERAL_STRINGS, key=len, reverse=True) if lit
+    ) + r")(?![\w/:.\-])",
+    re.IGNORECASE,
+) if _LEAK_LITERAL_STRINGS else None
 
 _IDENTITY_LEAK_FALLBACK = (
     "Внутренние технические детали своей реализации я не раскрываю. "
@@ -113,11 +137,14 @@ def _detect_identity_leak(text: str) -> bool:
     """Чистая проверка без лога: дёшево вызывать на каждый кусок стрима, лог только в _scrub_identity_leak."""
     if not text:
         return False
-    low = text.lower()
-    for lit in _LEAK_LITERAL_STRINGS:
-        if lit and lit.lower() in low:
+    if _LEAK_LITERAL_RE is not None and _LEAK_LITERAL_RE.search(text):
+        return True
+    if _IDENTITY_LEAK_RE.search(text):
+        return True
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        if _IDENTITY_BASED_ON_RE.search(sentence) and _FIRST_PERSON_RE.search(sentence):
             return True
-    return bool(_IDENTITY_LEAK_RE.search(text))
+    return False
 
 # Слой Г — только лог [mush-suspect], без подмены: сигнал смешение письменностей
 # внутри токена (прод-кейс nemotron-nano-9b-v2, см. _OR_MODEL_HEALTH).
