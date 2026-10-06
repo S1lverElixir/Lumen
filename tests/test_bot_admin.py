@@ -483,6 +483,19 @@ def test_require_bot_token_returns_configured_token(monkeypatch):
     assert bot._require_bot_token() == "123:abc"
 
 
+def test_secret_log_formatter_survives_interpreter_teardown():
+    # Финализация обнуляет глобалы модуля: форматирование не должно падать.
+    import logging
+    fmt = bot._SecretLogFormatter()
+    rec = logging.LogRecord("bot", logging.WARNING, __file__, 1, "hello %s", ("world",), None)
+    orig = bot._SECRET_NAMES
+    bot._SECRET_NAMES = None
+    try:
+        assert fmt.format(rec) == "hello world"
+    finally:
+        bot._SECRET_NAMES = orig
+
+
 def _sleep_then_cancel(loop_sleeps):
     # Первые loop_sleeps+1 вызовов sleep проходят (1.5с старта + тики),
     # дальше CancelledError останавливает бесконечный цикл стартапа.

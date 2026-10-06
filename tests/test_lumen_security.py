@@ -83,6 +83,16 @@ def test_scrub_identity_leak_replaces_whole_message_and_logs(caplog):
     assert result == lumen_security._IDENTITY_LEAK_FALLBACK
 
 
+def test_scrub_identity_leak_logs_metadata_not_model_text(caplog):
+    # В логах и Sentry — метаданные, а не текст модели.
+    import logging
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        lumen_security._scrub_identity_leak("Я — Gemini от Google.", source="test")
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    assert "[identity-leak]" in messages
+    assert "Gemini" not in messages
+
+
 def test_scrub_identity_leak_passthrough_when_clean():
     assert lumen_security._scrub_identity_leak("Привет! Чем могу помочь?", source="test") == "Привет! Чем могу помочь?"
 

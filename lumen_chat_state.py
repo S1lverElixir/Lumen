@@ -22,7 +22,6 @@ from lumen_state_storage import (
     StorageConfig,
     _chat_storage_key,
     _serialize_chat_state,
-    _upstash_request as _lumen_upstash_request,
     _upstash_set as _lumen_upstash_set,
     _upstash_get as _lumen_upstash_get,
     _upstash_delete as _lumen_upstash_delete,
@@ -76,10 +75,6 @@ def _storage_config() -> StorageConfig:
         upstash_token=bot.UPSTASH_REDIS_REST_TOKEN, chats_dir=_CHATS_DIR,
     )
 
-
-def _upstash_request(command_path: str, *, method: str = "GET", body: bytes | None = None) -> Any:
-    import bot
-    return _lumen_upstash_request(bot.UPSTASH_REDIS_REST_URL, bot.UPSTASH_REDIS_REST_TOKEN, command_path, method=method, body=body)
 
 def _upstash_set(key: str, value: str) -> None:
     import bot

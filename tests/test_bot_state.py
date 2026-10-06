@@ -2695,6 +2695,55 @@ def test_oversize_attachment_gets_honest_refusal(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
+def test_download_retry_warning_redacts_bot_token(monkeypatch, caplog):
+    # Токен в URL светился в WARNING на ретрае — та же замена, что в финале.
+    import logging
+    from types import SimpleNamespace
+    token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+    monkeypatch.setattr(bot, "BOT_TOKEN", token)
+
+    async def boom_get_file(file_id):
+        raise RuntimeError(f"https://api.telegram.org/file/bot{token}/photos/x.jpg boom")
+
+    async def boom_session():
+        raise AssertionError("no session expected")
+
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(get_file=boom_get_file))
+    monkeypatch.setattr(bot, "_get_telegram_session", boom_session)
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        with pytest.raises(RuntimeError):
+            asyncio.run(bot._download_telegram_file_bytes("fid", retries=1))
+    assert token not in caplog.text
+    assert "<TOKEN>" in caplog.text
+
+
+def test_attachment_tmp_write_runs_off_loop(monkeypatch):
+    # Запись до 20МБ стопорила loop — только через to_thread.
+    import asyncio
+    from types import SimpleNamespace
+    seen = []
+    real_to_thread = asyncio.to_thread
+
+    async def rec_to_thread(func, /, *args, **kwargs):
+        seen.append(getattr(func, "__name__", ""))
+        return await real_to_thread(func, *args, **kwargs)
+
+    async def fake_download(file_id):
+        return b"z" * 16, "image/jpeg"
+
+    monkeypatch.setattr(asyncio, "to_thread", rec_to_thread)
+    monkeypatch.setattr(bot, "_download_telegram_file_bytes", fake_download)
+    source = SimpleNamespace(file_id="fid", mime_type="image/jpeg")
+    try:
+        tmp_path, mime, name = asyncio.run(bot._download_message_attachment_to_tmp(source))
+        assert mime == "image/jpeg"
+        assert "write_bytes" in seen
+    finally:
+        import os
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_path)
+
+
 def test_album_skips_files_over_running_total(monkeypatch):
     # Аудит D1/A4-04: суммарный кап extra-файлов альбома.
     import lumen_message_core

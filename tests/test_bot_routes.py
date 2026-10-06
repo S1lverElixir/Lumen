@@ -91,10 +91,10 @@ def test_gemini_error_msg_rate_limit():
 
 
 def test_gemini_error_msg_value_error_passthrough():
-    # ValueError используется в ask_gemini как готовый пользовательский текст
-    # (например про неподдерживаемый тип вложения) — должен вернуться как есть.
-    exc = ValueError("кастомная ошибка")
-    assert bot._gemini_error_msg(exc, "gemini-3.5-flash") == "кастомная ошибка"
+    # Только UserFacingInputError используется в ask_gemini как готовый
+    # пользовательский текст — остальной ValueError идёт общим шаблоном.
+    assert bot._gemini_error_msg(bot.UserFacingInputError("кастомная ошибка"), "gemini-3.5-flash") == "кастомная ошибка"
+    assert bot._gemini_error_msg(ValueError("/secret/path model-xyz"), "gemini-3.5-flash") != "/secret/path model-xyz"
 
 
 def test_gemini_error_msg_all_models_exhausted():

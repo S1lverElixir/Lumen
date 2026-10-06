@@ -551,17 +551,17 @@ async def cmd_logs(message: Message) -> None:
             log_content = log_content.replace(secret, "<REDACTED>")
 
         # пишем во временный файл, чтобы не ловить блокировку на живом логе
-        tmp_dir = tempfile.gettempdir()
-        temp_log_path = os.path.join(tmp_dir, "logs.txt")
-        with open(temp_log_path, "w", encoding="utf-8", errors="ignore") as f:
-            f.write(log_content)
-
-        await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
-
+        fd, temp_log_path = tempfile.mkstemp(prefix="logs_", suffix=".txt")
         try:
-            os.unlink(temp_log_path)
-        except Exception:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
+                f.write(log_content)
+
+            await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
+        finally:
+            try:
+                os.unlink(temp_log_path)
+            except Exception:
+                pass
     except Exception as exc:
         log.exception("Error extracting or sending logs:")
         await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
@@ -926,7 +926,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
     import bot
     _purge_expired_picks()
     _enforce_pending_picks_cap()
-    token = secrets.token_hex(4)
+    token = secrets.token_hex(8)
     lang = bot._chat_lang(message.chat.id)
     bot._pending_picks[token] = {
         "chat_id": message.chat.id,
@@ -1005,7 +1005,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
             bot._pending_picks.pop(token, None)
             _purge_expired_picks()
             _enforce_pending_picks_cap()
-            fresh = secrets.token_hex(4)
+            fresh = secrets.token_hex(8)
             bot._pending_picks[fresh] = {
                 "chat_id": rec.get("chat_id"),
                 "user_id": rec.get("user_id"),

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
 import bot
+import contextlib
 import lumen_chat_state
 import lumen_commands
 import lumen_limits
@@ -55,6 +56,46 @@ def test_cmd_logs_flushes_the_listeners_real_handlers_not_root():
     finally:
         bot.OWNER_ID = original_owner
         bot._LOG_LISTENER = original_listener
+
+
+def test_cmd_logs_uses_unique_temp_file(monkeypatch):
+    # Предсказуемое имя в общем tmp — перезапись и чтение чужого.
+    import os
+    monkeypatch.setattr(bot, "OWNER_ID", 555002)
+    prior = None
+    if bot.LOG_FILE_PATH.exists():
+        prior = bot.LOG_FILE_PATH.read_bytes()
+    bot.LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    bot.LOG_FILE_PATH.write_text("log line\n", encoding="utf-8")
+    incoming = _FakeIncomingMessage(555002)
+    incoming.from_user = SimpleNamespace(id=555002)
+    seen = {}
+
+    async def fake_reply_document(document, **kwargs):
+        seen["path"] = getattr(document, "path", "")
+        return SimpleNamespace()
+
+    incoming.reply_document = fake_reply_document
+
+    async def fake_tg_call(method, *args, **kwargs):
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    try:
+        asyncio.run(bot.cmd_logs(incoming))
+        assert seen.get("path"), "document must be sent"
+        assert os.path.basename(seen["path"]) != "logs.txt"
+        assert not os.path.exists(seen["path"]), "temp file must be cleaned up"
+        first_path = seen["path"]
+        asyncio.run(bot.cmd_logs(incoming))
+        assert seen["path"] != first_path, "each run must use its own temp file"
+    finally:
+        if prior is None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(bot.LOG_FILE_PATH)
+        else:
+            bot.LOG_FILE_PATH.write_bytes(prior)
+        bot.chat_state.pop(555002, None)
 
 
 def test_cmd_stats_counts_only_recently_active_chats():
