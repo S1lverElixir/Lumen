@@ -447,7 +447,7 @@ class _FakeProc:
         return self.returncode
 
 
-def _run_proxy_middleware(url, *, secret="proxy-secret-abc", bases=("https://proxy.example/fetch/api.telegram.org",), headers=None):
+def _run_proxy_middleware(url, *, secret="proxy-secret-abc-0123456789abcdef", bases=("https://proxy.example/fetch/api.telegram.org",), headers=None):
     from multidict import CIMultiDict
     from yarl import URL
 

@@ -151,8 +151,8 @@ def proxy_auth_middlewares(
         if parsed.hostname in {"api.telegram.org", "www.tikwm.com", "tikwm.com"}:
             continue
         scopes.append((parsed.hostname, port, parsed.path.rstrip("/")))
-    if scopes and (not proxy_secret or any(not 33 <= ord(c) <= 126 for c in proxy_secret)):
-        raise ValueError("LUMEN_PROXY_SECRET is required for configured proxies and must be printable ASCII without spaces")
+    if scopes and (not proxy_secret or len(proxy_secret) < 32 or any(not 33 <= ord(c) <= 126 for c in proxy_secret)):
+        raise ValueError("LUMEN_PROXY_SECRET is required for configured proxies (min 32 printable ASCII chars without spaces)")
 
     async def authenticate(request: aiohttp.ClientRequest, handler):
         request.headers.popall(PROXY_AUTH_HEADER, None)

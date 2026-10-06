@@ -229,7 +229,7 @@ def test_tikwm_proxy_candidates_primary_plus_fallbacks_deduped():
 
 def test_proxy_middleware_sends_secret_only_to_configured_proxy():
     _, _, seen = _run_proxy_middleware("https://proxy.example/fetch/api.telegram.org/bot123/sendMessage")
-    assert seen["sent"].get("X-Lumen-Proxy-Secret") == "proxy-secret-abc"
+    assert seen["sent"].get("X-Lumen-Proxy-Secret") == "proxy-secret-abc-0123456789abcdef"
 
 
 def test_proxy_middleware_never_sends_secret_to_direct_or_unrelated_hosts():
@@ -254,6 +254,11 @@ def test_proxy_middleware_strips_stale_secret_and_requires_secret():
         lumen_telegram_transport.proxy_auth_middlewares(
             proxy_secret="", proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
         )
+    with pytest.raises(ValueError):
+        lumen_telegram_transport.proxy_auth_middlewares(
+            proxy_secret="short",
+            proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
+        )
 
 
 def test_proxy_middleware_rejects_authenticated_redirects():
@@ -264,7 +269,7 @@ def test_proxy_middleware_rejects_authenticated_redirects():
     from yarl import URL
 
     (authenticate,) = lumen_telegram_transport.proxy_auth_middlewares(
-        proxy_secret="proxy-secret-abc",
+        proxy_secret="proxy-secret-abc-0123456789abcdef",
         proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
     )
 

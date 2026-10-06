@@ -16,7 +16,7 @@ import {
   resolveTarget,
 } from "./proxy.ts";
 
-const TEST_SECRET = "isolated-test-secret";
+const TEST_SECRET = "isolated-test-secret-0123456789abcdef";
 const AUTH_HEADERS = { [PROXY_AUTH_HEADER]: TEST_SECRET };
 
 function assert(condition: boolean, message: string): void {
@@ -87,6 +87,18 @@ Deno.test("resolveTarget отклоняет некорректный форма�
   assertEquals(resolveTarget("/fetch", "").ok, false);
   assertEquals(resolveTarget("/fetch/", "").ok, false);
   assertEquals(resolveTarget("/wrong-prefix/api.telegram.org/getMe", "").ok, false);
+});
+
+Deno.test("resolveTarget требует форму bot-пути для api.telegram.org", () => {
+  // Без токена в пути — не релей: произвольные пути при наличии секрета закрыты.
+  assertEquals(resolveTarget("/fetch/api.telegram.org/getMe", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.telegram.org/evil", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.telegram.org/bot", "").ok, false);
+  // Легитимные формы бота проходят.
+  assertEquals(resolveTarget("/fetch/api.telegram.org/bot123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11/getMe", "").ok, true);
+  assertEquals(resolveTarget("/fetch/api.telegram.org/file/bot123/photos/f.jpg", "").ok, true);
+  // Чужим хостам форма не нужна.
+  assertEquals(resolveTarget("/fetch/www.tikwm.com/api/", "").ok, true);
 });
 
 Deno.test("ALLOWED_HOSTS содержит ровно те хосты, что реально нужны боту", () => {
@@ -186,7 +198,7 @@ Deno.test("handleRequest возвращает 502, если апстрим-fetch
   const fakeFetch: typeof fetch = () => {
     throw new Error(`network unreachable ${TEST_SECRET}`);
   };
-  const req = new Request("https://proxy.example/fetch/api.telegram.org/getMe", { method: "GET", headers: AUTH_HEADERS });
+  const req = new Request("https://proxy.example/fetch/api.telegram.org/bot123/getMe", { method: "GET", headers: AUTH_HEADERS });
   const resp = await handleRequest(req, fakeFetch, TEST_SECRET);
   assertEquals(resp.status, 502);
   assertEquals(await resp.text(), "Upstream fetch failed");
@@ -209,7 +221,7 @@ for (const suppliedSecret of [undefined, "", "incorrect-test-secret"]) {
   });
 }
 
-for (const configuredSecret of [undefined, "", "   ", "invalid secret"]) {
+for (const configuredSecret of [undefined, "", "   ", "invalid secret", "short"]) {
   Deno.test(`handleRequest fails closed for invalid configuration: ${String(configuredSecret)}`, async () => {
     let fetchCalled = false;
     const fakeFetch: typeof fetch = () => {
@@ -376,7 +388,7 @@ Deno.test("handleRequest требует от апстрима не следов�
     capturedRedirect = init?.redirect;
     return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
   };
-  const req = new Request("https://proxy.example/fetch/api.telegram.org/getMe", { headers: AUTH_HEADERS });
+  const req = new Request("https://proxy.example/fetch/api.telegram.org/bot123/getMe", { headers: AUTH_HEADERS });
   await handleRequest(req, fakeFetch, TEST_SECRET);
   assertEquals(capturedRedirect, "error");
 });
@@ -388,7 +400,7 @@ Deno.test("handleRequest терпит кривой content-length (NaN/отри�
     return Promise.resolve(new Response('{"ok":true}', { status: 200 }));
   };
   for (const declared of ["abc", "-5"]) {
-    const req = new Request("https://proxy.example/fetch/api.telegram.org/getMe", {
+    const req = new Request("https://proxy.example/fetch/api.telegram.org/bot123/getMe", {
       headers: { ...AUTH_HEADERS, "content-length": declared },
     });
     assertEquals((await handleRequest(req, fakeFetch, TEST_SECRET)).status, 200);

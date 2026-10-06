@@ -54,6 +54,10 @@ export const ALLOWED_HOSTS = new Set([
 // под честно большие файлы, но не «без предела».
 export const MAX_REQUEST_BODY_BYTES = 100 * 1024 * 1024;
 
+// Короткий секрет перебирается быстро: нижняя граница длины с обеих сторон
+// (здесь и в lumen_telegram_transport.py).
+export const MIN_PROXY_SECRET_LENGTH = 32;
+
 export class BodyTooLargeError extends Error {}
 
 export function limitStreamBytes(
@@ -133,7 +137,16 @@ export function resolveTarget(pathname: string, search: string): TargetResolutio
     return { ok: false, status: 403, message: "Host not allowed" };
   }
   const path = "/" + parts.slice(3).join("/");
+  if (host === "api.telegram.org" && !isTelegramBotPath(path)) {
+    return { ok: false, status: 404, message: "Not found — путь Telegram обязан иметь форму /bot<token>/<метод> или /file/bot<token>/<путь>" };
+  }
   return { ok: true, url: `https://${host}${path}${search}` };
+}
+
+// Telegram Bot API без токена в пути не вызывается: без формы исчезает целый
+// класс чужеродного использования (релей произвольных путей при наличии секрета).
+function isTelegramBotPath(path: string): boolean {
+  return /^\/bot[^/]+\/.+/.test(path) || /^\/file\/bot[^/]+\/.+/.test(path);
 }
 
 export function buildForwardHeaders(reqHeaders: Headers): Headers {
@@ -158,7 +171,10 @@ export async function handleRequest(
   proxySecret: string | undefined = undefined,
   maxBodyBytes: number = MAX_REQUEST_BODY_BYTES,
 ): Promise<Response> {
-  if (!proxySecret || !/^[\x21-\x7e]+$/.test(proxySecret)) {
+  if (
+    !proxySecret || proxySecret.length < MIN_PROXY_SECRET_LENGTH ||
+    !/^[\x21-\x7e]+$/.test(proxySecret)
+  ) {
     return new Response("Proxy authentication unavailable", { status: 503 });
   }
   const suppliedSecret = req.headers.get(PROXY_AUTH_HEADER) ?? "";
