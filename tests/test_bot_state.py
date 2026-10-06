@@ -493,6 +493,26 @@ def test_load_state_clean_on_first_start_without_index_or_legacy():
             lumen_chat_state._state_load_failed = orig_failed
 
 
+@pytest.mark.parametrize(("env_value", "expected"), [
+    ("abc", 10), ("", 10), ("0", 10), ("-5", 10), ("3", 3),
+])
+def test_flush_concurrency_falls_back_on_garbage(monkeypatch, env_value, expected):
+    # Голый int() ронял импорт на мусоре, а 0 давал висящий семафор.
+    import asyncio
+    monkeypatch.setenv("STATE_FLUSH_CONCURRENCY", env_value)
+    assert lumen_chat_state._flush_concurrency() == expected
+    monkeypatch.delenv("STATE_FLUSH_CONCURRENCY", raising=False)
+    assert lumen_chat_state._flush_concurrency() == 10
+    orig_sem = lumen_chat_state._state_flush_semaphore
+    lumen_chat_state._state_flush_semaphore = None
+    try:
+        sem = lumen_chat_state._flush_semaphore()
+        assert asyncio.run(asyncio.wait_for(sem.acquire(), timeout=2))
+        sem.release()
+    finally:
+        lumen_chat_state._state_flush_semaphore = orig_sem
+
+
 def test_load_global_quota_restores_groq():
     # Внешний аудит: groq-счётчики сохранялись, но при загрузке терялись.
     import json

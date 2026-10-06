@@ -463,12 +463,26 @@ _quota_generation = 0
 _state_load_failed = False
 FLUSH_INTERVAL_SEC = 10.0
 # Конкурентность флаша — семафором: всплеск "грязных" чатов иначе породил бы сотни параллельных HTTP к Upstash.
-STATE_FLUSH_CONCURRENCY = int(os.getenv("STATE_FLUSH_CONCURRENCY", "10"))
-_state_flush_semaphore = asyncio.Semaphore(STATE_FLUSH_CONCURRENCY)
+def _flush_concurrency() -> int:
+    """Лениво через bot._env_number: голый int() ронял импорт на мусоре,
+    а 0 давал висящий семафор."""
+    import bot
+    return bot._env_number("STATE_FLUSH_CONCURRENCY", 10, cast=int, min_value=1)
+
+
+_state_flush_semaphore: asyncio.Semaphore | None = None
+
+
+def _flush_semaphore() -> asyncio.Semaphore:
+    """Один семафор на процесс, создаётся при первом флаше."""
+    global _state_flush_semaphore
+    if _state_flush_semaphore is None:
+        _state_flush_semaphore = asyncio.Semaphore(_flush_concurrency())
+    return _state_flush_semaphore
 
 async def _save_chat_to_storage_limited(chat_id: int, state: dict[str, Any]) -> bool:
     import bot
-    async with _state_flush_semaphore:
+    async with _flush_semaphore():
         # Снапшот JSON — ЗДЕСЬ, а не в потоке: dumps без await атомарен для loop'а,
         # а живой state в to_thread могли мутировать между итерациями (битый снапшот).
         try:
@@ -491,7 +505,7 @@ def _save_chat_payload(chat_id: int, payload: str) -> bool:
 
 async def _delete_chat_storage_limited(chat_id: int) -> bool:
     import bot
-    async with _state_flush_semaphore:
+    async with _flush_semaphore():
         return await asyncio.to_thread(bot._delete_chat_storage, chat_id)
 
 def mark_state_dirty(chat_id: int | None = None) -> None:

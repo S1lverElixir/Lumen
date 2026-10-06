@@ -179,6 +179,12 @@ async def probe_url(session: Any, url: str, *, timeout_sec: float = 6.0, redact:
             exc_str = exc_str.replace(redact, "<TOKEN>")
         return {"error": exc_str, "elapsed_sec": elapsed, "ok": False}
 
+def _diag_budget_sec() -> float:
+    """Лениво через bot._env_number: голый float() давал 500 на мусоре в env."""
+    import bot
+    return bot._env_number("DIAG_TOTAL_BUDGET_SEC", 25, min_value=1)
+
+
 @app.get("/diag")
 async def network_diagnostics(request: Request) -> dict[str, Any]:
     """Проверяет исходящую сетевую доступность различных хостов из контейнера.
@@ -212,7 +218,7 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
     session = await bot._get_http_session()
     # Общий бюджет вместо последовательных 14×6с (~84с висящей диагностики):
     # зонды идут параллельно, хвост обрезается бюджетом (AUD-F-001).
-    diag_budget = float(os.getenv("DIAG_TOTAL_BUDGET_SEC", "25"))
+    diag_budget = _diag_budget_sec()
 
     async def _probe(name: str, url: str) -> tuple[str, dict[str, Any]]:
         return name, await probe_url(session, url, timeout_sec=6.0, redact=bot_token or "")

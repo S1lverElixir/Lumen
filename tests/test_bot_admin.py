@@ -377,6 +377,18 @@ def test_webhook_handler_returns_503_when_inflight_full(monkeypatch):
         bot._process_raw_update = original_process
 
 
+@pytest.mark.parametrize(("env_value", "expected"), [
+    ("abc", 25.0), ("", 25.0), ("0", 25.0), ("-5", 25.0), ("30", 30.0),
+])
+def test_diag_budget_sec_falls_back_on_garbage(monkeypatch, env_value, expected):
+    # Голый float() давал 500 на мусоре в env, а 0 молча ронял все зонды.
+    import lumen_admin
+    monkeypatch.setenv("DIAG_TOTAL_BUDGET_SEC", env_value)
+    assert lumen_admin._diag_budget_sec() == expected
+    monkeypatch.delenv("DIAG_TOTAL_BUDGET_SEC", raising=False)
+    assert lumen_admin._diag_budget_sec() == 25.0
+
+
 def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
     # Апдейт может прийти раньше, чем main() успеет создать глобальный bot (Bot/
     # genai.Client создаются уже после старта uvicorn) — отвечаем 503, чтобы
