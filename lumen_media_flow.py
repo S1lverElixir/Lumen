@@ -57,7 +57,10 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
         except Exception as exc:
             last_exc = exc
             if attempt < retries:
-                log.warning('[media] Attempt %d/%d to download file_id %s failed, retrying in 0.5s: %s', attempt + 1, retries + 1, file_id, exc)
+                retry_msg = str(exc) or repr(exc) or type(exc).__name__
+                if bot.BOT_TOKEN:
+                    retry_msg = retry_msg.replace(bot.BOT_TOKEN, "<TOKEN>")
+                log.warning('[media] Attempt %d/%d to download file_id %s failed, retrying in 0.5s: %s', attempt + 1, retries + 1, file_id, retry_msg)
                 await asyncio.sleep(0.5)
     exc_str = str(last_exc) or repr(last_exc) or type(last_exc).__name__
     if bot.BOT_TOKEN:
@@ -120,8 +123,8 @@ async def _download_message_attachment_to_tmp(source: Any) -> tuple[str, str, st
              final_mime = _sanitize_mime_type(None, real_mime)
         if final_mime == "application/octet-stream" or not final_mime:
              final_mime = mime or "application/octet-stream"
-        with open(tmp_path, "wb") as h:
-            h.write(data)
+        # Запись до 20МБ — в потоке, loop не стопорим.
+        await asyncio.to_thread(Path(tmp_path).write_bytes, data)
         return tmp_path, final_mime, filename or Path(tmp_path).name
     except Exception:
         with contextlib.suppress(FileNotFoundError):

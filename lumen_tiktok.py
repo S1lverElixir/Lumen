@@ -121,11 +121,19 @@ def _tiktok_video_candidates(media_data: dict) -> list[dict[str, Any]]:
         raw_url = media_data.get(url_key)
         if not raw_url:
             continue
+        if not isinstance(raw_url, str):
+            log.warning("[tiktok] Skipping non-string URL for %s: %r.", url_key, raw_url)
+            continue
         if raw_url.startswith("//"):
             # Протокол-относительный URL чиним как https, иначе ниже склеилось бы в битый "https://www.tikwm.com//host/path".
             raw_url = "https:" + raw_url
         elif not raw_url.startswith("http"):
-            raw_url = "https://www.tikwm.com" + raw_url
+            # Склейка давала userinfo-путаницу ("@evil.com/x" ехал хостом):
+            # только относительный путь к базовому хосту.
+            raw_url = urllib.parse.urljoin("https://www.tikwm.com/", raw_url)
+        if urllib.parse.urlsplit(raw_url).scheme.lower() not in ("http", "https"):
+            log.warning("[tiktok] Skipping non-HTTP(S) URL for %s: %r.", url_key, raw_url)
+            continue
         try:
             size_bytes = int(media_data.get(size_key) or 0)
         except (TypeError, ValueError):
@@ -157,14 +165,19 @@ async def _tikwm_throttle() -> None:
         _tikwm_last_request_ts = now
 
 
-async def _read_capped_body(resp: aiohttp.ClientResponse, url: str) -> bytes | None:
+# JSON TikWM обязан быть маленьким: свой кап, а не общий видео-лимит.
+TIKWM_JSON_MAX_BYTES = 1 * 1024 * 1024
+
+
+async def _read_capped_body(resp: aiohttp.ClientResponse, url: str, *, cap_bytes: int | None = None) -> bytes | None:
     # JSON TikWM обязан быть маленьким: читаем с тем же капом, что бинарные
     # скачивания, иначе скомпрометированный прокси льёт в память без края.
+    cap = cap_bytes if cap_bytes is not None else TIKTOK_DOWNLOAD_MAX_BYTES
     content_length = resp.headers.get("Content-Length")
     if content_length is not None:
         try:
-            if int(content_length) > TIKTOK_DOWNLOAD_MAX_BYTES:
-                log.warning("[tikwm] Refusing %s: Content-Length %s exceeds the %d byte cap.", url, content_length, TIKTOK_DOWNLOAD_MAX_BYTES)
+            if int(content_length) > cap:
+                log.warning("[tikwm] Refusing %s: Content-Length %s exceeds the %d byte cap.", url, content_length, cap)
                 return None
         except ValueError:
             pass
@@ -172,8 +185,8 @@ async def _read_capped_body(resp: aiohttp.ClientResponse, url: str) -> bytes | N
     total = 0
     async for chunk in resp.content.iter_chunked(65536):
         total += len(chunk)
-        if total > TIKTOK_DOWNLOAD_MAX_BYTES:
-            log.warning("[tikwm] Aborting %s: exceeded the %d byte cap mid-stream.", url, TIKTOK_DOWNLOAD_MAX_BYTES)
+        if total > cap:
+            log.warning("[tikwm] Aborting %s: exceeded the %d byte cap mid-stream.", url, cap)
             return None
         chunks.append(chunk)
     return b"".join(chunks)
@@ -211,7 +224,7 @@ async def _fetch_tikwm_media_data(
                 async with session.get(api_url, timeout=12, headers=api_headers) as r:
                     if r.status == 200:
                         all_attempts_403_empty = False
-                        raw_body = await _read_capped_body(r, api_url)
+                        raw_body = await _read_capped_body(r, api_url, cap_bytes=TIKWM_JSON_MAX_BYTES)
                         if raw_body is None:
                             continue
                         try:
@@ -224,7 +237,8 @@ async def _fetch_tikwm_media_data(
                             return res.get("data")
                         log.warning("[tikwm] Endpoint %s returned code %s: %s", api_url, res.get("code"), res.get("msg"))
                     else:
-                        body = await r.read()
+                        raw_error = await _read_capped_body(r, api_url, cap_bytes=TIKWM_JSON_MAX_BYTES)
+                        body = raw_error if raw_error is not None else b""
                         if r.status == 403:
                             saw_403 = True
                         if r.status != 403 or body:
@@ -325,6 +339,42 @@ def _host_resolves_to_public(host: str | None) -> bool:
         return False
 
 
+def _resolve_result_is_public(result: Any) -> bool:
+    """Одна запись резолва публична: имя уже раскрыто в IP, смотрим is_global."""
+    try:
+        return ipaddress.ip_address(result["host"]).is_global
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
+    """Резолвер shared-сессии: отбрасывает не-публичные адреса при каждом резолве.
+
+    Предпроверка _host_resolves_to_public ловит прямой внутренний адрес в JSON,
+    но не TOCTOU между резолвом и коннектом (DNS-rebinding: первый резолв
+    публичный, второй приватный). Коннектор зовёт resolve перед каждым новым
+    соединением, включая хопы редиректов, поэтому фильтрация здесь закрывает и
+    цепочку. SNI/Host не трогаем: фильтруем только IP, имя хоста едет дальше."""
+    def __init__(self) -> None:
+        # DefaultResolver требует бегущий loop в конструкторе, поэтому создаём
+        # лениво при первом резолве, а не здесь.
+        self._inner: Any | None = None
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> list[Any]:
+        if self._inner is None:
+            self._inner = aiohttp.resolver.DefaultResolver()
+        results = await self._inner.resolve(host, port=port, family=family)
+        public = [entry for entry in results if _resolve_result_is_public(entry)]
+        if not public and results:
+            raise socket.gaierror(f"no public address for {host!r}")
+        return public
+
+    async def close(self) -> None:
+        if self._inner is not None:
+            await self._inner.close()
+            self._inner = None
+
+
 # Редиректы проверяем вручную, а не доверяем клиенту: aiohttp с allow_redirects=True
 # уже сходил бы на следующий хоп до нашей проверки конечного хоста. Каждый адрес
 # из цепочки Location обязан пройти ту же схему и SSRF-проверку, что стартовый URL.
@@ -411,6 +461,10 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
     return None
 
 
+# Сколько ждём зависший communicate после kill перед снятием задачи (аудит 06.10.2026).
+_COMMUNICATE_DRAIN_SEC = 5.0
+
+
 async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: float):
     async def finish():
         try:
@@ -421,19 +475,32 @@ async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: flo
     completion = asyncio.create_task(finish())
     try:
         return await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
+    except asyncio.TimeoutError:
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-        while not completion.done():
-            try:
-                await asyncio.shield(completion)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        with contextlib.suppress(Exception, asyncio.CancelledError):
-            completion.result()
+        # Дренаж ограничен: communicate, переживший kill, не держит loop вечно.
+        # Ошибка самого дренажа летит как есть (вызывающие ловят широкий
+        # Exception); исходный TimeoutError — когда дренаж просто не уложился.
+        try:
+            await asyncio.wait_for(asyncio.shield(completion), timeout=_COMMUNICATE_DRAIN_SEC)
+        except asyncio.TimeoutError:
+            if completion.done():
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    completion.result()
+            else:
+                completion.cancel()
+        raise
+    except asyncio.CancelledError:
+        # Внешняя отмена не дренаж: глотать её продолжением ожидания нельзя.
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        if completion.done():
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                completion.result()
+        else:
+            completion.cancel()
         raise
 
 
@@ -559,6 +626,10 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Upgrade-Insecure-Requests": "1"
     }
+    # Стартовый URL от пользователя: внутренний адрес режем до первого запроса.
+    if not await asyncio.to_thread(_host_resolves_to_public, urllib.parse.urlsplit(url).hostname):
+        log.warning("[tiktok] Refusing to resolve non-public start URL %r.", url)
+        return url
     # Редиректы разбираем вручную через _checked_redirect_url: aiohttp
     # с allow_redirects=True сходил бы на следующий хоп до проверки хоста.
     current_url = url

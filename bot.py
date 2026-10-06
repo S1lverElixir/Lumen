@@ -82,10 +82,14 @@ def _current_log_secrets() -> tuple[str, ...]:
 
 
 class _SecretLogFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
+    def format(self, record: logging.LogRecord, _secrets=_current_log_secrets) -> str:
+        # Секреты через замыкание, а не глобал: при финализации интерпретатора
+        # глобалы модуля уже None и форматирование падало с TypeError.
+        # Остатки teardown глушим: строка без вычистки лучше шумного трейсбека.
         text = super().format(record)
-        for secret in _current_log_secrets():
-            text = text.replace(secret, "<REDACTED>")
+        with contextlib.suppress(Exception):
+            for secret in _secrets():
+                text = text.replace(secret, "<REDACTED>")
         return text
 
 
@@ -436,7 +440,6 @@ from lumen_chat_state import (
     CHAT_INDEX_KEY,
     CHAT_INDEX_FILE,
     _storage_config,
-    _upstash_request,
     _upstash_set,
     _upstash_get,
     _upstash_delete,
@@ -621,6 +624,7 @@ from lumen_errors import (
     _classify_model_error,
     _model_error_text,
     _or_error_msg,
+    UserFacingInputError,
     GeminiAllModelsExhaustedError,
     _next_fallback_model,
     _gemini_error_msg,
@@ -831,7 +835,6 @@ __all__ = [
     "CHAT_INDEX_KEY",
     "CHAT_INDEX_FILE",
     "_storage_config",
-    "_upstash_request",
     "_upstash_set",
     "_upstash_get",
     "_upstash_delete",
@@ -911,6 +914,7 @@ __all__ = [
     "_classify_model_error",
     "_model_error_text",
     "_or_error_msg",
+    "UserFacingInputError",
     "GeminiAllModelsExhaustedError",
     "_next_fallback_model",
     "_gemini_error_msg",
@@ -1559,6 +1563,15 @@ async def main() -> None:
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await serve_task
                 raise SystemExit(1) from exc
+        # Сервер упал первым (порт занят, падение uvicorn): без этой ветки
+        # исключение терялось и процесс тихо выходил с кодом 0.
+        if serve_task in done and not serve_task.cancelled():
+            exc = serve_task.exception()
+            if exc is not None:
+                log.error("[serve] HTTP server failed, stopping: %s", exc)
+                raise SystemExit(1) from exc
+            log.error("[serve] HTTP server exited unexpectedly, stopping")
+            raise SystemExit(1)
     finally:
         startup_task.cancel()
         flush_task.cancel()

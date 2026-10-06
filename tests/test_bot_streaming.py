@@ -35,15 +35,10 @@ def test_stream_wait_caps_chunk_timeout_by_remaining_budget():
 
 
 def _fake_gemini_stream(pieces=None, *, raises=None, hang_sec=0.0):
-    """Мок generate_content_stream по НАСТОЯЩЕМУ контракту google-genai 2.24.0:
-    обычная функция, возвращающая асинхронный генератор (тело SDK — `return
-    stream_generator()`), а НЕ корутина.
-
-    Раньше фейки здесь были `async def ... return gen()`, из-за чего тесты
-    подпирали фиктивное рукопожатие wait_for вокруг вызова: реальный SDK сети
-    в корутине не делает, значит тот таймаут не срабатывал никогда
-    (враждебное ревью 27.09.2026)."""
-    def _stream(*, model, contents, config=None):
+    """Мок generate_content_stream по контракту google-genai 2.27.0:
+    async def, вызов надо ждать (пример из SDK:
+    `async for chunk in await client.aio.models.generate_content_stream(...)`)."""
+    async def _stream(*, model, contents, config=None):
         async def gen():
             if hang_sec:
                 await asyncio.sleep(hang_sec)
@@ -76,19 +71,22 @@ def test_gemini_stream_timeout_covers_a_hanging_first_chunk():
         bot.STREAM_CHUNK_TIMEOUT_SEC = original_cap
 
 
-def test_gemini_stream_call_is_not_awaited():
-    # Контракт SDK: generate_content_stream — обычная функция. Если бы обёртка снова
-    # стала await-ить её, тест падал бы с TypeError, а не проходил вхолостую.
+def test_gemini_stream_call_is_awaited():
+    # Контракт SDK 2.27.0: generate_content_stream это async def, обёртка обязана
+    # ждать вызов. Синхронный мок (старое поведение) даёт TypeError при await.
+    import inspect
+    from google.genai.models import AsyncModels
+    assert inspect.iscoroutinefunction(AsyncModels.generate_content_stream)
     calls = []
 
-    def sync_only(*, model, contents, config=None):
+    async def async_only(*, model, contents, config=None):
         calls.append(model)
         async def gen():
             yield SimpleNamespace(text="ok")
         return gen()
 
     fake_client = MagicMock()
-    fake_client.aio.models.generate_content_stream = sync_only
+    fake_client.aio.models.generate_content_stream = async_only
     original_client = bot.client
     bot.client = fake_client
     try:
@@ -849,6 +847,101 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
             lumen_typing_pace._speed_ema[pace_key] = original_ema
         else:
             lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+
+def test_run_streaming_reply_catchup_edits_respect_min_interval(monkeypatch):
+    # Довывод правится тем же троттлингом, что основной цикл: тик короче
+    # интервала правок, серия быстро ловила бы 429.
+    import lumen_typing_pace
+    import time
+    chat_id = 999113
+    pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
+    original_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC
+    monkeypatch.setattr(bot, "STREAM_EDIT_MIN_INTERVAL_SEC", 0.4)
+    monkeypatch.setattr(bot, "STREAM_TYPING_TICK_SEC", 0.3)
+    monkeypatch.setattr(bot, "_typing_sleep", asyncio.sleep)
+    long_text = "Буква " * 500
+    fake_stream = _fake_gemini_stream([long_text])
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = fake_stream
+    incoming = _FakeIncomingMessage(chat_id)
+    edit_ts = []
+    orig_tg_call = bot._tg_call
+
+    async def rec_tg_call(method, *args, **kwargs):
+        if getattr(method, "__name__", "") == "edit_text":
+            edit_ts.append(time.monotonic())
+        return await orig_tg_call(method, *args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", rec_tg_call)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
+        assert answer == long_text.strip()
+        # Последняя правка финальная терминальная (один вызов, вне троттлинга
+        # по дизайну) — меряем промежутки прогрессивных правок.
+        gaps = [b - a for a, b in zip(edit_ts, edit_ts[1:-1])]
+        assert gaps, "expected progressive edits during streaming"
+        assert min(gaps) >= 0.35
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        if original_ema is not None:
+            lumen_typing_pace._speed_ema[pace_key] = original_ema
+        else:
+            lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+
+def test_send_text_pauses_between_chunks(monkeypatch):
+    # Куски уходят с паузой против флуд-контроля за серию подряд.
+    from types import SimpleNamespace
+    sleeps = []
+
+    async def rec_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(bot, "_typing_sleep", rec_sleep)
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "bot", _Bot())
+    incoming = _FakeIncomingMessage(999114)
+    text = "слово " * 800
+    chunks = lumen_streaming._split_text_chunks(text, bot.TG_MAX_LEN)
+    assert len(chunks) > 1
+    try:
+        asyncio.run(bot._send_text(incoming, text))
+        assert sleeps == [bot.STREAM_TYPING_TICK_SEC] * (len(chunks) - 1)
+    finally:
+        bot.chat_state.pop(999114, None)
+
+
+def test_gemini_streaming_daily_429_marks_exhausted_like_text_path():
+    # Стриминг опознавал суточную квоту чужим предикатом и ставил минутную
+    # остывку вместо метки до утра.
+    chat_id = 999116
+    model = bot.DEFAULT_GEMINI_MODEL
+    fake_stream = _fake_gemini_stream(raises=RuntimeError("429 Quota exceeded for the day"))
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = fake_stream
+    incoming = _FakeIncomingMessage(chat_id)
+    original_client = bot.client
+    bot.client = fake_client
+    bot.GLOBAL_QUOTA.setdefault("gemini", {}).pop(model, None)
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, model))
+        assert answer is None
+        entry = bot.GLOBAL_QUOTA["gemini"][model]
+        assert entry["exhausted_at"] is not None
+        assert lumen_router_config._is_quota_exhausted("gemini", model) is True
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        bot.GLOBAL_QUOTA["gemini"].pop(model, None)
 
 
 def test_rich_send_used_for_final_answer_with_table():

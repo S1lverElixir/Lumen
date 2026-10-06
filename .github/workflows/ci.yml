@@ -22,10 +22,13 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      # Пины по SHA (аудит 06.10.2026): теги двигаются, SHA нет. Коммит справа —
+      # текущий Snapchat тега на дату пина.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
 
@@ -38,7 +41,7 @@ jobs:
       - run: pytest -q
 
       # Deno-тесты прокси (proxy/proxy_test.ts — без внешних импортов, офлайн).
-      - uses: denoland/setup-deno@v2
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
         with:
           deno-version: v2.x
 

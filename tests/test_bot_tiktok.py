@@ -1146,6 +1146,69 @@ def test_communicate_process_propagates_communicate_failure():
     asyncio.run(run())
 
 
+def test_communicate_process_bounds_drain_and_reraises_cancel(monkeypatch):
+    # communicate переживает kill: дренаж ограничен, задача снимается, внешняя
+    # отмена пробрасывается, а не глотается продолжением ожидания.
+    import threading
+
+    class _UnkillableProc:
+        def __init__(self):
+            self.killed = False
+            self.returncode = None
+
+        def kill(self):
+            self.killed = True
+
+        async def communicate(self):
+            await asyncio.sleep(3600)
+
+        async def wait(self):
+            return self.returncode
+
+    drain_sec = getattr(lumen_tiktok, "_COMMUNICATE_DRAIN_SEC", 5.0)
+    monkeypatch.setattr(lumen_tiktok, "_COMMUNICATE_DRAIN_SEC", 0.05, raising=False)
+
+    def _timeout_path():
+        # Старый код вис в дренаже вечно — ловим join-таймаутом, сьют не виснет.
+        outcome = {}
+
+        def _target():
+            async def _run():
+                started = time.monotonic()
+                try:
+                    await lumen_tiktok._communicate_process(_UnkillableProc(), timeout=0.05)
+                    outcome["result"] = ("returned", time.monotonic() - started)
+                except asyncio.TimeoutError:
+                    outcome["result"] = ("timeout", time.monotonic() - started)
+                except asyncio.CancelledError:
+                    outcome["result"] = ("cancelled", time.monotonic() - started)
+
+            asyncio.run(_run())
+
+        thread = threading.Thread(target=_target, daemon=True)
+        thread.start()
+        thread.join(timeout=5)
+        return outcome.get("result", ("hung", 5.0))
+
+    async def _cancel_path():
+        proc = _UnkillableProc()
+        task = asyncio.create_task(lumen_tiktok._communicate_process(proc, timeout=30))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2)
+            return "returned"
+        except asyncio.CancelledError:
+            return "cancelled"
+        except asyncio.TimeoutError:
+            return "hung"
+
+    kind, elapsed = _timeout_path()
+    assert kind == "timeout"
+    assert elapsed < drain_sec + 4
+    assert asyncio.run(_cancel_path()) == "cancelled"
+
+
 def test_slideshow_status_uses_localized_key():
     # Статус слайдшоу был захардкожен по-русски — теперь ключ tiktok_dl_slideshow с плейсхолдерами.
     # Проверяем точное равенство строке на языке чата, а не «где-то есть слово
@@ -1409,6 +1472,83 @@ def test_single_video_status_deleted_after_music():
         lumen_tiktok_flow._send_tiktok_music = original_music
 
 
+def test_single_video_send_goes_through_tg_call(monkeypatch):
+    # Отправки идут через _tg_call (breaker/таймаут/RetryAfter), а не напрямую:
+    # при недоступности Telegram прямой send_video не дёргается вообще.
+    import lumen_tiktok_flow
+    direct_calls = []
+
+    class _DirectBot:
+        async def send_video(self, **kwargs):
+            direct_calls.append(kwargs)
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return b"\x00" * 100
+
+    async def fake_probe_dims(path):
+        return 0, 0, 0
+
+    async def fake_thumb(path, duration):
+        return None
+
+    async def fake_tg_call(method, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_probe_video_dimensions", fake_probe_dims)
+    monkeypatch.setattr(bot, "_generate_video_thumbnail", fake_thumb)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", _DirectBot())
+    incoming = _FakeIncomingMessage(999456)
+    incoming.message_id = 1
+    media_data = {"play": "https://tikwm.com/v.mp4", "size": 100, "author": {"nickname": "Nick"}}
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(lumen_tiktok_flow._send_tiktok_single_video(
+                None, media_data, incoming, None, "Nick", {}))
+        assert direct_calls == []
+    finally:
+        bot.chat_state.pop(999456, None)
+
+
+def test_single_video_send_does_not_retry_transient_failure(monkeypatch):
+    # Повтор отправки после сбоя дал бы дубль: одна попытка, ошибка наружу.
+    import lumen_tiktok_flow
+    attempts = []
+
+    class _FlakyBot:
+        async def send_video(self, **kwargs):
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                raise RuntimeError("connection reset by peer")
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return b"\x00" * 100
+
+    async def fake_probe_dims(path):
+        return 0, 0, 0
+
+    async def fake_thumb(path, duration):
+        return None
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_probe_video_dimensions", fake_probe_dims)
+    monkeypatch.setattr(bot, "_generate_video_thumbnail", fake_thumb)
+    monkeypatch.setattr(bot, "bot", _FlakyBot())
+    incoming = _FakeIncomingMessage(999457)
+    incoming.message_id = 1
+    media_data = {"play": "https://tikwm.com/v.mp4", "size": 100, "author": {"nickname": "Nick"}}
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(lumen_tiktok_flow._send_tiktok_single_video(
+                None, media_data, incoming, None, "Nick", {}))
+        assert len(attempts) == 1
+    finally:
+        bot.chat_state.pop(999457, None)
+
+
 # ─────────────── S9: DNS в потоке, ручные редиректы, капы, N/A, WebM ───────────────
 
 def _fake_public_dns(host, port, *args, **kwargs):
@@ -1463,6 +1603,96 @@ def test_resolve_tiktok_short_refuses_non_public_hop():
     assert all("169.254" not in url for _, url, _ in session.calls)
 
 
+def _resolve_entry(ip):
+    return {"hostname": "x.example", "host": ip, "port": 443,
+            "family": socket.AF_INET, "proto": 0, "flags": 0}
+
+
+class _ScriptedInnerResolver:
+    """Подмена DefaultResolver с заранее заготовленной выдачей по вызовам."""
+    def __init__(self, script):
+        self._script = list(script)
+        self.calls = 0
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        self.calls += 1
+        return self._script[min(self.calls - 1, len(self._script) - 1)]
+
+    async def close(self):
+        pass
+
+
+def test_public_only_resolver_refilters_every_resolve():
+    # DNS-rebinding: первый резолв публичный, второй приватный — второй обязан
+    # упасть, а не отдать соединение внутрь сети.
+    inner = _ScriptedInnerResolver([
+        [_resolve_entry("93.184.216.34")],
+        [_resolve_entry("169.254.169.254")],
+    ])
+    resolver = lumen_tiktok._PublicOnlyResolver()
+    resolver._inner = inner
+    try:
+        first = asyncio.run(resolver.resolve("x.example", 443))
+        assert [entry["host"] for entry in first] == ["93.184.216.34"]
+        with pytest.raises(socket.gaierror):
+            asyncio.run(resolver.resolve("x.example", 443))
+    finally:
+        asyncio.run(resolver.close())
+
+
+def test_public_only_resolver_drops_private_but_keeps_public():
+    # Смешанная выдача — только публичные, чисто приватная — отказ.
+    inner = _ScriptedInnerResolver([
+        [_resolve_entry("93.184.216.34"), _resolve_entry("10.0.0.5"), _resolve_entry("127.0.0.1")],
+    ])
+    resolver = lumen_tiktok._PublicOnlyResolver()
+    resolver._inner = inner
+    try:
+        assert [entry["host"] for entry in asyncio.run(resolver.resolve("x.example", 443))] == ["93.184.216.34"]
+    finally:
+        asyncio.run(resolver.close())
+    inner_all_private = _ScriptedInnerResolver([[_resolve_entry("192.168.1.1")]])
+    resolver2 = lumen_tiktok._PublicOnlyResolver()
+    resolver2._inner = inner_all_private
+    try:
+        with pytest.raises(socket.gaierror):
+            asyncio.run(resolver2.resolve("x.example", 443))
+    finally:
+        asyncio.run(resolver2.close())
+
+
+def test_resolve_tiktok_short_refuses_non_public_start_url():
+    # Стартовый URL от пользователя: внутренний адрес — ни одного запроса.
+    session = _FakeChainResolveSession({
+        "http://127.0.0.1/evil": (
+            _FakeChainResolveResponse(404, url="http://127.0.0.1/evil"),
+            _FakeChainResolveResponse(404, url="http://127.0.0.1/evil"),
+        ),
+    })
+    assert asyncio.run(lumen_tiktok._resolve_tiktok_short(session, "http://127.0.0.1/evil")) == "http://127.0.0.1/evil"
+    assert session.calls == []
+
+
+def test_http_session_connector_uses_public_only_resolver():
+    # Коннектор shared-сессии фильтрует каждый резолв: защита сквозная для всех
+    # внешних запросов (TikTok, Pollinations, TTS, OpenRouter/Groq).
+    import lumen_transport_calls
+
+    async def _check():
+        session = await lumen_transport_calls._get_http_session()
+        try:
+            return isinstance(session.connector._resolver, lumen_tiktok._PublicOnlyResolver)
+        finally:
+            await session.close()
+
+    orig = bot._http_session
+    bot._http_session = None
+    try:
+        assert asyncio.run(_check()) is True
+    finally:
+        bot._http_session = orig
+
+
 def test_fetch_tikwm_media_data_skips_huge_content_length():
     # A7-4: тело JSON раньше читалось без капа — заявленные гигабайты
     # пропускаем до скачивания.
@@ -1472,6 +1702,71 @@ def test_fetch_tikwm_media_data_skips_huge_content_length():
     result = asyncio.run(bot._fetch_tikwm_media_data(
         _FakeTikwmApiSession([resp]), "https://www.tiktok.com/@u/video/1", {}))
     assert result is None
+
+
+def test_fetch_tikwm_media_data_json_capped_below_video_limit():
+    # JSON капнут своим мегабайтом, а не общим видео-лимитом 75МБ.
+    import lumen_tiktok
+    from tests.bot_test_helpers import _FakeTikwmApiResponse, _FakeTikwmApiSession
+    assert lumen_tiktok.TIKWM_JSON_MAX_BYTES <= 2 * 1024 * 1024
+    big = b'{"code": 0, "data": {}, "pad": "' + b"x" * (lumen_tiktok.TIKWM_JSON_MAX_BYTES + 100) + b'"}'
+    resp = _FakeTikwmApiResponse(status=200, body_bytes=big)
+    result = asyncio.run(bot._fetch_tikwm_media_data(
+        _FakeTikwmApiSession([resp]), "https://www.tiktok.com/@u/video/1", {}))
+    assert result is None
+
+
+def test_fetch_tikwm_media_data_error_branch_reads_capped():
+    # Ветка ошибки тоже читает с капом, а не голым read().
+    from tests.bot_test_helpers import _FakeDownloadContent, _FakeTikwmApiSession
+    calls = []
+
+    class _NoUncappedReadResponse:
+        status = 500
+        headers = {"Content-Length": str(10 ** 12)}
+
+        def __init__(self):
+            self.content = _FakeDownloadContent([b"e" * 100])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def read(self):
+            calls.append("read")
+            return b"e" * 100
+
+    result = asyncio.run(bot._fetch_tikwm_media_data(
+        _FakeTikwmApiSession([_NoUncappedReadResponse()]), "https://www.tiktok.com/@u/video/1", {}))
+    assert result is None
+    assert calls == []
+
+
+def test_tikwm_proxy_fallback_tries_next_candidate_on_exception(monkeypatch):
+    # Исключение первого кандидата не отменяет остальных.
+    import lumen_tiktok_flow
+    calls = []
+
+    async def flaky_fetch(session, resolved_url, headers, proxy_base_url=""):
+        calls.append(proxy_base_url)
+        if len(calls) == 1:
+            raise RuntimeError("proxy down")
+        return {"play": "https://tikwm.com/v.mp4"}
+
+    async def always_boom(session, resolved_url, headers, proxy_base_url=""):
+        raise RuntimeError("all down")
+
+    monkeypatch.setattr(bot, "_tikwm_proxy_candidates", lambda: ["http://p1", "http://p2"])
+    monkeypatch.setattr(bot, "_fetch_tikwm_media_data", flaky_fetch)
+    result = asyncio.run(lumen_tiktok_flow._fetch_tikwm_media_data_with_proxy_fallback(
+        None, "https://www.tiktok.com/@u/video/1", {}))
+    assert result == {"play": "https://tikwm.com/v.mp4"}
+    assert calls == ["http://p1", "http://p2"]
+    monkeypatch.setattr(bot, "_fetch_tikwm_media_data", always_boom)
+    assert asyncio.run(lumen_tiktok_flow._fetch_tikwm_media_data_with_proxy_fallback(
+        None, "https://www.tiktok.com/@u/video/1", {})) is None
 
 
 def test_probe_video_dimensions_survives_na_width(monkeypatch):
@@ -1533,6 +1828,17 @@ def test_tiktok_video_candidates_protocol_relative_url():
     assert candidates[0]["url"] == "https://cdn.tikwm.com/v.mp4"
 
 
+def test_tiktok_video_candidates_rejects_userinfo_and_non_string():
+    # Склейка давала userinfo-путаницу: "@evil.com/x" ехал хостом.
+    import urllib.parse
+    candidates = bot._tiktok_video_candidates({"play": "@evil.com/x", "size": 1})
+    assert candidates[0]["url"] == "https://www.tikwm.com/@evil.com/x"
+    assert urllib.parse.urlsplit(candidates[0]["url"]).hostname == "www.tikwm.com"
+    assert bot._tiktok_video_candidates({"play": "javascript:alert(1)", "size": 1}) == []
+    assert bot._tiktok_video_candidates({"play": 12345, "size": 1}) == []
+    assert bot._tiktok_video_candidates({"play": {"u": 1}, "size": 1}) == []
+
+
 def test_download_url_bin_honors_caller_cap():
     # Аудит A7-5: видео режем лимитом отправки (50МБ), а не общим 75МБ.
     mapping = {"http://8.8.8.8/v.mp4": _FakeDownloadResponse([b"123456789012345"])}
@@ -1546,18 +1852,21 @@ def test_slideshow_stops_at_post_budget(monkeypatch):
     # Аудит D1/A7-1: общий кап RAM на пост — остаток слайдов пропускается.
     calls = {}
 
-    async def fake_download(session, url, headers=None):
+    async def fake_download(session, url, headers=None, cap_bytes=None):
         return b"k" * 1024
 
     class _FakeTgBot:
         async def send_photo(self, **kwargs):
             calls["photo"] = calls.get("photo", 0) + 1
+            return SimpleNamespace()
 
         async def send_video(self, **kwargs):
             calls["video"] = calls.get("video", 0) + 1
+            return SimpleNamespace()
 
         async def send_media_group(self, **kwargs):
             calls["group"] = calls.get("group", 0) + 1
+            return SimpleNamespace()
 
     async def fake_edit(*args, **kwargs):
         return True
@@ -1579,4 +1888,46 @@ def test_slideshow_stops_at_post_budget(monkeypatch):
         assert "group" not in calls
     finally:
         bot.chat_state.pop(999985, None)
+
+
+class _SlideshowCapBot:
+    async def send_photo(self, **kwargs):
+        return SimpleNamespace()
+
+    async def send_video(self, **kwargs):
+        return SimpleNamespace()
+
+    async def send_media_group(self, **kwargs):
+        return SimpleNamespace()
+
+
+def test_slideshow_slide_download_reserves_post_budget(monkeypatch):
+    # Кап слайда — остаток общего бюджета до скачивания, а не после.
+    import lumen_tiktok
+    seen_caps = {}
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        seen_caps[url] = cap_bytes
+        return b"k" * 1024
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "TIKTOK_SLIDESHOW_MAX_BYTES", 1500)
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "_delete_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "bot", _SlideshowCapBot())
+    incoming = _FakeIncomingMessage(999984)
+    incoming.message_id = 7
+    media_data = {"images": ["http://x/1.jpg", "http://x/2.jpg", "http://x/3.jpg"]}
+    try:
+        asyncio.run(bot._try_send_tiktok_slideshow(
+            None, media_data, incoming, None, "author", {},
+        ))
+        assert seen_caps
+        assert all(cap is not None and cap <= 1500 for cap in seen_caps.values())
+        assert all(cap <= lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES for cap in seen_caps.values())
+    finally:
+        bot.chat_state.pop(999984, None)
 

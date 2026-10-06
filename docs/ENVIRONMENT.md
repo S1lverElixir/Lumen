@@ -110,7 +110,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `UPSTASH_REDIS_REST_URL` | — | Upstash Redis REST URL. Set together with the token below to persist state across redeploys. |
 | `UPSTASH_REDIS_REST_TOKEN` | — | Upstash Redis REST token. |
 
-Setup: create a free database at [upstash.com](https://upstash.com), grab the REST URL and token from the database page, add them as Space secrets, and redeploy. The free tier is 256 MB / 500,000 commands per month, no card required.
+Setup: create a free database at [upstash.com](https://upstash.com), grab the REST URL and token from the database page, add them as Space secrets, and redeploy. The free tier is 256 MB / 500,000 commands per month, no card required (limits as of 06.10.2026).
 
 ## Hardcoded limits (not environment variables)
 
@@ -123,6 +123,14 @@ These ceilings are fixed in code; change them only with a code edit:
 | `MAX_CHAT_HISTORY_LEN` | `100` | Max stored messages per chat. |
 | `QUOTA_RATE_LIMIT_COOLDOWN_SEC` | `600` | Cooldown after a rate-limit hit. |
 | `HISTORY_SUMMARIZE_KEEP` | `80` | Recent messages kept verbatim when older history is summarized. |
+| `TG_MAX_LEN` | `4096` | Telegram message limit in UTF-16 code units; chunking and HTML fit are measured against it. |
+| `TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES` | `50 MB` | Telegram upload ceiling; bigger variants are skipped before downloading. |
+| `WEBHOOK_MAX_BODY_BYTES` | `512 KB` | Biggest accepted webhook update body. |
+| `WEBHOOK_MAX_INFLIGHT_TASKS` | `100` | Max background update tasks; overflow asks Telegram to retry (503). |
+| `POLLINATIONS_IMAGE_MAX_BYTES` | `30 MB` | Biggest accepted generated image. |
+| `TIKWM_JSON_MAX_BYTES` | `1 MB` | Biggest accepted TikWM metadata body (not the 75 MB media cap). |
+| `MIN_PROXY_SECRET_LENGTH` | `32` | Shortest accepted proxy secret, enforced on both sides. |
+| `_TABLE_SEP_MAX_LEN` | `500` | Widest table-separator line passed to the separator regex. |
 
 ## Observability
 
@@ -134,7 +142,7 @@ These ceilings are fixed in code; change them only with a code edit:
 | `DIAG_TOTAL_BUDGET_SEC` | `25s` | Total budget for the `/diag` network check across all probed hosts, so a hanging host cannot hang the diagnostic. |
 | `ADMIN_SECRET_SEED` | — | Secret seed for deriving `WEBHOOK_SECRET` and `ADMIN_PANEL_KEY`. **Set it to its own random value, separate from `BOT_TOKEN`.** Without it both keys are derived from `BOT_TOKEN`, so a leaked token also exposes `/export_state` and `/webhook` (the bot logs a warning at startup). Changing the seed (or setting it for the first time) rotates both keys at once: on restart the bot re-registers the Telegram webhook with the new `WEBHOOK_SECRET` by itself, but anything using the old `ADMIN_PANEL_KEY` (browser bookmarks, cron export scripts) gets `401` until updated — fetch the new key via `GET /admin_keys` with Bearer `BOT_TOKEN`. |
 
-Sentry setup: create a free Python project at [sentry.io](https://sentry.io) (Developer tier: 5,000 events/month), copy the DSN from the project settings, and add it as a Space secret.
+Sentry setup: create a free Python project at [sentry.io](https://sentry.io) (Developer tier: 5,000 events/month as of 06.10.2026), copy the DSN from the project settings, and add it as a Space secret.
 
 ## Hugging Face Space identity
 

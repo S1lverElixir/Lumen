@@ -701,6 +701,33 @@ def test_route_never_becomes_empty_when_all_models_exhausted():
         bot.GLOBAL_QUOTA["openrouter"].pop("probe/all-dead:free", None)
 
 
+def test_skip_exhausted_returns_single_first_allowed_variant():
+    # Все мёртвы — один первый вариант, а не вся цепочка: иначе каждое сообщение
+    # платило HTTP-вызовом за каждую модель цепочки при исчерпанной квоте.
+    import bot
+    for mid in ("probe/dead1:free", "probe/dead2:free", "probe/dead3:free"):
+        bot.GLOBAL_QUOTA.setdefault("openrouter", {})[mid] = {"used": 0, "exhausted_at": 123.0}
+    try:
+        assert lumen_router_config._skip_exhausted("openrouter", ["probe/dead1:free", "probe/dead2:free", "probe/dead3:free"]) == ["probe/dead1:free"]
+    finally:
+        for mid in ("probe/dead1:free", "probe/dead2:free", "probe/dead3:free"):
+            bot.GLOBAL_QUOTA["openrouter"].pop(mid, None)
+
+
+def test_skip_exhausted_fallback_skips_registry_excluded_models():
+    # Первый вариант из реестра исключённых не возвращаем: он подтверждённо мёртв.
+    import bot
+    excluded = next(iter(lumen_router_config._ROUTER_EXCLUDED_OR_MODELS))
+    bot.GLOBAL_QUOTA.setdefault("openrouter", {})[excluded] = {"used": 0, "exhausted_at": 123.0}
+    bot.GLOBAL_QUOTA.setdefault("openrouter", {})["probe/deadX:free"] = {"used": 0, "exhausted_at": 123.0}
+    try:
+        assert lumen_router_config._skip_exhausted("openrouter", [excluded, "probe/deadX:free"]) == ["probe/deadX:free"]
+        assert lumen_router_config._skip_exhausted("openrouter", [excluded]) == []
+    finally:
+        bot.GLOBAL_QUOTA["openrouter"].pop(excluded, None)
+        bot.GLOBAL_QUOTA["openrouter"].pop("probe/deadX:free", None)
+
+
 def test_successful_usage_clears_exhausted_mark():
     # Метка снимается успешным ответом, иначе после сброса суток или починки
     # провайдера модель навсегда выпадала бы из роутинга.

@@ -38,8 +38,9 @@ jobs:
       && github.event.workflow_run.event == 'push'
       && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Тот коммит, что проверялся CI (см. sync-to-hf.yml); при ручном
           # запуске — текущий main.
@@ -56,8 +57,14 @@ jobs:
         id: proxy_changed_ci
         if: github.event_name != 'workflow_dispatch'
         run: |
-          # Мержи в main — merge-коммиты: дифф с первым родителем показывает весь PR.
-          if git diff --name-only HEAD~1 HEAD | grep -q '^proxy/'; then
+          # Мержи — по базе слияния, а не HEAD~1: иначе мультикоммитные пуши
+          # в main проверяли бы только последний коммит.
+          if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
+            base="$(git merge-base HEAD^1 HEAD^2)"
+          else
+            base="HEAD~1"
+          fi
+          if git diff --name-only "$base" HEAD | grep -q '^proxy/'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -65,14 +72,14 @@ jobs:
 
       - name: Deploy to primary proxy
         if: steps.proxy_changed.outputs.changed == 'true' || steps.proxy_changed_ci.outputs.changed == 'true'
-        uses: denoland/deployctl@v1
+        uses: denoland/deployctl@35381c73621e1731268f80e51b54718d086f1e64 # v1
         with:
           project: ${{ secrets.DENO_PROXY_PROJECT }}
           entrypoint: proxy/proxy.ts
 
       - name: Deploy to fallback proxy
         if: steps.proxy_changed.outputs.changed == 'true' || steps.proxy_changed_ci.outputs.changed == 'true'
-        uses: denoland/deployctl@v1
+        uses: denoland/deployctl@35381c73621e1731268f80e51b54718d086f1e64 # v1
         with:
           project: ${{ secrets.DENO_PROXY_PROJECT_FALLBACK }}
           entrypoint: proxy/proxy.ts

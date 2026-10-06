@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import re
 import socket
@@ -19,6 +20,7 @@ from aiogram.exceptions import (
     TelegramEntityTooLarge,
     TelegramForbiddenError,
     TelegramMigrateToChat,
+    TelegramNetworkError,
     TelegramNotFound,
     TelegramUnauthorizedError,
 )
@@ -65,10 +67,16 @@ async def _rotate_telegram_proxy() -> bool:
 async def _get_http_session() -> aiohttp.ClientSession:
     import bot
     if bot._http_session is None or bot._http_session.closed:
+        from lumen_tiktok import _PublicOnlyResolver
         bot._http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=60),
             # limit 40 (24.07.2026): слайдшоу TikTok до 35 слайдов качается разом через gather — со старым 16 часть ждала бы в очереди. Остальные потребители используют на порядок меньше соединений.
-            connector=aiohttp.TCPConnector(family=socket.AF_INET, limit=40, ttl_dns_cache=300),
+            connector=aiohttp.TCPConnector(
+                family=socket.AF_INET, limit=40, ttl_dns_cache=300,
+                # Резолвер режет не-публичные IP при каждом резолве: закрывает
+                # DNS-rebinding для всех внешних запросов этой сессии.
+                resolver=_PublicOnlyResolver(),
+            ),
             middlewares=proxy_auth_middlewares(
                 proxy_secret=bot.LUMEN_PROXY_SECRET,
                 proxy_base_urls=(*bot._TELEGRAM_PROXY_CANDIDATES, *bot._tikwm_proxy_candidates()),
@@ -86,9 +94,23 @@ async def _close_sessions() -> None:
 
 # безопасные обёртки над вызовами telegram
 
+# Реентрантность _handle_proxy_failure: уведомление владельцу идёт через
+# _tg_call ДО trip(), падение того же прокси звало обработчик снова из той же
+# задачи. Контекстная метка (а не глобальный флаг) — параллельные задачи
+# обрабатывают свои сбои независимо, вложенная ветка в той же задаче закрыта.
+_proxy_failure_nested: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "proxy_failure_nested", default=False,
+)
+
+
 async def _handle_proxy_failure(context: str) -> None:
     """Реакция на "прокси вернул не-JSON/недоступен" (раньше дублировалась в _tg_call и telegram_api_call). Только обновляет breaker и логирует; рубить ли попытку — решает вызывающий код."""
     import bot
+    if _proxy_failure_nested.get():
+        # Вложенный сбой из _notify_owner ниже: счётчик честно растёт, но вторую
+        # ветку уведомления не запускаем, иначе цепочка повторялась бы.
+        bot._tg_proxy_breaker.note_failure()
+        return
     tripped = bot._tg_proxy_breaker.note_failure()
     if not tripped:
         log.warning(
@@ -110,11 +132,15 @@ async def _handle_proxy_failure(context: str) -> None:
     # Либо резервных прокси нет вообще, либо мы уже обошли их все по кругу за
     # этот заход — теперь действительно пауза. Уведомляем ДО trip(), иначе
     # собственный is_down-гейт _tg_call/telegram_api_call заблокирует само уведомление.
-    await bot._notify_owner(
-        f"⚠️ Telegram-прокси недоступен при {context} ({bot._tg_proxy_breaker.consecutive_failures} сбоев "
-        f"подряд, резервные адреса тоже не помогли). Пауза {bot._tg_proxy_breaker.cooldown_sec:.0f}с. "
-        f"Активный адрес: {bot.TELEGRAM_API_BASE_URL}"
-    )
+    _nested_token = _proxy_failure_nested.set(True)
+    try:
+        await bot._notify_owner(
+            f"⚠️ Telegram-прокси недоступен при {context} ({bot._tg_proxy_breaker.consecutive_failures} сбоев "
+            f"подряд, резервные адреса тоже не помогли). Пауза {bot._tg_proxy_breaker.cooldown_sec:.0f}с. "
+            f"Активный адрес: {bot.TELEGRAM_API_BASE_URL}"
+        )
+    finally:
+        _proxy_failure_nested.reset(_nested_token)
     bot._tg_proxy_breaker.trip()
     log.warning(
         '[telegram] Proxy unavailable during %s %d time(s) in a row (threshold %d) — pausing for %.0fs. Check availability of %s.',
@@ -178,10 +204,18 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
             return result
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError as exc:
+            # Таймаут — исход неизвестен (запрос мог дойти): повтор отправки
+            # дал бы дубль. Не ретраим, как клиентские ошибки.
+            last_exc = exc
+            break
         except Exception as exc:
             last_exc = exc
             if _tg_is_client_error(exc):
                 # Клиентская ошибка: повтор с теми же аргументами даст то же самое.
+                break
+            if isinstance(exc, TelegramNetworkError) and "timeout" in str(exc).lower():
+                # Таймаут aiogram-сессии той же природы, что выше: мог дойти.
                 break
             if attempt < retries:
                 # Флуд-контроль ждём по retry_after, остальное — коротким бэкоффом.

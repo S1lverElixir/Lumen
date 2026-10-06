@@ -151,8 +151,8 @@ def proxy_auth_middlewares(
         if parsed.hostname in {"api.telegram.org", "www.tikwm.com", "tikwm.com"}:
             continue
         scopes.append((parsed.hostname, port, parsed.path.rstrip("/")))
-    if scopes and (not proxy_secret or any(not 33 <= ord(c) <= 126 for c in proxy_secret)):
-        raise ValueError("LUMEN_PROXY_SECRET is required for configured proxies and must be printable ASCII without spaces")
+    if scopes and (not proxy_secret or len(proxy_secret) < 32 or any(not 33 <= ord(c) <= 126 for c in proxy_secret)):
+        raise ValueError("LUMEN_PROXY_SECRET is required for configured proxies (min 32 printable ASCII chars without spaces)")
 
     async def authenticate(request: aiohttp.ClientRequest, handler):
         request.headers.popall(PROXY_AUTH_HEADER, None)
@@ -190,12 +190,15 @@ def proxy_auth_middlewares(
 
 class IPv4AiohttpSession(AiohttpSession):
     def __init__(
-        self, *, proxy_secret: str = "", proxy_base_urls: Sequence[str] = (), **kwargs,
+        self, *, proxy_secret: str = "", proxy_base_urls: Sequence[str] = (),
+        # aiogram кладёт self.timeout на каждый запрос поверх дефолта сессии:
+        # без явных 30с здесь действовали бы молчаливые 60с aiogram, а не total=30 ниже.
+        timeout: float = 30.0, **kwargs,
     ) -> None:
         self._proxy_middlewares = proxy_auth_middlewares(
             proxy_secret=proxy_secret, proxy_base_urls=proxy_base_urls,
         )
-        super().__init__(**kwargs)
+        super().__init__(timeout=timeout, **kwargs)
 
     async def create_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:

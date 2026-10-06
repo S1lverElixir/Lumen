@@ -402,6 +402,45 @@ def test_flush_dirty_state_once_keeps_dirty_index_and_quota_on_write_failure():
         lumen_chat_state._quota_dirty = False
 
 
+def test_flush_keeps_dirty_flag_when_mutated_during_write():
+    # Гонка флагов: payload построен, запись висит, состояние мутировало —
+    # флаг обязан остаться True, иначе изменение теряется до следующей мутации.
+    import threading
+    bot._dirty_chat_ids.clear()
+    bot._pending_chat_deletions.clear()
+
+    def _run_with_blocking_save(flag_name, save_name, mutate):
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_save(payload):
+            started.set()
+            assert release.wait(timeout=5)
+            return True
+
+        async def _scenario():
+            flush_task = asyncio.create_task(bot._flush_dirty_state_once())
+            assert await asyncio.to_thread(started.wait, 5)
+            mutate()
+            release.set()
+            await flush_task
+
+        setattr(lumen_chat_state, flag_name, True)
+        try:
+            with patch(f"bot.{save_name}", side_effect=blocking_save):
+                asyncio.run(_scenario())
+            assert getattr(lumen_chat_state, flag_name) is True
+        finally:
+            release.set()
+            setattr(lumen_chat_state, flag_name, False)
+
+    lumen_chat_state._quota_dirty = False
+    _run_with_blocking_save("_index_dirty", "_save_chat_index_payload", lumen_chat_state.mark_state_dirty)
+    bot._dirty_chat_ids.clear()
+    lumen_chat_state._index_dirty = False
+    _run_with_blocking_save("_quota_dirty", "_save_quota_payload", lumen_chat_state.mark_quota_dirty)
+
+
 def test_load_state_falls_back_to_legacy_blob_on_corrupt_index():
     # Внешний аудит: битый индекс обнулял восстановление, хотя per-chat файлы целы.
     import json
@@ -424,6 +463,54 @@ def test_load_state_falls_back_to_legacy_blob_on_corrupt_index():
             bot._dirty_chat_ids.clear()
             bot._dirty_chat_ids.update(was_dirty)
             lumen_chat_state._index_dirty = False
+
+
+def test_load_state_flags_failed_when_index_corrupt_and_no_legacy():
+    # Битый индекс без legacy-блоба: удалённые per-chat данные новее пустой памяти,
+    # следующий флаш не должен затирать индекс только новыми чатами.
+    def fake_read(key, path):
+        if "index" in str(key).lower() or str(path).endswith("index.json"):
+            return "not-json{{{"
+        return None
+
+    with patch("bot._storage_read_text", side_effect=fake_read):
+        orig_failed = lumen_chat_state._state_load_failed
+        try:
+            bot.load_state_from_disk()
+            assert lumen_chat_state._state_load_failed is True
+        finally:
+            lumen_chat_state._state_load_failed = orig_failed
+
+
+def test_load_state_clean_on_first_start_without_index_or_legacy():
+    # Сторож обратного пути: индекса никогда не было — флага нет, флаш пишет свободно.
+    with patch("bot._storage_read_text", return_value=None):
+        orig_failed = lumen_chat_state._state_load_failed
+        try:
+            bot.load_state_from_disk()
+            assert lumen_chat_state._state_load_failed is False
+        finally:
+            lumen_chat_state._state_load_failed = orig_failed
+
+
+@pytest.mark.parametrize(("env_value", "expected"), [
+    ("abc", 10), ("", 10), ("0", 10), ("-5", 10), ("3", 3),
+])
+def test_flush_concurrency_falls_back_on_garbage(monkeypatch, env_value, expected):
+    # Голый int() ронял импорт на мусоре, а 0 давал висящий семафор.
+    import asyncio
+    monkeypatch.setenv("STATE_FLUSH_CONCURRENCY", env_value)
+    assert lumen_chat_state._flush_concurrency() == expected
+    monkeypatch.delenv("STATE_FLUSH_CONCURRENCY", raising=False)
+    assert lumen_chat_state._flush_concurrency() == 10
+    orig_sem = lumen_chat_state._state_flush_semaphore
+    lumen_chat_state._state_flush_semaphore = None
+    try:
+        sem = lumen_chat_state._flush_semaphore()
+        assert asyncio.run(asyncio.wait_for(sem.acquire(), timeout=2))
+        sem.release()
+    finally:
+        lumen_chat_state._state_flush_semaphore = orig_sem
 
 
 def test_load_global_quota_restores_groq():
@@ -2606,6 +2693,55 @@ def test_oversize_attachment_gets_honest_refusal(monkeypatch):
         assert "20" in sent.get("text", "") and "большой" in sent["text"]
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def test_download_retry_warning_redacts_bot_token(monkeypatch, caplog):
+    # Токен в URL светился в WARNING на ретрае — та же замена, что в финале.
+    import logging
+    from types import SimpleNamespace
+    token = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+    monkeypatch.setattr(bot, "BOT_TOKEN", token)
+
+    async def boom_get_file(file_id):
+        raise RuntimeError(f"https://api.telegram.org/file/bot{token}/photos/x.jpg boom")
+
+    async def boom_session():
+        raise AssertionError("no session expected")
+
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(get_file=boom_get_file))
+    monkeypatch.setattr(bot, "_get_telegram_session", boom_session)
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        with pytest.raises(RuntimeError):
+            asyncio.run(bot._download_telegram_file_bytes("fid", retries=1))
+    assert token not in caplog.text
+    assert "<TOKEN>" in caplog.text
+
+
+def test_attachment_tmp_write_runs_off_loop(monkeypatch):
+    # Запись до 20МБ стопорила loop — только через to_thread.
+    import asyncio
+    from types import SimpleNamespace
+    seen = []
+    real_to_thread = asyncio.to_thread
+
+    async def rec_to_thread(func, /, *args, **kwargs):
+        seen.append(getattr(func, "__name__", ""))
+        return await real_to_thread(func, *args, **kwargs)
+
+    async def fake_download(file_id):
+        return b"z" * 16, "image/jpeg"
+
+    monkeypatch.setattr(asyncio, "to_thread", rec_to_thread)
+    monkeypatch.setattr(bot, "_download_telegram_file_bytes", fake_download)
+    source = SimpleNamespace(file_id="fid", mime_type="image/jpeg")
+    try:
+        tmp_path, mime, name = asyncio.run(bot._download_message_attachment_to_tmp(source))
+        assert mime == "image/jpeg"
+        assert "write_bytes" in seen
+    finally:
+        import os
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_path)
 
 
 def test_album_skips_files_over_running_total(monkeypatch):

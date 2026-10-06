@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
 import bot
+import contextlib
 import lumen_chat_state
 import lumen_commands
 import lumen_limits
@@ -55,6 +56,46 @@ def test_cmd_logs_flushes_the_listeners_real_handlers_not_root():
     finally:
         bot.OWNER_ID = original_owner
         bot._LOG_LISTENER = original_listener
+
+
+def test_cmd_logs_uses_unique_temp_file(monkeypatch):
+    # Предсказуемое имя в общем tmp — перезапись и чтение чужого.
+    import os
+    monkeypatch.setattr(bot, "OWNER_ID", 555002)
+    prior = None
+    if bot.LOG_FILE_PATH.exists():
+        prior = bot.LOG_FILE_PATH.read_bytes()
+    bot.LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    bot.LOG_FILE_PATH.write_text("log line\n", encoding="utf-8")
+    incoming = _FakeIncomingMessage(555002)
+    incoming.from_user = SimpleNamespace(id=555002)
+    seen = {}
+
+    async def fake_reply_document(document, **kwargs):
+        seen["path"] = getattr(document, "path", "")
+        return SimpleNamespace()
+
+    incoming.reply_document = fake_reply_document
+
+    async def fake_tg_call(method, *args, **kwargs):
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    try:
+        asyncio.run(bot.cmd_logs(incoming))
+        assert seen.get("path"), "document must be sent"
+        assert os.path.basename(seen["path"]) != "logs.txt"
+        assert not os.path.exists(seen["path"]), "temp file must be cleaned up"
+        first_path = seen["path"]
+        asyncio.run(bot.cmd_logs(incoming))
+        assert seen["path"] != first_path, "each run must use its own temp file"
+    finally:
+        if prior is None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(bot.LOG_FILE_PATH)
+        else:
+            bot.LOG_FILE_PATH.write_bytes(prior)
+        bot.chat_state.pop(555002, None)
 
 
 def test_cmd_stats_counts_only_recently_active_chats():
@@ -396,7 +437,7 @@ def test_draw_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypat
     async def fake_safe_reply(msg, text, **kwargs):
         replied.append(text)
 
-    async def failing_generate(session, model_id, prompt):
+    async def failing_generate(session, model_id, prompt, timeout_sec=None):
         raise RuntimeError("all image generation models unavailable")
 
     async def fake_get_http_session():
@@ -557,7 +598,7 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
     chat_id = 999430
     captured_model = []
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
         captured_model.append(model_id)
         return b"\x89PNG fake bytes"
 
@@ -584,6 +625,61 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_inline_draw_refuses_when_user_total_limit_exhausted(monkeypatch):
+    # /draw без дневного лимита обходился: исчерпанный total — отказ до генерации.
+    from types import SimpleNamespace
+    incoming = _FakeIncomingMessage(999491)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=777021)
+    monkeypatch.setattr(bot, "OWNER_ID", 1)
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 2)
+    bot._record_user_daily(777021)
+    bot._record_user_daily(777021)
+
+    async def fail_generate(session, model_id, prompt, timeout_sec=None):
+        raise AssertionError("generation must not run for an exhausted user")
+
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fail_generate)
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        assert len(replies) == 1
+        assert bot._user_daily_entry(777021)["total"] == 2
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777021", None)
+        bot.chat_state.pop(999491, None)
+
+
+def test_inline_draw_records_user_daily_on_success(monkeypatch):
+    # Успешная картинка растит total, как озвучка.
+    from types import SimpleNamespace
+    incoming = _FakeIncomingMessage(999492)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=777022)
+    monkeypatch.setattr(bot, "OWNER_ID", 1)
+
+    async def fake_generate(session, model_id, prompt, timeout_sec=None):
+        return b"\x89PNG fake bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_generate)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        assert bot._user_daily_entry(777022)["total"] == 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777022", None)
+        bot.chat_state.pop(999492, None)
+
+
 def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
     # Регрессия на находку код-ревью (28 августа 2026): раньше у /draw не было
     # общего бюджета времени на всю фолбэк-цепочку — при недоступности сервиса
@@ -594,7 +690,7 @@ def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
     chat_id = 999432
     attempts = []
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
         attempts.append(model_id)
         await asyncio.sleep(0.05)  # дольше урезанного DRAW_TOTAL_BUDGET_SEC ниже
         raise RuntimeError("503 Service Unavailable")
@@ -624,7 +720,7 @@ def test_inline_draw_falls_back_when_auto_picked_model_fails():
     chat_id = 999431
     attempts = []
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
         attempts.append(model_id)
         if model_id == "flux-anime":
             raise RuntimeError("503 Service Unavailable")
@@ -668,7 +764,7 @@ def test_inline_draw_stops_chain_on_service_rate_limit():
     chat_id = 999432
     attempts = []
 
-    async def fake_pollinations_text_to_image_always_429(session, model_id, prompt):
+    async def fake_pollinations_text_to_image_always_429(session, model_id, prompt, timeout_sec=None):
         attempts.append(model_id)
         raise RuntimeError("Pollinations.ai HTTP 429")
 
@@ -1044,10 +1140,18 @@ def test_lang_table_covers_all_keys_in_all_languages():
     import lumen_lang
     assert tuple(lumen_lang.SUPPORTED_LANGS) == tuple(sorted(lumen_lang.SUPPORTED_LANGS))
     assert set(lumen_lang.LANG_NAMES) == set(lumen_lang.SUPPORTED_LANGS)
+    # Байт-дубликат английского не перевод: такую строку удаляем, показ едет
+    # фолбэком. Исключения с причиной — только здесь.
+    allowed_en_duplicates = {("selftest_header", "fil")}
     for key, table in lumen_lang.STRINGS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
-            covered = bool(lumen_lang.LANG_PACKS.get(lang, {}).get(key)) or bool(table.get(lang))
-            assert covered, f"missing {key}[{lang}]"
+            explicit = lumen_lang.LANG_PACKS.get(lang, {}).get(key) or table.get(lang)
+            resolved = explicit or table.get("en")
+            assert resolved, f"missing {key}[{lang}]"
+            if explicit is not None and lang != "en" and explicit == table.get("en"):
+                assert (key, lang) in allowed_en_duplicates, (
+                    f"untranslated duplicate {key}[{lang}]: delete it, English fallback covers display"
+                )
     for lang in lumen_lang.SUPPORTED_LANGS:
         for scenario in ("film", "series", "music", "books", "games"):
             q, opts, tpl = lumen_lang.pick_texts(lang, scenario)
@@ -1126,7 +1230,7 @@ def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
     incoming.message_id = 1
     calls = []
 
-    async def fake_pollinations(session, model_id, prompt):
+    async def fake_pollinations(session, model_id, prompt, timeout_sec=None):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
@@ -1156,7 +1260,7 @@ def test_inline_draw_send_failure_reports_service_error(monkeypatch):
     incoming.message_id = 1
     replied = []
 
-    async def fake_pollinations(session, model_id, prompt):
+    async def fake_pollinations(session, model_id, prompt, timeout_sec=None):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
@@ -1543,6 +1647,39 @@ def test_pick_callback_ignores_banned_user(monkeypatch):
     asyncio.run(bot.handle_pick_callback(query))
     assert fake_core.await_count == 0
     assert answered == [True]
+
+
+def test_banned_user_commands_send_nothing(monkeypatch):
+    # Обход бана через прямые команды: catch-all с _is_banned не ловит
+    # зарегистрированные раньше cmd_*, каждая проверяет первой строкой.
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(bot, "OWNER_ID", 106002)
+    banned_id = 607002
+    bot._ban_user(banned_id)
+    try:
+        calls = []
+        async def fake_tg_call(method, *args, **kwargs):
+            calls.append(True)
+            return SimpleNamespace()
+        monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+        monkeypatch.setattr(bot, "_safe_reply", AsyncMock(side_effect=lambda *a, **k: calls.append(True)))
+        monkeypatch.setattr(bot, "_send_text", AsyncMock(side_effect=lambda *a, **k: calls.append(True)))
+        cases = [
+            (bot.cmd_start, "/start"),
+            (bot.cmd_draw, "/draw кот"),
+            (bot.cmd_tts, "/tts привет"),
+            (bot.cmd_reset, "/reset"),
+            (bot.cmd_lang, "/lang"),
+        ]
+        for func, text in cases:
+            calls.clear()
+            incoming = _FakeIncomingMessage(999805)
+            incoming.from_user = SimpleNamespace(id=banned_id)
+            incoming.text = text
+            asyncio.run(func(incoming))
+            assert calls == [], func.__name__
+    finally:
+        bot._unban_user(banned_id)
 
 
 def test_selftest_llm_head_gemini_success_counts_quota_and_outcome(monkeypatch):

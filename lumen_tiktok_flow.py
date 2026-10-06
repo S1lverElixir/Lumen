@@ -20,6 +20,7 @@ from aiogram.types import (
 )
 
 from lumen_tiktok import (
+    TIKTOK_DOWNLOAD_MAX_BYTES,
     _original_sound_label,
     _GENERIC_ORIGINAL_SOUND_PHRASES,
     _chunk_tiktok_media_items,
@@ -150,30 +151,40 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          # Слэш и управляющие из чужого названия — в "_" (AUD-E-005),
          # иначе multipart-имя файла битое.
          safe_title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", cleaned_title[:60]).strip() or "track"
-         try:
-              await bot.bot.send_audio(
-                   chat_id=message.chat.id,
-                   audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
-                   title=cleaned_title,
-                   performer=performer_name,
-                   duration=music_duration if music_duration > 0 else None,
-                   thumbnail=thumbnail_file,
-                   reply_to_message_id=message.message_id
-              )
-         except Exception as send_exc:
+         # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_audio.
+         # None вместо исключения — дальше та же логика, что раньше в except.
+         sent_audio = await bot._tg_call(
+              bot.bot.send_audio,
+              chat_id=message.chat.id,
+              audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
+              title=cleaned_title,
+              performer=performer_name,
+              duration=music_duration if music_duration > 0 else None,
+              thumbnail=thumbnail_file,
+              reply_to_message_id=message.message_id,
+              call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+              # Без слепого ретрая: повтор без обложки ниже и есть стратегия повтора.
+              retries=0,
+         )
+         if sent_audio is None:
               if thumbnail_file is None:
-                   raise
+                   raise RuntimeError("Telegram send_audio failed: connection timeout or proxy unavailable")
               # Обложка с TikWM бывает жирной — Telegram режет отправку целиком, и трек не приходит
               # вообще молча. Повторяем без обложки: музыка важнее картинки.
-              log.warning("[tiktok] send_audio with thumbnail failed, retrying without: %s", send_exc)
-              await bot.bot.send_audio(
+              log.warning("[tiktok] send_audio with thumbnail failed, retrying without")
+              sent_audio = await bot._tg_call(
+                   bot.bot.send_audio,
                    chat_id=message.chat.id,
                    audio=BufferedInputFile(tagged_music_bytes, filename=f"{safe_title}.mp3"),
                    title=cleaned_title,
                    performer=performer_name,
                    duration=music_duration if music_duration > 0 else None,
-                   reply_to_message_id=message.message_id
+                   reply_to_message_id=message.message_id,
+                   call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+                   retries=0,
               )
+              if sent_audio is None:
+                   raise RuntimeError("Telegram send_audio failed: connection timeout or proxy unavailable")
     except Exception as e:
          log.warning("[tiktok] failed to send music: %s", e)
 
@@ -200,7 +211,15 @@ async def _fetch_tikwm_media_data_with_proxy_fallback(session: aiohttp.ClientSes
     import bot
     result = None
     for candidate in bot._tikwm_proxy_candidates():
-        result = await bot._fetch_tikwm_media_data(session, resolved_url, headers, proxy_base_url=candidate)
+        try:
+            result = await bot._fetch_tikwm_media_data(session, resolved_url, headers, proxy_base_url=candidate)
+        except Exception as exc:
+            # Рутина сети — warning без Sentry; остальное пахнет багом — error.
+            if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
+                log.warning("[tiktok] TikWM proxy candidate %r failed: %s", candidate, exc)
+            else:
+                log.exception("[tiktok] TikWM proxy candidate %r failed unexpectedly", candidate)
+            continue
         if result is not None:
             return result
     return result
@@ -230,7 +249,11 @@ async def _try_send_tiktok_slideshow(
               async with bot._tiktok_slide_download_semaphore:
                    if post_budget[0] <= 0:
                         return None
-                   data = await bot._download_url_bin(session, slide_url, headers=headers)
+                   # Резерв до скачивания: кап слайда — остаток бюджета.
+                   data = await bot._download_url_bin(
+                        session, slide_url, headers=headers,
+                        cap_bytes=min(TIKTOK_DOWNLOAD_MAX_BYTES, post_budget[0]),
+                   )
                    if data:
                         post_budget[0] -= len(data)
                         if post_budget[0] < 0:
@@ -282,23 +305,37 @@ async def _try_send_tiktok_slideshow(
                     # Один уцелевший слайд — обычным send_photo/send_video: media group требует минимум 2.
                    only_item = media_items[0]
                    if isinstance(only_item, InputMediaVideo):
-                        await bot.bot.send_video(
+                        sent_slide = await bot._tg_call(
+                             bot.bot.send_video,
                              chat_id=message.chat.id, video=only_item.media,
                              supports_streaming=True, reply_to_message_id=message.message_id,
+                             call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+                             # Без слепого ретрая: повтор отправки после сбоя дал бы дубль.
+                             retries=0,
                         )
                    else:
-                        await bot.bot.send_photo(
+                        sent_slide = await bot._tg_call(
+                             bot.bot.send_photo,
                              chat_id=message.chat.id, photo=only_item.media,
                              reply_to_message_id=message.message_id,
+                             call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+                             retries=0,
                         )
+                   if sent_slide is None:
+                        raise RuntimeError("Telegram slideshow slide send failed: connection timeout or proxy unavailable")
               else:
                     # Группы по 10 без хвоста из 1 (жёсткое требование Telegram 2–10); первая — ответом на ссылку.
                    chunks = _chunk_tiktok_media_items(media_items)
                    for chunk_idx, chunk in enumerate(chunks):
-                        await bot.bot.send_media_group(
+                        sent_chunk = await bot._tg_call(
+                             bot.bot.send_media_group,
                              chat_id=message.chat.id, media=chunk,
                              reply_to_message_id=message.message_id if chunk_idx == 0 else None,
+                             call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+                             retries=0,
                         )
+                        if sent_chunk is None:
+                             raise RuntimeError("Telegram send_media_group failed: connection timeout or proxy unavailable")
                         if chunk_idx + 1 < len(chunks):
                               # Пауза между группами — против анти-флуда.
                              await asyncio.sleep(0.3)
@@ -311,12 +348,13 @@ async def _send_tiktok_single_video(
     session: aiohttp.ClientSession, media_data: dict, message: Message, status: Message | None,
     author: str, headers: dict,
 ) -> None:
-    """Пробуем качества HD → обычное → с водяным; EntityTooLarge — следующий вариант, не сдаёмся."""
+    """Пробуем качества HD → обычное → с водяным; переполнение лимита — следующий вариант, не сдаёмся."""
     import bot
     # Качества HD → обычное → с водяным (раньше без HD); EntityTooLarge — следующий вариант.дальше.
     video_candidates = _tiktok_video_candidates(media_data)
     if video_candidates:
          hit_size_limit = False
+         send_failed = False
          for candidate in video_candidates:
               if candidate["size"] and candidate["size"] > bot.TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES:
                     # Заранее большой размер пропускаем без скачивания и помечаем hit_size_limit, чтобы дать честное "слишком большое".
@@ -370,21 +408,29 @@ async def _send_tiktok_single_video(
               if thumb_bytes:
                    send_kwargs["thumbnail"] = BufferedInputFile(thumb_bytes, filename="thumb.jpg")
 
-              try:
-                   await bot.bot.send_video(**send_kwargs)
-              except TelegramEntityTooLarge:
-                   # Реальный размер больше лимита, хотя заявленный был неточен — пробуем следующий, более лёгкий вариант.
-                   hit_size_limit = True
-                   log.warning(
-                        '[tiktok] Variant %s (%s, %d bytes) exceeded the Telegram limit when sending — trying the next quality option.',
-                        candidate["key"], candidate["label"], len(video_bytes),
-                   )
+              # Реальный размер уже скачан: больше лимита сюда не приезжает
+              # (кап скачивания выше), заявленный перебор отсеян до скачивания.
+              # Проверка лимита Telegram — парой выше, здесь только отправка.
+              # Через _tg_call: breaker-гейт, таймаут и RetryAfter. None — сбой
+              # отправки: пробуем следующий вариант, как раньше при исключении.
+              # Без слепого ретрая: повтор отправки после сбоя дал бы дубль.
+              sent_video = await bot._tg_call(
+                   bot.bot.send_video, **send_kwargs,
+                   call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+                   retries=0,
+              )
+              if sent_video is None:
+                   send_failed = True
                    continue
 
               await _send_tiktok_music(session, media_data, message, author, headers)
               await bot._delete_message_quietly(status)
               return
 
+         if send_failed:
+              # Варианты скачались, но ни один не ушёл в Telegram — честная
+              # ошибка отправки, а не "контент удалён".
+              raise RuntimeError("Telegram send_video failed: connection timeout or proxy unavailable")
          if hit_size_limit:
               # Скачался, но ни один вариант не влез в лимит — отличаем от "TikTok ничего не отдал" (иначе вводящее "контент удалён").
                raise TikTokUserFacingError(

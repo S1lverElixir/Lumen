@@ -280,6 +280,18 @@ async def _chat_completion_chain(
                     label, model_trial,
                 )
                 raise
+            # 429 — в карантин/остывку, как стриминг выше. Account-wide сюда не
+            # доходит: stop_on выше уже оборвал цепочку без метки (иначе метка
+            # каскадом расползлась бы по всем моделям, хотя лимит общий).
+            try:
+                _txt = bot._error_text(exc).strip() or exc.__class__.__name__
+                if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":
+                    if bot._is_account_wide_or_rate_limit(_txt.lower()):
+                        bot._mark_quota_exhausted(provider, model_trial)
+                    else:
+                        bot._mark_rate_limited(provider, model_trial)
+            except Exception:
+                pass
             log.warning("[%s] Model %s failed: %s. Switching to next candidate...", label, model_trial, str(last_exc) or last_exc.__class__.__name__)
 
     if last_exc:
@@ -750,7 +762,7 @@ async def ask_gemini(
              if _is_gemini_supported_mime(mime):
                  extra_parts.append(types.Part.from_bytes(data=b, mime_type=mime))
              else:
-                 raise ValueError(f"Тип вложения '{mime}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
+                 raise bot.UserFacingInputError(f"Тип вложения '{mime}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
     if youtube_url:
           # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))
@@ -824,8 +836,13 @@ async def ask_gemini(
                     log.warning("[gemini] Model %s quota exhausted (429). Switching to %s", curr_model_id, next_model)
                     curr_model_id = next_model
                     continue
-                log.warning("[gemini] All Gemini models in route exhausted their quota (429): %s", ", ".join(quota_exhausted_models))
-                raise bot.GeminiAllModelsExhaustedError(quota_exhausted_models) from exc
+                if quota_exhausted_models:
+                    log.warning("[gemini] All Gemini models in route exhausted their quota (429): %s", ", ".join(quota_exhausted_models))
+                    raise bot.GeminiAllModelsExhaustedError(quota_exhausted_models) from exc
+                # Одни минутные всплески: суточного исчерпания не было — отдаём
+                # последний 429 как есть, а не пустой "исчерпано всё".
+                log.warning("[gemini] All Gemini models in route rate-limited (429), no daily exhaustion.")
+                raise
 
             # Остальные исходы — одна попытка и сразу следующая модель, без ретраев.
             next_model = bot._next_fallback_model(tried_models, chain)

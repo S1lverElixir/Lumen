@@ -78,12 +78,16 @@ class GeminiAllModelsExhaustedError(RuntimeError):
         self.exhausted_models = exhausted_models
         super().__init__(f"All Gemini models exhausted quota: {', '.join(exhausted_models)}")
 
+
+class UserFacingInputError(ValueError):
+    """Готовый пользовательский текст (проверен при написании): показывается как есть."""
+
 def _next_fallback_model(tried_models: set[str], chain: list[str]) -> str | None:
     """Первая непробованная из цепочки: один источник вместо трёх копий в ask_gemini."""
     return next((m for m in chain if m not in tried_models), None)
 
 def _gemini_error_msg(e: Exception, model_id: str, lang: str = DEFAULT_LANG) -> str:
-    if isinstance(e, ValueError):
+    if isinstance(e, UserFacingInputError):
         return str(e)
     if isinstance(e, GeminiAllModelsExhaustedError):
         return _lang_t(lang, "err_quota_exhausted")

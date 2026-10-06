@@ -94,14 +94,11 @@ def _stream_wait(bot: Any, deadline: float | None) -> float:
 async def _gemini_stream_pieces(model_id: str, call_contents: list, gconfig, *, deadline: float | None = None):
     """Куски от Gemini (тонкая обёртка над generate_content_stream).
 
-    Рукопожатия как отдельного шага НЕТ намеренно: generate_content_stream
-    возвращает генератор, не делая сети (проверено по исходнику google-genai
-    2.24.0: тело — `return stream_generator()`), поэтому wait_for вокруг вызова
-    ограничивал только мгновенное создание объекта и никогда не срабатывал —
-    витрина таймаута без защиты (враждебное ревью 27.09.2026). Реальную сетевую
-    жду ловлю ниже: первый кусок идёт через __anext__ под тем же _stream_wait."""
+    В google-genai 2.27.0 это async def: вызов надо ждать (пример из SDK:
+    `async for chunk in await client.aio.models.generate_content_stream(...)`).
+    Реальную сетевую жду ловлю ниже: первый кусок идёт через __anext__ под тем же _stream_wait."""
     import bot
-    stream = bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig)
+    stream = await bot.client.aio.models.generate_content_stream(model=model_id, contents=call_contents, config=gconfig)
     stream_iter = stream.__aiter__()
     try:
         while True:
@@ -369,9 +366,13 @@ async def _run_streaming_reply(
             for step_len in _typing_catchup_steps(remaining_len, typing_speed, bot.STREAM_TYPING_TICK_SEC, bot.STREAM_TYPING_MAX_CATCHUP_TICKS):
                 await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
                 current_chunk_text = target_full[:already_shown_len + step_len]
-                if current_chunk_text != last_edited_plain:
+                # Довывод правится тем же троттлингом, что основной цикл: тик
+                # короче интервала правок, иначе серия быстро ловти 429.
+                now = time.monotonic()
+                if current_chunk_text != last_edited_plain and now - last_edit_ts >= bot.STREAM_EDIT_MIN_INTERVAL_SEC:
                     await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0)
                     last_edited_plain = current_chunk_text
+                    last_edit_ts = now
 
         # Финал — с полной HTML-конвертацией (во время стрима голый текст: частичный markdown дал бы несбалансированные теги).
         final_text = final_chunks[-1]
@@ -392,7 +393,10 @@ async def _run_streaming_reply(
             try:
                 _txt = bot._error_text(exc).strip() or exc.__class__.__name__
                 if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":
-                    if bot._is_account_wide_or_rate_limit(_txt.lower()):
+                    # Дневную квоту опознаём предикатом провайдера, как текстовый
+                    # путь: общий account-wide ловит только OpenRouter-тексты.
+                    _daily = bot._is_gemini_daily_quota(_txt) if provider == "gemini" else bot._is_account_wide_or_rate_limit(_txt.lower())
+                    if _daily:
                         bot._mark_quota_exhausted(provider, model_id)
                     else:
                         bot._mark_rate_limited(provider, model_id)

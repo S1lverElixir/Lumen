@@ -229,7 +229,7 @@ def test_tikwm_proxy_candidates_primary_plus_fallbacks_deduped():
 
 def test_proxy_middleware_sends_secret_only_to_configured_proxy():
     _, _, seen = _run_proxy_middleware("https://proxy.example/fetch/api.telegram.org/bot123/sendMessage")
-    assert seen["sent"].get("X-Lumen-Proxy-Secret") == "proxy-secret-abc"
+    assert seen["sent"].get("X-Lumen-Proxy-Secret") == "proxy-secret-abc-0123456789abcdef"
 
 
 def test_proxy_middleware_never_sends_secret_to_direct_or_unrelated_hosts():
@@ -254,6 +254,11 @@ def test_proxy_middleware_strips_stale_secret_and_requires_secret():
         lumen_telegram_transport.proxy_auth_middlewares(
             proxy_secret="", proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
         )
+    with pytest.raises(ValueError):
+        lumen_telegram_transport.proxy_auth_middlewares(
+            proxy_secret="short",
+            proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
+        )
 
 
 def test_proxy_middleware_rejects_authenticated_redirects():
@@ -264,7 +269,7 @@ def test_proxy_middleware_rejects_authenticated_redirects():
     from yarl import URL
 
     (authenticate,) = lumen_telegram_transport.proxy_auth_middlewares(
-        proxy_secret="proxy-secret-abc",
+        proxy_secret="proxy-secret-abc-0123456789abcdef",
         proxy_base_urls=("https://proxy.example/fetch/api.telegram.org",),
     )
 
@@ -306,6 +311,85 @@ def _save_breaker_state():
 def _restore_breaker_state(saved):
     breaker = bot._tg_proxy_breaker
     breaker.consecutive_failures, breaker.down_until, breaker.down_logged_at = saved
+
+
+def test_ipv4_session_request_timeout_matches_session_total():
+    # aiogram кладёт self.timeout (дефолт 60с) на каждый запрос поверх дефолта
+    # сессии: без явного значения здесь действовали бы 60с, а не total=30.
+    import lumen_telegram_transport
+    sess = lumen_telegram_transport.IPv4AiohttpSession(proxy_secret="x", proxy_base_urls=())
+    try:
+        assert sess.timeout == 30.0
+    finally:
+        asyncio.run(sess.close())
+
+
+def test_tg_call_does_not_retry_send_after_timeout(monkeypatch):
+    # Повтор отправки после таймаута (исход неизвестен) давал дубли сообщений.
+    from aiogram.exceptions import TelegramNetworkError
+    calls = []
+
+    async def flaky_send(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise asyncio.TimeoutError("slow proxy")
+        return "ok"
+
+    async def slow_aiogram(**kwargs):
+        raise TelegramNetworkError(method=MagicMock(), message="Request timeout error")
+
+    saved = _save_breaker_state()
+    try:
+        assert asyncio.run(bot._tg_call(flaky_send, retries=1)) is None
+        assert asyncio.run(bot._tg_call(slow_aiogram, retries=1)) is None
+    finally:
+        _restore_breaker_state(saved)
+    assert len(calls) == 1
+
+
+def test_handle_proxy_failure_does_not_reenter_on_failing_notify(monkeypatch):
+    # Реентрантность: на пороге _notify_owner идёт ДО trip() через _tg_call;
+    # падение того же прокси звало _handle_proxy_failure снова (счётчик уже за
+    # порогом) — цепочка повторялась. Вложенный сбой не запускает вторую ветку.
+    import json
+    from types import SimpleNamespace
+
+    entries = []
+    real_handler = bot._handle_proxy_failure
+
+    class _Brake(Exception):
+        pass
+
+    async def counting_handler(context):
+        entries.append(context)
+        if len(entries) > 2:
+            raise _Brake()
+        await real_handler(context)
+
+    async def always_garbage(**kwargs):
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    async def fake_rotate():
+        return False
+
+    async def fake_sleep(sec):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(bot, "_handle_proxy_failure", counting_handler)
+    monkeypatch.setattr(bot, "_rotate_telegram_proxy", fake_rotate)
+    monkeypatch.setattr(bot, "OWNER_ID", 999001)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_message=always_garbage))
+    saved = _save_breaker_state()
+    breaker = bot._tg_proxy_breaker
+    breaker.consecutive_failures = breaker.trip_threshold - 1
+    breaker.down_until = 0.0
+    try:
+        asyncio.run(bot._handle_proxy_failure("probe"))
+        # Внешний вызов + один вложенный из уведомления, дальше ветка закрыта.
+        assert len(entries) == 2
+    finally:
+        _restore_breaker_state(saved)
 
 
 def test_tg_call_waits_retry_after_before_retry(monkeypatch):
@@ -356,13 +440,14 @@ def test_tg_call_does_not_retry_client_errors(monkeypatch, exc_cls):
 
 def test_tg_call_still_retries_transient_errors(monkeypatch):
     # Сторож к A8-02: запрет повторов 4xx не должен отменять ретраи сетевых сбоев.
+    # Таймауты сюда не входят: повтор после таймаута давал дубли (исход неизвестен).
     calls = []
     slept = []
 
     async def flaky():
         calls.append(1)
         if len(calls) == 1:
-            raise TimeoutError("boom")
+            raise ConnectionResetError("boom")
         return "ok"
 
     async def fake_sleep(sec):

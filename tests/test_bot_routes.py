@@ -91,10 +91,10 @@ def test_gemini_error_msg_rate_limit():
 
 
 def test_gemini_error_msg_value_error_passthrough():
-    # ValueError используется в ask_gemini как готовый пользовательский текст
-    # (например про неподдерживаемый тип вложения) — должен вернуться как есть.
-    exc = ValueError("кастомная ошибка")
-    assert bot._gemini_error_msg(exc, "gemini-3.5-flash") == "кастомная ошибка"
+    # Только UserFacingInputError используется в ask_gemini как готовый
+    # пользовательский текст — остальной ValueError идёт общим шаблоном.
+    assert bot._gemini_error_msg(bot.UserFacingInputError("кастомная ошибка"), "gemini-3.5-flash") == "кастомная ошибка"
+    assert bot._gemini_error_msg(ValueError("/secret/path model-xyz"), "gemini-3.5-flash") != "/secret/path model-xyz"
 
 
 def test_gemini_error_msg_all_models_exhausted():
@@ -874,6 +874,35 @@ def test_ask_gemini_burst_429_only_cools_down_the_model():
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.6-flash", None)
 
 
+@pytest.mark.parametrize(("provider", "exc_cls_name"), [
+    ("openrouter", "OpenRouterAPIError"),
+    ("groq", "GroqAPIError"),
+])
+def test_chat_completion_chain_cools_down_model_on_429(provider, exc_cls_name):
+    # Нестриминговые OpenRouter/Groq не писали cooldown после 429 — зеркалим
+    # стриминг, иначе _is_quota_exhausted их не видит и модель долбят заново.
+    import lumen_routes
+    exc_cls = getattr(bot, exc_cls_name)
+
+    async def boom_429(payload, deadline):
+        raise exc_cls("HTTP 429 rate limit", status_code=429)
+
+    model = f"probe/rl-{provider}:free"
+    bot.GLOBAL_QUOTA.setdefault(provider, {}).pop(model, None)
+    try:
+        with pytest.raises(exc_cls):
+            asyncio.run(lumen_routes._chat_completion_chain(
+                [{"role": "system", "content": ""}, {"role": "user", "content": "hi"}],
+                [model], model, request_fn=boom_429, provider=provider,
+            ))
+        entry = bot.GLOBAL_QUOTA[provider][model]
+        assert entry["exhausted_at"] is None, "минутный всплеск не должен запирать модель до утра"
+        assert entry["cooldown_until"] > time.time()
+        assert lumen_router_config._is_quota_exhausted(provider, model) is True
+    finally:
+        bot.GLOBAL_QUOTA[provider].pop(model, None)
+
+
 def test_ask_gemini_raises_all_models_exhausted_when_entire_chain_429s():
     chat_id = 999011
 
@@ -891,6 +920,31 @@ def test_ask_gemini_raises_all_models_exhausted_when_entire_chain_429s():
         with pytest.raises(bot.GeminiAllModelsExhaustedError) as exc_info:
             asyncio.run(bot.ask_gemini(chat_id, "Привет", model_chain=["gemini-3.6-flash", "gemini-2.5-flash"]))
         assert set(exc_info.value.exhausted_models) == {"gemini-3.6-flash", "gemini-2.5-flash"}
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.6-flash", None)
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash", None)
+
+
+def test_ask_gemini_minute_429s_do_not_raise_empty_exhausted():
+    # Одни минутные всплески: суточного исчерпания не было — последний 429
+    # идёт как есть, а не пустой "исчерпано всё".
+    chat_id = 999017
+
+    class _Minute429(Exception):
+        status_code = 429
+
+    def fake_generate_content(*, model, contents, config=None):
+        raise _Minute429("RESOURCE_EXHAUSTED: quota exceeded for quota metric Generate requests per minute")
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        with pytest.raises(_Minute429):
+            asyncio.run(bot.ask_gemini(chat_id, "Привет", model_chain=["gemini-3.6-flash", "gemini-2.5-flash"]))
     finally:
         bot.client = original_client
         bot.chat_state.pop(chat_id, None)

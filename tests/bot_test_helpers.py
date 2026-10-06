@@ -264,11 +264,20 @@ class _FakeSessionForSSE:
 
 class _FakeWebhookRequest:
     def __init__(self, headers: dict | None = None, body: dict | None = None):
+        import json as _json
         self.headers = headers or {}
         self._body = body or {}
+        self._raw = _json.dumps(self._body).encode("utf-8")
+        self.json_calls = 0
+        self.body_calls = 0
 
     async def json(self):
+        self.json_calls += 1
         return self._body
+
+    async def body(self):
+        self.body_calls += 1
+        return self._raw
 
 
 async def _run_webhook_handler(req: "_FakeWebhookRequest") -> dict:
@@ -336,16 +345,15 @@ class _FakeTikTokSession:
 
 
 class _FakeTikwmApiResponse:
-    def __init__(self, status=200, json_body=None, body_bytes=b""):
+    def __init__(self, status=200, json_body=None, body_bytes: bytes | None = None):
         import json as _json
         self.status = status
         self._json_body = json_body or {}
-        self._body_bytes = body_bytes
-        # Честный фейк (см. _FakeTikTokResponse): контент из json, если байты не заданы.
+        # Явно заданные байты (включая пустые) едут и в read(), и в стрим,
+        # как у настоящего ответа.
+        self._body_bytes = body_bytes if body_bytes is not None else _json.dumps(self._json_body).encode("utf-8")
         self.headers = {}
-        self.content = _FakeDownloadContent(
-            [body_bytes] if body_bytes else [_json.dumps(self._json_body).encode("utf-8")]
-        )
+        self.content = _FakeDownloadContent([self._body_bytes])
 
     async def __aenter__(self):
         return self
@@ -439,7 +447,7 @@ class _FakeProc:
         return self.returncode
 
 
-def _run_proxy_middleware(url, *, secret="proxy-secret-abc", bases=("https://proxy.example/fetch/api.telegram.org",), headers=None):
+def _run_proxy_middleware(url, *, secret="proxy-secret-abc-0123456789abcdef", bases=("https://proxy.example/fetch/api.telegram.org",), headers=None):
     from multidict import CIMultiDict
     from yarl import URL
 

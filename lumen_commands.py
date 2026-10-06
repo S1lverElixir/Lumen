@@ -46,6 +46,8 @@ log = logging.getLogger("bot")
 
 async def cmd_start(message: Message) -> None:
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     # Лимит и здесь: хендлер зарегистрирован раньше общего catch-all, поэтому
     # сообщение до _reject_rate_limited_message не доходило — спамер получал
     # бесконечные ответы в группе, расходуя прокси-трафик (аудит 26.09.2026).
@@ -63,6 +65,18 @@ async def cmd_start(message: Message) -> None:
 
 async def inline_draw(message: Message, prompt: str) -> None:
     import bot
+    # Дневной лимит пользователя, как у озвучки: проба без создания.
+    uid = bot._user_key_for_message(message)
+    _draw_entry = bot._user_daily_peek(uid)
+    if bot._user_daily_total_exhausted(uid, _draw_entry):
+        hours, mins = bot._user_daily_reset_in()
+        bot._record_stats_event("daily_limit_denials")
+        await bot._safe_reply(message, bot._t(
+            message.chat.id, "user_daily_total",
+            used=(_draw_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _draw_entry),
+            hours=hours, mins=mins,
+        ))
+        return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_generating_image"))
     try:
         session = await bot._get_http_session()
@@ -91,7 +105,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 # Статус без названий моделей (см. ИДЕНТИЧНОСТЬ в system_prompt.py); на первой попытке статус и так стоит.
                 if attempt_model != primary_model:
                     await bot._edit_message_quietly(status, bot._t(message.chat.id, "status_taking_longer"))
-                image_bytes = await bot._pollinations_text_to_image(session, attempt_model, prompt)
+                # Таймаут попытки — остаток общего бюджета: зависшая модель не
+                # переживает дедлайн цепочки.
+                attempt_timeout = max(1.0, deadline - time.monotonic())
+                image_bytes = await bot._pollinations_text_to_image(session, attempt_model, prompt, timeout_sec=attempt_timeout)
                 break
             except Exception as exc:
                 last_error = exc
@@ -124,6 +141,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
             if sent is None:
                 raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
             # Суточный счётчик /stats: картинка ушла пользователю.
+            bot._record_user_daily(uid)
             bot._record_stats_event("answers_sent")
         else:
             if rate_limited:
@@ -155,6 +173,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
 
 async def cmd_draw(message: Message) -> None:
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     prompt = message.text.partition(" ")[2].strip() if message.text else ""
     if not prompt:
         await bot._safe_reply(message, bot._t(message.chat.id, "draw_empty"))
@@ -321,9 +341,16 @@ async def inline_tts(message: Message, text: str) -> None:
         return
     # Дневные лимиты пользователя: общий и отдельный на озвучку (он же тратит квоту Gemini TTS).
     # Проба без создания: отказ не заводит запись и не раздувает day_users.
+    # Считаем сразу все чанки: каждый — отдельный синтез, иначе длинный текст
+    # уводил бы счётчик за лимит.
     uid = bot._user_key_for_message(message)
     _tts_entry = bot._user_daily_peek(uid)
-    if bot._user_daily_total_exhausted(uid, _tts_entry):
+    try:
+        _tts_over_total = int((_tts_entry or {}).get("total") or 0) + len(chunks) > bot._user_daily_limit(uid, "total", _tts_entry)
+        _tts_over_tts = int((_tts_entry or {}).get("tts") or 0) + len(chunks) > bot._user_daily_limit(uid, "tts", _tts_entry)
+    except (TypeError, ValueError):
+        _tts_over_total = _tts_over_tts = False
+    if bot._user_daily_total_exhausted(uid, _tts_entry) or _tts_over_total:
         hours, mins = bot._user_daily_reset_in()
         # Суточный счётчик /stats: отказ по лимиту, озвучки не будет.
         bot._record_stats_event("daily_limit_denials")
@@ -333,7 +360,7 @@ async def inline_tts(message: Message, text: str) -> None:
             hours=hours, mins=mins,
         ))
         return
-    if bot._user_daily_tts_exhausted(uid, _tts_entry):
+    if bot._user_daily_tts_exhausted(uid, _tts_entry) or _tts_over_tts:
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
             message.chat.id, "user_daily_tts",
@@ -388,8 +415,8 @@ async def inline_tts(message: Message, text: str) -> None:
         )
         if sent is None:
             raise RuntimeError("Telegram send_voice failed: connection timeout or proxy unavailable")
-    # Один запрос — один счёт: чанки одного сообщения не множат дневной расход.
-    bot._record_user_daily(uid, tts=True)
+        # Каждый чанк — отдельный синтез за квоту: списываем поштучно.
+        bot._record_user_daily(uid, tts=True)
     bot._record_stats_event("answers_sent")
     if shortened:
         # Обрезка по общему дедлайну — говорим прямо, что озвучено начало.
@@ -397,6 +424,8 @@ async def inline_tts(message: Message, text: str) -> None:
 
 async def cmd_tts(message: Message) -> None:
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     text = message.text.partition(" ")[2].strip() if message.text else ""
     if not text:
         await bot._safe_reply(message, bot._t(message.chat.id, "tts_empty"))
@@ -409,6 +438,8 @@ async def cmd_tts(message: Message) -> None:
 async def cmd_reset(message: Message) -> None:
     """Сброс истории чата. В меню. Личка — всем, группа — админам/владельцу."""
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     requester_id = message.from_user.id if message.from_user else None
     if not await bot._is_privileged_in_chat(message.chat.type, message.chat.id, requester_id):
         await bot._tg_call(
@@ -428,6 +459,8 @@ async def cmd_reset(message: Message) -> None:
 # ── Язык системных сообщений (/lang) — ответы ИИ не трогает (см. RESPONSE LANGUAGE в system_prompt.py). Права как у /reset; кнопки без флагов/эмодзи, текущий — с ✓, меню по алфавиту кода.
 async def cmd_lang(message: Message) -> None:
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     lang = bot._chat_lang(message.chat.id)
     rows = []
     codes = list(SUPPORTED_LANGS)
@@ -450,6 +483,10 @@ async def cmd_lang(message: Message) -> None:
 async def handle_lang_callback(query: CallbackQuery) -> None:
     """Кнопка языка ("lang:<код>", влезает в лимит 64 байт): права, сохранение, подтверждение на новом языке."""
     import bot
+    if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
     data = query.data or ""
     if not data.startswith("lang:"):
         return
@@ -521,17 +558,17 @@ async def cmd_logs(message: Message) -> None:
             log_content = log_content.replace(secret, "<REDACTED>")
 
         # пишем во временный файл, чтобы не ловить блокировку на живом логе
-        tmp_dir = tempfile.gettempdir()
-        temp_log_path = os.path.join(tmp_dir, "logs.txt")
-        with open(temp_log_path, "w", encoding="utf-8", errors="ignore") as f:
-            f.write(log_content)
-
-        await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
-
+        fd, temp_log_path = tempfile.mkstemp(prefix="logs_", suffix=".txt")
         try:
-            os.unlink(temp_log_path)
-        except Exception:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
+                f.write(log_content)
+
+            await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
+        finally:
+            try:
+                os.unlink(temp_log_path)
+            except Exception:
+                pass
     except Exception as exc:
         log.exception("Error extracting or sending logs:")
         await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
@@ -896,7 +933,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
     import bot
     _purge_expired_picks()
     _enforce_pending_picks_cap()
-    token = secrets.token_hex(4)
+    token = secrets.token_hex(8)
     lang = bot._chat_lang(message.chat.id)
     bot._pending_picks[token] = {
         "chat_id": message.chat.id,
@@ -921,7 +958,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
 async def handle_pick_callback(query: CallbackQuery) -> None:
     """Кнопки-уточнения: чужие отклоняем, протухшие известные перевыпускаем разок, выбор дописываем к запросу и гоним обычным путём (_handle_message_core)."""
     import bot
-    if query.from_user is not None and bot._is_banned(query.from_user.id):
+    if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
         # Забаненный и кнопками не отвечает: иначе игнор обходился живыми пиками.
         with contextlib.suppress(Exception):
             await query.answer()
@@ -975,7 +1012,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
             bot._pending_picks.pop(token, None)
             _purge_expired_picks()
             _enforce_pending_picks_cap()
-            fresh = secrets.token_hex(4)
+            fresh = secrets.token_hex(8)
             bot._pending_picks[fresh] = {
                 "chat_id": rec.get("chat_id"),
                 "user_id": rec.get("user_id"),

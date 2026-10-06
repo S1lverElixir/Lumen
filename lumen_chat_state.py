@@ -22,7 +22,6 @@ from lumen_state_storage import (
     StorageConfig,
     _chat_storage_key,
     _serialize_chat_state,
-    _upstash_request as _lumen_upstash_request,
     _upstash_set as _lumen_upstash_set,
     _upstash_get as _lumen_upstash_get,
     _upstash_delete as _lumen_upstash_delete,
@@ -76,10 +75,6 @@ def _storage_config() -> StorageConfig:
         upstash_token=bot.UPSTASH_REDIS_REST_TOKEN, chats_dir=_CHATS_DIR,
     )
 
-
-def _upstash_request(command_path: str, *, method: str = "GET", body: bytes | None = None) -> Any:
-    import bot
-    return _lumen_upstash_request(bot.UPSTASH_REDIS_REST_URL, bot.UPSTASH_REDIS_REST_TOKEN, command_path, method=method, body=body)
 
 def _upstash_set(key: str, value: str) -> None:
     import bot
@@ -453,17 +448,36 @@ _dirty_chat_ids: set[int] = set()
 _pending_chat_deletions: set[int] = set()
 _index_dirty = False
 _quota_dirty = False
+# Поколения мутаций под гонку "payload построен — запись висит — состояние
+# изменилось": флаш сбрасывает флаг, только если поколение не выросло за время
+# записи, иначе изменение терялось бы до следующей мутации.
+_index_generation = 0
+_quota_generation = 0
 # Отказ стартовой загрузки: пока стоит, индекс и квоту не перезаписываем,
 # иначе первый флаш затрёт хорошие удалённые данные пустым снимком (аудит A5-2).
 _state_load_failed = False
 FLUSH_INTERVAL_SEC = 10.0
 # Конкурентность флаша — семафором: всплеск "грязных" чатов иначе породил бы сотни параллельных HTTP к Upstash.
-STATE_FLUSH_CONCURRENCY = int(os.getenv("STATE_FLUSH_CONCURRENCY", "10"))
-_state_flush_semaphore = asyncio.Semaphore(STATE_FLUSH_CONCURRENCY)
+def _flush_concurrency() -> int:
+    """Лениво через bot._env_number: голый int() ронял импорт на мусоре,
+    а 0 давал висящий семафор."""
+    import bot
+    return bot._env_number("STATE_FLUSH_CONCURRENCY", 10, cast=int, min_value=1)
+
+
+_state_flush_semaphore: asyncio.Semaphore | None = None
+
+
+def _flush_semaphore() -> asyncio.Semaphore:
+    """Один семафор на процесс, создаётся при первом флаше."""
+    global _state_flush_semaphore
+    if _state_flush_semaphore is None:
+        _state_flush_semaphore = asyncio.Semaphore(_flush_concurrency())
+    return _state_flush_semaphore
 
 async def _save_chat_to_storage_limited(chat_id: int, state: dict[str, Any]) -> bool:
     import bot
-    async with _state_flush_semaphore:
+    async with _flush_semaphore():
         # Снапшот JSON — ЗДЕСЬ, а не в потоке: dumps без await атомарен для loop'а,
         # а живой state в to_thread могли мутировать между итерациями (битый снапшот).
         try:
@@ -486,7 +500,7 @@ def _save_chat_payload(chat_id: int, payload: str) -> bool:
 
 async def _delete_chat_storage_limited(chat_id: int) -> bool:
     import bot
-    async with _state_flush_semaphore:
+    async with _flush_semaphore():
         return await asyncio.to_thread(bot._delete_chat_storage, chat_id)
 
 def mark_state_dirty(chat_id: int | None = None) -> None:
@@ -494,12 +508,13 @@ def mark_state_dirty(chat_id: int | None = None) -> None:
     Явный chat_id (предпочтительный путь для нового кода) — помечает "грязным"
     ТОЛЬКО этот чат, ничего больше. Вызов БЕЗ chat_id (миграция из старого
     общего блоба) помечает "грязными" вообще все текущие чаты и индекс целиком."""
-    global _index_dirty
+    global _index_dirty, _index_generation
     if chat_id is not None:
         _dirty_chat_ids.add(chat_id)
     else:
         _dirty_chat_ids.update(chat_state.keys())
         _index_dirty = True
+        _index_generation += 1
 
 def _mark_new_chat_id(chat_id: int) -> None:
     """Регистрирует НОВЫЙ chat_id, только что появившийся в chat_state (см.
@@ -507,13 +522,15 @@ def _mark_new_chat_id(chat_id: int) -> None:
     чат без индекса, после рестарта его данные будут недостижимы: per-chat ключ
     существует, но индекс (единственный способ узнать список ID при чтении) о
     нём не знает."""
-    global _index_dirty
+    global _index_dirty, _index_generation
     _dirty_chat_ids.add(chat_id)
     _index_dirty = True
+    _index_generation += 1
 
 def mark_quota_dirty() -> None:
-    global _quota_dirty
+    global _quota_dirty, _quota_generation
     _quota_dirty = True
+    _quota_generation += 1
 
 async def _flush_dirty_state_once() -> None:
     """Тело ОДНОЙ итерации периодического сброса состояния — вынесено из
@@ -565,16 +582,22 @@ async def _flush_dirty_state_once() -> None:
                 log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
             else:
                 index_payload = json.dumps(sorted(chat_state.keys()))
+                started_index_generation = _index_generation
                 if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
-                    _index_dirty = False
+                    # Сбрасываем, только если за время записи никто не мутировал:
+                    # иначе свежий снимок уже устарел и флаг обязан жить дальше.
+                    if _index_generation == started_index_generation:
+                        _index_dirty = False
         if _quota_dirty:
             if _state_load_failed:
                 # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
                 log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
             else:
                 quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
+                started_quota_generation = _quota_generation
                 if await asyncio.to_thread(bot._save_quota_payload, quota_payload):
-                    _quota_dirty = False
+                    if _quota_generation == started_quota_generation:
+                        _quota_dirty = False
     except Exception as exc:
         log.warning('[state] Periodic state flush failed: %s', exc)
 
@@ -697,6 +720,11 @@ def load_state_from_disk() -> None:
     try:
         raw = bot._storage_read_text("lumen:chat_state", STATE_FILE_PATH)
         if not raw:
+            if index_raw is not None:
+                # Индекс был, но не разобрался, а legacy нет: удалённые per-chat
+                # данные новее пустой памяти — следующий флаш их бы затирал.
+                _state_load_failed = True
+                log.warning("[state] Chat index unreadable and no legacy blob, keeping remote data intact.")
             return
         loaded = json.loads(raw)
         for chat_id_str, s in loaded.items():
@@ -777,7 +805,7 @@ def _t_no_create(chat_id: int | None, key: str, **kwargs: Any) -> str:
 
 def _prune_old_chats() -> None:
     import bot
-    global _index_dirty
+    global _index_dirty, _index_generation
     sorted_ids = sorted(chat_state.keys(), key=lambda cid: chat_state[cid].get("last_activity", 0))
     # Лок ЗАНЯТ = в чате идёт ответ. Такой чат вытеснять нельзя: идущий маршрут
     # продолжал бы писать в отвязанный state, а следующее сообщение создало бы
@@ -804,6 +832,7 @@ def _prune_old_chats() -> None:
     if removed_ids:
         # Неизменённые чаты не пачкаем: иначе следующий флаш перезаписывал тысячи лишних ключей.
         _index_dirty = True
+        _index_generation += 1
 
 def get_chat_lock(chat_id: int) -> asyncio.Lock:
     import bot

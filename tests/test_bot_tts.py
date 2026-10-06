@@ -533,3 +533,66 @@ def test_inline_tts_records_user_daily_on_success(monkeypatch):
         bot.chat_state.pop(999989, None)
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
 
+
+def test_inline_tts_charges_each_synthesized_chunk():
+    # Каждый чанк — отдельный синтез за квоту: списываем поштучно, а не раз за сообщение.
+    limit = bot.TTS_MAX_CHARS
+    part = "Предложение номер раз про интересные вещи. "
+    text = part * ((limit // len(part)) + 2)
+    assert len(text) > limit
+
+    incoming = _FakeIncomingMessage(999810)
+    incoming.message_id = 12360
+    incoming.from_user = SimpleNamespace(id=777015)
+
+    original_client = bot.client
+    original_bot = bot.bot
+    bot.client = _wav_client()
+    counting = _CountingVoiceBot()
+    bot.bot = counting
+    try:
+        asyncio.run(bot.inline_tts(incoming, text))
+        assert len(counting.voices) == 2
+        entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("777015")
+        assert entry is not None
+        assert entry["tts"] == 2 and entry["total"] == 2
+    finally:
+        bot.client = original_client
+        bot.bot = original_bot
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777015", None)
+        bot.chat_state.pop(999810, None)
+
+
+def test_inline_tts_refuses_when_chunks_would_exceed_limit(monkeypatch):
+    # Проверка считает все чанки сразу: 4/5 + текст на 3 чанка — отказ до синтеза.
+    import lumen_commands
+    from types import SimpleNamespace
+    limit = bot.TTS_MAX_CHARS
+    part = "Предложение номер раз про интересные вещи. "
+    text = part * ((limit // len(part)) + 2)
+    assert len(text) > limit
+    incoming = _FakeIncomingMessage(999811)
+    incoming.message_id = 12361
+    incoming.from_user = SimpleNamespace(id=777016)
+    monkeypatch.setattr(bot, "DAILY_USER_TTS_LIMIT", 5)
+    for _ in range(4):
+        bot._record_user_daily(777016, tts=True)
+
+    async def fail_synth(chunk_text):
+        raise AssertionError("synthesis must not run when chunks exceed the limit")
+
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fail_synth)
+    replies = []
+
+    async def fake_safe_reply(msg, reply_text, **kwargs):
+        replies.append(reply_text)
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    try:
+        asyncio.run(bot.inline_tts(incoming, text))
+        assert len(replies) == 1
+        assert bot._user_daily_entry(777016)["tts"] == 4
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777016", None)
+        bot.chat_state.pop(999811, None)
+

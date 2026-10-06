@@ -271,9 +271,14 @@ def _is_quota_exhausted(provider: str, model_id: str) -> bool:
         return False
 
 def _skip_exhausted(provider: str, models: list[str]) -> list[str]:
-    """Убирает модели с меткой квоты и временным карантином, но никогда не возвращает пустой список: один заведомо мёртвый вариант честнее мгновенного отказа (аудит 26.09.2026)."""
+    """Убирает модели с меткой квоты и временным карантином. Все мёртвы — один первый разрешённый вариант (не из реестра исключённых): каждое сообщение платит максимум одно лишнее обращение, а не по одному за всю цепочку."""
     alive = [m for m in models if not _is_quota_exhausted(provider, m) and not _is_quarantined(provider, m)]
-    return alive or list(models)
+    if alive:
+        return alive
+    for candidate in models:
+        if candidate not in _ROUTER_EXCLUDED_OR_MODELS:
+            return [candidate]
+    return []
 
 # ── Временный карантин моделей ──
 # Только в памяти: N плохих ответов подряд (пусто или mush-каша) — и роутер

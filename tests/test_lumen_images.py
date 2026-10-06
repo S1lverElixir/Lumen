@@ -55,15 +55,19 @@ def test_pick_image_model_result_always_a_known_model():
 
 # ─────────────────────────── _pollinations_generate ───────────────────────────
 
-def test_pollinations_generate_accepts_jpeg_by_magic_bytes():
-    # Регрессия AUD-E-001: body[:4] никогда не равен 3-байтному b"\xff\xd8\xff",
-    # поэтому JPEG без image/* Content-Type отвергался как "не-изображение".
-    class FakeResp:
-        status = 200
-        headers = {"Content-Type": "application/octet-stream"}
+def _fake_image_session(body_chunks, *, status=200, headers=None, captured=None):
+    class FakeContent:
+        def iter_chunked(self, _n):
+            async def _gen():
+                for chunk in body_chunks:
+                    yield chunk
+            return _gen()
 
-        async def read(self):
-            return b"\xff\xd8\xff\xe0" + b"\x00" * 100
+    class FakeResp:
+        def __init__(self):
+            self.status = status
+            self.headers = headers or {}
+            self.content = FakeContent()
 
         async def __aenter__(self):
             return self
@@ -73,7 +77,44 @@ def test_pollinations_generate_accepts_jpeg_by_magic_bytes():
 
     class FakeSession:
         def get(self, url, timeout=None):
+            if captured is not None:
+                captured["timeout"] = timeout
             return FakeResp()
 
-    body = asyncio.run(lumen_images._pollinations_generate(FakeSession(), "flux", "кот"))
+    return FakeSession()
+
+
+def test_pollinations_generate_accepts_jpeg_by_magic_bytes():
+    # Регрессия AUD-E-001: body[:4] никогда не равен 3-байтному b"\xff\xd8\xff",
+    # поэтому JPEG без image/* Content-Type отвергался как "не-изображение".
+    session = _fake_image_session(
+        [b"\xff\xd8\xff\xe0" + b"\x00" * 100],
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    body = asyncio.run(lumen_images._pollinations_generate(session, "flux", "кот"))
     assert body[:3] == b"\xff\xd8\xff"
+
+
+def test_pollinations_generate_refuses_oversized_body(monkeypatch):
+    # Чтение без капа складывало в память тело любого размера: Content-Length
+    # врёт, поток перепроверяем по факту. Кап ужимаем, иначе тест лил бы 30 МБ.
+    monkeypatch.setattr(lumen_images, "POLLINATIONS_IMAGE_MAX_BYTES", 100)
+    big = b"\x89PNG" + b"\x00" * 200
+    with pytest.raises(RuntimeError):
+        asyncio.run(lumen_images._pollinations_generate(
+            _fake_image_session([big], headers={"Content-Type": "image/png"}), "flux", "кот"))
+    with pytest.raises(RuntimeError):
+        asyncio.run(lumen_images._pollinations_generate(
+            _fake_image_session(
+                [b"\x89PNG" + b"\x00" * 10],
+                headers={"Content-Type": "image/png", "Content-Length": "1000000"},
+            ), "flux", "кот"))
+
+
+def test_pollinations_generate_timeout_uses_given_budget():
+    # Таймаут попытки — остаток DRAW_TOTAL_BUDGET_SEC, а не фиксированные 90с.
+    captured = {}
+    session = _fake_image_session([b"\x89PNG" + b"\x00" * 10], captured=captured)
+    asyncio.run(lumen_images._pollinations_generate(session, "flux", "кот", timeout_sec=7.5))
+    assert captured["timeout"].total == 7.5
+    assert captured["timeout"].sock_connect == 12.0

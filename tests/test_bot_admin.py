@@ -89,6 +89,28 @@ def test_check_admin_key_rejects_wrong_or_missing_key():
         bot.ADMIN_PANEL_KEY = original
 
 
+def test_bearer_non_ascii_returns_false_not_500():
+    # compare_digest на str падает TypeError на не-ASCII: отказ без исключения.
+    original = bot.ADMIN_PANEL_KEY
+    bot.ADMIN_PANEL_KEY = "real-admin-key"
+    try:
+        assert bot._check_bearer_token(_FakeAdminRequest(headers={"Authorization": "Bearer café"}), "real-admin-key") is False
+        assert bot._check_admin_key(_FakeAdminRequest(headers={"Authorization": "Bearer café"})) is False
+    finally:
+        bot.ADMIN_PANEL_KEY = original
+
+
+def test_webhook_non_ascii_secret_returns_false_not_500():
+    original = bot.WEBHOOK_SECRET
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    try:
+        req = _FakeWebhookRequest(headers={"X-Telegram-Bot-Api-Secret-Token": "café"}, body={"update_id": 1})
+        result = asyncio.run(_run_webhook_handler(req))
+        assert result == {"ok": False}
+    finally:
+        bot.WEBHOOK_SECRET = original
+
+
 def test_webhook_handler_tracks_dispatched_task_for_shutdown():
     original_secret = bot.WEBHOOK_SECRET
     original_bot_obj = bot.bot
@@ -274,6 +296,99 @@ def test_webhook_handler_rejects_invalid_or_missing_secret_and_does_not_dispatch
         bot._process_raw_update = original_process
 
 
+def test_webhook_handler_rejects_oversized_body_before_reading():
+    # Тело сверх капа: отказ до разбора, сырые байты не читаем целиком.
+    import lumen_admin
+    original_secret = bot.WEBHOOK_SECRET
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    try:
+        req = _FakeWebhookRequest(
+            headers={
+                "X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret",
+                "Content-Length": str(lumen_admin.WEBHOOK_MAX_BODY_BYTES + 1),
+            },
+            body={"update_id": 1},
+        )
+        assert asyncio.run(_run_webhook_handler(req)) == {"ok": False}
+        assert req.body_calls == 0
+        # Заголовок соврал (маленький), тело большое — тоже отказ.
+        req2 = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 2},
+        )
+        req2._raw = b"x" * (lumen_admin.WEBHOOK_MAX_BODY_BYTES + 1)
+        assert asyncio.run(_run_webhook_handler(req2)) == {"ok": False}
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+
+
+def test_webhook_denied_log_is_throttled(caplog):
+    # Гроздья отклонений — одной строкой, а не WARNING на каждый запрос в очередь.
+    import logging
+    import lumen_admin
+    orig_count = lumen_admin._webhook_denied_count
+    orig_last = lumen_admin._webhook_denied_last_log
+    lumen_admin._webhook_denied_count = 0
+    lumen_admin._webhook_denied_last_log = 0.0
+    original_secret = bot.WEBHOOK_SECRET
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot"):
+            for _ in range(3):
+                req = _FakeWebhookRequest(
+                    headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"},
+                    body={"update_id": 1},
+                )
+                assert asyncio.run(_run_webhook_handler(req)) == {"ok": False}
+        denied = [r for r in caplog.records if "Rejected" in r.getMessage()]
+        assert len(denied) == 1
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        lumen_admin._webhook_denied_count = orig_count
+        lumen_admin._webhook_denied_last_log = orig_last
+
+
+def test_webhook_handler_returns_503_when_inflight_full(monkeypatch):
+    # Переполнение фоновых задач — 503 с повтором, апдейт не теряется молча.
+    import lumen_admin
+    original_secret = bot.WEBHOOK_SECRET
+    original_bot_obj = bot.bot
+    original_process = bot._process_raw_update
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    bot.bot = object()
+    calls = []
+
+    async def fake_process(raw_update):
+        calls.append(raw_update)
+
+    bot._process_raw_update = fake_process
+    monkeypatch.setattr(lumen_admin, "WEBHOOK_MAX_INFLIGHT_TASKS", 0)
+    try:
+        req = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 1},
+        )
+        result = asyncio.run(_run_webhook_handler(req))
+        assert result.status_code == 503
+        assert calls == []
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        bot.bot = original_bot_obj
+        bot._process_raw_update = original_process
+
+
+@pytest.mark.parametrize(("env_value", "expected"), [
+    ("abc", 25.0), ("", 25.0), ("0", 25.0), ("-5", 25.0), ("30", 30.0),
+])
+def test_diag_budget_sec_falls_back_on_garbage(monkeypatch, env_value, expected):
+    # Голый float() давал 500 на мусоре в env, а 0 молча ронял все зонды.
+    import lumen_admin
+    monkeypatch.setenv("DIAG_TOTAL_BUDGET_SEC", env_value)
+    assert lumen_admin._diag_budget_sec() == expected
+    monkeypatch.delenv("DIAG_TOTAL_BUDGET_SEC", raising=False)
+    assert lumen_admin._diag_budget_sec() == 25.0
+
+
 def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
     # Апдейт может прийти раньше, чем main() успеет создать глобальный bot (Bot/
     # genai.Client создаются уже после старта uvicorn) — отвечаем 503, чтобы
@@ -366,6 +481,19 @@ def test_require_bot_token_returns_configured_token(monkeypatch):
     # Сторож: непустой токен молча проходит дальше в Bot().
     monkeypatch.setattr(bot, "BOT_TOKEN", "123:abc")
     assert bot._require_bot_token() == "123:abc"
+
+
+def test_secret_log_formatter_survives_interpreter_teardown():
+    # Финализация обнуляет глобалы модуля: форматирование не должно падать.
+    import logging
+    fmt = bot._SecretLogFormatter()
+    rec = logging.LogRecord("bot", logging.WARNING, __file__, 1, "hello %s", ("world",), None)
+    orig = bot._SECRET_NAMES
+    bot._SECRET_NAMES = None
+    try:
+        assert fmt.format(rec) == "hello world"
+    finally:
+        bot._SECRET_NAMES = orig
 
 
 def _sleep_then_cancel(loop_sleeps):
@@ -513,6 +641,55 @@ def test_webhook_setup_succeeds_after_retries(monkeypatch):
         asyncio.run(bot._webhook_startup())
     assert calls["hook"] == 3
     assert sleeps == [1.5, 5.0, 10.0, 3600]
+
+
+def test_main_exits_nonzero_when_server_dies_first(monkeypatch, caplog):
+    # Падение uvicorn первым (порт занят) раньше терялось: процесс тихо выходил
+    # с кодом 0. Теперь исключение сервера логируется и даёт SystemExit(1).
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import lumen_chat_state
+    monkeypatch.setattr(bot, "_require_bot_token", lambda: "123:abc")
+    monkeypatch.setattr(bot, "Bot", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(bot, "IPv4AiohttpSession", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(bot.genai, "Client", lambda *a, **k: SimpleNamespace())
+
+    async def _never():
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bot, "_webhook_startup", _never)
+    monkeypatch.setattr(bot, "_flush_dirty_state", _never)
+    monkeypatch.setattr(bot, "_drain_inflight_tasks", AsyncMock())
+    monkeypatch.setattr(bot, "_close_sessions", AsyncMock())
+    monkeypatch.setattr(bot.uvicorn, "Config", lambda *a, **k: SimpleNamespace())
+
+    class _DeadServer:
+        should_exit = False
+
+        async def serve(self):
+            raise RuntimeError("port busy")
+
+    monkeypatch.setattr(bot.uvicorn, "Server", lambda cfg: _DeadServer())
+    orig_bot, orig_client = bot.bot, bot.client
+    orig_dirty, orig_deletions = set(bot._dirty_chat_ids), set(bot._pending_chat_deletions)
+    orig_index_dirty, orig_quota_dirty = lumen_chat_state._index_dirty, lumen_chat_state._quota_dirty
+    bot._dirty_chat_ids.clear()
+    bot._pending_chat_deletions.clear()
+    lumen_chat_state._index_dirty = False
+    lumen_chat_state._quota_dirty = False
+    try:
+        with caplog.at_level(logging.ERROR, logger="bot"), pytest.raises(SystemExit) as exc_info:
+            asyncio.run(bot.main())
+        assert exc_info.value.code == 1
+        assert "[serve] HTTP server failed" in caplog.text
+    finally:
+        bot.bot, bot.client = orig_bot, orig_client
+        bot._dirty_chat_ids.clear()
+        bot._dirty_chat_ids.update(orig_dirty)
+        bot._pending_chat_deletions.clear()
+        bot._pending_chat_deletions.update(orig_deletions)
+        lumen_chat_state._index_dirty = orig_index_dirty
+        lumen_chat_state._quota_dirty = orig_quota_dirty
 
 
 def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():

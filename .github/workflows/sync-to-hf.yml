@@ -30,8 +30,9 @@ jobs:
       && github.event.workflow_run.event == 'push'
       && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Явно берём тот коммит, что проверялся CI (workflow_run сам по себе
           # не чекаутит его) — иначе можно было бы задеплоить более поздний,
