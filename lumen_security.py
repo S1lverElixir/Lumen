@@ -207,10 +207,10 @@ _INJECTION_PROBE_RE = re.compile(
     r"|покажи\s+(мне\s+)?сво(й|и)\s+(системн\w*\s+)?(промпт|инструкции)"
     r"|выведи\s+(мне\s+)?сво(й|и)\s+(системн\w*\s+)?(промпт|инструкции)"
     r"|повтори\s+(всё\s+|весь\s+текст\s+)?(что\s+)?(написано\s+)?выше"
-    r"|(developer|debug|god|dan|jailbreak)\s*[\s\-]?mode"
-    r"|режим\s+(разработчика|отладки|бога|джейлбрейк\w*)"
-    # "в режиме разработчика" только с глаголом (включи/перейди): голое "как включить
-    # режим отладки на Android?" легитимно.
+    # Голое "debug mode" / "режим разработчика" без инъекционного контекста не ловим:
+    # "Как включить режим разработчика на Android?" и "Что такое debug mode
+    # в Python?" легитимны. Режим разработчика/отладки/бога срабатывает только
+    # парой с явным взломом (см. _MODE_WORD_RE + _MODE_CONTEXT_RE ниже).
     r"|(ты\s+теперь|перейди|перейти|включи|включить|подтверди|подтверждаю)\b[^.?!]{0,60}режиме\s+(разработчика|отладки|бога|джейлбрейк\w*)"
     r"|you\s+are\s+now\s+(an?\s+)?(unrestricted|uncensored|jailbroken)"
     r"|ты\s+теперь\s+(без\s+ограничени\w*|неограничен\w*|не\s+связан\w*\s+правилами)"
@@ -218,6 +218,24 @@ _INJECTION_PROBE_RE = re.compile(
     r"|притворись\s*,?\s*(что\s+)?у\s+тебя\s+нет\s+(правил|ограничени\w*)"
     r"|(what|which)\s+(is\s+)?your\s+(real\s+|actual\s+)?system\s+prompt"
     r"|раскрой\s+(свой\s+)?системн\w*\s+промпт",
+    re.IGNORECASE,
+)
+
+# Слово режима без контекста легитимно (Android/Python/Minecraft), с явным
+# взломом рядом режем. Контекст без общих глаголов "включи/открой": иначе
+# "Как включить режим разработчика на Android?" снова ложно срабатывал.
+_MODE_WORD_RE = re.compile(
+    r"(developer|debug|god|dan|jailbreak)\s*[\s\-]?mode"
+    r"|режим\w*\s+(разработчика|разработчике|отладки|отладке|бога|джейлбрейк\w*)",
+    re.IGNORECASE,
+)
+_MODE_CONTEXT_RE = re.compile(
+    r"ты\s+теперь|you\s+are\s+now|act\s+as"
+    r"|игнорируй|забудь|ignore\s+(all\s+|any\s+)?(the\s+)?(previous|prior|above|earlier)"
+    r"|unrestricted|uncensored|jailbroken|без\s+ограничени|неограничен|не\s+связан\w*\s+правилами"
+    r"|притворись|подтверди|подтверждаю"
+    r"|system\s+prompt|системн\w*\s+(промпт|инструкц)"
+    r"|(покажи|выведи|раскрой|print|повтори|repeat)\b[^.?!]{0,40}(промпт|конфигурац|инструкц|prompt|instructions|above|выше)",
     re.IGNORECASE,
 )
 
@@ -231,4 +249,11 @@ def _looks_like_injection_probe(text: str) -> bool:
     if _INJECTION_PROBE_RE.search(stripped):
         return True
     spaced = "".join(" " if unicodedata.category(ch) == "Cf" else ch for ch in norm)
-    return bool(_INJECTION_PROBE_RE.search(spaced))
+    if _INJECTION_PROBE_RE.search(spaced):
+        return True
+    # Режим разработчика/отладки/бога только с инъекционным контекстом: голые
+    # вопросы про Android/Python/Minecraft идут модели, явные взломы режем здесь.
+    probe = stripped if _MODE_WORD_RE.search(stripped) and _MODE_CONTEXT_RE.search(stripped) else ""
+    if probe:
+        return True
+    return bool(_MODE_WORD_RE.search(spaced) and _MODE_CONTEXT_RE.search(spaced))
