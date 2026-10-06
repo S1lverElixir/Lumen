@@ -1545,6 +1545,39 @@ def test_pick_callback_ignores_banned_user(monkeypatch):
     assert answered == [True]
 
 
+def test_banned_user_commands_send_nothing(monkeypatch):
+    # Обход бана через прямые команды: catch-all с _is_banned не ловит
+    # зарегистрированные раньше cmd_*, каждая проверяет первой строкой.
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(bot, "OWNER_ID", 106002)
+    banned_id = 607002
+    bot._ban_user(banned_id)
+    try:
+        calls = []
+        async def fake_tg_call(method, *args, **kwargs):
+            calls.append(True)
+            return SimpleNamespace()
+        monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+        monkeypatch.setattr(bot, "_safe_reply", AsyncMock(side_effect=lambda *a, **k: calls.append(True)))
+        monkeypatch.setattr(bot, "_send_text", AsyncMock(side_effect=lambda *a, **k: calls.append(True)))
+        cases = [
+            (bot.cmd_start, "/start"),
+            (bot.cmd_draw, "/draw кот"),
+            (bot.cmd_tts, "/tts привет"),
+            (bot.cmd_reset, "/reset"),
+            (bot.cmd_lang, "/lang"),
+        ]
+        for func, text in cases:
+            calls.clear()
+            incoming = _FakeIncomingMessage(999805)
+            incoming.from_user = SimpleNamespace(id=banned_id)
+            incoming.text = text
+            asyncio.run(func(incoming))
+            assert calls == [], func.__name__
+    finally:
+        bot._unban_user(banned_id)
+
+
 def test_selftest_llm_head_gemini_success_counts_quota_and_outcome(monkeypatch):
     # Проба Gemini как у остальных: успех в квоту и сброс счётчика карантина.
     import lumen_model_speed

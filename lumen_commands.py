@@ -46,6 +46,8 @@ log = logging.getLogger("bot")
 
 async def cmd_start(message: Message) -> None:
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     # Лимит и здесь: хендлер зарегистрирован раньше общего catch-all, поэтому
     # сообщение до _reject_rate_limited_message не доходило — спамер получал
     # бесконечные ответы в группе, расходуя прокси-трафик (аудит 26.09.2026).
@@ -155,6 +157,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
 
 async def cmd_draw(message: Message) -> None:
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     prompt = message.text.partition(" ")[2].strip() if message.text else ""
     if not prompt:
         await bot._safe_reply(message, bot._t(message.chat.id, "draw_empty"))
@@ -397,6 +401,8 @@ async def inline_tts(message: Message, text: str) -> None:
 
 async def cmd_tts(message: Message) -> None:
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     text = message.text.partition(" ")[2].strip() if message.text else ""
     if not text:
         await bot._safe_reply(message, bot._t(message.chat.id, "tts_empty"))
@@ -409,6 +415,8 @@ async def cmd_tts(message: Message) -> None:
 async def cmd_reset(message: Message) -> None:
     """Сброс истории чата. В меню. Личка — всем, группа — админам/владельцу."""
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     requester_id = message.from_user.id if message.from_user else None
     if not await bot._is_privileged_in_chat(message.chat.type, message.chat.id, requester_id):
         await bot._tg_call(
@@ -428,6 +436,8 @@ async def cmd_reset(message: Message) -> None:
 # ── Язык системных сообщений (/lang) — ответы ИИ не трогает (см. RESPONSE LANGUAGE в system_prompt.py). Права как у /reset; кнопки без флагов/эмодзи, текущий — с ✓, меню по алфавиту кода.
 async def cmd_lang(message: Message) -> None:
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     lang = bot._chat_lang(message.chat.id)
     rows = []
     codes = list(SUPPORTED_LANGS)
@@ -450,6 +460,10 @@ async def cmd_lang(message: Message) -> None:
 async def handle_lang_callback(query: CallbackQuery) -> None:
     """Кнопка языка ("lang:<код>", влезает в лимит 64 байт): права, сохранение, подтверждение на новом языке."""
     import bot
+    if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
     data = query.data or ""
     if not data.startswith("lang:"):
         return
@@ -921,7 +935,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
 async def handle_pick_callback(query: CallbackQuery) -> None:
     """Кнопки-уточнения: чужие отклоняем, протухшие известные перевыпускаем разок, выбор дописываем к запросу и гоним обычным путём (_handle_message_core)."""
     import bot
-    if query.from_user is not None and bot._is_banned(query.from_user.id):
+    if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
         # Забаненный и кнопками не отвечает: иначе игнор обходился живыми пиками.
         with contextlib.suppress(Exception):
             await query.answer()
