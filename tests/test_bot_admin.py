@@ -537,6 +537,55 @@ def test_webhook_setup_succeeds_after_retries(monkeypatch):
     assert sleeps == [1.5, 5.0, 10.0, 3600]
 
 
+def test_main_exits_nonzero_when_server_dies_first(monkeypatch, caplog):
+    # Падение uvicorn первым (порт занят) раньше терялось: процесс тихо выходил
+    # с кодом 0. Теперь исключение сервера логируется и даёт SystemExit(1).
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import lumen_chat_state
+    monkeypatch.setattr(bot, "_require_bot_token", lambda: "123:abc")
+    monkeypatch.setattr(bot, "Bot", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(bot, "IPv4AiohttpSession", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(bot.genai, "Client", lambda *a, **k: SimpleNamespace())
+
+    async def _never():
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bot, "_webhook_startup", _never)
+    monkeypatch.setattr(bot, "_flush_dirty_state", _never)
+    monkeypatch.setattr(bot, "_drain_inflight_tasks", AsyncMock())
+    monkeypatch.setattr(bot, "_close_sessions", AsyncMock())
+    monkeypatch.setattr(bot.uvicorn, "Config", lambda *a, **k: SimpleNamespace())
+
+    class _DeadServer:
+        should_exit = False
+
+        async def serve(self):
+            raise RuntimeError("port busy")
+
+    monkeypatch.setattr(bot.uvicorn, "Server", lambda cfg: _DeadServer())
+    orig_bot, orig_client = bot.bot, bot.client
+    orig_dirty, orig_deletions = set(bot._dirty_chat_ids), set(bot._pending_chat_deletions)
+    orig_index_dirty, orig_quota_dirty = lumen_chat_state._index_dirty, lumen_chat_state._quota_dirty
+    bot._dirty_chat_ids.clear()
+    bot._pending_chat_deletions.clear()
+    lumen_chat_state._index_dirty = False
+    lumen_chat_state._quota_dirty = False
+    try:
+        with caplog.at_level(logging.ERROR, logger="bot"), pytest.raises(SystemExit) as exc_info:
+            asyncio.run(bot.main())
+        assert exc_info.value.code == 1
+        assert "[serve] HTTP server failed" in caplog.text
+    finally:
+        bot.bot, bot.client = orig_bot, orig_client
+        bot._dirty_chat_ids.clear()
+        bot._dirty_chat_ids.update(orig_dirty)
+        bot._pending_chat_deletions.clear()
+        bot._pending_chat_deletions.update(orig_deletions)
+        lumen_chat_state._index_dirty = orig_index_dirty
+        lumen_chat_state._quota_dirty = orig_quota_dirty
+
+
 def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():
     # Общий зонд /diag и /selftest: успех — статус, неуспех — текст без секрета.
     class _FakeResp:

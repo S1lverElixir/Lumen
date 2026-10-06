@@ -1559,6 +1559,15 @@ async def main() -> None:
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await serve_task
                 raise SystemExit(1) from exc
+        # Сервер упал первым (порт занят, падение uvicorn): без этой ветки
+        # исключение терялось и процесс тихо выходил с кодом 0.
+        if serve_task in done and not serve_task.cancelled():
+            exc = serve_task.exception()
+            if exc is not None:
+                log.error("[serve] HTTP server failed, stopping: %s", exc)
+                raise SystemExit(1) from exc
+            log.error("[serve] HTTP server exited unexpectedly, stopping")
+            raise SystemExit(1)
     finally:
         startup_task.cancel()
         flush_task.cancel()
