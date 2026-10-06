@@ -325,6 +325,42 @@ def _host_resolves_to_public(host: str | None) -> bool:
         return False
 
 
+def _resolve_result_is_public(result: Any) -> bool:
+    """Одна запись резолва публична: имя уже раскрыто в IP, смотрим is_global."""
+    try:
+        return ipaddress.ip_address(result["host"]).is_global
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
+    """Резолвер shared-сессии: отбрасывает не-публичные адреса при каждом резолве.
+
+    Предпроверка _host_resolves_to_public ловит прямой внутренний адрес в JSON,
+    но не TOCTOU между резолвом и коннектом (DNS-rebinding: первый резолв
+    публичный, второй приватный). Коннектор зовёт resolve перед каждым новым
+    соединением, включая хопы редиректов, поэтому фильтрация здесь закрывает и
+    цепочку. SNI/Host не трогаем: фильтруем только IP, имя хоста едет дальше."""
+    def __init__(self) -> None:
+        # DefaultResolver требует бегущий loop в конструкторе, поэтому создаём
+        # лениво при первом резолве, а не здесь.
+        self._inner: Any | None = None
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> list[Any]:
+        if self._inner is None:
+            self._inner = aiohttp.resolver.DefaultResolver()
+        results = await self._inner.resolve(host, port=port, family=family)
+        public = [entry for entry in results if _resolve_result_is_public(entry)]
+        if not public and results:
+            raise socket.gaierror(f"no public address for {host!r}")
+        return public
+
+    async def close(self) -> None:
+        if self._inner is not None:
+            await self._inner.close()
+            self._inner = None
+
+
 # Редиректы проверяем вручную, а не доверяем клиенту: aiohttp с allow_redirects=True
 # уже сходил бы на следующий хоп до нашей проверки конечного хоста. Каждый адрес
 # из цепочки Location обязан пройти ту же схему и SSRF-проверку, что стартовый URL.
@@ -559,6 +595,10 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Upgrade-Insecure-Requests": "1"
     }
+    # Стартовый URL от пользователя: внутренний адрес режем до первого запроса.
+    if not await asyncio.to_thread(_host_resolves_to_public, urllib.parse.urlsplit(url).hostname):
+        log.warning("[tiktok] Refusing to resolve non-public start URL %r.", url)
+        return url
     # Редиректы разбираем вручную через _checked_redirect_url: aiohttp
     # с allow_redirects=True сходил бы на следующий хоп до проверки хоста.
     current_url = url

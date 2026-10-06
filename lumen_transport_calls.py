@@ -65,10 +65,16 @@ async def _rotate_telegram_proxy() -> bool:
 async def _get_http_session() -> aiohttp.ClientSession:
     import bot
     if bot._http_session is None or bot._http_session.closed:
+        from lumen_tiktok import _PublicOnlyResolver
         bot._http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=60),
             # limit 40 (24.07.2026): слайдшоу TikTok до 35 слайдов качается разом через gather — со старым 16 часть ждала бы в очереди. Остальные потребители используют на порядок меньше соединений.
-            connector=aiohttp.TCPConnector(family=socket.AF_INET, limit=40, ttl_dns_cache=300),
+            connector=aiohttp.TCPConnector(
+                family=socket.AF_INET, limit=40, ttl_dns_cache=300,
+                # Резолвер режет не-публичные IP при каждом резолве: закрывает
+                # DNS-rebinding для всех внешних запросов этой сессии.
+                resolver=_PublicOnlyResolver(),
+            ),
             middlewares=proxy_auth_middlewares(
                 proxy_secret=bot.LUMEN_PROXY_SECRET,
                 proxy_base_urls=(*bot._TELEGRAM_PROXY_CANDIDATES, *bot._tikwm_proxy_candidates()),

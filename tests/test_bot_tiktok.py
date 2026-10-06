@@ -1463,6 +1463,96 @@ def test_resolve_tiktok_short_refuses_non_public_hop():
     assert all("169.254" not in url for _, url, _ in session.calls)
 
 
+def _resolve_entry(ip):
+    return {"hostname": "x.example", "host": ip, "port": 443,
+            "family": socket.AF_INET, "proto": 0, "flags": 0}
+
+
+class _ScriptedInnerResolver:
+    """Подмена DefaultResolver с заранее заготовленной выдачей по вызовам."""
+    def __init__(self, script):
+        self._script = list(script)
+        self.calls = 0
+
+    async def resolve(self, host, port=0, family=socket.AF_INET):
+        self.calls += 1
+        return self._script[min(self.calls - 1, len(self._script) - 1)]
+
+    async def close(self):
+        pass
+
+
+def test_public_only_resolver_refilters_every_resolve():
+    # DNS-rebinding: первый резолв публичный, второй приватный — второй обязан
+    # упасть, а не отдать соединение внутрь сети.
+    inner = _ScriptedInnerResolver([
+        [_resolve_entry("93.184.216.34")],
+        [_resolve_entry("169.254.169.254")],
+    ])
+    resolver = lumen_tiktok._PublicOnlyResolver()
+    resolver._inner = inner
+    try:
+        first = asyncio.run(resolver.resolve("x.example", 443))
+        assert [entry["host"] for entry in first] == ["93.184.216.34"]
+        with pytest.raises(socket.gaierror):
+            asyncio.run(resolver.resolve("x.example", 443))
+    finally:
+        asyncio.run(resolver.close())
+
+
+def test_public_only_resolver_drops_private_but_keeps_public():
+    # Смешанная выдача — только публичные, чисто приватная — отказ.
+    inner = _ScriptedInnerResolver([
+        [_resolve_entry("93.184.216.34"), _resolve_entry("10.0.0.5"), _resolve_entry("127.0.0.1")],
+    ])
+    resolver = lumen_tiktok._PublicOnlyResolver()
+    resolver._inner = inner
+    try:
+        assert [entry["host"] for entry in asyncio.run(resolver.resolve("x.example", 443))] == ["93.184.216.34"]
+    finally:
+        asyncio.run(resolver.close())
+    inner_all_private = _ScriptedInnerResolver([[_resolve_entry("192.168.1.1")]])
+    resolver2 = lumen_tiktok._PublicOnlyResolver()
+    resolver2._inner = inner_all_private
+    try:
+        with pytest.raises(socket.gaierror):
+            asyncio.run(resolver2.resolve("x.example", 443))
+    finally:
+        asyncio.run(resolver2.close())
+
+
+def test_resolve_tiktok_short_refuses_non_public_start_url():
+    # Стартовый URL от пользователя: внутренний адрес — ни одного запроса.
+    session = _FakeChainResolveSession({
+        "http://127.0.0.1/evil": (
+            _FakeChainResolveResponse(404, url="http://127.0.0.1/evil"),
+            _FakeChainResolveResponse(404, url="http://127.0.0.1/evil"),
+        ),
+    })
+    assert asyncio.run(lumen_tiktok._resolve_tiktok_short(session, "http://127.0.0.1/evil")) == "http://127.0.0.1/evil"
+    assert session.calls == []
+
+
+def test_http_session_connector_uses_public_only_resolver():
+    # Коннектор shared-сессии фильтрует каждый резолв: защита сквозная для всех
+    # внешних запросов (TikTok, Pollinations, TTS, OpenRouter/Groq).
+    import lumen_transport_calls
+
+    async def _check():
+        session = await lumen_transport_calls._get_http_session()
+        try:
+            return isinstance(session.connector._resolver, lumen_tiktok._PublicOnlyResolver)
+        finally:
+            await session.close()
+
+    orig = bot._http_session
+    bot._http_session = None
+    try:
+        assert asyncio.run(_check()) is True
+    finally:
+        bot._http_session = orig
+
+
 def test_fetch_tikwm_media_data_skips_huge_content_length():
     # A7-4: тело JSON раньше читалось без капа — заявленные гигабайты
     # пропускаем до скачивания.
