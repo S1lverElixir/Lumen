@@ -308,6 +308,51 @@ def _restore_breaker_state(saved):
     breaker.consecutive_failures, breaker.down_until, breaker.down_logged_at = saved
 
 
+def test_handle_proxy_failure_does_not_reenter_on_failing_notify(monkeypatch):
+    # Реентрантность: на пороге _notify_owner идёт ДО trip() через _tg_call;
+    # падение того же прокси звало _handle_proxy_failure снова (счётчик уже за
+    # порогом) — цепочка повторялась. Вложенный сбой не запускает вторую ветку.
+    import json
+    from types import SimpleNamespace
+
+    entries = []
+    real_handler = bot._handle_proxy_failure
+
+    class _Brake(Exception):
+        pass
+
+    async def counting_handler(context):
+        entries.append(context)
+        if len(entries) > 2:
+            raise _Brake()
+        await real_handler(context)
+
+    async def always_garbage(**kwargs):
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    async def fake_rotate():
+        return False
+
+    async def fake_sleep(sec):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(bot, "_handle_proxy_failure", counting_handler)
+    monkeypatch.setattr(bot, "_rotate_telegram_proxy", fake_rotate)
+    monkeypatch.setattr(bot, "OWNER_ID", 999001)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_message=always_garbage))
+    saved = _save_breaker_state()
+    breaker = bot._tg_proxy_breaker
+    breaker.consecutive_failures = breaker.trip_threshold - 1
+    breaker.down_until = 0.0
+    try:
+        asyncio.run(bot._handle_proxy_failure("probe"))
+        # Внешний вызов + один вложенный из уведомления, дальше ветка закрыта.
+        assert len(entries) == 2
+    finally:
+        _restore_breaker_state(saved)
+
+
 def test_tg_call_waits_retry_after_before_retry(monkeypatch):
     # Регрессия A8-02: флуд-контроль ждём по retry_after, а не 0.5с (ранний повтор продлевал бан).
     calls = []
