@@ -849,6 +849,77 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
             lumen_typing_pace._speed_ema.pop(pace_key, None)
 
 
+def test_run_streaming_reply_catchup_edits_respect_min_interval(monkeypatch):
+    # Довывод правится тем же троттлингом, что основной цикл: тик короче
+    # интервала правок, серия быстро ловила бы 429.
+    import lumen_typing_pace
+    import time
+    chat_id = 999113
+    pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
+    original_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC
+    monkeypatch.setattr(bot, "STREAM_EDIT_MIN_INTERVAL_SEC", 0.4)
+    monkeypatch.setattr(bot, "STREAM_TYPING_TICK_SEC", 0.3)
+    monkeypatch.setattr(bot, "_typing_sleep", asyncio.sleep)
+    long_text = "Буква " * 500
+    fake_stream = _fake_gemini_stream([long_text])
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = fake_stream
+    incoming = _FakeIncomingMessage(chat_id)
+    edit_ts = []
+    orig_tg_call = bot._tg_call
+
+    async def rec_tg_call(method, *args, **kwargs):
+        if getattr(method, "__name__", "") == "edit_text":
+            edit_ts.append(time.monotonic())
+        return await orig_tg_call(method, *args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", rec_tg_call)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
+        assert answer == long_text.strip()
+        # Последняя правка финальная терминальная (один вызов, вне троттлинга
+        # по дизайну) — меряем промежутки прогрессивных правок.
+        gaps = [b - a for a, b in zip(edit_ts, edit_ts[1:-1])]
+        assert gaps, "expected progressive edits during streaming"
+        assert min(gaps) >= 0.35
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        if original_ema is not None:
+            lumen_typing_pace._speed_ema[pace_key] = original_ema
+        else:
+            lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+
+def test_send_text_pauses_between_chunks(monkeypatch):
+    # Куски уходят с паузой против флуд-контроля за серию подряд.
+    from types import SimpleNamespace
+    sleeps = []
+
+    async def rec_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(bot, "_typing_sleep", rec_sleep)
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "bot", _Bot())
+    incoming = _FakeIncomingMessage(999114)
+    text = "слово " * 800
+    chunks = lumen_streaming._split_text_chunks(text, bot.TG_MAX_LEN)
+    assert len(chunks) > 1
+    try:
+        asyncio.run(bot._send_text(incoming, text))
+        assert sleeps == [bot.STREAM_TYPING_TICK_SEC] * (len(chunks) - 1)
+    finally:
+        bot.chat_state.pop(999114, None)
+
+
 def test_rich_send_used_for_final_answer_with_table():
     chat_id = 999401
     incoming = _FakeIncomingMessage(chat_id)

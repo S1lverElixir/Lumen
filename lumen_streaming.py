@@ -366,9 +366,13 @@ async def _run_streaming_reply(
             for step_len in _typing_catchup_steps(remaining_len, typing_speed, bot.STREAM_TYPING_TICK_SEC, bot.STREAM_TYPING_MAX_CATCHUP_TICKS):
                 await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
                 current_chunk_text = target_full[:already_shown_len + step_len]
-                if current_chunk_text != last_edited_plain:
+                # Довывод правится тем же троттлингом, что основной цикл: тик
+                # короче интервала правок, иначе серия быстро ловти 429.
+                now = time.monotonic()
+                if current_chunk_text != last_edited_plain and now - last_edit_ts >= bot.STREAM_EDIT_MIN_INTERVAL_SEC:
                     await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0)
                     last_edited_plain = current_chunk_text
+                    last_edit_ts = now
 
         # Финал — с полной HTML-конвертацией (во время стрима голый текст: частичный markdown дал бы несбалансированные теги).
         final_text = final_chunks[-1]

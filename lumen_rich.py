@@ -105,6 +105,9 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
     chunks = _split_text_chunks(text, bot.TG_MAX_LEN)
     for i, chunk in enumerate(chunks):
         chunk_kwargs = kwargs if i == len(chunks) - 1 else {k: v for k, v in kwargs.items() if k != "reply_markup"}
+        if i > 0:
+            # Пауза между кусками — против флуд-контроля за серию подряд.
+            await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
         if parse_html:
             # Сначала рич (таблицы/заголовки/математика), при любом неуспехе —
             # обычный HTML-путь ниже. Reply threading — только у первого чанка.
