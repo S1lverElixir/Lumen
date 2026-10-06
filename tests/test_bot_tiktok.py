@@ -1667,6 +1667,71 @@ def test_fetch_tikwm_media_data_skips_huge_content_length():
     assert result is None
 
 
+def test_fetch_tikwm_media_data_json_capped_below_video_limit():
+    # JSON капнут своим мегабайтом, а не общим видео-лимитом 75МБ.
+    import lumen_tiktok
+    from tests.bot_test_helpers import _FakeTikwmApiResponse, _FakeTikwmApiSession
+    assert lumen_tiktok.TIKWM_JSON_MAX_BYTES <= 2 * 1024 * 1024
+    big = b'{"code": 0, "data": {}, "pad": "' + b"x" * (lumen_tiktok.TIKWM_JSON_MAX_BYTES + 100) + b'"}'
+    resp = _FakeTikwmApiResponse(status=200, body_bytes=big)
+    result = asyncio.run(bot._fetch_tikwm_media_data(
+        _FakeTikwmApiSession([resp]), "https://www.tiktok.com/@u/video/1", {}))
+    assert result is None
+
+
+def test_fetch_tikwm_media_data_error_branch_reads_capped():
+    # Ветка ошибки тоже читает с капом, а не голым read().
+    from tests.bot_test_helpers import _FakeDownloadContent, _FakeTikwmApiSession
+    calls = []
+
+    class _NoUncappedReadResponse:
+        status = 500
+        headers = {"Content-Length": str(10 ** 12)}
+
+        def __init__(self):
+            self.content = _FakeDownloadContent([b"e" * 100])
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def read(self):
+            calls.append("read")
+            return b"e" * 100
+
+    result = asyncio.run(bot._fetch_tikwm_media_data(
+        _FakeTikwmApiSession([_NoUncappedReadResponse()]), "https://www.tiktok.com/@u/video/1", {}))
+    assert result is None
+    assert calls == []
+
+
+def test_tikwm_proxy_fallback_tries_next_candidate_on_exception(monkeypatch):
+    # Исключение первого кандидата не отменяет остальных.
+    import lumen_tiktok_flow
+    calls = []
+
+    async def flaky_fetch(session, resolved_url, headers, proxy_base_url=""):
+        calls.append(proxy_base_url)
+        if len(calls) == 1:
+            raise RuntimeError("proxy down")
+        return {"play": "https://tikwm.com/v.mp4"}
+
+    async def always_boom(session, resolved_url, headers, proxy_base_url=""):
+        raise RuntimeError("all down")
+
+    monkeypatch.setattr(bot, "_tikwm_proxy_candidates", lambda: ["http://p1", "http://p2"])
+    monkeypatch.setattr(bot, "_fetch_tikwm_media_data", flaky_fetch)
+    result = asyncio.run(lumen_tiktok_flow._fetch_tikwm_media_data_with_proxy_fallback(
+        None, "https://www.tiktok.com/@u/video/1", {}))
+    assert result == {"play": "https://tikwm.com/v.mp4"}
+    assert calls == ["http://p1", "http://p2"]
+    monkeypatch.setattr(bot, "_fetch_tikwm_media_data", always_boom)
+    assert asyncio.run(lumen_tiktok_flow._fetch_tikwm_media_data_with_proxy_fallback(
+        None, "https://www.tiktok.com/@u/video/1", {})) is None
+
+
 def test_probe_video_dimensions_survives_na_width(monkeypatch):
     # A7-6: width=N/A раньше ронял float() и вместе с ним валидный duration.
     class _FakeFFprobe:
@@ -1726,6 +1791,17 @@ def test_tiktok_video_candidates_protocol_relative_url():
     assert candidates[0]["url"] == "https://cdn.tikwm.com/v.mp4"
 
 
+def test_tiktok_video_candidates_rejects_userinfo_and_non_string():
+    # Склейка давала userinfo-путаницу: "@evil.com/x" ехал хостом.
+    import urllib.parse
+    candidates = bot._tiktok_video_candidates({"play": "@evil.com/x", "size": 1})
+    assert candidates[0]["url"] == "https://www.tikwm.com/@evil.com/x"
+    assert urllib.parse.urlsplit(candidates[0]["url"]).hostname == "www.tikwm.com"
+    assert bot._tiktok_video_candidates({"play": "javascript:alert(1)", "size": 1}) == []
+    assert bot._tiktok_video_candidates({"play": 12345, "size": 1}) == []
+    assert bot._tiktok_video_candidates({"play": {"u": 1}, "size": 1}) == []
+
+
 def test_download_url_bin_honors_caller_cap():
     # Аудит A7-5: видео режем лимитом отправки (50МБ), а не общим 75МБ.
     mapping = {"http://8.8.8.8/v.mp4": _FakeDownloadResponse([b"123456789012345"])}
@@ -1739,7 +1815,7 @@ def test_slideshow_stops_at_post_budget(monkeypatch):
     # Аудит D1/A7-1: общий кап RAM на пост — остаток слайдов пропускается.
     calls = {}
 
-    async def fake_download(session, url, headers=None):
+    async def fake_download(session, url, headers=None, cap_bytes=None):
         return b"k" * 1024
 
     class _FakeTgBot:
@@ -1775,4 +1851,46 @@ def test_slideshow_stops_at_post_budget(monkeypatch):
         assert "group" not in calls
     finally:
         bot.chat_state.pop(999985, None)
+
+
+class _SlideshowCapBot:
+    async def send_photo(self, **kwargs):
+        return SimpleNamespace()
+
+    async def send_video(self, **kwargs):
+        return SimpleNamespace()
+
+    async def send_media_group(self, **kwargs):
+        return SimpleNamespace()
+
+
+def test_slideshow_slide_download_reserves_post_budget(monkeypatch):
+    # Кап слайда — остаток общего бюджета до скачивания, а не после.
+    import lumen_tiktok
+    seen_caps = {}
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        seen_caps[url] = cap_bytes
+        return b"k" * 1024
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "TIKTOK_SLIDESHOW_MAX_BYTES", 1500)
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "_delete_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "bot", _SlideshowCapBot())
+    incoming = _FakeIncomingMessage(999984)
+    incoming.message_id = 7
+    media_data = {"images": ["http://x/1.jpg", "http://x/2.jpg", "http://x/3.jpg"]}
+    try:
+        asyncio.run(bot._try_send_tiktok_slideshow(
+            None, media_data, incoming, None, "author", {},
+        ))
+        assert seen_caps
+        assert all(cap is not None and cap <= 1500 for cap in seen_caps.values())
+        assert all(cap <= lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES for cap in seen_caps.values())
+    finally:
+        bot.chat_state.pop(999984, None)
 

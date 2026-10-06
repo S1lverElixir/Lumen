@@ -345,16 +345,15 @@ class _FakeTikTokSession:
 
 
 class _FakeTikwmApiResponse:
-    def __init__(self, status=200, json_body=None, body_bytes=b""):
+    def __init__(self, status=200, json_body=None, body_bytes: bytes | None = None):
         import json as _json
         self.status = status
         self._json_body = json_body or {}
-        self._body_bytes = body_bytes
-        # Честный фейк (см. _FakeTikTokResponse): контент из json, если байты не заданы.
+        # Явно заданные байты (включая пустые) едут и в read(), и в стрим,
+        # как у настоящего ответа.
+        self._body_bytes = body_bytes if body_bytes is not None else _json.dumps(self._json_body).encode("utf-8")
         self.headers = {}
-        self.content = _FakeDownloadContent(
-            [body_bytes] if body_bytes else [_json.dumps(self._json_body).encode("utf-8")]
-        )
+        self.content = _FakeDownloadContent([self._body_bytes])
 
     async def __aenter__(self):
         return self

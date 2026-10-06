@@ -121,11 +121,19 @@ def _tiktok_video_candidates(media_data: dict) -> list[dict[str, Any]]:
         raw_url = media_data.get(url_key)
         if not raw_url:
             continue
+        if not isinstance(raw_url, str):
+            log.warning("[tiktok] Skipping non-string URL for %s: %r.", url_key, raw_url)
+            continue
         if raw_url.startswith("//"):
             # Протокол-относительный URL чиним как https, иначе ниже склеилось бы в битый "https://www.tikwm.com//host/path".
             raw_url = "https:" + raw_url
         elif not raw_url.startswith("http"):
-            raw_url = "https://www.tikwm.com" + raw_url
+            # Склейка давала userinfo-путаницу ("@evil.com/x" ехал хостом):
+            # только относительный путь к базовому хосту.
+            raw_url = urllib.parse.urljoin("https://www.tikwm.com/", raw_url)
+        if urllib.parse.urlsplit(raw_url).scheme.lower() not in ("http", "https"):
+            log.warning("[tiktok] Skipping non-HTTP(S) URL for %s: %r.", url_key, raw_url)
+            continue
         try:
             size_bytes = int(media_data.get(size_key) or 0)
         except (TypeError, ValueError):
@@ -157,14 +165,19 @@ async def _tikwm_throttle() -> None:
         _tikwm_last_request_ts = now
 
 
-async def _read_capped_body(resp: aiohttp.ClientResponse, url: str) -> bytes | None:
+# JSON TikWM обязан быть маленьким: свой кап, а не общий видео-лимит.
+TIKWM_JSON_MAX_BYTES = 1 * 1024 * 1024
+
+
+async def _read_capped_body(resp: aiohttp.ClientResponse, url: str, *, cap_bytes: int | None = None) -> bytes | None:
     # JSON TikWM обязан быть маленьким: читаем с тем же капом, что бинарные
     # скачивания, иначе скомпрометированный прокси льёт в память без края.
+    cap = cap_bytes if cap_bytes is not None else TIKTOK_DOWNLOAD_MAX_BYTES
     content_length = resp.headers.get("Content-Length")
     if content_length is not None:
         try:
-            if int(content_length) > TIKTOK_DOWNLOAD_MAX_BYTES:
-                log.warning("[tikwm] Refusing %s: Content-Length %s exceeds the %d byte cap.", url, content_length, TIKTOK_DOWNLOAD_MAX_BYTES)
+            if int(content_length) > cap:
+                log.warning("[tikwm] Refusing %s: Content-Length %s exceeds the %d byte cap.", url, content_length, cap)
                 return None
         except ValueError:
             pass
@@ -172,8 +185,8 @@ async def _read_capped_body(resp: aiohttp.ClientResponse, url: str) -> bytes | N
     total = 0
     async for chunk in resp.content.iter_chunked(65536):
         total += len(chunk)
-        if total > TIKTOK_DOWNLOAD_MAX_BYTES:
-            log.warning("[tikwm] Aborting %s: exceeded the %d byte cap mid-stream.", url, TIKTOK_DOWNLOAD_MAX_BYTES)
+        if total > cap:
+            log.warning("[tikwm] Aborting %s: exceeded the %d byte cap mid-stream.", url, cap)
             return None
         chunks.append(chunk)
     return b"".join(chunks)
@@ -211,7 +224,7 @@ async def _fetch_tikwm_media_data(
                 async with session.get(api_url, timeout=12, headers=api_headers) as r:
                     if r.status == 200:
                         all_attempts_403_empty = False
-                        raw_body = await _read_capped_body(r, api_url)
+                        raw_body = await _read_capped_body(r, api_url, cap_bytes=TIKWM_JSON_MAX_BYTES)
                         if raw_body is None:
                             continue
                         try:
@@ -224,7 +237,8 @@ async def _fetch_tikwm_media_data(
                             return res.get("data")
                         log.warning("[tikwm] Endpoint %s returned code %s: %s", api_url, res.get("code"), res.get("msg"))
                     else:
-                        body = await r.read()
+                        raw_error = await _read_capped_body(r, api_url, cap_bytes=TIKWM_JSON_MAX_BYTES)
+                        body = raw_error if raw_error is not None else b""
                         if r.status == 403:
                             saw_403 = True
                         if r.status != 403 or body:

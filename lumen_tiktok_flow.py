@@ -20,6 +20,7 @@ from aiogram.types import (
 )
 
 from lumen_tiktok import (
+    TIKTOK_DOWNLOAD_MAX_BYTES,
     _original_sound_label,
     _GENERIC_ORIGINAL_SOUND_PHRASES,
     _chunk_tiktok_media_items,
@@ -210,7 +211,12 @@ async def _fetch_tikwm_media_data_with_proxy_fallback(session: aiohttp.ClientSes
     import bot
     result = None
     for candidate in bot._tikwm_proxy_candidates():
-        result = await bot._fetch_tikwm_media_data(session, resolved_url, headers, proxy_base_url=candidate)
+        try:
+            result = await bot._fetch_tikwm_media_data(session, resolved_url, headers, proxy_base_url=candidate)
+        except Exception as exc:
+            # Упавший кандидат не отменяет остальных: пробуем дальше.
+            log.warning("[tiktok] TikWM proxy candidate %r failed: %s", candidate, exc)
+            continue
         if result is not None:
             return result
     return result
@@ -240,7 +246,11 @@ async def _try_send_tiktok_slideshow(
               async with bot._tiktok_slide_download_semaphore:
                    if post_budget[0] <= 0:
                         return None
-                   data = await bot._download_url_bin(session, slide_url, headers=headers)
+                   # Резерв до скачивания: кап слайда — остаток бюджета.
+                   data = await bot._download_url_bin(
+                        session, slide_url, headers=headers,
+                        cap_bytes=min(TIKTOK_DOWNLOAD_MAX_BYTES, post_budget[0]),
+                   )
                    if data:
                         post_budget[0] -= len(data)
                         if post_budget[0] < 0:
