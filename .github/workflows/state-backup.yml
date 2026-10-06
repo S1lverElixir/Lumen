@@ -29,6 +29,7 @@ concurrency:
 jobs:
   backup:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Fetch /export_state
         run: |
@@ -42,9 +43,18 @@ jobs:
           STATE_BACKUP_TOKEN: ${{ secrets.STATE_BACKUP_TOKEN }}
           STATE_BACKUP_REPO: ${{ secrets.STATE_BACKUP_REPO }}
         run: |
+          set -euo pipefail
+          # Приватность: бэкап только в приватный репозиторий, иначе стоп.
+          visibility="$(GH_TOKEN="${STATE_BACKUP_TOKEN}" gh repo view "${STATE_BACKUP_REPO}" --json visibility -q .visibility)"
+          if [ "${visibility}" != "PRIVATE" ]; then
+            echo "Refusing backup: ${STATE_BACKUP_REPO} is not PRIVATE (got: ${visibility})" >&2
+            exit 1
+          fi
           git config --global user.name "lumen-backup"
           git config --global user.email "lumen-backup@local"
-          git clone "https://x-access-token:${STATE_BACKUP_TOKEN}@github.com/${STATE_BACKUP_REPO}.git" backup-repo
+          # PAT не в URL клона, а в extraheader: иначе светится в remote -v и логах.
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${STATE_BACKUP_TOKEN}" | base64 -w0)" \
+            clone "https://github.com/${STATE_BACKUP_REPO}.git" backup-repo
           cp export_state.json backup-repo/export_state.json
           cd backup-repo
           git add export_state.json
