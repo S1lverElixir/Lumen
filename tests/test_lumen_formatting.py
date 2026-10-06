@@ -89,6 +89,56 @@ def test_table_separator_match_is_time_bounded():
     assert lumen_formatting._is_table_separator("просто текст") is False
 
 
+def test_split_chunks_fit_html_and_utf16_units():
+    # Лимит считается по итоговому HTML в units: раздутая разметка и эмодзи
+    # вне BMP больше не дают 400 от Telegram.
+    bold_ru = "**" + "привет " * 600 + "**"
+    chunks = lumen_formatting._split_text_chunks(bold_ru, 4096)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert lumen_formatting._tg_len(lumen_formatting._md_to_html(chunk)) <= 4096
+    emoji = "😀" * 3000
+    emoji_chunks = lumen_formatting._split_text_chunks(emoji, 4096)
+    assert len(emoji_chunks) == 2
+    for chunk in emoji_chunks:
+        assert lumen_formatting._tg_len(chunk) <= 4096
+    assert "".join(emoji_chunks) == emoji
+    # Граница: ровно 4096 units одним чанком, +1 эмодзи уже двумя.
+    assert len(lumen_formatting._split_text_chunks("😀" * 2048, 4096)) == 1
+    assert len(lumen_formatting._split_text_chunks("😀" * 2049, 4096)) == 2
+    assert len(lumen_formatting._split_text_chunks("я" * 4096, 4096)) == 1
+
+
+def test_split_chunks_keep_fences_intact():
+    # Длинный забор делится построчно с переоткрытием: каждый кусок рендерится.
+    code = "```python\n" + "x = 1\n" * 1500 + "```"
+    chunks = lumen_formatting._split_text_chunks(code, 4096)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.startswith("```") and chunk.rstrip().endswith("```")
+        assert "<pre>" in lumen_formatting._md_to_html(chunk)
+        assert "```" not in lumen_formatting._md_to_html(chunk)
+
+
+def test_md_to_html_link_with_inline_code_has_no_placeholder_leak():
+    # Код внутри метки ссылки: плейсхолдер не протекает, оба тега на месте.
+    html = lumen_formatting._md_to_html("[`code` текст](https://example.com)")
+    assert "\x00" not in html
+    assert '<a href="https://example.com">' in html
+    assert "<code>code</code>" in html
+
+
+def test_strip_markdown_keeps_underscores_in_urls_and_filenames():
+    # Подчёркивания внутри слов не выделение: URL, файлы, эмодзи рядом.
+    assert lumen_formatting._strip_markdown("см. https://example.com/my_file_name тут") == "см. https://example.com/my_file_name тут"
+    assert lumen_formatting._strip_markdown("открой my_file_name.txt и отчёт_📄_финал.txt") == "открой my_file_name.txt и отчёт_📄_финал.txt"
+    assert lumen_formatting._strip_markdown("файл_имя with-hyphen остаётся") == "файл_имя with-hyphen остаётся"
+    # Настоящие выделения по-прежнему чистятся, включая кириллицу и эмодзи.
+    assert lumen_formatting._strip_markdown("**жирно** и *курсив*") == "жирно и курсив"
+    assert lumen_formatting._strip_markdown("привет _друг_ 😀") == "привет друг 😀"
+    assert lumen_formatting._strip_markdown("*😀*") == "😀"
+
+
 def test_md_to_html_normalizes_raw_html_bold_tag():
     # Регрессия: модель иногда пишет литеральные <b>/<i> теги вместо markdown
     # (несмотря на инструкцию в system_prompt.py) — раньше это экранировалось

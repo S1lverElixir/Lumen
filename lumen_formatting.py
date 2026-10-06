@@ -406,7 +406,20 @@ def _md_to_html(text: str) -> str:
     text = text.replace(_BLOCKQUOTE_START, "<blockquote>").replace(_BLOCKQUOTE_END, "</blockquote>")
 
     # ── Фаза 4: возвращаем код с экранированием ────────────────────
+    # Ссылки первыми: метка ссылки может содержать плейсхолдер кода
+    # ([`code` text](url) — код вырезается раньше ссылки), поздняя замена кода
+    # находит его уже внутри вставленного <a> и протечки \x00CB0\x00 нет.
     for key, orig in _saved.items():
+        if not orig.startswith("["):
+            continue
+        m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
+        label, url = m.group(1), m.group(2)
+        label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        url = url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+        text = text.replace(key, f'<a href="{url}">{label}</a>')
+    for key, orig in _saved.items():
+        if orig.startswith("["):
+            continue
         if orig.startswith("```"):
             m = re.match(r"```([a-zA-Z0-9]*)\n(.*)\n```", orig, re.DOTALL)
             lang, inner = (m.group(1), m.group(2)) if m else ("", orig[3:-3])
@@ -415,17 +428,6 @@ def _md_to_html(text: str) -> str:
             # в клиентах, которые её поддерживают); раньше язык из ```python вырезался
             # регэкспом при сохранении, но никогда не доходил до вывода.
             replacement = f'<pre><code class="language-{lang}">{inner}</code></pre>' if lang else f"<pre>{inner}</pre>"
-        elif orig.startswith("["):
-            # markdown-ссылка [текст](url) — см. Phase 1 выше про то, почему вырезана
-            # плейсхолдером, а не обработана в Phase 3. Текст ссылки восстанавливается
-            # как обычный экранированный текст (markdown внутри него — **/*/` и т.п. —
-            # намеренно НЕ поддерживается, это не запрашивалось; при необходимости
-            # добавить — рекурсивный вызов _md_to_html на group(1) прямо здесь).
-            m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
-            label, url = m.group(1), m.group(2)
-            label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            url = url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-            replacement = f'<a href="{url}">{label}</a>'
         else:
             inner = orig[1:-1]
             inner = inner.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -614,14 +616,115 @@ def _strip_markdown(text: str) -> str:
     прилетел как есть). Чистит только синтаксис, слова не трогает."""
     if not text:
         return ""
+    # Голые URL прячем до чистки: "_" внутри них не выделение.
+    _urls: dict[str, str] = {}
+    def _save_url(m: re.Match) -> str:
+        key = f"\x00U{len(_urls)}\x00"
+        _urls[key] = m.group(0)
+        return key
     text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", r"\1", text)
+    text = re.sub(r"https?://[^\s()<>]+", _save_url, text)
     text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text, flags=re.DOTALL)
-    text = re.sub(r"(\*|_)(.*?)\1", r"\2", text)
+    # Одиночное "_" только вне слова: my_file_name и имена файлов не трогаем.
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"\1", text)
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
     text = re.sub(r"~~(.*?)~~", r"\1", text)
     text = re.sub(r"`([^`\n]+)`", r"\1", text)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    for key, url in _urls.items():
+        text = text.replace(key, url)
     return text
+
+
+def _tg_len(text: str) -> int:
+    """Длина глазами Telegram: UTF-16 code units, не codepoints (эмодзи вне BMP
+    стоят 2 единицы, 3000 штук уже переполнение при "коротких" 3000 символах)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _take_prefix_by_units(text: str, max_units: int) -> str:
+    """Самый длинный префикс не длиннее max_units (кодпоинт не рвём)."""
+    if _tg_len(text) <= max_units:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _tg_len(text[:mid]) <= max_units:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo]
+
+
+_FENCE_BLOCK_RE = re.compile(r"```[a-zA-Z0-9]*\n.*?\n```", re.DOTALL)
+_FENCE_UNWRAP_RE = re.compile(r"\A```([a-zA-Z0-9]*)\n(.*)\n```\Z", re.DOTALL)
+# Дальше этого пол не дробим: патологический синтаксис теоретически раздувает
+# HTML без края, вечный бисект хуже одного негабаритного чанка с фолбэком.
+_SPLIT_FLOOR_UNITS = 64
+
+
+def _chunk_plain(span: str, max_len: int) -> list[str]:
+    """Кусочки plain-сегмента по границам абзацев/строк/предложений (в units)."""
+    if _tg_len(span) <= max_len:
+        return [span]
+    chunks: list[str] = []
+    remaining = span
+    while _tg_len(remaining) > max_len:
+        window = _take_prefix_by_units(remaining, max_len)
+        cut = -1
+        for sep in ("\n\n", "\n", ". ", " "):
+            idx = window.rfind(sep)
+            if idx > len(window) * 0.5:
+                cut = idx + len(sep)
+                break
+        if cut <= 0:
+            cut = len(window)
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _chunk_fence_block(block: str, max_len: int) -> list[str]:
+    """Забор целиком, если влезает; иначе построчно с переоткрытием забора."""
+    if _tg_len(_md_to_html(block)) <= max_len:
+        return [block]
+    m = _FENCE_UNWRAP_RE.match(block)
+    if not m:
+        return _chunk_plain(block, max_len)
+    lang, inner = m.group(1), m.group(2)
+    wrap_overhead = _tg_len(f"```{lang}\n") + _tg_len("\n```")
+    inner_chunks = _chunk_plain(inner, max(64, max_len - wrap_overhead)) or [inner]
+    return [f"```{lang}\n{part}\n```" for part in inner_chunks]
+
+
+def _split_to_fit_html(chunk_md: str, max_len: int) -> list[str]:
+    """Дробление markdown-куска, пока его итоговый HTML не влезет в лимит."""
+    if _tg_len(_md_to_html(chunk_md)) <= max_len:
+        return [chunk_md]
+    m = _FENCE_UNWRAP_RE.match(chunk_md)
+    wrap = (m.group(1), True) if m else None
+    inner = m.group(2) if m else chunk_md
+    if not inner.strip():
+        return [chunk_md]
+    lines = inner.split("\n")
+    if len(lines) > 1:
+        mid = len(lines) // 2
+        parts = ["\n".join(lines[:mid]), "\n".join(lines[mid:])]
+    else:
+        half = _take_prefix_by_units(inner, _tg_len(inner) // 2) or inner[:1]
+        rest = inner[len(half):]
+        parts = [half, rest] if rest else [half]
+    out: list[str] = []
+    for part in parts:
+        piece = f"```{wrap[0]}\n{part}\n```" if wrap else part
+        if _tg_len(part) <= _SPLIT_FLOOR_UNITS:
+            out.append(piece)
+        else:
+            out.extend(_split_to_fit_html(piece, max_len))
+    return out
 
 
 def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
@@ -634,26 +737,35 @@ def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
     строками без единой зависимости от Telegram/рантайма — тот же класс, что и
     _md_to_html выше. Дефолт 4096 дублирует TG_MAX_LEN из bot.py буквально
     (импортировать константу оттуда нельзя — циклический импорт): оба места
-    про лимит Telegram, меняются только вместе с ним."""
-    if len(text) <= max_len:
+    про лимит Telegram, меняются только вместе с ним.
+
+    Лимит соблюдается дважды: сам markdown режется в units (эмодзи вне BMP
+    стоят 2), затем каждый кусок проверяется по длине итогового HTML —
+    разметка раздувает текст, и чанк "4095 символов" иначе давал 400 от
+    Telegram. Заборы не рвутся: длинные делятся построчно с переоткрытием."""
+    if not text:
         return [text]
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > max_len:
-        window = remaining[:max_len]
-        cut = -1
-        for sep in ("\n\n", "\n", ". ", " "):
-            idx = window.rfind(sep)
-            if idx > max_len * 0.5:
-                cut = idx + len(sep)
-                break
-        if cut <= 0:
-            cut = max_len
-        chunks.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip()
-    if remaining:
-        chunks.append(remaining)
-    return chunks
+    pieces: list[tuple[bool, str]] = []
+    pos = 0
+    for m in _FENCE_BLOCK_RE.finditer(text):
+        if m.start() > pos:
+            pieces.append((False, text[pos:m.start()]))
+        pieces.append((True, m.group(0)))
+        pos = m.end()
+    if pos < len(text):
+        pieces.append((False, text[pos:]))
+    if not pieces:
+        return [text]
+    md_chunks: list[str] = []
+    for is_fence, seg in pieces:
+        if is_fence:
+            md_chunks.extend(_chunk_fence_block(seg, max_len))
+        else:
+            md_chunks.extend(_chunk_plain(seg, max_len))
+    out: list[str] = []
+    for chunk in md_chunks:
+        out.extend(_split_to_fit_html(chunk, max_len))
+    return out or [text]
 
 
 def _truncate_html_to_fit(md_text: str, limit: int) -> str:
