@@ -465,6 +465,34 @@ def test_load_state_falls_back_to_legacy_blob_on_corrupt_index():
             lumen_chat_state._index_dirty = False
 
 
+def test_load_state_flags_failed_when_index_corrupt_and_no_legacy():
+    # Битый индекс без legacy-блоба: удалённые per-chat данные новее пустой памяти,
+    # следующий флаш не должен затирать индекс только новыми чатами.
+    def fake_read(key, path):
+        if "index" in str(key).lower() or str(path).endswith("index.json"):
+            return "not-json{{{"
+        return None
+
+    with patch("bot._storage_read_text", side_effect=fake_read):
+        orig_failed = lumen_chat_state._state_load_failed
+        try:
+            bot.load_state_from_disk()
+            assert lumen_chat_state._state_load_failed is True
+        finally:
+            lumen_chat_state._state_load_failed = orig_failed
+
+
+def test_load_state_clean_on_first_start_without_index_or_legacy():
+    # Сторож обратного пути: индекса никогда не было — флага нет, флаш пишет свободно.
+    with patch("bot._storage_read_text", return_value=None):
+        orig_failed = lumen_chat_state._state_load_failed
+        try:
+            bot.load_state_from_disk()
+            assert lumen_chat_state._state_load_failed is False
+        finally:
+            lumen_chat_state._state_load_failed = orig_failed
+
+
 def test_load_global_quota_restores_groq():
     # Внешний аудит: groq-счётчики сохранялись, но при загрузке терялись.
     import json

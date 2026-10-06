@@ -711,6 +711,11 @@ def load_state_from_disk() -> None:
     try:
         raw = bot._storage_read_text("lumen:chat_state", STATE_FILE_PATH)
         if not raw:
+            if index_raw is not None:
+                # Индекс был, но не разобрался, а legacy нет: удалённые per-chat
+                # данные новее пустой памяти — следующий флаш их бы затирал.
+                _state_load_failed = True
+                log.warning("[state] Chat index unreadable and no legacy blob, keeping remote data intact.")
             return
         loaded = json.loads(raw)
         for chat_id_str, s in loaded.items():
