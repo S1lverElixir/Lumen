@@ -53,7 +53,32 @@ def _pick_image_model(prompt: str) -> str:
     return DEFAULT_POLLINATIONS_IMAGE_MODEL
 
 
-async def _pollinations_generate(session: aiohttp.ClientSession, model_name: str, prompt: str) -> bytes:
+# Читаем потоково с капом: бесконтрольный resp.read() складывал в память тело
+# любого размера от чужого сервиса.
+POLLINATIONS_IMAGE_MAX_BYTES = 30 * 1024 * 1024
+
+
+async def _read_capped_image(resp: aiohttp.ClientResponse, url: str) -> bytes | None:
+    """Тело картинки с отказом при превышении капа (None): Content-Length врёт —
+    поток перепроверяем по факту."""
+    content_length = resp.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            if int(content_length) > POLLINATIONS_IMAGE_MAX_BYTES:
+                return None
+        except ValueError:
+            pass
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(65536):
+        total += len(chunk)
+        if total > POLLINATIONS_IMAGE_MAX_BYTES:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def _pollinations_generate(session: aiohttp.ClientSession, model_name: str, prompt: str, *, timeout_sec: float | None = None) -> bytes:
     """Бесплатная генерация через Pollinations.ai — не требует авторизации.
     `session` передаётся вызывающим кодом (см. докстринг модуля) — раньше получалась
     неявно через `_get_http_session()` внутри этой же функции, когда она жила в bot.py."""
@@ -62,18 +87,23 @@ async def _pollinations_generate(session: aiohttp.ClientSession, model_name: str
         f"https://image.pollinations.ai/prompt/{encoded}"
         f"?width=1024&height=1024&model={model_name}&nologo=true&enhance=false"
     )
-    async with session.get(url, timeout=aiohttp.ClientTimeout(total=90)) as resp:
+    total_timeout = timeout_sec if timeout_sec is not None else 90.0
+    async with session.get(
+        url, timeout=aiohttp.ClientTimeout(total=total_timeout, sock_connect=12.0),
+    ) as resp:
         if resp.status == 200:
             ctype = (resp.headers.get("Content-Type") or "").lower()
-            body = await resp.read()
+            body = await _read_capped_image(resp, url)
+            if body is None:
+                raise RuntimeError("Pollinations вернул изображение больше капа")
             if body and (ctype.startswith("image/") or body.startswith((b"\x89PNG", b"\xff\xd8\xff", b"RIFF", b"GIF8"))):
                 return body
             raise RuntimeError(f"Pollinations вернул не-изображение: {ctype}")
         raise RuntimeError(f"Pollinations.ai HTTP {resp.status}")
 
 
-async def _pollinations_text_to_image(session: aiohttp.ClientSession, model_id: str, prompt: str) -> bytes:
+async def _pollinations_text_to_image(session: aiohttp.ClientSession, model_id: str, prompt: str, *, timeout_sec: float | None = None) -> bytes:
     # HF-ветка убрана (FLUX.1-dev вернул 410 Gone) — провайдер один, приставки "pollinations:" на ключах не нужны.
     if model_id not in POLLINATIONS_IMAGE_MODELS:
         raise ValueError(f"Неизвестная модель генерации изображений: {model_id}")
-    return await _pollinations_generate(session, model_id, prompt)
+    return await _pollinations_generate(session, model_id, prompt, timeout_sec=timeout_sec)

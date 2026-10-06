@@ -93,7 +93,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 # Статус без названий моделей (см. ИДЕНТИЧНОСТЬ в system_prompt.py); на первой попытке статус и так стоит.
                 if attempt_model != primary_model:
                     await bot._edit_message_quietly(status, bot._t(message.chat.id, "status_taking_longer"))
-                image_bytes = await bot._pollinations_text_to_image(session, attempt_model, prompt)
+                # Таймаут попытки — остаток общего бюджета: зависшая модель не
+                # переживает дедлайн цепочки.
+                attempt_timeout = max(1.0, deadline - time.monotonic())
+                image_bytes = await bot._pollinations_text_to_image(session, attempt_model, prompt, timeout_sec=attempt_timeout)
                 break
             except Exception as exc:
                 last_error = exc

@@ -396,7 +396,7 @@ def test_draw_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypat
     async def fake_safe_reply(msg, text, **kwargs):
         replied.append(text)
 
-    async def failing_generate(session, model_id, prompt):
+    async def failing_generate(session, model_id, prompt, timeout_sec=None):
         raise RuntimeError("all image generation models unavailable")
 
     async def fake_get_http_session():
@@ -557,7 +557,7 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
     chat_id = 999430
     captured_model = []
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
         captured_model.append(model_id)
         return b"\x89PNG fake bytes"
 
@@ -594,7 +594,7 @@ def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
     chat_id = 999432
     attempts = []
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
         attempts.append(model_id)
         await asyncio.sleep(0.05)  # дольше урезанного DRAW_TOTAL_BUDGET_SEC ниже
         raise RuntimeError("503 Service Unavailable")
@@ -624,7 +624,7 @@ def test_inline_draw_falls_back_when_auto_picked_model_fails():
     chat_id = 999431
     attempts = []
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt):
+    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
         attempts.append(model_id)
         if model_id == "flux-anime":
             raise RuntimeError("503 Service Unavailable")
@@ -668,7 +668,7 @@ def test_inline_draw_stops_chain_on_service_rate_limit():
     chat_id = 999432
     attempts = []
 
-    async def fake_pollinations_text_to_image_always_429(session, model_id, prompt):
+    async def fake_pollinations_text_to_image_always_429(session, model_id, prompt, timeout_sec=None):
         attempts.append(model_id)
         raise RuntimeError("Pollinations.ai HTTP 429")
 
@@ -1126,7 +1126,7 @@ def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
     incoming.message_id = 1
     calls = []
 
-    async def fake_pollinations(session, model_id, prompt):
+    async def fake_pollinations(session, model_id, prompt, timeout_sec=None):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
@@ -1156,7 +1156,7 @@ def test_inline_draw_send_failure_reports_service_error(monkeypatch):
     incoming.message_id = 1
     replied = []
 
-    async def fake_pollinations(session, model_id, prompt):
+    async def fake_pollinations(session, model_id, prompt, timeout_sec=None):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
