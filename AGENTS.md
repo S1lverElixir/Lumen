@@ -20,7 +20,7 @@
 - If you find a leaked secret, tell the owner to rotate it. Do not rewrite git history without asking.
 
 ## What this repo is
-- Lumen: a Telegram bot (persona styled after Claude) running as a single FastAPI + aiogram webhook service on a Hugging Face Space (Docker, Python 3.13, entry: python -u bot.py). LLM backbone: Google Gemini + free OpenRouter models with per-message routing (web search and link reading go to Gemini, the rest to free OpenRouter models, to protect Gemini's daily quota).
+- Lumen: a Telegram bot (persona styled after Claude) running as a single FastAPI + aiogram webhook service on a Hugging Face Space (Docker, Python 3.13, entry: python -u bot.py). LLM backbone: Google Gemini + free OpenRouter models + Groq with per-message routing (web search and link reading go to Gemini, plain text starts at Groq, OpenRouter covers the rest, to protect Gemini's daily quota).
 - bot.py is the entry point and composition root (env, logging, Dispatcher, main). Domain logic lives in lumen_*.py; list the directory to find the module you need.
 - Model routing lives in lumen_router_config.py, injection and leak defenses in lumen_security.py.
 - Tests need no real secrets: conftest.py stubs BOT_TOKEN, GEMINI_API_KEY and BOT_LOG_PATH. Do not add real keys to tests or fixtures.

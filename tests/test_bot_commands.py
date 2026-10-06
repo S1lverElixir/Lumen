@@ -1099,10 +1099,18 @@ def test_lang_table_covers_all_keys_in_all_languages():
     import lumen_lang
     assert tuple(lumen_lang.SUPPORTED_LANGS) == tuple(sorted(lumen_lang.SUPPORTED_LANGS))
     assert set(lumen_lang.LANG_NAMES) == set(lumen_lang.SUPPORTED_LANGS)
+    # Байт-дубликат английского не перевод: такую строку удаляем, показ едет
+    # фолбэком. Исключения с причиной — только здесь.
+    allowed_en_duplicates = {("selftest_header", "fil")}
     for key, table in lumen_lang.STRINGS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
-            covered = bool(lumen_lang.LANG_PACKS.get(lang, {}).get(key)) or bool(table.get(lang))
-            assert covered, f"missing {key}[{lang}]"
+            explicit = lumen_lang.LANG_PACKS.get(lang, {}).get(key) or table.get(lang)
+            resolved = explicit or table.get("en")
+            assert resolved, f"missing {key}[{lang}]"
+            if explicit is not None and lang != "en" and explicit == table.get("en"):
+                assert (key, lang) in allowed_en_duplicates, (
+                    f"untranslated duplicate {key}[{lang}]: delete it, English fallback covers display"
+                )
     for lang in lumen_lang.SUPPORTED_LANGS:
         for scenario in ("film", "series", "music", "books", "games"):
             q, opts, tpl = lumen_lang.pick_texts(lang, scenario)

@@ -17,7 +17,7 @@ pinned: false
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-A Telegram bot styled after Claude's tone and personality (direct, warm, light on hedging), running on Google Gemini, free OpenRouter models and Groq with automatic per-message routing between them. Lumen also generates images, downloads TikTok videos without watermarks, and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
+A Telegram bot styled after Claude's tone and personality (direct, warm, light on hedging), running on Google Gemini, free OpenRouter models and Groq with automatic per-message routing between them. Lumen also generates images, downloads TikTok videos (usually without watermarks, watermarked copy as a last resort), and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
 
 **Stack:** Python 3.13 · aiogram · FastAPI · google-genai · Docker
 
@@ -42,7 +42,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 - **Automatic model routing.** Every message goes to whichever provider actually has what it needs: plain text starts at Groq (1000 free requests/day), web search and link reading go to Gemini, OpenRouter covers the rest — protecting Gemini's tight daily quota.
 - **Streaming replies** with a self-calibrating typing-speed pacer, so answers type themselves in instead of landing in a few large chunks.
 - **Defenses against prompt injection and identity leaks.** A deterministic input filter plus output scrubbers keep the bot from revealing which model or provider actually answered.
-- **TikTok downloads** without watermarks: video, slideshows (including "live" photo slides), and original sound.
+- **TikTok downloads** (usually without watermarks; a watermarked copy is the last resort): video, slideshows (including "live" photo slides), and original sound.
 - **Image generation** through Pollinations.ai. The model is picked from the prompt itself (anime, fantasy, realism, quick sketch, or a general default).
 - **Text-to-speech** through Gemini TTS.
 - `/draw` and `/tts` also work as plain phrases at the start of a message ("draw a cat," "read this out loud"), no slash required.
@@ -87,6 +87,7 @@ Hugging Face Spaces' outbound IPs are blocked by Telegram's Bot API entirely, an
 ```bash
 TELEGRAM_API_BASE_URL=https://<proxy-domain>/fetch/api.telegram.org
 TIKWM_API_BASE_URL=https://<proxy-domain>/fetch/www.tikwm.com
+LUMEN_PROXY_SECRET=<случайная строка от 32 символов: без неё прокси отвечает 503, а бот падает на старте>
 ```
 
 The proxy only forwards to an explicit host allowlist (`api.telegram.org`, `www.tikwm.com`, `tikwm.com`). See `proxy/proxy.ts` for the implementation and `proxy/proxy_test.ts` for its tests.
@@ -134,7 +135,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest -v
 ```
 
-Test files live in `tests/` and mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, and `test_lumen_model_speed.py` each test their matching module directly, while `test_bot_admin.py`, `test_bot_commands.py`, `test_bot_routes.py`, `test_bot_state.py`, `test_bot_streaming.py`, `test_bot_tiktok.py`, `test_bot_transport.py`, and `test_bot_tts.py` cover `bot.py` by domain (shared fakes live in `bot_test_helpers.py`). `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets.
+Test files live in `tests/` and mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, `test_lumen_media.py`, and `test_lumen_model_speed.py` each test their matching module directly, while `test_bot_admin.py`, `test_bot_commands.py`, `test_bot_routes.py`, `test_bot_state.py`, `test_bot_streaming.py`, `test_bot_tiktok.py`, `test_bot_transport.py`, and `test_bot_tts.py` cover `bot.py` by domain (shared fakes live in `bot_test_helpers.py`). `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets.
 
 CI (`.github/workflows/ci.yml`) runs `pyflakes` + `pytest` + `pip-audit` + `deno test` on every push and pull request; a successful run triggers `sync-to-hf.yml`, which mirrors the commit to the Hugging Face Space.
 
