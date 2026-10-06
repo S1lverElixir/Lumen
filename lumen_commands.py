@@ -65,6 +65,18 @@ async def cmd_start(message: Message) -> None:
 
 async def inline_draw(message: Message, prompt: str) -> None:
     import bot
+    # Дневной лимит пользователя, как у озвучки: проба без создания.
+    uid = bot._user_key_for_message(message)
+    _draw_entry = bot._user_daily_peek(uid)
+    if bot._user_daily_total_exhausted(uid, _draw_entry):
+        hours, mins = bot._user_daily_reset_in()
+        bot._record_stats_event("daily_limit_denials")
+        await bot._safe_reply(message, bot._t(
+            message.chat.id, "user_daily_total",
+            used=(_draw_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _draw_entry),
+            hours=hours, mins=mins,
+        ))
+        return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_generating_image"))
     try:
         session = await bot._get_http_session()
@@ -129,6 +141,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
             if sent is None:
                 raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
             # Суточный счётчик /stats: картинка ушла пользователю.
+            bot._record_user_daily(uid)
             bot._record_stats_event("answers_sent")
         else:
             if rate_limited:
@@ -395,8 +408,8 @@ async def inline_tts(message: Message, text: str) -> None:
         )
         if sent is None:
             raise RuntimeError("Telegram send_voice failed: connection timeout or proxy unavailable")
-    # Один запрос — один счёт: чанки одного сообщения не множат дневной расход.
-    bot._record_user_daily(uid, tts=True)
+        # Каждый чанк — отдельный синтез за квоту: списываем поштучно.
+        bot._record_user_daily(uid, tts=True)
     bot._record_stats_event("answers_sent")
     if shortened:
         # Обрезка по общему дедлайну — говорим прямо, что озвучено начало.

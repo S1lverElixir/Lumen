@@ -533,3 +533,32 @@ def test_inline_tts_records_user_daily_on_success(monkeypatch):
         bot.chat_state.pop(999989, None)
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
 
+
+def test_inline_tts_charges_each_synthesized_chunk():
+    # Каждый чанк — отдельный синтез за квоту: списываем поштучно, а не раз за сообщение.
+    limit = bot.TTS_MAX_CHARS
+    part = "Предложение номер раз про интересные вещи. "
+    text = part * ((limit // len(part)) + 2)
+    assert len(text) > limit
+
+    incoming = _FakeIncomingMessage(999810)
+    incoming.message_id = 12360
+    incoming.from_user = SimpleNamespace(id=777015)
+
+    original_client = bot.client
+    original_bot = bot.bot
+    bot.client = _wav_client()
+    counting = _CountingVoiceBot()
+    bot.bot = counting
+    try:
+        asyncio.run(bot.inline_tts(incoming, text))
+        assert len(counting.voices) == 2
+        entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("777015")
+        assert entry is not None
+        assert entry["tts"] == 2 and entry["total"] == 2
+    finally:
+        bot.client = original_client
+        bot.bot = original_bot
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777015", None)
+        bot.chat_state.pop(999810, None)
+

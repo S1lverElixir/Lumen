@@ -393,7 +393,10 @@ async def _run_streaming_reply(
             try:
                 _txt = bot._error_text(exc).strip() or exc.__class__.__name__
                 if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":
-                    if bot._is_account_wide_or_rate_limit(_txt.lower()):
+                    # Дневную квоту опознаём предикатом провайдера, как текстовый
+                    # путь: общий account-wide ловит только OpenRouter-тексты.
+                    _daily = bot._is_gemini_daily_quota(_txt) if provider == "gemini" else bot._is_account_wide_or_rate_limit(_txt.lower())
+                    if _daily:
                         bot._mark_quota_exhausted(provider, model_id)
                     else:
                         bot._mark_rate_limited(provider, model_id)

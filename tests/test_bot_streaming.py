@@ -920,6 +920,30 @@ def test_send_text_pauses_between_chunks(monkeypatch):
         bot.chat_state.pop(999114, None)
 
 
+def test_gemini_streaming_daily_429_marks_exhausted_like_text_path():
+    # Стриминг опознавал суточную квоту чужим предикатом и ставил минутную
+    # остывку вместо метки до утра.
+    chat_id = 999116
+    model = bot.DEFAULT_GEMINI_MODEL
+    fake_stream = _fake_gemini_stream(raises=RuntimeError("429 Quota exceeded for the day"))
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = fake_stream
+    incoming = _FakeIncomingMessage(chat_id)
+    original_client = bot.client
+    bot.client = fake_client
+    bot.GLOBAL_QUOTA.setdefault("gemini", {}).pop(model, None)
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, model))
+        assert answer is None
+        entry = bot.GLOBAL_QUOTA["gemini"][model]
+        assert entry["exhausted_at"] is not None
+        assert lumen_router_config._is_quota_exhausted("gemini", model) is True
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        bot.GLOBAL_QUOTA["gemini"].pop(model, None)
+
+
 def test_rich_send_used_for_final_answer_with_table():
     chat_id = 999401
     incoming = _FakeIncomingMessage(chat_id)

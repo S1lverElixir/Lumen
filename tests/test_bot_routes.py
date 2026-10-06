@@ -927,6 +927,31 @@ def test_ask_gemini_raises_all_models_exhausted_when_entire_chain_429s():
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash", None)
 
 
+def test_ask_gemini_minute_429s_do_not_raise_empty_exhausted():
+    # Одни минутные всплески: суточного исчерпания не было — последний 429
+    # идёт как есть, а не пустой "исчерпано всё".
+    chat_id = 999017
+
+    class _Minute429(Exception):
+        status_code = 429
+
+    def fake_generate_content(*, model, contents, config=None):
+        raise _Minute429("RESOURCE_EXHAUSTED: quota exceeded for quota metric Generate requests per minute")
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        with pytest.raises(_Minute429):
+            asyncio.run(bot.ask_gemini(chat_id, "Привет", model_chain=["gemini-3.6-flash", "gemini-2.5-flash"]))
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.6-flash", None)
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash", None)
+
+
 def test_ask_gemini_falls_back_to_next_model_on_timeout():
     # Прежняя версия использовала блокирующий time.sleep в async-фейке и один и тот
     # же текст ответа для обеих моделей: таймаут никогда не срабатывал, фолбэка не

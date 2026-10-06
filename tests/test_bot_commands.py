@@ -584,6 +584,61 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_inline_draw_refuses_when_user_total_limit_exhausted(monkeypatch):
+    # /draw без дневного лимита обходился: исчерпанный total — отказ до генерации.
+    from types import SimpleNamespace
+    incoming = _FakeIncomingMessage(999491)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=777021)
+    monkeypatch.setattr(bot, "OWNER_ID", 1)
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 2)
+    bot._record_user_daily(777021)
+    bot._record_user_daily(777021)
+
+    async def fail_generate(session, model_id, prompt, timeout_sec=None):
+        raise AssertionError("generation must not run for an exhausted user")
+
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fail_generate)
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        assert len(replies) == 1
+        assert bot._user_daily_entry(777021)["total"] == 2
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777021", None)
+        bot.chat_state.pop(999491, None)
+
+
+def test_inline_draw_records_user_daily_on_success(monkeypatch):
+    # Успешная картинка растит total, как озвучка.
+    from types import SimpleNamespace
+    incoming = _FakeIncomingMessage(999492)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=777022)
+    monkeypatch.setattr(bot, "OWNER_ID", 1)
+
+    async def fake_generate(session, model_id, prompt, timeout_sec=None):
+        return b"\x89PNG fake bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_generate)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        assert bot._user_daily_entry(777022)["total"] == 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777022", None)
+        bot.chat_state.pop(999492, None)
+
+
 def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
     # Регрессия на находку код-ревью (28 августа 2026): раньше у /draw не было
     # общего бюджета времени на всю фолбэк-цепочку — при недоступности сервиса

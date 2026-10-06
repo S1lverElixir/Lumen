@@ -835,8 +835,13 @@ async def ask_gemini(
                     log.warning("[gemini] Model %s quota exhausted (429). Switching to %s", curr_model_id, next_model)
                     curr_model_id = next_model
                     continue
-                log.warning("[gemini] All Gemini models in route exhausted their quota (429): %s", ", ".join(quota_exhausted_models))
-                raise bot.GeminiAllModelsExhaustedError(quota_exhausted_models) from exc
+                if quota_exhausted_models:
+                    log.warning("[gemini] All Gemini models in route exhausted their quota (429): %s", ", ".join(quota_exhausted_models))
+                    raise bot.GeminiAllModelsExhaustedError(quota_exhausted_models) from exc
+                # Одни минутные всплески: суточного исчерпания не было — отдаём
+                # последний 429 как есть, а не пустой "исчерпано всё".
+                log.warning("[gemini] All Gemini models in route rate-limited (429), no daily exhaustion.")
+                raise
 
             # Остальные исходы — одна попытка и сразу следующая модель, без ретраев.
             next_model = bot._next_fallback_model(tried_models, chain)
