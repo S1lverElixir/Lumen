@@ -190,12 +190,15 @@ def proxy_auth_middlewares(
 
 class IPv4AiohttpSession(AiohttpSession):
     def __init__(
-        self, *, proxy_secret: str = "", proxy_base_urls: Sequence[str] = (), **kwargs,
+        self, *, proxy_secret: str = "", proxy_base_urls: Sequence[str] = (),
+        # aiogram кладёт self.timeout на каждый запрос поверх дефолта сессии:
+        # без явных 30с здесь действовали бы молчаливые 60с aiogram, а не total=30 ниже.
+        timeout: float = 30.0, **kwargs,
     ) -> None:
         self._proxy_middlewares = proxy_auth_middlewares(
             proxy_secret=proxy_secret, proxy_base_urls=proxy_base_urls,
         )
-        super().__init__(**kwargs)
+        super().__init__(timeout=timeout, **kwargs)
 
     async def create_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:

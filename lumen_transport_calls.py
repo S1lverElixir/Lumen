@@ -20,6 +20,7 @@ from aiogram.exceptions import (
     TelegramEntityTooLarge,
     TelegramForbiddenError,
     TelegramMigrateToChat,
+    TelegramNetworkError,
     TelegramNotFound,
     TelegramUnauthorizedError,
 )
@@ -203,10 +204,18 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
             return result
         except asyncio.CancelledError:
             raise
+        except asyncio.TimeoutError as exc:
+            # Таймаут — исход неизвестен (запрос мог дойти): повтор отправки
+            # дал бы дубль. Не ретраим, как клиентские ошибки.
+            last_exc = exc
+            break
         except Exception as exc:
             last_exc = exc
             if _tg_is_client_error(exc):
                 # Клиентская ошибка: повтор с теми же аргументами даст то же самое.
+                break
+            if isinstance(exc, TelegramNetworkError) and "timeout" in str(exc).lower():
+                # Таймаут aiogram-сессии той же природы, что выше: мог дойти.
                 break
             if attempt < retries:
                 # Флуд-контроль ждём по retry_after, остальное — коротким бэкоффом.

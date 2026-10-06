@@ -308,6 +308,40 @@ def _restore_breaker_state(saved):
     breaker.consecutive_failures, breaker.down_until, breaker.down_logged_at = saved
 
 
+def test_ipv4_session_request_timeout_matches_session_total():
+    # aiogram кладёт self.timeout (дефолт 60с) на каждый запрос поверх дефолта
+    # сессии: без явного значения здесь действовали бы 60с, а не total=30.
+    import lumen_telegram_transport
+    sess = lumen_telegram_transport.IPv4AiohttpSession(proxy_secret="x", proxy_base_urls=())
+    try:
+        assert sess.timeout == 30.0
+    finally:
+        asyncio.run(sess.close())
+
+
+def test_tg_call_does_not_retry_send_after_timeout(monkeypatch):
+    # Повтор отправки после таймаута (исход неизвестен) давал дубли сообщений.
+    from aiogram.exceptions import TelegramNetworkError
+    calls = []
+
+    async def flaky_send(**kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise asyncio.TimeoutError("slow proxy")
+        return "ok"
+
+    async def slow_aiogram(**kwargs):
+        raise TelegramNetworkError(method=MagicMock(), message="Request timeout error")
+
+    saved = _save_breaker_state()
+    try:
+        assert asyncio.run(bot._tg_call(flaky_send, retries=1)) is None
+        assert asyncio.run(bot._tg_call(slow_aiogram, retries=1)) is None
+    finally:
+        _restore_breaker_state(saved)
+    assert len(calls) == 1
+
+
 def test_handle_proxy_failure_does_not_reenter_on_failing_notify(monkeypatch):
     # Реентрантность: на пороге _notify_owner идёт ДО trip() через _tg_call;
     # падение того же прокси звало _handle_proxy_failure снова (счётчик уже за
@@ -401,13 +435,14 @@ def test_tg_call_does_not_retry_client_errors(monkeypatch, exc_cls):
 
 def test_tg_call_still_retries_transient_errors(monkeypatch):
     # Сторож к A8-02: запрет повторов 4xx не должен отменять ретраи сетевых сбоев.
+    # Таймауты сюда не входят: повтор после таймаута давал дубли (исход неизвестен).
     calls = []
     slept = []
 
     async def flaky():
         calls.append(1)
         if len(calls) == 1:
-            raise TimeoutError("boom")
+            raise ConnectionResetError("boom")
         return "ok"
 
     async def fake_sleep(sec):
