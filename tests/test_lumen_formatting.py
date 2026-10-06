@@ -16,6 +16,7 @@ Telegram/Gemini/OpenRouter/рантайм-состояния бота, поэт�
 """
 import lumen_formatting
 import pytest
+import time
 
 
 
@@ -74,6 +75,18 @@ def test_md_to_html_no_html_injection_via_markdown_markers():
     assert result.count("<b>") == result.count("</b>")
     assert result.count("<i>") == result.count("</i>")
     assert result.count("<code>") == result.count("</code>")
+
+
+def test_table_separator_match_is_time_bounded():
+    # Квадратичный регекс на пробельных хвостах зависал: строка режется до match.
+    line = "| a | b |\n" + " " * 12000 + "-"
+    started = time.monotonic()
+    lumen_formatting._convert_markdown_tables_to_lists(line)
+    assert time.monotonic() - started < 1.0
+    # Обычный разделитель по-прежнему детектится.
+    assert lumen_formatting._is_table_separator("|---|---|") is True
+    assert lumen_formatting._is_table_separator(" --- | --- ") is True
+    assert lumen_formatting._is_table_separator("просто текст") is False
 
 
 def test_md_to_html_normalizes_raw_html_bold_tag():

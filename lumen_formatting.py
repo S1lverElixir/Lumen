@@ -8,6 +8,14 @@ from __future__ import annotations
 import re
 
 _TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+# Регекс квадратичен на длинных пробельных хвостах: строку режем до match,
+# разделитель шире капа в живых сообщениях не встречается.
+_TABLE_SEP_MAX_LEN = 500
+
+
+def _is_table_separator(line: str) -> bool:
+    """Строка-разделитель markdown-таблицы с bounded match."""
+    return _TABLE_SEP_RE.match(line[:_TABLE_SEP_MAX_LEN]) is not None
 
 def _split_table_cells(line: str) -> list[str]:
     s = line.strip()
@@ -28,7 +36,7 @@ def _convert_markdown_tables_to_lists(text: str) -> str:
     n = len(lines)
     while i < n:
         line = lines[i]
-        if "|" in line and i + 1 < n and "-" in lines[i + 1] and _TABLE_SEP_RE.match(lines[i + 1]):
+        if "|" in line and i + 1 < n and "-" in lines[i + 1] and _is_table_separator(lines[i + 1]):
             header_cells = _split_table_cells(line)
             if len(header_cells) >= 2:
                 data_rows = []
@@ -61,7 +69,7 @@ def _table_block_line_indexes(lines: list[str]) -> set[int]:
     idx: set[int] = set()
     i, n = 0, len(lines)
     while i < n:
-        if "|" in lines[i] and i + 1 < n and "-" in lines[i + 1] and _TABLE_SEP_RE.match(lines[i + 1]):
+        if "|" in lines[i] and i + 1 < n and "-" in lines[i + 1] and _is_table_separator(lines[i + 1]):
             if len(_split_table_cells(lines[i])) >= 2:
                 j = i + 2
                 data = 0
@@ -531,7 +539,7 @@ def _md_to_rich_html(text: str) -> str:
     n = len(lines)
     while i < n:
         line = lines[i]
-        if "|" in line and i + 1 < n and "-" in lines[i + 1] and _TABLE_SEP_RE.match(lines[i + 1]):
+        if "|" in line and i + 1 < n and "-" in lines[i + 1] and _is_table_separator(lines[i + 1]):
             header_cells = _split_table_cells(line)
             if len(header_cells) >= 2:
                 data_rows: list[list[str]] = []
