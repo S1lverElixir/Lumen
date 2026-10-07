@@ -1382,6 +1382,64 @@ def test_ask_groq_text_raises_last_error_when_whole_chain_fails(monkeypatch):
         asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]))
 
 
+def test_ask_groq_text_trims_long_history_to_token_budget(monkeypatch):
+    # Прод 05–07.10.2026: история 9–27K токенов давала HTTP 413 на каждую попытку
+    # Groq. Падает на старом коде, где история ехала целиком.
+    import lumen_routes
+    from collections import deque
+    chat_id = 999706
+    history = []
+    for i in range(60):
+        history.append({"role": "user", "content": "вопрос %d " % i + "x" * 500})
+        history.append({"role": "assistant", "content": "ответ %d " % i + "y" * 500})
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": history, "ctx": deque()})
+    seen = {}
+
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+        # Первый запрос — сам ответ; второй (если будет) — саммаризатор истории
+        # _trim_history, его не трогаем.
+        seen.setdefault("messages", json_body["messages"])
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
+    assert asyncio.run(bot.ask_groq_text(chat_id, "текущий вопрос", model_chain=["qwen/qwen3.8-27b"])) == "ok"
+    msgs = seen["messages"]
+    total = sum(lumen_routes._estimate_tokens(m.get("content") if isinstance(m.get("content"), str) else "") for m in msgs)
+    assert total <= lumen_routes._GROQ_PROMPT_TOKEN_BUDGET
+    # Системный промпт и текущий вопрос на месте, хранимая история не ужата.
+    assert msgs[0]["role"] == "system"
+    assert msgs[-1]["content"].endswith("текущий вопрос")
+    # Хранимая история ужатию не подлежит: текущий вопрос-ответ дописаны как есть.
+    assert history[-2]["content"] == "текущий вопрос"
+    assert history[-1] == {"role": "assistant", "content": "ok"}
+
+
+def test_model_attempt_counters_track_chain_success_and_failure(monkeypatch):
+    # 08.10.2026: по счётчикам model_attempts/model_failures виден реальный КПД
+    # маршрута (раньше делили ответы на попытки только вручную по логам).
+    from collections import deque
+    chat_id = 999707
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+    calls = {"n": 0}
+
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise bot.GroqAPIError("boom", status_code=500)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
+    before_a = bot._stats_entry().get("model_attempts", 0)
+    before_f = bot._stats_entry().get("model_failures", 0)
+    assert asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"])) == "ok"
+    assert bot._stats_entry().get("model_attempts", 0) - before_a == 2
+    assert bot._stats_entry().get("model_failures", 0) - before_f == 1
+
+
 def test_shared_chain_raises_budget_error_without_second_attempt(monkeypatch):
     # Общий цикл не должен тратить вторую попытку, если бюджет маршрута истёк.
     from collections import deque

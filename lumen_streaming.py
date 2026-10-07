@@ -248,6 +248,9 @@ async def _run_streaming_reply(
         if placeholder is None:
             return None, None
         sent_messages.append(placeholder)
+        # Попытка к модели состоялась (запрос уже ушёл в генератор кусков);
+        # пустой считают только ранний обрыв до показа — частичный ответ показан.
+        bot._record_stats_event("model_attempts")
 
         # Дальше цикл читает генератор напрямую — проверки кусков/утечек/троттлинга ниже без изменений.
         piece_agen = _pieces_with_waiting_feedback(
@@ -404,6 +407,7 @@ async def _run_streaming_reply(
                 pass
             # Плейсхолдер НЕ удаляем — возвращаем для переиспользования (см. докстринг).
             log.warning('[stream] Stream %s/%s failed before showing any content, falling back to a regular call: %s', provider, model_id, exc)
+            bot._record_stats_event("model_failures")
             return None, (sent_messages[-1] if sent_messages else None)
         log.warning('[stream] Stream %s/%s failed after partially showing the response, finishing as-is: %s', provider, model_id, exc)
         if _detect_identity_leak(full_text):
@@ -465,9 +469,10 @@ async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Messa
     return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline)
 
 async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None) -> tuple[str | None, Message | None]:
-    """Обёртка _run_streaming_reply для Groq (SSE через chat/completions)."""
+    """Обёртка _run_streaming_reply для Groq (SSE через chat/completions). Историю режем тем же _trim_messages_for_groq, что обычный путь, — иначе стрим-проба падает с 413 ещё до цепочки."""
     import bot
-    messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
+    from lumen_routes import _trim_messages_for_groq
+    messages = _trim_messages_for_groq(bot._build_openrouter_turn_messages(chat_id, user_text, model_id))
     # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
     piece_agen = bot._groq_stream_pieces(model_id, messages, deadline=deadline)
     return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline)
