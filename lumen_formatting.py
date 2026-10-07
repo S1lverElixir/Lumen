@@ -779,6 +779,9 @@ def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
         if is_fence:
             md_chunks.extend(_chunk_fence_block(seg, max_len))
         else:
+            # Слипшиеся буллеты разносим ДО резки: иначе чанкер рвёт список
+            # по ". " и куски с 1 маркером мимо порога сплиттера (прод 07.10.2026).
+            seg = _split_inline_numbered(_split_inline_bullets(seg))
             md_chunks.extend(_chunk_plain(seg, max_len))
     out: list[str] = []
     for chunk in md_chunks:
