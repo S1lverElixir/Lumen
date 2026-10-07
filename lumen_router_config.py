@@ -223,6 +223,16 @@ _OR_MODEL_HEALTH: dict[str, _ModelHealthNote] = {
     "nex-agi/nex-n2.5-mini:free": _ModelHealthNote(
         reason="Логи прода 05.10.2026: 'This model is unavailable for free. The paid version is available now' — стояла второй в лёгкой цепочке."
     ),
+    # ── Логи прода 05–07.10.2026: та же платная отсечка, что у nex-mini выше ──
+    "inclusionai/ling-3.0-flash-vl:free": _ModelHealthNote(
+        reason="Логи прода 05–06.10.2026: 'unavailable for free... use this slug instead' — замыкала vision-цепочку, каждая картинка теряла попытку."
+    ),
+    "inclusionai/ling-3.0-flash-fin:free": _ModelHealthNote(
+        reason="Логи прода 07.10.2026: тот же 'unavailable for free' — стояла третьей в лёгкой цепочке."
+    ),
+    "qwen/qwen3.8-27b:free": _ModelHealthNote(
+        reason="Liveness 07.10.2026: 'unavailable for free... use this slug instead: qwen/qwen3.8-27b' — тот же паттерн снятия с free."
+    ),
 }
 
 # Вычисляется из _OR_MODEL_HEALTH — роутер не должен выбирать эти модели.
@@ -373,13 +383,11 @@ def _groq_route(models: list[str]) -> list[tuple[str, str]]:
 # ── "Лёгкие" запросы — самый частый маршрут, целиком OpenRouter.
 # Порядок по аудитам 22.08/17.09.2026; nex-mini повышен продом 17.09.2026, снят
 # 05.10.2026 (платная отсечка — см. _OR_MODEL_HEALTH): второй стала sante.
+# 08.10.2026: fin и qwen3.8-27b:free сняты той же отсечкой — убраны из цепочки.
 _OR_LIGHT_ORDER: list[str] = [
     "nvidia/nemotron-3.5-lightning:free",
     "inclusionai/ling-3.0-flash-sante:free",
-    "inclusionai/ling-3.0-flash-fin:free",
     "liquid/lfm-2.5-2.6b:free",
-    # 21.09.2026: то же семейство, что калиброванный Groq-Qwen, но другой эндпоинт — после проверенных.
-    "qwen/qwen3.8-27b:free",
     "openrouter/free",
 ]
 
@@ -399,12 +407,12 @@ _OR_HEAVY_ORDER: list[str] = [
 ]
 
 # ── Картинки без свежести — vision OpenRouter (только base64-картинки).
-# Голова gemma-4-31b (квота подтверждена), ling-vl в хвосте некалиброван (аудит 17.09.2026).
+# Голова gemma-4-31b (квота подтверждена); ling-vl снят 08.10.2026 той же
+# платной отсечкой (см. _OR_MODEL_HEALTH) — убран из цепочки.
 _OR_VISION_ORDER: list[str] = [
     "google/gemma-4-31b-it:free",
     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
     "google/gemma-4-26b-a4b-it:free",
-    "inclusionai/ling-3.0-flash-vl:free",
 ]
 
 # ── Цепочки Gemini, где нужен именно Gemini. Голова — 3.8-flash (аудит 17.09.2026).
