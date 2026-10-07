@@ -183,6 +183,26 @@ def _is_gemini_daily_quota(text: str) -> bool:
         "per day", "per_day", "perday", "daily limit", "daily quota", "quota exceeded for the day",
     ))
 
+def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> bool:
+    """Отказ "модель недоступна" (503/404/invalid model) → короткая остывка, как на 429.
+
+    Прод 05.10.2026: пять моделей линейки Gemini 3.x подряд отдавали 503, и каждая
+    повторялась на каждом обращении — до 22 секунд и пяти попыток впустую на запрос.
+    Официальный список моделей и дашборд AI Studio показывали, что модели живы и
+    квота есть, то есть это был временный отказ, а не снятие с free. Поэтому НЕ
+    выкидываем модель из цепочек, а пропускаем её на QUOTA_RATE_LIMIT_COOLDOWN_SEC:
+    остывка сама истекает, успешный ответ и так снимает метку.
+    """
+    import bot
+    try:
+        txt = bot._error_text(exc).strip() or exc.__class__.__name__
+        if bot._classify_model_error(bot._error_status(exc, txt), txt) != "unavailable":
+            return False
+        bot._mark_rate_limited(provider, model_id)
+        return True
+    except Exception:
+        return False
+
 async def _probe_or_model_liveness() -> None:
     """Проактивная проверка живости (раз в сутки): только предупреждает в логах тем же паттерном, что у известных мёртвых — реестр _OR_MODEL_HEALTH не мутирует (курируется вручную). Ротация day-of-year % len — за N дней проверяются все модели списка за те же 3 запроса/сутки."""
     import bot
@@ -276,6 +296,7 @@ async def _chat_completion_chain(
         except Exception as exc:
             last_exc = exc
             bot._record_stats_event("model_failures")
+            _mark_model_unavailable(provider, model_trial, exc)
             if stop_on is not None and stop_on(exc):
                 log.warning(
                     '[%s] Model %s failed with an account-wide limit — stopping the chain, the rest would fail the same way.',
@@ -887,6 +908,7 @@ async def ask_gemini(
                 raise
 
             # Остальные исходы — одна попытка и сразу следующая модель, без ретраев.
+            _mark_model_unavailable("gemini", curr_model_id, exc)
             next_model = bot._next_fallback_model(tried_models, chain)
             if next_model:
                 bot._record_stats_event("model_failures")

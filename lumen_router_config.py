@@ -23,7 +23,7 @@ log = logging.getLogger("bot")
 # Поля name/badge/desc убраны (июль 2026, /model удалена) — читаются только grounding/url_context/no_search/no_system/stream/quota_unconfirmed.
 #
 # ── Как дашборд AI Studio считает бесплатную квоту grounding-инструментов ──
-# Бакет "Gemini 3" — 0/0 на search и map (24.07 + перепроверка 17.08.2026); квота на поиск только у 2.5-flash/lite, map — только у 3.5/3.1-lite.
+# Бакет "Gemini 3" — 0/0 на search и map (24.07 + перепроверка 17.08.2026 + аудит дашборда 08.10.2026); квота на поиск только у 2.5-flash/lite, map — только у 3.5/3.1-lite.
 GEMINI_MODELS: dict[str, dict[str, Any]] = {
     # Флагман линейки Flash (аудит 17.09.2026, бакет 5 RPM/250K TPM/20 RPD). Grounding False: бакет Gemini 3 без квоты на оба инструмента.
     "gemini-3.8-flash": {
@@ -417,24 +417,40 @@ _OR_VISION_ORDER: list[str] = [
     "google/gemma-4-26b-a4b-it:free",
 ]
 
-# ── Цепочки Gemini, где нужен именно Gemini. Вся линейка 3.x убрана 08.10.2026:
-# прод 05.10.2026 — HTTP 503 "model unavailable" на 3.8/3.7/3.6/3.5-flash и
-# 3-flash-preview разом (жива только ветка 2.5). Конфиги в GEMINI_MODELS и ID в
-# детекте утечек оставлены: если дашборд покажет их живыми — вернуть в цепочки.
+# ── Цепочки Gemini, где нужен именно Gemini.
+# Голова — 2.5-flash: единственная, кто фактически отвечал в проде 05–07.10.2026,
+# и единственная с реальной квотой search grounding (линейка 3.x — 0/0, аудит
+# ДД.ММ.ГГГГ по дашборду AI Studio владельца).
+# 08.10.2026: линейка 3.x ВОЗВРАЩЕНА в цепочки. Ошибки 503 на неё в проде 05.10 —
+# не снятие моделей: официальный список моделей (обновлён 06.10.2026) и дашборд
+# показывают живые лимиты у gemini-3.8/3.7/3.6/3.5-flash и gemini-3-flash-preview.
+# Отход от этой линейки теперь делает не список цепочек, а остывка по "unavailable"
+# (см. _mark_model_unavailable в lumen_routes.py) — модель с 503 пропускается на
+# QUOTA_RATE_LIMIT_COOLDOWN_SEC, а не тратит попытку на каждом сообщении.
 GEMINI_HEAVY_CHAIN: list[str] = [
     "gemini-2.5-flash",
+    "gemini-3.8-flash",
     "gemini-2.5-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
     "gemma-4-31b-it",
     "gemma-4-26b-a4b-it",
 ]
-# Сначала модели с реальной квотой search grounding (2.5-flash/lite), lite 3.x — резервом.
+# Сначала модели с реальной квотой search grounding (2.5-flash/lite), линейка 3.x — резервом (ответ по знаниям/url_context).
 GEMINI_SEARCH_CHAIN: list[str] = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
+    "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
 ]
 # Дефолт для прямых вызовов ask_gemini без явной цепочки.
 # Копия, а не алиас: раньше правка дефолта молча меняла тяжёлую цепочку (аудит 26.09.2026).

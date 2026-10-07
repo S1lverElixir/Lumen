@@ -403,6 +403,12 @@ async def _run_streaming_reply(
                         bot._mark_quota_exhausted(provider, model_id)
                     else:
                         bot._mark_rate_limited(provider, model_id)
+                else:
+                    # 503/404 и прочие "недоступна" — остывка на тех же условиях
+                    # (прод 05.10.2026: без неё пять моделей 3.x повторялись на
+                    # каждом сообщении, по 22 секунды попытки впустую).
+                    from lumen_routes import _mark_model_unavailable
+                    _mark_model_unavailable(provider, model_id, exc)
             except Exception:
                 pass
             # Плейсхолдер НЕ удаляем — возвращаем для переиспользования (см. докстринг).

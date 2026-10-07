@@ -231,9 +231,9 @@ def test_new_gemini_models_present_and_prioritized():
     assert "gemini-3.7-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.6-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.5-flash-lite" in lumen_router_config.GEMINI_MODELS
-    # 08.10.2026: линейка 3.x убрана из цепочек (503 в проде 05.10.2026) —
-    # дефолт переехал на живую ветку 2.5, она же голова тяжёлой цепочки
-    # (lite 3.x в том же логе отдавали 400 — стоят резервом).
+    # 08.10.2026: линейка 3.x в цепочках (жива, лимиты есть), но дефолт и голова —
+    # на 2.5-flash: единственная, кто отвечал в проде 05–07.10.2026, и единственная
+    # с квотой search grounding.
     assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-2.5-flash"
     assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-2.5-flash"
     # Обновлено (24.07.2026) вместе с реордером GEMINI_SEARCH_CHAIN — см. комментарий
@@ -252,10 +252,17 @@ def test_gemini_3_flash_preview_restored_after_official_docs_confirmation():
     # 05.10.2026 (HTTP 503 разом на пяти моделях). Конфиг в GEMINI_MODELS оставлен:
     # возврат — одной правкой цепочек, если дашборд покажет их живыми.
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_MODELS
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_HEAVY_CHAIN
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_SEARCH_CHAIN
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_LINK_CHAIN
-    assert "gemini-3-flash-preview" not in lumen_router_config.GEMINI_LINK_SEARCH_CHAIN
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_HEAVY_CHAIN
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_SEARCH_CHAIN
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_LINK_CHAIN
+    assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_LINK_SEARCH_CHAIN
+    # 08.10.2026 (пересмотр после скриншота дашборда): модель жива, у неё есть
+    # лимит 5 RPM / 250K TPM / 20 RPD, и официальный список моделей Google
+    # (обновлён 06.10.2026) подтверждает код gemini-3-flash-preview. Продовые 503
+    # были временным отказом, поэтому откат снятия — вернуть в цепочки, а отход
+    # обеспечивает остывка по "unavailable" (_mark_model_unavailable).
+    chain = lumen_router_config.GEMINI_HEAVY_CHAIN
+    assert chain.index("gemini-3.5-flash") < chain.index("gemini-3-flash-preview") < chain.index("gemma-4-31b-it")
 
 
 def test_gemini_3_flash_preview_quota_config_matches_dashboard():
@@ -672,16 +679,20 @@ def test_sept_2026_new_heavy_and_vision_models_placed():
 
 
 def test_gemini_3_8_flash_heads_heavy_chain_and_default():
-    # 08.10.2026: вся линейка 3.x убрана из цепочек (прод 05.10.2026 — HTTP 503
-    # разом). Конфиг и детект утечек оставлены, возврат — правкой цепочек.
+    # 08.10.2026 (пересмотр после скриншота дашборда AI Studio): линейка 3.x жива,
+    # лимиты у неё есть (5 RPM / 250K TPM / 20 RPD), официальный список модерий
+    # Google (обновлён 06.10.2026) подтверждает коды. Продовые 503 05.10.2026 — временный
+    # отказ, поэтому 3.8 остаётся в цепочках вторым резервом после 2.5-flash
+    # (единственной, кто реально отвечал в проде и у кого есть квота поиска).
     assert "gemini-3.8-flash" in lumen_router_config.GEMINI_MODELS
     assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-2.5-flash"
-    assert "gemini-3.8-flash" not in lumen_router_config.GEMINI_HEAVY_CHAIN
-    assert "gemini-3.8-flash" not in lumen_router_config.GEMINI_SEARCH_CHAIN
-    assert "gemini-3.8-flash" not in lumen_router_config.GEMINI_LINK_CHAIN
-    for dead in ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash-preview"):
-        assert dead not in lumen_router_config.GEMINI_HEAVY_CHAIN
-        assert dead not in lumen_router_config.GEMINI_SEARCH_CHAIN
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-2.5-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[1] == "gemini-3.8-flash"
+    assert "gemini-3.8-flash" in lumen_router_config.GEMINI_SEARCH_CHAIN
+    assert "gemini-3.8-flash" in lumen_router_config.GEMINI_LINK_CHAIN
+    for alive in ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"):
+        assert alive in lumen_router_config.GEMINI_HEAVY_CHAIN
+        assert alive in lumen_router_config.GEMINI_SEARCH_CHAIN
     conf = lumen_router_config.GEMINI_MODELS["gemini-3.8-flash"]
     assert conf.get("search_grounding") is False
     assert conf.get("map_grounding") is False
