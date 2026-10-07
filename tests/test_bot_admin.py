@@ -8,6 +8,7 @@ import bot
 import logging
 import os
 import threading
+import time
 import pytest
 from unittest.mock import Mock
 from tests.bot_test_helpers import (
@@ -329,7 +330,9 @@ def test_webhook_denied_log_is_throttled(caplog):
     orig_count = lumen_admin._webhook_denied_count
     orig_last = lumen_admin._webhook_denied_last_log
     lumen_admin._webhook_denied_count = 0
-    lumen_admin._webhook_denied_last_log = 0.0
+    # Ноль monotonic вместо прошлого: на свежей CI-машине uptime < 60с и первый
+    # отказ молча копится (прод 07.10.2026) — уводим метку в прошлое явно.
+    lumen_admin._webhook_denied_last_log = time.monotonic() - lumen_admin._WEBHOOK_DENIED_LOG_INTERVAL_SEC - 1.0
     original_secret = bot.WEBHOOK_SECRET
     bot.WEBHOOK_SECRET = "real-webhook-secret"
     try:
