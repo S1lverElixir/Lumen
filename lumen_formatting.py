@@ -578,6 +578,14 @@ def _md_to_rich_html(text: str) -> str:
 
     text = text.replace(_BLOCKQUOTE_START, "<blockquote>").replace(_BLOCKQUOTE_END, "</blockquote>")
 
+    # Прод 07.10.2026: в rich-сообщении голый перенос строки НЕ разрыв — Telegram
+    # склеивает абзацы, и разнесённый список приходил одной кашей (в обычном
+    # HTML-пути \n работает, поэтому баг был виден только в финале). Переносы
+    # заменяем на <br/> — ровно так их показывают доки для <blockquote>.
+    # Момент: код/ссылки/таблицы/заголовки ещё в плейсхолдерах (без \n внутри),
+    # поэтому многострочные <pre> не пострадают.
+    text = text.replace("\n", "<br/>")
+
     for key, (tag_level, inner) in _heads.items():
         text = text.replace(key, f"<h{tag_level}>{_rich_inline(inner)}</h{tag_level}>")
     for key, (header, rows) in _tables.items():
