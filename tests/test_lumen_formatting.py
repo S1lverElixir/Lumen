@@ -127,6 +127,19 @@ def test_split_chunks_merge_short_fenced_message_back():
     assert chunks == [text]
 
 
+def test_split_chunks_presplit_inline_bullets_before_cutting():
+    # Прод 07.10.2026: чанкер резал слипшийся список по ". " до сплиттера,
+    # куски с 1 маркером не делились и в чат уходила каша.
+    text = (
+        "Лучше проприетарные системы, когда: • Требуется гарантированная поддержка "
+        "с длинным пояснением для набора длины строки. • Важна интеграция из коробки "
+        "с длинным пояснением для набора длины строки. • Нужна безопасность за счет "
+        "сокрытия с длинным пояснением для набора длины строки."
+    )
+    chunks = lumen_formatting._split_text_chunks(text, 4096)
+    assert any("\n• " in c for c in chunks)
+
+
 def test_md_to_html_link_with_inline_code_has_no_placeholder_leak():
     # Код внутри метки ссылки: плейсхолдер не протекает, оба тега на месте.
     html = lumen_formatting._md_to_html("[`code` текст](https://example.com)")
