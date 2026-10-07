@@ -432,10 +432,10 @@ def test_md_to_rich_html_splits_inline_lists_end_to_end():
     bullets = "Вот несколько хороших мелодрамм: " + " • ".join(
         ["фильм номер %d с тёплым и подробным описанием сюжета" % i for i in range(4)]
     )
-    assert "\n• " in lumen_formatting._md_to_rich_html(bullets)
+    assert "<br/>• " in lumen_formatting._md_to_rich_html(bullets)
     numbered = "1. Пункт первый с достаточным пояснением для проверки. 2. Пункт второй с достаточным пояснением для проверки. 3. Пункт третий с достаточным пояснением для проверки."
     rich = lumen_formatting._md_to_rich_html(numbered)
-    assert "\n2. " in rich and "\n3. " in rich
+    assert "<br/>2. " in rich and "<br/>3. " in rich
 
 
 def test_md_to_rich_html_scrubs_stray_latex_like_the_plain_path():
@@ -473,7 +473,10 @@ def test_render_paths_parity_on_shared_cases():
         "список: " + " • ".join(f"пункт {i} с текстом подлиннее" for i in range(4)),
     ]
     for case in shared:
-        assert lumen_formatting._md_to_html(case) == lumen_formatting._md_to_rich_html(case), case
+        # Перенос строки в rich — это <br/> (прод 07.10.2026: голый \n там склеивался),
+        # в обычном HTML — \n. Поэтому сравниваем с приведением к общему виду.
+        rich = lumen_formatting._md_to_rich_html(case).replace("<br/>", "\n")
+        assert lumen_formatting._md_to_html(case) == rich, case
 
 
 def test_render_paths_differ_only_for_headings():
@@ -481,6 +484,21 @@ def test_render_paths_differ_only_for_headings():
     # путь отдаёт <b>. Проверяем, что это всё, что разъезжается.
     assert lumen_formatting._md_to_html("## Title") == "<b>Title</b>"
     assert lumen_formatting._md_to_rich_html("## Title") == "<h3>Title</h3>"
+
+
+def test_md_to_rich_html_turns_newlines_into_br():
+    # Прод 07.10.2026: в финальном rich-сообщении разнесённый список приходил одной
+    # кашей — Telegram склеивает абзацы, голый "\n" разрывом не считается. Разрыв
+    # в rich даёт только <br/> (так же в доках показан <blockquote>). Падает на
+    # старом коде, где переносы оставались "\n" и список выглядел слипшимся.
+    b = chr(96) * 3
+    text = "список:\n• раз\n• два\n\n" + b + "python\nx = 1\ny = 2\n" + b
+    rich = lumen_formatting._md_to_rich_html(text)
+    assert "список:<br/>• раз<br/>• два<br/><br/>" in rich
+    # Переносы внутри блока кода обязаны остаться переносами.
+    assert '<pre><code class="language-python">x = 1\ny = 2</code></pre>' in rich
+    # Вне <pre> голых переносов не остаётся.
+    assert "\n" not in rich.replace("x = 1\ny = 2", "")
 
 
 def test_md_to_rich_html_splits_three_bullets_prod_movies():
@@ -491,7 +509,7 @@ def test_md_to_rich_html_splits_three_bullets_prod_movies():
         "• Crazy Rich Asians (2018): вясёлая рамантычная камедыя пра кітайскую эліту, поўная колеру і музыкі."
     )
     assert len(text) >= 200
-    assert "\n• " in lumen_formatting._md_to_rich_html(text)
+    assert "<br/>• " in lumen_formatting._md_to_rich_html(text)
 
 
 def test_md_to_html_full_pipeline_converts_bullet_list_with_bold():
