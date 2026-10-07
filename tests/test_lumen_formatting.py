@@ -351,9 +351,14 @@ def test_split_inline_bullets_ignores_short_prose():
         "для длины строки и смыслом · третий пункт с подробностями для длины строки и смыслом · четвёртый пункт.",
         4, "Итоги такие: ",
     ),
+    # Прод 07.10.2026: строки платформ (~150 символов) не ловились порогом 200.
+    (
+        "Telegram: • Поищи канал по названию и нажми вступить для проверки длины строки • Часто приватные каналы шлют приглашения в личку",
+        3, "Telegram:",
+    ),
 ])
 def test_split_inline_bullets_splits_prod_answers(text, n_lines, intro):
-    assert len(text) >= 200
+    assert len(text) >= 120
     lines = lumen_formatting._split_inline_bullets(text).split("\n")
     assert len(lines) == n_lines
     assert "" not in lines
