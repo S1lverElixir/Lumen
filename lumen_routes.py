@@ -695,12 +695,13 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                              tool_calls.append(f"response:{json.dumps(bot._json_prune_defaults(getattr(fn_resp, 'response', None)), ensure_ascii=False)}")
                          except Exception:
                              tool_calls.append("response")
-        if not ans and tool_calls:
-            ans = "[Tool call: " + "; ".join(tool_calls) + "]"
-        elif not ans and reasons:
+        if not ans and (tool_calls or reasons):
             retry_failed = False
-            if any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
-                # Модель сломала свой вызов инструмента — повторяем без инструментов.
+            if tool_calls or any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
+                # Ответ без текста: битый вызов или голый tool_call — пользователю
+                # JSON инструментов не показываем (прод 07.10.2026), повторяем без них.
+                if tool_calls:
+                    log.warning("[gemini] Model %s returned only tool calls without text, retrying without tools.", model_id)
                 try:
                     retry_gconfig = gconfig.model_copy(update={"tools": None}) if gconfig is not None else None
                     # Async-клиент, а не to_thread: wait_for реально отменяет зависший
@@ -737,7 +738,7 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                     # модель, а не показывать заглушку блокировки как готовый ответ
                     # (иначе цепочка останавливалась на первой же битой модели).
                     retry_failed = True
-            if not ans and not retry_failed:
+            if not ans and not retry_failed and reasons:
                 ans = f"[Ответ заблокирован или пуст. Причина: {', '.join(reasons)}]"
     # Пустая строка без блокировки — не "Empty response": ask_gemini пробует следующую модель.
     return ans.strip()

@@ -376,6 +376,35 @@ def test_extract_gemini_answer_reports_non_malformed_block_without_retry_state()
     assert "SAFETY" in ans
 
 
+def test_extract_gemini_answer_retries_without_tools_on_tool_only_response():
+    # Прод 07.10.2026: модель вернула только function_call без текста, юзер видел "[Tool call: ...]".
+    from types import SimpleNamespace
+    fn_part = SimpleNamespace(
+        text="",
+        function_call=SimpleNamespace(name="google_search", args={"query": "test"}),
+        function_response=None,
+    )
+    content = SimpleNamespace(parts=[fn_part])
+    resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="STOP", content=content)])
+
+    async def retry_ok(*, model, contents, config=None):
+        assert config is None or getattr(config, "tools", None) is None
+        return _FakeGeminiResponse(text="Ответ без инструментов")
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = retry_ok
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        ans = asyncio.run(bot._extract_gemini_answer_text(
+            resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
+        ))
+        assert ans == "Ответ без инструментов"
+        assert "Tool call" not in ans
+    finally:
+        bot.client = original_client
+
+
 @pytest.mark.parametrize("retry_outcome", ["raises", "empty"])
 def test_extract_gemini_answer_failed_retry_goes_to_next_model(retry_outcome):
     # Повтор после битого вызова сам упал (а не просто не влез в бюджет) или
