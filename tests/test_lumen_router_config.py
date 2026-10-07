@@ -591,7 +591,7 @@ def test_sept_2026_new_light_models_after_proven_head_before_reserve():
     assert order[0] == "nvidia/nemotron-3.5-lightning:free"
     assert order[-1] == "openrouter/free"
     for model_id in (
-        "inclusionai/ling-3.0-flash-sante:free", "inclusionai/ling-3.0-flash-fin:free",
+        "inclusionai/ling-3.0-flash-sante:free",
         "liquid/lfm-2.5-2.6b:free",
     ):
         assert model_id in order
@@ -619,6 +619,27 @@ def test_nex_mini_excluded_after_paid_tier_cutover():
     assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free"]
 
 
+def test_oct_2026_paid_cutover_excludes_ling_vl_fin_and_qwen():
+    # Прод 05–07.10.2026: та же платная отсечка "unavailable for free", что у
+    # nex-mini выше — три модели разом. Мёртвые вне цепочек, но ID остаются
+    # в детекте утечек (их дословно нельзя в ответ).
+    for model_id in (
+        "inclusionai/ling-3.0-flash-vl:free",
+        "inclusionai/ling-3.0-flash-fin:free",
+        "qwen/qwen3.8-27b:free",
+    ):
+        assert model_id in lumen_router_config._OR_MODEL_HEALTH
+        assert model_id in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+        assert model_id not in lumen_router_config._OR_LIGHT_ORDER
+        assert model_id not in lumen_router_config._OR_VISION_ORDER
+        assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+    route = lumen_router_config._or_route([
+        "inclusionai/ling-3.0-flash-fin:free",
+        "inclusionai/ling-3.0-flash-sante:free",
+    ])
+    assert [m for _, m in route] == ["inclusionai/ling-3.0-flash-sante:free"]
+
+
 def test_nemotron_super_demoted_below_ultra_after_second_mush_incident():
     # Вечер 17.09.2026: super выдал "кашу" прямо в проде (второй инцидент после
     # калибровочного) — понижен под ultra без инцидентов, но не исключён.
@@ -635,7 +656,8 @@ def test_sept_2026_new_heavy_and_vision_models_placed():
     assert heavy.index("thinkingmachines/inkling:free") < heavy.index("dots-studio/dots-3-note-preview:free")
     vision = lumen_router_config._OR_VISION_ORDER
     assert vision[0] == "google/gemma-4-31b-it:free"
-    assert "inclusionai/ling-3.0-flash-vl:free" in vision
+    # ling-vl снят 08.10.2026 (платная отсечка) — вне цепочки, но в детекте утечек.
+    assert "inclusionai/ling-3.0-flash-vl:free" not in vision
 
 
 def test_gemini_3_8_flash_heads_heavy_chain_and_default():
