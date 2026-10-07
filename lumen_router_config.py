@@ -80,7 +80,7 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "no_search": True, "stream": True, "url_context": True,
     },
 }
-DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 # ── TTS-модели (аудит техдолга, август 2026) ──
 GEMINI_TTS_MODELS: list[str] = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
@@ -384,10 +384,12 @@ def _groq_route(models: list[str]) -> list[tuple[str, str]]:
 # Порядок по аудитам 22.08/17.09.2026; nex-mini повышен продом 17.09.2026, снят
 # 05.10.2026 (платная отсечка — см. _OR_MODEL_HEALTH): второй стала sante.
 # 08.10.2026: fin и qwen3.8-27b:free сняты той же отсечкой — убраны из цепочки.
+# 08.10.2026: голова — sante (фактически отвечает в проде), nemotron-3.5-lightning
+# понижен в хвост (таймауты в проде 07.10.2026) — резервом перед openrouter/free.
 _OR_LIGHT_ORDER: list[str] = [
-    "nvidia/nemotron-3.5-lightning:free",
     "inclusionai/ling-3.0-flash-sante:free",
     "liquid/lfm-2.5-2.6b:free",
+    "nvidia/nemotron-3.5-lightning:free",
     "openrouter/free",
 ]
 
@@ -415,31 +417,24 @@ _OR_VISION_ORDER: list[str] = [
     "google/gemma-4-26b-a4b-it:free",
 ]
 
-# ── Цепочки Gemini, где нужен именно Gemini. Голова — 3.8-flash (аудит 17.09.2026).
+# ── Цепочки Gemini, где нужен именно Gemini. Вся линейка 3.x убрана 08.10.2026:
+# прод 05.10.2026 — HTTP 503 "model unavailable" на 3.8/3.7/3.6/3.5-flash и
+# 3-flash-preview разом (жива только ветка 2.5). Конфиги в GEMINI_MODELS и ID в
+# детекте утечек оставлены: если дашборд покажет их живыми — вернуть в цепочки.
 GEMINI_HEAVY_CHAIN: list[str] = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemma-4-31b-it",
     "gemma-4-26b-a4b-it",
 ]
-# Сначала модели с реальной квотой search grounding (2.5-flash/lite), линейка 3.x — резервом (ответ по знаниям/url_context).
+# Сначала модели с реальной квотой search grounding (2.5-flash/lite), lite 3.x — резервом.
 GEMINI_SEARCH_CHAIN: list[str] = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
 ]
 # Дефолт для прямых вызовов ask_gemini без явной цепочки.
 # Копия, а не алиас: раньше правка дефолта молча меняла тяжёлую цепочку (аудит 26.09.2026).
