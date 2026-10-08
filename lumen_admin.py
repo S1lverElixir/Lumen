@@ -11,7 +11,7 @@ import hmac
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import aiohttp
@@ -164,6 +164,9 @@ async def webhook_handler(request: Request) -> Any:
             return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     except Exception as exc:
         log.warning("[webhook] Failed to process incoming update: %s", exc)
+        # Битое тело — не успех: пусть Telegram повторит, а не считает дроп
+        # обработанным (аудит M2, 10.2026).
+        return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     return {"ok": True}
 
 async def probe_url(session: Any, url: str, *, timeout_sec: float = 6.0, redact: str = "") -> dict[str, Any]:
@@ -251,7 +254,7 @@ async def export_state(request: Request) -> dict[str, Any]:
     # Квота вложенная (счётчики per-model) — только deepcopy отцепляет её целиком.
     quota = copy.deepcopy(dict(bot.GLOBAL_QUOTA))
     return {
-        "exported_at": datetime.now().isoformat(),
+        "exported_at": datetime.now(timezone.utc).isoformat(),
         "chats": chats,
         "global_quota": quota,
     }
