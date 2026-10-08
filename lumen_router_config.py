@@ -362,9 +362,10 @@ def _or_route(models: list[str]) -> list[tuple[str, str]]:
     return [("openrouter", m) for m in _skip_exhausted("openrouter", models) if m not in _ROUTER_EXCLUDED_OR_MODELS]
 
 def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
-    # Реестра здоровья, как _OR_MODEL_HEALTH, здесь нет (аудит 29.09.2026):
-    # мёртвая модель стоит головой и каждая попытка платит лишнее обращение.
-    # При инциденте убирать из ORDER-списков с датой, как для OpenRouter.
+    # Отдельного реестра здоровья, как _OR_MODEL_HEALTH, здесь нет осознанно:
+    # временные отказы (503/unavailable) гасит остывка _mark_model_unavailable на
+    # QUOTA_RATE_LIMIT_COOLDOWN_SEC, а снятие модели — только с датированным
+    # подтверждением (аудит M8, 10.2026). При инциденте убирать из ORDER-списков с датой.
     return [("gemini", m) for m in _skip_exhausted("gemini", models)]
 
 # ── Groq (прямой провайдер, не через OpenRouter) ──
@@ -376,7 +377,7 @@ _GROQ_LIGHT_ORDER: list[str] = [
 ]
 
 def _groq_route(models: list[str]) -> list[tuple[str, str]]:
-    # То же про реестр здоровья, что у _gemini_route выше.
+    # То же про остывку вместо реестра, что у _gemini_route выше.
     return [("groq", m) for m in _skip_exhausted("groq", models)]
 
 

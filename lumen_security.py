@@ -157,6 +157,9 @@ _SCRIPT_KEYWORDS = (
 )
 _MUSH_MIN_TEXT_LEN = 100
 _MUSH_MIN_MIXED_TOKENS = 3
+# Верхний кап сканируемого текста: unicodedata.name() на каждый символ без края —
+# CPU-DoS длинным текстом (аудит M10, 10.2026). Хвост за капом не сканируем.
+_MUSH_MAX_TEXT_LEN = 20000
 
 
 def _token_scripts(token: str) -> set[str]:
@@ -179,6 +182,7 @@ def _garbled_mixed_tokens(text: str) -> list[str]:
     """Смешанные токены (2+ письменности внутри одного): сырьё детектора и проверки эха."""
     if not text or len(text) < _MUSH_MIN_TEXT_LEN:
         return []
+    text = text[:_MUSH_MAX_TEXT_LEN]
     stripped = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     stripped = re.sub(r"`[^`\n]+`", " ", stripped)
     stripped = re.sub(r"https?://\S+", " ", stripped)
