@@ -87,11 +87,12 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          sender_language_code = message.from_user.language_code if message.from_user else None
 
          # Диагностика: исходные поля TikWM при каждом решении ("сначала факты, потом фикс").
+         # Подписанные URL в лог не пишем, только факты наличия (аудит M7, 10.2026).
          log.info(
-              "[tiktok-music][diag] raw_title=%r raw_author=%r cover=%r author_avatar=%r "
+              "[tiktok-music][diag] raw_title=%r raw_author=%r has_cover=%s has_avatar=%s "
               "residual_title=%r sender_language_code=%r -> is_original_sound=%s",
-              raw_music_title, raw_music_author, music_info.get("cover"),
-              media_data.get("author", {}).get("avatar"), residual_title, sender_language_code, is_original_sound,
+              raw_music_title, raw_music_author, bool(music_info.get("cover")),
+              bool(media_data.get("author", {}).get("avatar")), residual_title, sender_language_code, is_original_sound,
          )
 
          if is_original_sound:
@@ -119,12 +120,13 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
                    )
                    cleaned_title, performer_name = performer_name, author_uniq_clean or author_nick or performer_name
 
-         # достаём обложку трека
+         # достаём обложку трека: только для превью, поэтому малый кап вместо
+         # дефолтных 75МБ (аудит M6, 10.2026).
          cover_url = music_info.get("cover") or music_info.get("avatar") or media_data.get("author", {}).get("avatar")
          cover_bytes = None
          if cover_url:
               try:
-                   cover_bytes = await bot._download_url_bin(session, cover_url, headers=headers)
+                   cover_bytes = await bot._download_url_bin(session, cover_url, headers=headers, cap_bytes=2 * 1024 * 1024)
               except Exception as e:
                    log.warning("[tiktok] failed to download cover image: %s", e)
 
@@ -244,21 +246,26 @@ async def _try_send_tiktok_slideshow(
          fetch_urls = _slideshow_slide_urls(media_data, images_to_fetch)
          # Общий кап RAM на пост: больше не качаем и остаток пропускаем.
          post_budget = [bot.TIKTOK_SLIDESHOW_MAX_BYTES]
+         # Резерв бюджета — под локом ДО скачивания: проверка и вычитание иначе
+         # неатомарны при параллельных загрузках и кап пробивается (аудит H4, 10.2026).
+         _post_budget_lock = asyncio.Lock()
 
          async def _download_slide_bounded(slide_url: str) -> bytes | None:
               async with bot._tiktok_slide_download_semaphore:
-                   if post_budget[0] <= 0:
-                        return None
-                   # Резерв до скачивания: кап слайда — остаток бюджета.
+                   async with _post_budget_lock:
+                        if post_budget[0] <= 0:
+                             return None
+                        # Резерв до скачивания: кап слайда — остаток бюджета.
+                        reservation = min(TIKTOK_DOWNLOAD_MAX_BYTES, post_budget[0])
+                        post_budget[0] -= reservation
                    data = await bot._download_url_bin(
                         session, slide_url, headers=headers,
-                        cap_bytes=min(TIKTOK_DOWNLOAD_MAX_BYTES, post_budget[0]),
+                        cap_bytes=reservation,
                    )
-                   if data:
-                        post_budget[0] -= len(data)
-                        if post_budget[0] < 0:
-                             return None
-                   return data
+                   # Неиспользованный резерв возвращаем: реальный расход — только len(data).
+                   async with _post_budget_lock:
+                        post_budget[0] += reservation - len(data or b"")
+                   return data or None
 
          downloaded = list(await asyncio.gather(
               *(_download_slide_bounded(u) for u in fetch_urls)
@@ -470,11 +477,12 @@ async def handle_tiktok(message: Message, url: str) -> None:
               raise TikTokUserFacingError(bot._t(message.chat.id, "tiktok_fetch_fail"))
 
           # Лог структуры images/live_images — видна смена формата TikWM.
+         # Полные подписанные URL не пишем, только счётчики (аудит M7, 10.2026).
          if images_debug := media_data.get("images"):
               log.info(
-                   '[tikwm][diag] slideshow post: response keys=%s, images(%d items)=%s, live_images=%s, top-level play=%s hdplay=%s wmplay=%s',
-                   sorted(media_data.keys()), len(images_debug), images_debug, media_data.get("live_images"),
-                   media_data.get("play"), media_data.get("hdplay"), media_data.get("wmplay"),
+                   '[tikwm][diag] slideshow post: response keys=%s, images=%d, has_live_images=%s, has_play=%s has_hdplay=%s has_wmplay=%s',
+                   sorted(media_data.keys()), len(images_debug), bool(media_data.get("live_images")),
+                   bool(media_data.get("play")), bool(media_data.get("hdplay")), bool(media_data.get("wmplay")),
               )
 
          author = (media_data.get("author") or {}).get("nickname") or bot._t(message.chat.id, "tiktok_author")
