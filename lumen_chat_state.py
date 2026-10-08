@@ -484,10 +484,14 @@ def _restore_user_names(raw: Any) -> dict[str, dict[str, str]]:
 
 
 def _resolve_nick(state: dict[str, Any], nick: str) -> str | None:
-    """Прозвище в показное имя: ищет по username и first_name без регистра."""
+    """Прозвище в показное имя: ищет по username и first_name без регистра.
+
+    Смотрит в обе стороны: «блин» находит «Блинчик», а «блинчика» тоже
+    находит «Блинчик» (склонения в живой речи). Короткие совпадения
+    отбрасываем, иначе двухбуквенные огрызки шумят на каждом сообщении."""
     try:
         needle = (nick or "").strip().lstrip("@").lower()
-        if not needle:
+        if len(needle) < 3:
             return None
         bucket = state.get("user_names") or {}
         if not isinstance(bucket, dict):
@@ -497,7 +501,10 @@ def _resolve_nick(state: dict[str, Any], nick: str) -> str | None:
                 continue
             for field in ("username", "first_name"):
                 val = entry.get(field)
-                if isinstance(val, str) and needle in val.lower():
+                if not isinstance(val, str):
+                    continue
+                low = val.lower()
+                if needle in low or (len(low) >= 4 and low in needle):
                     return _sender_display(entry.get("username"), entry.get("first_name"))
     except Exception:
         pass

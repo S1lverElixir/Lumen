@@ -3043,14 +3043,17 @@ def test_combined_memory_caps_background_at_100():
     from collections import deque
     state = {"history": [{"role": "user", "content": f"вопрос {i}"} for i in range(60)],
              "ctx": deque(), "recent_media_ids": {}, "user_names": {}}
-    for i in range(60):
-        message = SimpleNamespace(chat=SimpleNamespace(id=9001),
-                                  from_user=SimpleNamespace(id=7, username="m1st", first_name="M"),
-                                  text=f"фон {i}")
-        bot._record_passive_group_context(message, state, f"фон {i}")
-    assert len(state["history"]) == 60
-    assert len(state["history"]) + len(state["ctx"]) <= bot.MAX_TOTAL_MEMORY_MESSAGES
-    assert state["ctx"][0].endswith("фон 20")
+    try:
+        for i in range(60):
+            message = SimpleNamespace(chat=SimpleNamespace(id=9001),
+                                      from_user=SimpleNamespace(id=7, username="m1st", first_name="M"),
+                                      text=f"фон {i}")
+            bot._record_passive_group_context(message, state, f"фон {i}")
+        assert len(state["history"]) == 60
+        assert len(state["history"]) + len(state["ctx"]) <= bot.MAX_TOTAL_MEMORY_MESSAGES
+        assert state["ctx"][0].endswith("фон 20")
+    finally:
+        bot._dirty_chat_ids.discard(9001)
 
 
 def test_sender_directory_resolves_nicknames():
@@ -3079,3 +3082,42 @@ def test_reply_block_quotes_replied_message():
         _bot.BOT_USERNAME = prev_username
     assert "прошлый ответ бота" in block
     assert _bot._reply_target_block(SimpleNamespace(reply_to_message=None), state) == ""
+
+
+def test_sender_display_shows_both_names():
+    # Ник с first_name в скобках: иначе "блинчик" терялся при наличии username.
+    from lumen_chat_state import _sender_display
+    assert _sender_display("The_6JluH4ik", "Блинчик") == "@The_6JluH4ik (Блинчик)"
+    assert _sender_display("m1st", "m1st") == "@m1st"
+    assert _sender_display(None, "Блинчик") == "Блинчик"
+    assert _sender_display(None, None) == "User"
+
+
+def test_tagged_prompt_hints_nickname():
+    # Прозвище из вопроса связывается с автором: модель не гадает кто это.
+    state = {"history": [], "user_names": {}}
+    bot._note_sender(state, 11, "The_6JluH4ik", "Блинчик")
+    message = SimpleNamespace(chat=SimpleNamespace(id=9004),
+                              from_user=SimpleNamespace(id=7, username="m1st", first_name="M"),
+                              text="проверь слова блинчика", reply_to_message=None)
+    prompt = bot._tagged_prompt(state, message, "проверь слова блинчика")
+    assert "[@m1st (M)]" in prompt
+    assert "Подсказка" in prompt and "Блинчик" in prompt
+
+
+def test_ctx_survives_serialize_restore():
+    # Фон переживает рестарт: иначе единые 100 сообщений сбрасывались деплоем.
+    from collections import deque
+    cid = 9005
+    state = {"history": [{"role": "user", "content": "вопрос"}],
+             "ctx": deque(["@m1st (M): фоновая реплика"]),
+             "recent_media_ids": {}, "user_names": {"7": {"username": "m1st", "first_name": "M"}},
+             "last_activity": 1.0, "lang": "ru"}
+    try:
+        snapshot = bot._serialize_chat_state(state)
+        assert snapshot["ctx"] == ["@m1st (M): фоновая реплика"]
+        bot._restore_single_chat(cid, snapshot)
+        assert list(bot.chat_state[cid]["ctx"]) == ["@m1st (M): фоновая реплика"]
+        assert bot.chat_state[cid]["user_names"] == {"7": {"username": "m1st", "first_name": "M"}}
+    finally:
+        bot.chat_state.pop(cid, None)
