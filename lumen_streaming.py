@@ -296,7 +296,7 @@ async def _run_streaming_reply(
                 hist.append({"role": "assistant", "content": final_answer})
                 # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
                 await bot._trim_history(hist)
-                ctx.clear()
+                bot._trim_combined(state)
                 bot._record_quota_usage(provider, model_id)
                 return final_answer, None
 
@@ -320,7 +320,7 @@ async def _run_streaming_reply(
                     # Обрезка с саммари (см. _trim_history): молчаливый срез оставлял
                     # саммаризацию только нестриминговым путям (аудит 26.09.2026).
                     await bot._trim_history(hist)
-                    ctx.clear()
+                    bot._trim_combined(state)
                     bot._record_quota_usage(provider, model_id)
                     return final_answer, None
                 if not edits_dead:
@@ -451,7 +451,7 @@ async def _run_streaming_reply(
     hist.append({"role": "assistant", "content": final_answer})
     # Тот же _trim_history, что в нестриминговых путях (см. комментарий выше).
     await bot._trim_history(hist)
-    ctx.clear()
+    bot._trim_combined(state)
     bot._record_quota_usage(provider, model_id)
     return final_answer, None
 

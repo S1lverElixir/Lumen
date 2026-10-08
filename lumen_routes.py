@@ -361,7 +361,7 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     # В историю пишем чистый текст (без "Фон разговора") — её читает и Gemini, разовый групповой контекст там оседать не должен.
     history.append({"role": "user", "content": _history_user_text(user_text)})
     history.append({"role": "assistant", "content": answer})
-    ctx.clear()
+    bot._trim_combined(state)
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(history)
     bot._record_quota_usage("openrouter", model_trial)
@@ -428,7 +428,7 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     # В историю — чистый текст пользователя, как у остальных провайдеров.
     history.append({"role": "user", "content": _history_user_text(user_text)})
     history.append({"role": "assistant", "content": answer})
-    ctx.clear()
+    bot._trim_combined(state)
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(history)
     bot._record_quota_usage("groq", model_trial)
@@ -607,7 +607,7 @@ async def ask_openrouter_multimodal(
     history.append({"role": "assistant", "content": answer})
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(history)
-    ctx.clear()
+    bot._trim_combined(state)
     bot._record_quota_usage("openrouter", model_trial)
     return answer
 
@@ -936,7 +936,7 @@ async def ask_gemini(
     hist.append({"role": "assistant", "content": ans})
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(hist)
-    ctx.clear()
+    bot._trim_combined(state)
     bot._record_quota_usage("gemini", curr_model_id)
     return ans
 
