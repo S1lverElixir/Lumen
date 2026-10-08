@@ -315,6 +315,12 @@ TELEGRAM_DOWNLOAD_MAX_BYTES = _env_number("TELEGRAM_DOWNLOAD_MAX_BYTES", 20 * 10
 TELEGRAM_GET_FILE_TIMEOUT = _env_number("TELEGRAM_GET_FILE_TIMEOUT", 15, min_value=1)
 # Cooldown после HTML-мусора от прокси вместо JSON: без него десятки вызовов/сек валят лавину WARNING (см. _tg_call).
 TELEGRAM_PROXY_COOLDOWN_SEC = _env_number("TELEGRAM_PROXY_COOLDOWN_SEC", 20, min_value=0)
+# Потолок одного сна по Retry-After в _tg_call: длинный flood-wait иначе держит
+# лок чата сверх бюджета маршрута (аудит 10.2026). Сам ретрай сохраняется.
+TELEGRAM_FLOOD_SLEEP_MAX_SEC = _env_number("TELEGRAM_FLOOD_SLEEP_MAX_SEC", 10, min_value=1)
+# TIKTOK_GROUP_REQUIRE_MENTION=1 — ссылки TikTok в группах без обращения к боту
+# только пишутся в фон, а не качаются (аудит H2, 10.2026). По умолчанию выключено.
+TIKTOK_GROUP_REQUIRE_MENTION = os.getenv("TIKTOK_GROUP_REQUIRE_MENTION", "0") == "1"
 # Лимит ожидания следующего куска для любого провайдера: зависший стрим иначе держит лок чата бесконечно.
 STREAM_CHUNK_TIMEOUT_SEC = _env_number("STREAM_CHUNK_TIMEOUT_SEC", 30, min_value=1)
 # ── Паттерн "живой печати" при стриминге (см. lumen_typing_pace.py) ──
