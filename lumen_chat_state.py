@@ -389,9 +389,15 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         history = list(raw_gem or []) + list(raw_or or [])
         if len(history) > bot.SHARED_HISTORY_MAX_LEN:
             history = history[-bot.SHARED_HISTORY_MAX_LEN:]
+    raw_ctx = s.get("ctx")
+    if isinstance(raw_ctx, list):
+        ctx_lines = [line for line in raw_ctx if isinstance(line, str)][:MAX_CHAT_HISTORY_LEN]
+    else:
+        # Старые снимки фона не хранили: начинаем с пустого, как раньше.
+        ctx_lines = []
     chat_state[cid] = {
         "history": history,
-        "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
+        "ctx": deque(ctx_lines, maxlen=MAX_CHAT_HISTORY_LEN),
         "recent_media_ids": media_buckets,
         "user_names": _restore_user_names(s.get("user_names")),
         # Настенные часы, а не monotonic: тот сбрасывается рестартом и делал все
@@ -415,11 +421,15 @@ def _restore_last_activity(s: dict[str, Any]) -> float:
 
 
 def _sender_display(username: str | None, first_name: str | None) -> str:
-    """Показываемое имя: @username, иначе first_name, иначе User."""
-    if isinstance(username, str) and username.strip():
-        return "@" + username.strip().lstrip("@")
-    if isinstance(first_name, str) and first_name.strip():
-        return first_name.strip()[:64]
+    """Показываемое имя: @username, с first_name в скобках, если различаются."""
+    clean_username = username.strip().lstrip("@") if isinstance(username, str) else ""
+    clean_first = first_name.strip()[:64] if isinstance(first_name, str) and first_name.strip() else ""
+    if clean_username:
+        if clean_first and clean_first.lower() != clean_username.lower():
+            return f"@{clean_username} ({clean_first})"
+        return "@" + clean_username
+    if clean_first:
+        return clean_first
     return "User"
 
 

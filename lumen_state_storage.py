@@ -137,6 +137,8 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
     квота никогда фактически не использовалась. Старые записи с этим полем в
     хранилище просто тихо игнорируются при чтении, как и остальные удалённые поля
     выше."""
+    # Ленивый импорт: lumen_chat_state импортирует этот модуль, топ-уровень закольцует.
+    from lumen_chat_state import MAX_CHAT_HISTORY_LEN
     return {
         "schema_version": CHAT_STATE_SCHEMA_VERSION,
         "history": list(state.get("history", [])),
@@ -145,6 +147,8 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
         },
         # Ники переживают рестарт: без них после деплоя бот снова не знал бы авторов.
         "user_names": dict(state.get("user_names", {}) or {}),
+        # Фон тоже переживает рестарт: иначе единые 100 сообщений сбрасывались деплоем.
+        "ctx": [line for line in (state.get("ctx") or []) if isinstance(line, str)][:MAX_CHAT_HISTORY_LEN],
         # Настенные часы для подсчёта активных в /stats: monotonic сбрасывается
         # рестартом и делал все чаты "активными", time.time() переживает его.
         "last_activity": state.get("last_activity", 0.0),

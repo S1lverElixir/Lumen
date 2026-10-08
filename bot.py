@@ -512,7 +512,6 @@ from lumen_chat_state import (
     _trim_history,
     _trim_combined,
     _note_sender,
-    _sender_display,
     _resolve_nick,
 )
 
@@ -913,7 +912,6 @@ __all__ = [
     "_trim_history",
     "_trim_combined",
     "_note_sender",
-    "_sender_display",
     "_resolve_nick",
     "_pending_picks",
     "_purge_expired_picks",

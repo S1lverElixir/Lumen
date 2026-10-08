@@ -224,7 +224,35 @@ def _tagged_prompt(state: dict[str, Any], message: Message, clean_prompt: str) -
         getattr(sender, "first_name", None) if sender is not None else None,
     )
     tagged = f"[{display}] {clean_prompt}" if (clean_prompt or "").strip() else f"[{display}]"
-    return _reply_target_block(message, state) + tagged
+    return _reply_target_block(message, state) + tagged + _nick_hints(state, clean_prompt)
+
+
+# Сколько подсказок по прозвищам несём модели: хватает на участников, шум не раздувает.
+_NICK_HINT_MAX = 3
+# Короткие слова не резолвим: двухбуквенные совпадения шумят на каждом сообщении.
+_NICK_HINT_MIN_LEN = 3
+
+
+def _nick_hints(state: dict[str, Any], clean_prompt: str) -> str:
+    """Связывает прозвища из вопроса с авторами («блинчик» — это @user (Имя))."""
+    import bot
+    try:
+        words = re.findall(r"[\w@]+", clean_prompt or "", re.UNICODE)
+    except Exception:
+        return ""
+    seen: set[str] = set()
+    hints: list[str] = []
+    for word in words:
+        surface = word.strip().lstrip("@")
+        if len(surface) < _NICK_HINT_MIN_LEN or surface.lower() in seen:
+            continue
+        seen.add(surface.lower())
+        resolved = bot._resolve_nick(state, surface)
+        if resolved and resolved not in hints:
+            hints.append(f"[Подсказка: «{surface}» — это {resolved}.]")
+        if len(hints) >= _NICK_HINT_MAX:
+            break
+    return ("\n" + "\n".join(hints)) if hints else ""
 
 
 def _should_only_record_passively(message: Message, t: str, *, is_private: bool, is_guest: bool, mentioned: bool) -> bool:
