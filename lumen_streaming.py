@@ -8,7 +8,6 @@ import contextlib
 import json
 import logging
 import time
-from collections import deque
 from typing import Any
 import aiohttp
 from aiogram.enums import ParseMode
@@ -221,7 +220,6 @@ async def _run_streaming_reply(
     import bot
     state = bot.get_state(chat_id)
     hist = state.setdefault("history", [])
-    ctx = state.get("ctx", deque())
 
     sent_messages: list[Message] = []
     full_text = ""

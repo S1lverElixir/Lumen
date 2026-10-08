@@ -1263,7 +1263,7 @@ def test_media_question_without_file_gets_no_file_notice(rate_guard_setup, monke
     message = rate_guard_setup()
     message.text = "что на фото?"
     prompt = _run_core_capturing_prompt(message, monkeypatch)
-    assert prompt.startswith("что на фото?")
+    assert "что на фото?" in prompt
     assert "[Служебная пометка" in prompt
     assert "не выдумывай" in prompt.lower()
 
@@ -1309,7 +1309,7 @@ def test_continue_rewrites_prompt_and_clears_flag(rate_guard_setup, monkeypatch)
     monkeypatch.setattr(bot, "get_state", lambda cid: state)
     message.text = "продолжи"
     prompt = _run_core_capturing_prompt(message, monkeypatch)
-    assert prompt.startswith("объясни фотосинтез")
+    assert "объясни фотосинтез" in prompt
     assert "места обрыва" in prompt
     assert "interrupted" not in state
     bot.chat_state.pop(123, None)

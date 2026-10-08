@@ -349,7 +349,6 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     import bot
     state = bot.get_state(chat_id)
     history = state.setdefault("history", [])
-    ctx = state.get("ctx", deque())
     # Дедупликация с сохранением приоритета роутера; запасной — голова актуального _OR_LIGHT_ORDER (мёртвый llama-3.3 убран 24.07.2026).
     trial_models = list(dict.fromkeys(model_chain)) or [_OR_LIGHT_ORDER[0]]
     primary_model_id = trial_models[0]
@@ -358,7 +357,7 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
 
     answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id, user_text=user_text)
 
-    # В историю пишем чистый текст (без "Фон разговора") — её читает и Gemini, разовый групповой контекст там оседать не должен.
+    # В историю пишем текст с автором — модель видит кто спрашивал.
     history.append({"role": "user", "content": _history_user_text(user_text)})
     history.append({"role": "assistant", "content": answer})
     bot._trim_combined(state)
@@ -407,7 +406,6 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     from lumen_router_config import _GROQ_LIGHT_ORDER
     state = bot.get_state(chat_id)
     history = state.setdefault("history", [])
-    ctx = state.get("ctx", deque())
     # Дедупликация с сохранением приоритета роутера; запасной — голова актуального _GROQ_LIGHT_ORDER.
     trial_models = list(dict.fromkeys(model_chain)) or [_GROQ_LIGHT_ORDER[0]]
     primary_model_id = trial_models[0]
@@ -812,7 +810,6 @@ async def ask_gemini(
     if deadline is None:
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
     hist = state.setdefault("history", [])
-    ctx = state.get("ctx", deque())
 
     # Медиа/YouTube-части в тот же Content, что и текст (сборка — только в _build_gemini_turn_contents).
     extra_parts: list[types.Part] = []
