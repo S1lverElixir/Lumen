@@ -3036,3 +3036,46 @@ def test_core_refuses_video_before_download_when_gemini_exhausted(rate_guard_set
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
         bot.chat_state.pop(123, None)
+
+
+def test_combined_memory_caps_background_at_100():
+    # Общий лимит 100 сообщений включая фон: история цела, старые фоновые уходят.
+    from collections import deque
+    state = {"history": [{"role": "user", "content": f"вопрос {i}"} for i in range(60)],
+             "ctx": deque(), "recent_media_ids": {}, "user_names": {}}
+    for i in range(60):
+        message = SimpleNamespace(chat=SimpleNamespace(id=9001),
+                                  from_user=SimpleNamespace(id=7, username="m1st", first_name="M"),
+                                  text=f"фон {i}")
+        bot._record_passive_group_context(message, state, f"фон {i}")
+    assert len(state["history"]) == 60
+    assert len(state["history"]) + len(state["ctx"]) <= bot.MAX_TOTAL_MEMORY_MESSAGES
+    assert state["ctx"][0].endswith("фон 20")
+
+
+def test_sender_directory_resolves_nicknames():
+    # Прозвища резолвятся по username и first_name: иначе "блинчик" терялся.
+    state = {"history": [], "user_names": {}}
+    bot._note_sender(state, 11, "The_6JluH4ik", "Блинчик")
+    assert bot._resolve_nick(state, "блинчик") is not None
+    assert bot._resolve_nick(state, "6jluh4ik") is not None
+    assert bot._resolve_nick(state, "mist") is None
+
+
+def test_reply_block_quotes_replied_message():
+    # Реплай отвечает по цитируемому сообщению, а не по последнему в истории.
+    state = {"history": [], "ctx": __import__("collections").deque(), "user_names": {}}
+    replied_bot = SimpleNamespace(text="прошлый ответ бота", caption=None,
+                                  from_user=SimpleNamespace(id=1, username="LumenAI_bot", first_name="L"))
+    monkeypatch_bot = SimpleNamespace(chat=SimpleNamespace(id=9002),
+                                       from_user=SimpleNamespace(id=7, username="m1st", first_name="M"),
+                                       text="а это?", reply_to_message=replied_bot)
+    import bot as _bot
+    prev_username = _bot.BOT_USERNAME
+    _bot.BOT_USERNAME = "LumenAI_bot"
+    try:
+        block = _bot._reply_target_block(monkeypatch_bot, state)
+    finally:
+        _bot.BOT_USERNAME = prev_username
+    assert "прошлый ответ бота" in block
+    assert _bot._reply_target_block(SimpleNamespace(reply_to_message=None), state) == ""
