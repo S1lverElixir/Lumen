@@ -1935,3 +1935,19 @@ def test_slideshow_slide_download_reserves_post_budget(monkeypatch):
     finally:
         bot.chat_state.pop(999984, None)
 
+
+def test_group_tiktok_link_passive_only_when_mention_required(monkeypatch):
+    # Аудит H2: групповой TikTok без обращения качается по умолчанию;
+    # TIKTOK_GROUP_REQUIRE_MENTION=1 оставляет только запись в фон.
+    import lumen_message_core as core
+    msg = SimpleNamespace()
+    text = "смотри https://www.tiktok.com/@user/video/123"
+    monkeypatch.setattr(bot, "TIKTOK_GROUP_REQUIRE_MENTION", False)
+    assert core._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=False) is False
+    assert core._should_only_record_passively(msg, "просто текст", is_private=False, is_guest=False, mentioned=False) is True
+    monkeypatch.setattr(bot, "TIKTOK_GROUP_REQUIRE_MENTION", True)
+    assert core._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=False) is True
+    # Личка и упоминание флаг не трогают.
+    assert core._should_only_record_passively(msg, text, is_private=True, is_guest=False, mentioned=False) is False
+    assert core._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=True) is False
+
