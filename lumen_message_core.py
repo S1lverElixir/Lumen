@@ -166,11 +166,65 @@ def _record_passive_group_context(message: Message, state: dict[str, Any], t: st
     """Фон группы без упоминания: только контекст и медиа в state, без ответа."""
     import bot
     if t.strip():
-        _sender = message.from_user or {}
-        _username = getattr(_sender, "username", None) or getattr(_sender, "first_name", None) or "User"
-        state["ctx"].append(f"@{_username}: {t.strip()}")
+        sender = message.from_user
+        display = bot._note_sender(
+            state,
+            sender.id if sender is not None else None,
+            getattr(sender, "username", None) if sender is not None else None,
+            getattr(sender, "first_name", None) if sender is not None else None,
+        )
+        state["ctx"].append(f"{display}: {t.strip()}")
+        # Общий лимит 100 сообщений на чат, старые фоновые уходят первыми.
+        bot._trim_combined(state)
     bot._save_media_to_history(_msg_media_source(message), state, message.from_user.id if message.from_user else None)
     bot.mark_state_dirty(message.chat.id)
+
+
+# Сколько текста реплая несём модели: хватает на цитату, чат не раздувает.
+_REPLY_TARGET_MAX_CHARS = 1000
+
+
+def _reply_target_block(message: Message, state: dict[str, Any]) -> str:
+    """Цитата сообщения-реплая: реплай на бота отвечает по нему, а не по последнему."""
+    import bot
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        return ""
+    text = (getattr(reply, "text", None) or getattr(reply, "caption", None) or "").strip()
+    if not text:
+        return ""
+    if len(text) > _REPLY_TARGET_MAX_CHARS:
+        text = text[:_REPLY_TARGET_MAX_CHARS].rstrip() + "…"
+    ruser = getattr(reply, "from_user", None)
+    try:
+        bot_username = (bot.BOT_USERNAME or "").lower()
+    except Exception:
+        bot_username = ""
+    r_username = getattr(ruser, "username", None) if ruser is not None else None
+    if r_username and bot_username and str(r_username).lower() == bot_username:
+        return f"[Отвечаешь именно на это сообщение (реплай) — твой прошлый ответ: {text}]\n"
+    if ruser is not None:
+        display = bot._note_sender(
+            state, getattr(ruser, "id", None),
+            getattr(ruser, "username", None), getattr(ruser, "first_name", None),
+        )
+    else:
+        display = "User"
+    return f"[Отвечаешь именно на это сообщение (реплай) от {display}: {text}]\n"
+
+
+def _tagged_prompt(state: dict[str, Any], message: Message, clean_prompt: str) -> str:
+    """Вопрос с автором и реплаем: модель знает кто спрашивает и на что отвечает."""
+    import bot
+    sender = message.from_user
+    display = bot._note_sender(
+        state,
+        sender.id if sender is not None else None,
+        getattr(sender, "username", None) if sender is not None else None,
+        getattr(sender, "first_name", None) if sender is not None else None,
+    )
+    tagged = f"[{display}] {clean_prompt}" if (clean_prompt or "").strip() else f"[{display}]"
+    return _reply_target_block(message, state) + tagged
 
 
 def _should_only_record_passively(message: Message, t: str, *, is_private: bool, is_guest: bool, mentioned: bool) -> bool:
@@ -544,7 +598,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # Дошло до обработки: фон, инъекции и отказы выше уже отсеяны.
     bot._record_stats_event("messages_received")
 
-    ai_prompt = clean_prompt
+    # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
+    ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
     if (
         media_tuple is None
         and not extra_media

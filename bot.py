@@ -989,6 +989,8 @@ __all__ = [
     "_check_and_register_rate_limit",
     "_record_passive_group_context",
     "_should_only_record_passively",
+    "_reply_target_block",
+    "_tagged_prompt",
     "_rate_limit_key_for_message",
     "_reject_rate_limited_message",
     "_resolve_incoming_media",
@@ -1333,6 +1335,8 @@ from lumen_message_core import (
     _rate_limit_key_for_message,
     _reject_rate_limited_message,
     _resolve_incoming_media,
+    _reply_target_block,
+    _tagged_prompt,
     _handle_message_core,
     _process_raw_update,
 )
