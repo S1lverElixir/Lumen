@@ -128,8 +128,9 @@ def test_looks_like_heavy_query_ignores_substrings_and_handles_plurals():
 def test_build_route_youtube_link_forces_gemini_only():
     route = lumen_router_config._build_route(needs_youtube=True, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
     assert all(p == "gemini" for p, _ in route)
-    # ОБНОВЛЕНО (аудит моделей, 17.09.2026): флагман сменился с 3.7 на 3.8 Flash.
-    assert route[0] == ("gemini", "gemini-3.8-flash")
+    # ОБНОВЛЕНО 08.10.2026: линейка 3.x убрана из цепочек (503 в проде 05.10.2026) —
+    # голова LINK-цепочки теперь живая 2.5-flash.
+    assert route[0] == ("gemini", "gemini-2.5-flash")
 
 
 def test_build_route_website_link_forces_gemini_only_and_excludes_gemma():
@@ -230,9 +231,11 @@ def test_new_gemini_models_present_and_prioritized():
     assert "gemini-3.7-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.6-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.5-flash-lite" in lumen_router_config.GEMINI_MODELS
-    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
-    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.8-flash"
-    assert lumen_router_config.GEMINI_HEAVY_CHAIN[1] == "gemini-3.7-flash"
+    # 08.10.2026: линейка 3.x в цепочках (жива, лимиты есть), но дефолт и голова —
+    # на 2.5-flash: единственная, кто отвечал в проде 05–07.10.2026, и единственная
+    # с квотой search grounding.
+    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-2.5-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-2.5-flash"
     # Обновлено (24.07.2026) вместе с реордером GEMINI_SEARCH_CHAIN — см. комментарий
     # там же: реальная квота на search grounding подтверждена только у Gemini 2.5.
     assert lumen_router_config.GEMINI_SEARCH_CHAIN[0] == "gemini-2.5-flash"
@@ -245,15 +248,21 @@ def test_gemini_3_flash_preview_restored_after_official_docs_confirmation():
     # прислал скриншот ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview —
     # "Last updated 2026-08-18 UTC", живая таблица возможностей, Model code
     # gemini-3-flash-preview. Первоисточник перевешивает прежний (неверный) вывод.
+    # 08.10.2026: вся линейка 3.x снова убрана из цепочек — на этот раз прод
+    # 05.10.2026 (HTTP 503 разом на пяти моделях). Конфиг в GEMINI_MODELS оставлен:
+    # возврат — одной правкой цепочек, если дашборд покажет их живыми.
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_HEAVY_CHAIN
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_SEARCH_CHAIN
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_LINK_CHAIN
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_LINK_SEARCH_CHAIN
-    # Позиция — после 3.5 Flash по номеру версии (3, 3.1, 3.5, 3.6, 3.7), перед
-    # lite-вариантами.
+    # 08.10.2026 (пересмотр после скриншота дашборда): модель жива, у неё есть
+    # лимит 5 RPM / 250K TPM / 20 RPD, и официальный список моделей Google
+    # (обновлён 06.10.2026) подтверждает код gemini-3-flash-preview. Продовые 503
+    # были временным отказом, поэтому откат снятия — вернуть в цепочки, а отход
+    # обеспечивает остывка по "unavailable" (_mark_model_unavailable).
     chain = lumen_router_config.GEMINI_HEAVY_CHAIN
-    assert chain.index("gemini-3.5-flash") < chain.index("gemini-3-flash-preview") < chain.index("gemini-3.5-flash-lite")
+    assert chain.index("gemini-3.5-flash") < chain.index("gemini-3-flash-preview") < chain.index("gemma-4-31b-it")
 
 
 def test_gemini_3_flash_preview_quota_config_matches_dashboard():
@@ -411,7 +420,14 @@ def test_ling_3_0_flash_still_flagged_for_leak_detection():
 # nemotron-3-super/-ultra в heavy) — новая голова.
 
 def test_nemotron_3_5_lightning_promoted_to_light_order_head():
-    assert lumen_router_config._OR_LIGHT_ORDER[0] == "nvidia/nemotron-3.5-lightning:free"
+    # 08.10.2026: понижена в хвост — таймауты в проде 07.10.2026, каждая её
+    # попытка стоила до 22 секунд до живой sante. Головой стала sante
+    # (фактически отвечает в проде). Резервом перед openrouter/free, не в реестре.
+    order = lumen_router_config._OR_LIGHT_ORDER
+    assert order[0] == "inclusionai/ling-3.0-flash-sante:free"
+    assert order[-2] == "nvidia/nemotron-3.5-lightning:free"
+    assert order[-1] == "openrouter/free"
+    assert "nvidia/nemotron-3.5-lightning:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
 
 
 def test_nemotron_3_nano_30b_a3b_excluded_after_removal_date_passed():
@@ -588,7 +604,8 @@ def test_sept_2026_dead_models_excluded_but_kept_for_leak_detection():
 
 def test_sept_2026_new_light_models_after_proven_head_before_reserve():
     order = lumen_router_config._OR_LIGHT_ORDER
-    assert order[0] == "nvidia/nemotron-3.5-lightning:free"
+    # 08.10.2026: голова — sante (фактически отвечает в проде), nemotron-3.5-lightning понижен в хвост за таймауты 07.10.2026.
+    assert order[0] == "inclusionai/ling-3.0-flash-sante:free"
     assert order[-1] == "openrouter/free"
     for model_id in (
         "inclusionai/ling-3.0-flash-sante:free",
@@ -606,7 +623,8 @@ def test_inkling_small_excluded_after_agentic_harness_refusal():
     assert "thinkingmachines/inkling-small:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
     assert "thinkingmachines/inkling-small:free" not in lumen_router_config._OR_LIGHT_ORDER
     # nex-mini снят 05.10.2026 (платная отсечка) — второй стала sante.
-    assert lumen_router_config._OR_LIGHT_ORDER[1] == "inclusionai/ling-3.0-flash-sante:free"
+    # 08.10.2026: sante уже голова (nemotron понижен за таймауты 07.10.2026).
+    assert lumen_router_config._OR_LIGHT_ORDER[0] == "inclusionai/ling-3.0-flash-sante:free"
 
 
 def test_nex_mini_excluded_after_paid_tier_cutover():
@@ -661,11 +679,20 @@ def test_sept_2026_new_heavy_and_vision_models_placed():
 
 
 def test_gemini_3_8_flash_heads_heavy_chain_and_default():
+    # 08.10.2026 (пересмотр после скриншота дашборда AI Studio): линейка 3.x жива,
+    # лимиты у неё есть (5 RPM / 250K TPM / 20 RPD), официальный список модерий
+    # Google (обновлён 06.10.2026) подтверждает коды. Продовые 503 05.10.2026 — временный
+    # отказ, поэтому 3.8 остаётся в цепочках вторым резервом после 2.5-flash
+    # (единственной, кто реально отвечал в проде и у кого есть квота поиска).
     assert "gemini-3.8-flash" in lumen_router_config.GEMINI_MODELS
-    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
-    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.8-flash"
+    assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-2.5-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-2.5-flash"
+    assert lumen_router_config.GEMINI_HEAVY_CHAIN[1] == "gemini-3.8-flash"
     assert "gemini-3.8-flash" in lumen_router_config.GEMINI_SEARCH_CHAIN
     assert "gemini-3.8-flash" in lumen_router_config.GEMINI_LINK_CHAIN
+    for alive in ("gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"):
+        assert alive in lumen_router_config.GEMINI_HEAVY_CHAIN
+        assert alive in lumen_router_config.GEMINI_SEARCH_CHAIN
     conf = lumen_router_config.GEMINI_MODELS["gemini-3.8-flash"]
     assert conf.get("search_grounding") is False
     assert conf.get("map_grounding") is False

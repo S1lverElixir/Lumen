@@ -183,6 +183,26 @@ def _is_gemini_daily_quota(text: str) -> bool:
         "per day", "per_day", "perday", "daily limit", "daily quota", "quota exceeded for the day",
     ))
 
+def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> bool:
+    """Отказ "модель недоступна" (503/404/invalid model) → короткая остывка, как на 429.
+
+    Прод 05.10.2026: пять моделей линейки Gemini 3.x подряд отдавали 503, и каждая
+    повторялась на каждом обращении — до 22 секунд и пяти попыток впустую на запрос.
+    Официальный список моделей и дашборд AI Studio показывали, что модели живы и
+    квота есть, то есть это был временный отказ, а не снятие с free. Поэтому НЕ
+    выкидываем модель из цепочек, а пропускаем её на QUOTA_RATE_LIMIT_COOLDOWN_SEC:
+    остывка сама истекает, успешный ответ и так снимает метку.
+    """
+    import bot
+    try:
+        txt = bot._error_text(exc).strip() or exc.__class__.__name__
+        if bot._classify_model_error(bot._error_status(exc, txt), txt) != "unavailable":
+            return False
+        bot._mark_rate_limited(provider, model_id)
+        return True
+    except Exception:
+        return False
+
 async def _probe_or_model_liveness() -> None:
     """Проактивная проверка живости (раз в сутки): только предупреждает в логах тем же паттерном, что у известных мёртвых — реестр _OR_MODEL_HEALTH не мутирует (курируется вручную). Ротация day-of-year % len — за N дней проверяются все модели списка за те же 3 запроса/сутки."""
     import bot
@@ -243,6 +263,7 @@ async def _chat_completion_chain(
             log.warning('[%s] Route time budget exhausted before model %s. Tried: %s', label, model_trial, ", ".join(tried) or "none")
             raise bot.RouteBudgetExceededError(tried)
         tried.append(model_trial)
+        bot._record_stats_event("model_attempts")
         messages[0]["content"] = bot.get_system_prompt(model_trial)
         attempt_start = time.monotonic()
         try:
@@ -274,6 +295,8 @@ async def _chat_completion_chain(
             raise
         except Exception as exc:
             last_exc = exc
+            bot._record_stats_event("model_failures")
+            _mark_model_unavailable(provider, model_trial, exc)
             if stop_on is not None and stop_on(exc):
                 log.warning(
                     '[%s] Model %s failed with an account-wide limit — stopping the chain, the rest would fail the same way.',
@@ -344,8 +367,42 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     bot._record_quota_usage("openrouter", model_trial)
     return answer
 
+# Groq free отдаёт HTTP 413, когда запрос целиком превышает ~7K токенов
+# (прод 05–07.10.2026: история 9–27K токенов — каждая попытка в длинном чате
+# падала, Groq там мёртв принципиально). Системный промпт (~4.5K токенов) уже
+# съедает больше половины, поэтому историю под Groq режем отдельно — остальным
+# провайдерам она по-прежнему едет целиком. Оценка грубая: ASCII ~4 символа на
+# токен, кириллица ~2; бюджет 6K с запасом под погрешность оценки.
+_GROQ_PROMPT_TOKEN_BUDGET = 6000
+
+def _estimate_tokens(text: str) -> int:
+    """Грубая оценка токенов без токенизатора: хватает, чтобы не упереться в лимит."""
+    if not isinstance(text, str) or not text:
+        return 0
+    ascii_chars = sum(1 for c in text if ord(c) < 128)
+    return ascii_chars // 4 + (len(text) - ascii_chars) // 2
+
+def _trim_messages_for_groq(messages: list[dict]) -> list[dict]:
+    """История под лимит Groq: системный промпт и текущий вопрос неприкосновенны,
+    из середины выкидываем самые старые, пока влезаем в бюджет. Хранимую историю
+    не трогаем — режется только копия под этот запрос."""
+    if not messages:
+        return messages
+    sizes = [_estimate_tokens(m.get("content") if isinstance(m.get("content"), str) else str(m.get("content") or "")) for m in messages]
+    if sum(sizes) <= _GROQ_PROMPT_TOKEN_BUDGET:
+        return messages
+    head, middle, tail = messages[0], messages[1:-1], messages[-1]
+    budget_left = _GROQ_PROMPT_TOKEN_BUDGET - sizes[0] - (sizes[-1] if len(messages) > 1 else 0)
+    kept: list[dict] = []
+    for m, s in zip(reversed(middle), reversed(sizes[1:-1])):
+        if s <= budget_left:
+            kept.append(m)
+            budget_left -= s
+    kept.reverse()
+    return [head] + kept + ([tail] if len(messages) > 1 else [])
+
 async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
-    """Обычный текстовый запрос через прямой Groq — по образцу ask_openrouter_text: одна попытка на модель, скраб утечек, расход в квоту "groq". Сообщения строит общий _build_openrouter_turn_messages (тот же OpenAI-формат)."""
+    """Обычный текстовый запрос через прямой Groq — по образцу ask_openrouter_text: одна попытка на модель, скраб утечек, расход в квоту "groq". Сообщения строит общий _build_openrouter_turn_messages (тот же OpenAI-формат). Историю под запрос режет _trim_messages_for_groq (иначе см. его комментарий)."""
     import bot
     from lumen_router_config import _GROQ_LIGHT_ORDER
     state = bot.get_state(chat_id)
@@ -355,6 +412,7 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     trial_models = list(dict.fromkeys(model_chain)) or [_GROQ_LIGHT_ORDER[0]]
     primary_model_id = trial_models[0]
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, primary_model_id)
+    messages = _trim_messages_for_groq(messages)
 
     async def _request(payload: dict, dl: float | None):
         return await bot._groq_request("chat/completions", "POST", json_body=payload, deadline=dl)
@@ -788,6 +846,7 @@ async def ask_gemini(
             log.warning('[gemini] Route time budget exhausted. Tried: %s', ", ".join(sorted(tried_models)) or "none")
             raise bot.RouteBudgetExceededError(sorted(tried_models))
         tried_models.add(curr_model_id)
+        bot._record_stats_event("model_attempts")
         call_contents, gconfig = bot._build_gemini_call_config(curr_model_id, contents)
 
         attempt_start = time.monotonic()
@@ -810,9 +869,11 @@ async def ask_gemini(
                 raise
             next_model = bot._next_fallback_model(tried_models, chain)
             if next_model:
+                bot._record_stats_event("model_failures")
                 log.warning("[gemini] Model %s timed out (%.0fs). Switching to %s", curr_model_id, bot.ROUTE_MODEL_TIMEOUT_SEC, next_model)
                 curr_model_id = next_model
                 continue
+            bot._record_stats_event("model_failures")
             log.warning("[gemini] Model %s timed out and no fallback models remain in route.", curr_model_id)
             raise
         except Exception as exc:
@@ -834,6 +895,7 @@ async def ask_gemini(
                     bot._mark_rate_limited("gemini", curr_model_id)
                 next_model = bot._next_fallback_model(tried_models, chain)
                 if next_model:
+                    bot._record_stats_event("model_failures")
                     log.warning("[gemini] Model %s quota exhausted (429). Switching to %s", curr_model_id, next_model)
                     curr_model_id = next_model
                     continue
@@ -846,12 +908,15 @@ async def ask_gemini(
                 raise
 
             # Остальные исходы — одна попытка и сразу следующая модель, без ретраев.
+            _mark_model_unavailable("gemini", curr_model_id, exc)
             next_model = bot._next_fallback_model(tried_models, chain)
             if next_model:
+                bot._record_stats_event("model_failures")
                 reason = f"{kind}/{status_code}" if status_code else f"{kind}/{exc_class}"
                 log.warning("[gemini] Model %s failed (%s). Switching to %s", curr_model_id, reason, next_model)
                 curr_model_id = next_model
                 continue
+            bot._record_stats_event("model_failures")
             log.warning("[gemini] Model %s failed (%s) and no fallback models remain in route.", curr_model_id, exc_class)
             raise
 

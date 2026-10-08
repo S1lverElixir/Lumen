@@ -1806,7 +1806,7 @@ def test_stats_counters_reset_on_new_day():
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
         lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._reset_quota_if_new_day()
-        assert bot._stats_entry() == {"messages_received": 0, "answers_sent": 0, "all_failed": 0, "fallbacks": 0, "daily_limit_denials": 0}
+        assert bot._stats_entry() == {"messages_received": 0, "answers_sent": 0, "all_failed": 0, "fallbacks": 0, "daily_limit_denials": 0, "model_attempts": 0, "model_failures": 0}
     finally:
         if had_stats:
             bot.GLOBAL_QUOTA["stats"] = old_stats

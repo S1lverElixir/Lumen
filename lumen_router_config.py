@@ -23,7 +23,7 @@ log = logging.getLogger("bot")
 # Поля name/badge/desc убраны (июль 2026, /model удалена) — читаются только grounding/url_context/no_search/no_system/stream/quota_unconfirmed.
 #
 # ── Как дашборд AI Studio считает бесплатную квоту grounding-инструментов ──
-# Бакет "Gemini 3" — 0/0 на search и map (24.07 + перепроверка 17.08.2026); квота на поиск только у 2.5-flash/lite, map — только у 3.5/3.1-lite.
+# Бакет "Gemini 3" — 0/0 на search и map (24.07 + перепроверка 17.08.2026 + аудит дашборда 08.10.2026); квота на поиск только у 2.5-flash/lite, map — только у 3.5/3.1-lite.
 GEMINI_MODELS: dict[str, dict[str, Any]] = {
     # Флагман линейки Flash (аудит 17.09.2026, бакет 5 RPM/250K TPM/20 RPD). Grounding False: бакет Gemini 3 без квоты на оба инструмента.
     "gemini-3.8-flash": {
@@ -80,7 +80,7 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "no_search": True, "stream": True, "url_context": True,
     },
 }
-DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 # ── TTS-модели (аудит техдолга, август 2026) ──
 GEMINI_TTS_MODELS: list[str] = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
@@ -384,10 +384,12 @@ def _groq_route(models: list[str]) -> list[tuple[str, str]]:
 # Порядок по аудитам 22.08/17.09.2026; nex-mini повышен продом 17.09.2026, снят
 # 05.10.2026 (платная отсечка — см. _OR_MODEL_HEALTH): второй стала sante.
 # 08.10.2026: fin и qwen3.8-27b:free сняты той же отсечкой — убраны из цепочки.
+# 08.10.2026: голова — sante (фактически отвечает в проде), nemotron-3.5-lightning
+# понижен в хвост (таймауты в проде 07.10.2026) — резервом перед openrouter/free.
 _OR_LIGHT_ORDER: list[str] = [
-    "nvidia/nemotron-3.5-lightning:free",
     "inclusionai/ling-3.0-flash-sante:free",
     "liquid/lfm-2.5-2.6b:free",
+    "nvidia/nemotron-3.5-lightning:free",
     "openrouter/free",
 ]
 
@@ -415,17 +417,26 @@ _OR_VISION_ORDER: list[str] = [
     "google/gemma-4-26b-a4b-it:free",
 ]
 
-# ── Цепочки Gemini, где нужен именно Gemini. Голова — 3.8-flash (аудит 17.09.2026).
+# ── Цепочки Gemini, где нужен именно Gemini.
+# Голова — 2.5-flash: единственная, кто фактически отвечал в проде 05–07.10.2026,
+# и единственная с реальной квотой search grounding (линейка 3.x — 0/0, аудит
+# ДД.ММ.ГГГГ по дашборду AI Studio владельца).
+# 08.10.2026: линейка 3.x ВОЗВРАЩЕНА в цепочки. Ошибки 503 на неё в проде 05.10 —
+# не снятие моделей: официальный список моделей (обновлён 06.10.2026) и дашборд
+# показывают живые лимиты у gemini-3.8/3.7/3.6/3.5-flash и gemini-3-flash-preview.
+# Отход от этой линейки теперь делает не список цепочек, а остывка по "unavailable"
+# (см. _mark_model_unavailable в lumen_routes.py) — модель с 503 пропускается на
+# QUOTA_RATE_LIMIT_COOLDOWN_SEC, а не тратит попытку на каждом сообщении.
 GEMINI_HEAVY_CHAIN: list[str] = [
+    "gemini-2.5-flash",
     "gemini-3.8-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
     "gemma-4-31b-it",
     "gemma-4-26b-a4b-it",
 ]
@@ -433,9 +444,9 @@ GEMINI_HEAVY_CHAIN: list[str] = [
 GEMINI_SEARCH_CHAIN: list[str] = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
+    "gemini-3.8-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.8-flash",
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",

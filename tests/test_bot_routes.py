@@ -932,6 +932,69 @@ def test_chat_completion_chain_cools_down_model_on_429(provider, exc_cls_name):
         bot.GLOBAL_QUOTA[provider].pop(model, None)
 
 
+@pytest.mark.parametrize(("provider", "exc_cls_name"), [
+    ("openrouter", "OpenRouterAPIError"),
+    ("groq", "GroqAPIError"),
+])
+def test_chat_completion_chain_cools_down_model_on_unavailable(provider, exc_cls_name):
+    # Прод 05.10.2026: модели Gemini 3.x отдавали 503 и повторялись на каждом
+    # сообщении — до 22 секунд и нескольких попыток впустую. 503 не квота, но
+    # модель на QUOTA_RATE_LIMIT_COOLDOWN_SEC пропускать надо. Падает на старом
+    # коде, где "unavailable" не оставлял метки.
+    import lumen_routes
+    exc_cls = getattr(bot, exc_cls_name)
+
+    async def boom_503(payload, deadline):
+        raise exc_cls("model is currently unavailable", status_code=503)
+
+    model = f"probe/unavail-{provider}:free"
+    bot.GLOBAL_QUOTA.setdefault(provider, {}).pop(model, None)
+    try:
+        with pytest.raises(exc_cls):
+            asyncio.run(lumen_routes._chat_completion_chain(
+                [{"role": "system", "content": ""}, {"role": "user", "content": "hi"}],
+                [model], model, request_fn=boom_503, provider=provider,
+            ))
+        assert bot.GLOBAL_QUOTA[provider][model]["cooldown_until"] > time.time()
+        assert lumen_router_config._is_quota_exhausted(provider, model) is True
+    finally:
+        bot.GLOBAL_QUOTA[provider].pop(model, None)
+
+
+def test_ask_gemini_503_cools_model_down_instead_of_retrying_every_message():
+    # Тот же сценарий на текстовом пути Gemini: 503 от головы цепочки обязан
+    # оставить остывку, иначе модель долбится заново на каждом обращении.
+    chat_id = 999018
+    calls = []
+
+    class _Unavailable(Exception):
+        status_code = 503
+
+    def fake_generate_content(*, model, contents, config=None):
+        calls.append(model)
+        if model == "gemini-3.6-flash":
+            raise _Unavailable("The model is currently unavailable")
+        return _FakeGeminiResponse(text="Ответ резервной модели")
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
+    original_client = bot.client
+    bot.client = fake_client
+    bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.6-flash", None)
+    try:
+        answer = asyncio.run(bot.ask_gemini(chat_id, "Привет", model_chain=["gemini-3.6-flash", "gemini-2.5-flash"]))
+        assert answer == "Ответ резервной модели"
+        assert calls == ["gemini-3.6-flash", "gemini-2.5-flash"]
+        entry = bot.GLOBAL_QUOTA["gemini"]["gemini-3.6-flash"]
+        assert entry["exhausted_at"] is None, "503 — не суточная квота, запирать до утра нельзя"
+        assert entry["cooldown_until"] > time.time()
+        assert lumen_router_config._is_quota_exhausted("gemini", "gemini-3.6-flash") is True
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.6-flash", None)
+
+
 def test_ask_gemini_raises_all_models_exhausted_when_entire_chain_429s():
     chat_id = 999011
 
@@ -1380,6 +1443,64 @@ def test_ask_groq_text_raises_last_error_when_whole_chain_fails(monkeypatch):
     monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
     with pytest.raises(bot.GroqAPIError):
         asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]))
+
+
+def test_ask_groq_text_trims_long_history_to_token_budget(monkeypatch):
+    # Прод 05–07.10.2026: история 9–27K токенов давала HTTP 413 на каждую попытку
+    # Groq. Падает на старом коде, где история ехала целиком.
+    import lumen_routes
+    from collections import deque
+    chat_id = 999706
+    history = []
+    for i in range(60):
+        history.append({"role": "user", "content": "вопрос %d " % i + "x" * 500})
+        history.append({"role": "assistant", "content": "ответ %d " % i + "y" * 500})
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": history, "ctx": deque()})
+    seen = {}
+
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+        # Первый запрос — сам ответ; второй (если будет) — саммаризатор истории
+        # _trim_history, его не трогаем.
+        seen.setdefault("messages", json_body["messages"])
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
+    assert asyncio.run(bot.ask_groq_text(chat_id, "текущий вопрос", model_chain=["qwen/qwen3.8-27b"])) == "ok"
+    msgs = seen["messages"]
+    total = sum(lumen_routes._estimate_tokens(m.get("content") if isinstance(m.get("content"), str) else "") for m in msgs)
+    assert total <= lumen_routes._GROQ_PROMPT_TOKEN_BUDGET
+    # Системный промпт и текущий вопрос на месте, хранимая история не ужата.
+    assert msgs[0]["role"] == "system"
+    assert msgs[-1]["content"].endswith("текущий вопрос")
+    # Хранимая история ужатию не подлежит: текущий вопрос-ответ дописаны как есть.
+    assert history[-2]["content"] == "текущий вопрос"
+    assert history[-1] == {"role": "assistant", "content": "ok"}
+
+
+def test_model_attempt_counters_track_chain_success_and_failure(monkeypatch):
+    # 08.10.2026: по счётчикам model_attempts/model_failures виден реальный КПД
+    # маршрута (раньше делили ответы на попытки только вручную по логам).
+    from collections import deque
+    chat_id = 999707
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+    calls = {"n": 0}
+
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise bot.GroqAPIError("boom", status_code=500)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
+    before_a = bot._stats_entry().get("model_attempts", 0)
+    before_f = bot._stats_entry().get("model_failures", 0)
+    assert asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"])) == "ok"
+    assert bot._stats_entry().get("model_attempts", 0) - before_a == 2
+    assert bot._stats_entry().get("model_failures", 0) - before_f == 1
 
 
 def test_shared_chain_raises_budget_error_without_second_attempt(monkeypatch):
