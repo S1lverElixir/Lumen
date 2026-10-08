@@ -1372,7 +1372,7 @@ def test_send_tiktok_music_retries_without_thumbnail_on_failure():
                 raise RuntimeError("thumbnail too big")
             return SimpleNamespace()
 
-    async def fake_download(session, url, headers=None):
+    async def fake_download(session, url, headers=None, cap_bytes=None):
         return b"fake-bytes"
 
     def fake_write_tags(path, title, artist, cover):
@@ -1853,7 +1853,11 @@ def test_slideshow_stops_at_post_budget(monkeypatch):
     calls = {}
 
     async def fake_download(session, url, headers=None, cap_bytes=None):
-        return b"k" * 1024
+        # Честный фейк: как настоящий _download_url_bin, сверх капа не отдаёт ничего.
+        payload = b"k" * 1024
+        if cap_bytes is not None and cap_bytes < len(payload):
+            return None
+        return payload
 
     class _FakeTgBot:
         async def send_photo(self, **kwargs):
