@@ -282,7 +282,7 @@ async def _run_streaming_reply(
                 # Проверяем ДО edit_text — утечка не успевает "мигнуть" на экране.
                 tag = "identity-leak" if leak_kind == "identity" else "injection-echo"
                 log.warning(
-                    '[%s] Stream %s/%s started leaking internal details/echoing an injected instruction — aborting the stream and showing a neutral reply instead of the partially accumulated text: %r', tag, provider, model_id, full_text[:500],
+                    '[%s] Stream %s/%s started leaking internal details/echoing an injected instruction — aborting the stream and showing a neutral reply instead (accumulated_len=%d)', tag, provider, model_id, len(full_text),
                 )
                 aclose = getattr(piece_agen, "aclose", None)
                 if aclose is not None:
