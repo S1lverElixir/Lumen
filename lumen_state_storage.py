@@ -143,6 +143,8 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
         "recent_media_ids": {
             uid: list(dq) for uid, dq in state.get("recent_media_ids", {}).items()
         },
+        # Ники переживают рестарт: без них после деплоя бот снова не знал бы авторов.
+        "user_names": dict(state.get("user_names", {}) or {}),
         # Настенные часы для подсчёта активных в /stats: monotonic сбрасывается
         # рестартом и делал все чаты "активными", time.time() переживает его.
         "last_activity": state.get("last_activity", 0.0),

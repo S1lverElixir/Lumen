@@ -40,12 +40,17 @@ MAX_MEDIA_RECENT_IDS = 8  # хранится ОТДЕЛЬНО на каждог�
 # Живых отправителей медиа в чате десятки, 500 покрывает большие группы с запасом.
 # Потолок только против подделки user_id и раздувания снапшота, легитимные чаты не задевает.
 MAX_MEDIA_BUCKETS_PER_CHAT = 500
+# Общий лимит памяти чата в сообщениях, включая фоновые (требование владельца 08.10.2026).
+MAX_TOTAL_MEMORY_MESSAGES = 100
+# Сколько отправителей помним на чат: ники для подписей и резолва прозвищ.
+MAX_KNOWN_SENDERS_PER_CHAT = 500
 
 
 class ChatState(TypedDict, total=False):
     history: list[dict[str, Any]]
     ctx: "deque[str]"
     recent_media_ids: dict[str, "deque[tuple[str, str]]"]
+    user_names: dict[str, dict[str, str]]
     last_activity: float
     lang: str
 
@@ -388,6 +393,7 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         "history": history,
         "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
         "recent_media_ids": media_buckets,
+        "user_names": _restore_user_names(s.get("user_names")),
         # Настенные часы, а не monotonic: тот сбрасывается рестартом и делал все
         # чаты "активными" в /stats. Снимкам без метки — 0: такой чат неактивен.
         "last_activity": _restore_last_activity(s),
@@ -395,6 +401,7 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         # раньше теряло (прод-баг: /lang слетал при каждом деплое).
         "lang": normalize_lang(s.get("lang")),
     }
+    _trim_combined(chat_state[cid])
 
 
 def _restore_last_activity(s: dict[str, Any]) -> float:
@@ -405,6 +412,99 @@ def _restore_last_activity(s: dict[str, Any]) -> float:
     if isinstance(raw, (int, float)) and raw > 0:
         return float(raw)
     return 0.0
+
+
+def _sender_display(username: str | None, first_name: str | None) -> str:
+    """Показываемое имя: @username, иначе first_name, иначе User."""
+    if isinstance(username, str) and username.strip():
+        return "@" + username.strip().lstrip("@")
+    if isinstance(first_name, str) and first_name.strip():
+        return first_name.strip()[:64]
+    return "User"
+
+
+def _note_sender(state: dict[str, Any], user_id: int | None, username: str | None, first_name: str | None) -> str:
+    """Запоминает отправителя в state[user_names], возвращает показное имя."""
+    display = _sender_display(username, first_name)
+    try:
+        if user_id is None:
+            return display
+        bucket = state.get("user_names")
+        if not isinstance(bucket, dict):
+            bucket = {}
+            state["user_names"] = bucket
+        key = str(user_id)
+        entry = bucket.get(key)
+        if not isinstance(entry, dict):
+            entry = {}
+            bucket[key] = entry
+        if isinstance(username, str) and username.strip():
+            entry["username"] = username.strip().lstrip("@")[:64]
+        if isinstance(first_name, str) and first_name.strip():
+            entry["first_name"] = first_name.strip()[:64]
+        if len(bucket) > MAX_KNOWN_SENDERS_PER_CHAT:
+            # Старейшие вытесняем: словарь упорядочен вставкой.
+            for old_key in list(bucket.keys())[:len(bucket) - MAX_KNOWN_SENDERS_PER_CHAT]:
+                bucket.pop(old_key, None)
+    except Exception:
+        pass
+    return display
+
+
+def _restore_user_names(raw: Any) -> dict[str, dict[str, str]]:
+    """Словарь отправителей из снимка, мусор отбрасываем."""
+    clean: dict[str, dict[str, str]] = {}
+    if not isinstance(raw, dict):
+        return clean
+    for uid, entry in list(raw.items())[:MAX_KNOWN_SENDERS_PER_CHAT]:
+        try:
+            key = str(int(uid))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        item: dict[str, str] = {}
+        for field in ("username", "first_name"):
+            val = entry.get(field)
+            if isinstance(val, str) and val.strip():
+                item[field] = val.strip()[:64]
+        if item:
+            clean[key] = item
+    return clean
+
+
+def _resolve_nick(state: dict[str, Any], nick: str) -> str | None:
+    """Прозвище в показное имя: ищет по username и first_name без регистра."""
+    try:
+        needle = (nick or "").strip().lstrip("@").lower()
+        if not needle:
+            return None
+        bucket = state.get("user_names") or {}
+        if not isinstance(bucket, dict):
+            return None
+        for entry in bucket.values():
+            if not isinstance(entry, dict):
+                continue
+            for field in ("username", "first_name"):
+                val = entry.get(field)
+                if isinstance(val, str) and needle in val.lower():
+                    return _sender_display(entry.get("username"), entry.get("first_name"))
+    except Exception:
+        pass
+    return None
+
+
+def _trim_combined(state: dict[str, Any]) -> None:
+    """Держит history + ctx в общем лимите: старые фоновые уходят первыми."""
+    try:
+        history = state.get("history")
+        ctx = state.get("ctx")
+        if not isinstance(history, list) or ctx is None:
+            return
+        while len(history) + len(ctx) > MAX_TOTAL_MEMORY_MESSAGES and len(ctx) > 0:
+            ctx.popleft()
+    except Exception:
+        pass
 
 def _save_chat_index() -> bool:
     """True/False для повтора в _flush_state_now: раньше неуспех молча терялся (аудит A5-1)."""
@@ -755,6 +855,7 @@ def get_state(chat_id: int) -> dict[str, Any]:
             "history": [],
             "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
             "recent_media_ids": {},
+            "user_names": {},
             # Настенные часы: monotonic обнуляется рестартом и ломал /stats.
             "last_activity": time.time(),
         }

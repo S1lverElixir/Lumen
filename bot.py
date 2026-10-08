@@ -433,6 +433,7 @@ from lumen_chat_state import (
     MAX_CHAT_LIMIT,
     PRUNED_CHAT_TARGET,
     MAX_CHAT_HISTORY_LEN,
+    MAX_TOTAL_MEMORY_MESSAGES,
     _STATE_DIR,
     STATE_FILE_PATH,
     GLOBAL_QUOTA_FILE,
@@ -509,6 +510,10 @@ from lumen_chat_state import (
     _user_key_for_message,
     _user_daily_reset_in,
     _trim_history,
+    _trim_combined,
+    _note_sender,
+    _sender_display,
+    _resolve_nick,
 )
 
 # Простой трекер для rate limiting и очередь кнопок-уточнений живут в
@@ -829,6 +834,7 @@ __all__ = [
     "MAX_CHAT_LIMIT",
     "PRUNED_CHAT_TARGET",
     "MAX_CHAT_HISTORY_LEN",
+    "MAX_TOTAL_MEMORY_MESSAGES",
     "STATE_FILE_PATH",
     "GLOBAL_QUOTA_FILE",
     "_CHATS_DIR",
@@ -905,6 +911,10 @@ __all__ = [
     "_mark_rate_limited",
     "_record_quota_usage",
     "_trim_history",
+    "_trim_combined",
+    "_note_sender",
+    "_sender_display",
+    "_resolve_nick",
     "_pending_picks",
     "_purge_expired_picks",
     "_enforce_pending_picks_cap",
