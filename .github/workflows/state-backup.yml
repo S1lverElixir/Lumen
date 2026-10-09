@@ -7,6 +7,10 @@ name: State backup
 #   ADMIN_PANEL_KEY    — см. curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys
 #   STATE_BACKUP_REPO  — приватный репозиторий для бэкапов, например S1lverElixir/Lumen-state
 #   STATE_BACKUP_TOKEN — fine-grained PAT с Contents: read+write только на STATE_BACKUP_REPO
+# Опционально (алерт о провале, аудит M11):
+#   STATE_ALERT_TOKEN    — токен бота-сканера (lumen_smoke_bot), без прав админа
+#   STATE_ALERT_CHAT     — личный chat_id владельца с этим ботом
+# Без них провал виден только в сводке Actions.
 #
 # ПРИВАТНОСТЬ (инцидент, сентябрь 2026): раньше файл заливался артефактом
 # Actions, а артефакты публичного репозитория может скачать любой. Теперь
@@ -63,9 +67,31 @@ jobs:
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${STATE_BACKUP_TOKEN}" | base64 -w0)" \
             push origin HEAD:main
 
+      - name: Alert backup failure to Telegram
+        # Бэкап — единственный резерв истории чатов, и раньше его провал жил только
+        # в логах Actions (аудит M11, 10.2026). Состояние выводится из секретов:
+        # без них шаг тихо пропускается и падение всё равно уходит в сводку ниже.
+        #   STATE_ALERT_TOKEN — токен бота-сканера (лumen_smoke_bot), без прав админа
+        #   STATE_ALERT_CHAT  — личный chat_id владельца с этим ботом
+        # Токен не печатаем и не кладём в URL: он в extraheader-подобном Bearer.
+        if: failure()
+        env:
+          STATE_ALERT_TOKEN: ${{ secrets.STATE_ALERT_TOKEN }}
+          STATE_ALERT_CHAT: ${{ secrets.STATE_ALERT_CHAT }}
+        run: |
+          if [ -z "${STATE_ALERT_TOKEN}" ] || [ -z "${STATE_ALERT_CHAT}" ]; then
+            echo "alert secrets not set — skipping Telegram alert" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          curl -sf --retry 2 --max-time 20 -X POST \
+            "https://api.telegram.org/bot${STATE_ALERT_TOKEN}/sendMessage" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg c "$STATE_ALERT_CHAT" \
+                   --arg t "Lumen: ежедневный бэкап состояния ПРОВАЛИЛСЯ. Проверь вкладку Actions." \
+                   '{chat_id:$c, text:$t}')" \
+            || echo "Telegram alert failed" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Report backup failure
-        # Канала уведомлений нет (нужен отдельный секрет/чат — решение владельца):
-        # минимум фиксируем провал видимым шагом и сводкой, а не тишиной в логах.
         if: failure()
         run: |
           echo "## State backup FAILED — проверьте вкладку Actions" >> "$GITHUB_STEP_SUMMARY"
