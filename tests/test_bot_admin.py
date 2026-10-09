@@ -421,6 +421,34 @@ def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
         bot._process_raw_update = original_process
 
 
+def test_webhook_handler_retries_broken_body_instead_of_swallowing():
+    # Битое тело раньше отвечало ok:true и Telegram считал дроп успехом (аудит M2).
+    original_secret = bot.WEBHOOK_SECRET
+    original_bot_obj = bot.bot
+    original_process = bot._process_raw_update
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    bot.bot = object()
+    calls = []
+
+    async def fake_process(raw_update):
+        calls.append(raw_update)
+
+    bot._process_raw_update = fake_process
+    try:
+        req = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 1},
+        )
+        req._raw = b"{broken-json"
+        result = asyncio.run(_run_webhook_handler(req))
+        assert result.status_code == 503
+        assert calls == []
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        bot.bot = original_bot_obj
+        bot._process_raw_update = original_process
+
+
 def test_allowed_updates_contains_only_real_telegram_types():
     # guest_message — валидное поле Update (guest mode, Bot API; проверено по
     # core.telegram.org/bots/api 2026-09-21). Удаление отсюда было ошибкой

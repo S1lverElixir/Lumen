@@ -219,7 +219,10 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
                 break
             if attempt < retries:
                 # Флуд-контроль ждём по retry_after, остальное — коротким бэкоффом.
-                await asyncio.sleep(_tg_retry_after_sec(exc) or 0.5 * (attempt + 1))
+                # Сон ограничен капом: длинный retry_after иначе держит лок чата
+                # сверх бюджета маршрута (аудит 10.2026). Ретрай после капа остаётся.
+                wait = _tg_retry_after_sec(exc) or 0.5 * (attempt + 1)
+                await asyncio.sleep(min(wait, bot.TELEGRAM_FLOOD_SLEEP_MAX_SEC))
     if last_exc is not None and "message is not modified" in str(last_exc).lower():
         # "message is not modified" — валидный ответ API (семантический не-op), а не сбой: засчитываем успех, иначе повторные edit_text накручивали бы счётчик.
         bot._tg_proxy_breaker.note_success()
@@ -250,7 +253,7 @@ async def telegram_api_call(method: str, payload: dict, *, request_timeout: floa
             # См. _handle_proxy_failure — выключатель срабатывает по счётчику
             # подряд идущих сбоев (см. _TelegramProxyCircuitBreaker), а не на первый же сбой.
             await bot._handle_proxy_failure(f"вызове {method}")
-        # Цепочку не рвём (from exc): Sentry должен видеть первопричину, а не только обёртку.
+        # Цепочку сохраняем через from exc: Sentry должен видеть первопричину, а не только обёртку.
         raise RuntimeError(f"Network error in telegram_api_call for {method}: {exc_str}") from exc
     if not isinstance(data, dict) or not data.get("ok"):
         # Прокси round-trip'нул нормально и вернул валидный JSON — сам факт, что

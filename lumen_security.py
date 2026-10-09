@@ -157,6 +157,9 @@ _SCRIPT_KEYWORDS = (
 )
 _MUSH_MIN_TEXT_LEN = 100
 _MUSH_MIN_MIXED_TOKENS = 3
+# Верхний кап сканируемого текста: unicodedata.name() на каждый символ без края —
+# CPU-DoS длинным текстом (аудит M10, 10.2026). Хвост за капом не сканируем.
+_MUSH_MAX_TEXT_LEN = 20000
 
 
 def _token_scripts(token: str) -> set[str]:
@@ -179,6 +182,7 @@ def _garbled_mixed_tokens(text: str) -> list[str]:
     """Смешанные токены (2+ письменности внутри одного): сырьё детектора и проверки эха."""
     if not text or len(text) < _MUSH_MIN_TEXT_LEN:
         return []
+    text = text[:_MUSH_MAX_TEXT_LEN]
     stripped = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     stripped = re.sub(r"`[^`\n]+`", " ", stripped)
     stripped = re.sub(r"https?://\S+", " ", stripped)
@@ -266,6 +270,16 @@ _MODE_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Омоглифы кириллица/латиница: NFKC их не сводит, а модель читает ("Іgnore"
+# с украинской і выглядит как ignore). Сворачиваем двойников к латинице перед
+# проверкой (прод-проба 09.10.2026: такой зонд прошёл префильтр, удержала модель).
+_HOMOGLYPH_FOLD_TABLE = str.maketrans({
+    "а": "a", "е": "e", "ё": "e", "і": "i", "ї": "i", "о": "o", "р": "p",
+    "с": "c", "х": "x", "у": "y", "ј": "j", "ѕ": "s", "һ": "h", "ԁ": "d",
+    "А": "A", "В": "B", "Е": "E", "І": "I", "Ї": "I", "К": "K", "М": "M",
+    "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X", "Ү": "Y",
+})
+
 def _looks_like_injection_probe(text: str) -> bool:
     """Чистая функция — тестируется отдельно от _handle_message_core."""
     if not text:
@@ -274,6 +288,10 @@ def _looks_like_injection_probe(text: str) -> bool:
     # Невидимки бывают и внутри слова, и вместо пробела: проверяем оба варианта.
     stripped = "".join(ch for ch in norm if unicodedata.category(ch) != "Cf")
     if _INJECTION_PROBE_RE.search(stripped):
+        return True
+    # Тот же текст со свёрнутыми омоглифами: иначе "Іgnore prevіous
+    # іnstructions" с кириллическими буквами проходит мимо.
+    if _INJECTION_PROBE_RE.search(stripped.translate(_HOMOGLYPH_FOLD_TABLE)):
         return True
     spaced = "".join(" " if unicodedata.category(ch) == "Cf" else ch for ch in norm)
     if _INJECTION_PROBE_RE.search(spaced):

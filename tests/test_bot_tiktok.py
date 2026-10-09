@@ -1372,7 +1372,7 @@ def test_send_tiktok_music_retries_without_thumbnail_on_failure():
                 raise RuntimeError("thumbnail too big")
             return SimpleNamespace()
 
-    async def fake_download(session, url, headers=None):
+    async def fake_download(session, url, headers=None, cap_bytes=None):
         return b"fake-bytes"
 
     def fake_write_tags(path, title, artist, cover):
@@ -1853,7 +1853,11 @@ def test_slideshow_stops_at_post_budget(monkeypatch):
     calls = {}
 
     async def fake_download(session, url, headers=None, cap_bytes=None):
-        return b"k" * 1024
+        # Честный фейк: как настоящий _download_url_bin, сверх капа не отдаёт ничего.
+        payload = b"k" * 1024
+        if cap_bytes is not None and cap_bytes < len(payload):
+            return None
+        return payload
 
     class _FakeTgBot:
         async def send_photo(self, **kwargs):
@@ -1930,4 +1934,20 @@ def test_slideshow_slide_download_reserves_post_budget(monkeypatch):
         assert all(cap <= lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES for cap in seen_caps.values())
     finally:
         bot.chat_state.pop(999984, None)
+
+
+def test_group_tiktok_link_passive_only_when_mention_required(monkeypatch):
+    # Аудит H2: групповой TikTok без обращения качается по умолчанию;
+    # TIKTOK_GROUP_REQUIRE_MENTION=1 оставляет только запись в фон.
+    import lumen_message_core as core
+    msg = SimpleNamespace()
+    text = "смотри https://www.tiktok.com/@user/video/123"
+    monkeypatch.setattr(bot, "TIKTOK_GROUP_REQUIRE_MENTION", False)
+    assert core._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=False) is False
+    assert core._should_only_record_passively(msg, "просто текст", is_private=False, is_guest=False, mentioned=False) is True
+    monkeypatch.setattr(bot, "TIKTOK_GROUP_REQUIRE_MENTION", True)
+    assert core._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=False) is True
+    # Личка и упоминание флаг не трогают.
+    assert core._should_only_record_passively(msg, text, is_private=True, is_guest=False, mentioned=False) is False
+    assert core._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=True) is False
 

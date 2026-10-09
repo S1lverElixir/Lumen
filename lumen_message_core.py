@@ -264,6 +264,11 @@ def _should_only_record_passively(message: Message, t: str, *, is_private: bool,
     if is_private or is_guest or mentioned:
         return False
     url = extract_url(t)
+    if url and is_tiktok(url):
+        import bot
+        # Групповой TikTok без обращения по умолчанию качается (удобство шаринга);
+        # TIKTOK_GROUP_REQUIRE_MENTION=1 оставляет только запись в фон (аудит H2, 10.2026).
+        return bool(bot.TIKTOK_GROUP_REQUIRE_MENTION)
     return not url or not is_tiktok(url)
 
 
@@ -482,8 +487,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     clean_prompt = bot.clean_mention(t).strip()
 
     if clean_prompt and _looks_like_injection_probe(clean_prompt):
-        # Инъекция: отвечаем без LLM и логируем для /logs, чтобы пополнять паттерны реальными случаями.
-        log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s: %r', message.chat.id, clean_prompt[:300])
+        # Инъекция: отвечаем без LLM. Текст в лог не пишем, только длину (аудит M5, 10.2026).
+        log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s (prompt_len=%d)', message.chat.id, len(clean_prompt))
         await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
         return
 
@@ -545,7 +550,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             media_tuple = None
             if _looks_like_injection_probe(clean_prompt):
                 # Голосовой транскрипт дописывается после первого префильтра (аудит A3-1).
-                log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s: %r', message.chat.id, clean_prompt[:300])
+                log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s (prompt_len=%d)', message.chat.id, len(clean_prompt))
                 await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
                 return
 

@@ -61,8 +61,11 @@ _STATE_DIR = Path(os.getenv("STATE_DIR", "/app")).resolve()
 try:
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
 except Exception as _state_dir_exc:
-    log.warning('[setup] STATE_DIR %s is not writable (%s), using a temp directory instead.', _STATE_DIR, _state_dir_exc)
-    _STATE_DIR = Path(tempfile.gettempdir())
+    log.warning('[setup] STATE_DIR %s is not writable (%s), using a private temp directory instead.', _STATE_DIR, _state_dir_exc)
+    # Приватный подкаталог с 0o700: сырой gettempdir() читаем соседям по машине,
+    # а там истории чатов (аудит M4, 10.2026).
+    _STATE_DIR = Path(tempfile.mkdtemp(prefix="lumen-state-"))
+    os.chmod(_STATE_DIR, 0o700)
 STATE_FILE_PATH = _STATE_DIR / "chat_state.json"
 GLOBAL_QUOTA_FILE = _STATE_DIR / "global_quota.json"
 # Per-chat ключи вместо одного блоба: меньше payload и blast radius при сбое.
