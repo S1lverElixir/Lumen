@@ -211,15 +211,68 @@ def _is_garbled_echo(answer: str, user_text: str | None) -> bool:
     return all(token.lower() in low_user for token in mixed)
 
 
+def _leak_spans(text: str) -> list[tuple[int, int]]:
+    """Диапазоны символов, где нашлась утечка или эхо инструкции."""
+    spans: list[tuple[int, int]] = []
+    for pattern in (_LEAK_LITERAL_RE, _IDENTITY_LEAK_RE, _INJECTED_PAYLOAD_ECHO_RE, _IDENTITY_BASED_ON_RE):
+        if pattern is None:
+            continue
+        for m in pattern.finditer(text):
+            spans.append((m.start(), m.end()))
+    return spans
+
+
+# Доля текста с утечкой, выше которой точечная вычистка бессмысленна: резать
+# почти весь ответ — хуже, чем честно отказаться (аудит M9, 10.2026).
+_SCRUB_MAX_CONTAMINATED_RATIO = 0.5
+
+
+def _scrub_contaminated_sentences(text: str, *, kind: str) -> str | None:
+    """Вырезает только предложения с утечкой. None — текст порезан слишком сильно."""
+    spans = _leak_spans(text)
+    if not spans:
+        return text
+    # Границы предложений: режем по .!?… и переводам строк, сохранение разделителя.
+    bounds: list[int] = [0]
+    for m in _SENTENCE_SPLIT_RE.finditer(text):
+        bounds.append(m.end())
+    bounds.append(len(text))
+    drop: set[int] = set()
+    for start, end in spans:
+        for idx in range(len(bounds) - 1):
+            lo, hi = bounds[idx], bounds[idx + 1]
+            if lo <= start < hi or lo < end <= hi:
+                drop.add(idx)
+    kept = "".join(text[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1) if i not in drop)
+    kept = kept.strip()
+    if not kept:
+        return None
+    if len(kept) < len(text) * _SCRUB_MAX_CONTAMINATED_RATIO:
+        return None
+    log.warning('[%s] Scrubbed only the offending sentence(s), kept %d of %d chars', kind, len(kept), len(text))
+    return kept
+
+
 def _scrub_identity_leak(text: str, *, source: str) -> str:
     """Точка применения фильтра для НЕстримингового пути (ask_gemini, ask_openrouter_*).
     Вызывается непосредственно перед записью ответа в историю чата — если вызвать её
     только перед показом пользователю, но не перед hist.append/history.append, утечка
-    осталась бы в истории и могла бы повлиять на последующие ответы модели."""
+    осталась бы в истории и могла бы повлиять на последующие ответы модели.
+
+    Раньше любое срабатывание выкидывало ВЕСЬ ответ и подставляло fallback: одна
+    вставленная фраза про Gemini посреди нормального объяснения выглядела как поломка
+    бота (аудит M9, 10.2026). Теперь режем только предложение с утечкой, а fallback
+    оставляем на случай, когда остаток нечитаем."""
     if _detect_identity_leak(text):
+        scrubbed = _scrub_contaminated_sentences(text, kind="identity-leak")
+        if scrubbed is not None:
+            return scrubbed
         log.warning('[identity-leak] Detected and blocked an identity leak (source=%s, len=%d)', source, len(text))
         return _IDENTITY_LEAK_FALLBACK
     if _detect_injected_payload_echo(text):
+        scrubbed = _scrub_contaminated_sentences(text, kind="injection-echo")
+        if scrubbed is not None:
+            return scrubbed
         log.warning('[injection-echo] Detected and blocked a likely injected-instruction echo (source=%s, len=%d)', source, len(text))
         return _INJECTED_PAYLOAD_ECHO_FALLBACK
     if _detect_garbled_mix(text):
