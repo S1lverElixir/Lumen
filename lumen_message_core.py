@@ -643,16 +643,21 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
 
     # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
     ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
-    web_search_failed = False
-    if (
+    # Внешний поиск нужен свежему запросу без живого поиска в маршруте (ссылки/YouTube
+    # читает только Gemini — им сниппеты не замена). Дневной лимит пользователя — не сюда:
+    # его квота потрачена, ответ идёт с честной пометкой без чужого поиска.
+    # Выключен свитчом или пуст — тоже отвечаем с пометкой.
+    need_external_search = (
         needs_freshness
         and not needs_youtube
         and not needs_website
-        and web_search_is_enabled()
+        and not no_search_note
         and not route_has_live_search(route)
-    ):
-        # Свежий запрос, а живого поиска в маршруте нет (квота 2.5 исчерпана): сниппеты
-        # DuckDuckGo едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
+    )
+    web_search_failed = False
+    if need_external_search and web_search_is_enabled():
+        # Сниппеты DuckDuckGo едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
+        # Поиск идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный вопрос получит "занято").
         search_budget = web_search_timeout_sec()
         if route_deadline is not None:
             search_budget = min(search_budget, max(0.0, route_deadline - time.monotonic()))
@@ -668,6 +673,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             ai_prompt += format_snippets_for_prompt(snippets)
         else:
             web_search_failed = True
+    elif need_external_search:
+        web_search_failed = True
     if (
         media_tuple is None
         and not extra_media
