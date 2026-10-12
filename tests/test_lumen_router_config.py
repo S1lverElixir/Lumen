@@ -110,6 +110,25 @@ def test_looks_like_freshness_query_ignores_substrings():
     assert lumen_router_config._looks_like_freshness_query("groundbreaking discovery") is False
 
 
+def test_looks_like_search_request_detects_explicit_tool_asks():
+    # Прод 11.10.2026: "найди с веб поиском" без слов свежести уходило на модели
+    # без поиска — явная просьба искать теперь тоже ведёт на свежий маршрут.
+    assert lumen_router_config._looks_like_search_request("погугли что с ДЦ Яндекса") is True
+    assert lumen_router_config._looks_like_search_request("найди инфу с помощью веб-поиска") is True
+    assert lumen_router_config._looks_like_search_request("ищи через поиск, что там с дата-центрами") is True
+    assert lumen_router_config._looks_like_search_request("search the web for Yandex data centers") is True
+    assert lumen_router_config._looks_like_search_request("поищи в интернете свежие новости") is True
+
+
+def test_looks_like_search_request_ignores_code_searches():
+    # Голые "найди/ищи" без упоминания поиска — про код, а не про веб: иначе
+    # "найди баг" гнал бы тяжёлый разбор кода на поисковый маршрут.
+    assert lumen_router_config._looks_like_search_request("найди баг в скрипте") is False
+    assert lumen_router_config._looks_like_search_request("найди ошибку") is False
+    assert lumen_router_config._looks_like_search_request("привет") is False
+    assert lumen_router_config._looks_like_search_request("") is False
+
+
 def test_looks_like_heavy_query_detects_english():
     # Внешний аудит: "write a Python parser" пролетал в light-ветку.
     assert lumen_router_config._looks_like_heavy_query("write a Python parser for csv") is True
