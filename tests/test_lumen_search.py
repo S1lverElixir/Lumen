@@ -58,6 +58,18 @@ def test_format_snippets_for_prompt_marks_data_and_skips_empties():
     assert lumen_search.format_snippets_for_prompt([{"title": "", "url": "", "snippet": ""}]) == ""
 
 
+def test_format_snippets_for_prompt_cuts_on_whole_lines():
+    # Ревью: срез на 1500 символах рвал URL посередине — режем по целым строкам.
+    long_snippets = [
+        {"title": f"Title {i} " + "x" * 400, "url": f"https://example.com/{i}", "snippet": "y" * 400}
+        for i in range(10)
+    ]
+    block = lumen_search.format_snippets_for_prompt(long_snippets)
+    assert len(block) <= lumen_search._BLOCK_MAX_CHARS
+    assert block.endswith(")")
+    assert "https://example.com/9" not in block
+
+
 def test_route_has_live_search_follows_grounding_flags():
     assert lumen_search.route_has_live_search([("groq", "qwen/qwen3.8-27b")]) is False
     assert lumen_search.route_has_live_search([("gemini", "gemini-3.8-flash")]) is False
