@@ -56,6 +56,9 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `OPENROUTER_TITLE` | `BOT_USERNAME` | App title header sent with OpenRouter requests. |
 | `POLLINATIONS_IMAGE_MODEL` | `flux` | Default image-generation model (used only if the prompt doesn't match a more specific style). Renamed from `HF_IMAGE_MODEL` (Sept 2026) — the backend is Pollinations.ai, not Hugging Face; the old name is no longer read. |
 | `VOICE_TRANSCRIBE_MAX_BYTES` | `10485760` (10 MB) | Voice/audio attachments larger than this skip Whisper transcription and go straight to Gemini audio, as before. |
+| `WEB_SEARCH_ENABLED` | `1` | Free DuckDuckGo snippet fallback for fresh-info requests when no live-search Gemini model is left in the route (quota exhausted). Set to `0` (plus restart) to answer from knowledge with an honest "without live search" note instead. |
+| `WEB_SEARCH_TIMEOUT_SEC` | `8s` | Cap for one DuckDuckGo fetch, inside the shared `ROUTE_TOTAL_BUDGET_SEC`. |
+| `WEB_SEARCH_MAX_RESULTS` | `5` | How many snippets are attached to the prompt (each capped, whole block capped). |
 
 ## Timeouts, rate limiting & routing budgets
 
