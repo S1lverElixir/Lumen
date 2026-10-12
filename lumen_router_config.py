@@ -520,6 +520,20 @@ _FRESHNESS_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Явная просьба искать в вебе — отдельно от свежести.
+# Голые "найди/ищи" без упоминания поиска не ловим: "найди баг" про код, а не про веб (прод 11.10.2026).
+_SEARCH_REQUEST_RE = re.compile(
+    r"веб[\s\-]?поиск|поиск\w*\s+в\s+интернете|поищи\s+в\s+интернете"
+    r"|погугли\w*|загугли\w*|нагугли\w*|в\s+гугле"
+    r"|с\s+помощью\s+поиска|через\s+поиск|воспользуйся\s+поиском"
+    r"|search\s+the\s+web|web\s+search|google\s+it|look\s+it\s+up\s+online|browse\s+the\s+(web|internet)",
+    re.IGNORECASE,
+)
+
+def _looks_like_search_request(text: str) -> bool:
+    return bool(text) and bool(_SEARCH_REQUEST_RE.search(text))
+
+
 def _looks_like_freshness_query(text: str) -> bool:
     return bool(text) and bool(_FRESHNESS_QUERY_RE.search(text))
 

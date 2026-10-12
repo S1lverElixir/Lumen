@@ -38,6 +38,15 @@ from lumen_router_config import (
     _build_route,
     _looks_like_freshness_query,
     _looks_like_heavy_query,
+    _looks_like_search_request,
+)
+from lumen_search import (
+    fetch_web_snippets,
+    format_snippets_for_prompt,
+    route_has_live_search,
+    web_search_is_enabled,
+    web_search_max_results,
+    web_search_timeout_sec,
 )
 from lumen_security import _looks_like_injection_probe
 
@@ -588,7 +597,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
                 media_mime = extra_mime
                 break
     is_heavy = _looks_like_heavy_query(clean_prompt)
-    needs_freshness = _looks_like_freshness_query(clean_prompt)
+    # Явная просьба искать тоже ведёт на свежий маршрут: иначе "погугли" без слов-маркеров уходило на модели без поиска (прод 11.10.2026).
+    needs_freshness = _looks_like_freshness_query(clean_prompt) or _looks_like_search_request(clean_prompt)
     route = _build_route(
         needs_youtube=needs_youtube, needs_website=needs_website,
         media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
@@ -633,6 +643,31 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
 
     # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
     ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
+    web_search_failed = False
+    if (
+        needs_freshness
+        and not needs_youtube
+        and not needs_website
+        and web_search_is_enabled()
+        and not route_has_live_search(route)
+    ):
+        # Свежий запрос, а живого поиска в маршруте нет (квота 2.5 исчерпана): сниппеты
+        # DuckDuckGo едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
+        search_budget = web_search_timeout_sec()
+        if route_deadline is not None:
+            search_budget = min(search_budget, max(0.0, route_deadline - time.monotonic()))
+        snippets: list = []
+        if search_budget > 0:
+            try:
+                snippets = await fetch_web_snippets(
+                    clean_prompt, timeout_sec=search_budget, max_results=web_search_max_results(),
+                )
+            except Exception as exc:
+                log.warning("[web-search] Snippet fetch failed, answering with a no-search note: %s", exc.__class__.__name__)
+        if snippets:
+            ai_prompt += format_snippets_for_prompt(snippets)
+        else:
+            web_search_failed = True
     if (
         media_tuple is None
         and not extra_media
@@ -656,6 +691,8 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         )
         if no_search_note:
             ans = bot._t(message.chat.id, "fallback_no_search") + "\n\n" + ans
+        if web_search_failed:
+            ans = bot._t(message.chat.id, "fallback_no_live_search") + "\n\n" + ans
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
         # Успешный ответ закрывает флаг обрыва (добивка тоже считается успехом).
