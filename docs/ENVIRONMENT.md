@@ -145,6 +145,9 @@ These ceilings are fixed in code; change them only with a code edit:
 | `BOT_LOG_PATH` | `/app/bot.log` | Log file path. Mainly relevant for tests; leave it alone in production. |
 | `LOG_LEVEL` | `INFO` | Standard logging level (`DEBUG`/`INFO`/`WARNING`/...). |
 | `DIAG_TOTAL_BUDGET_SEC` | `25s` | Total budget for the `/diag` network check across all probed hosts, so a hanging host cannot hang the diagnostic. |
+| `DEV_TRACE` | `0` | Set to `1` to log every request, answer and passive group background as JSONL (`devtrace.jsonl` next to `bot.log`), for prompt debugging. Off by default: the file holds chat texts. |
+| `DEV_TRACE_PATH` | `<BOT_LOG_PATH dir>/devtrace.jsonl` | Where the dev trace file lives. Point it at a temp dir in tests. |
+| `DEV_TRACE_MAX_BYTES` | `5 MB` | File size cap before rotation to a single `.1` backup; garbage values fall back to the default. |
 | `ADMIN_SECRET_SEED` | — | Secret seed for deriving `WEBHOOK_SECRET` and `ADMIN_PANEL_KEY`. **Set it to its own random value, separate from `BOT_TOKEN`.** Without it both keys are derived from `BOT_TOKEN`, so a leaked token also exposes `/export_state` and `/webhook` (the bot logs a warning at startup). Changing the seed (or setting it for the first time) rotates both keys at once: on restart the bot re-registers the Telegram webhook with the new `WEBHOOK_SECRET` by itself, but anything using the old `ADMIN_PANEL_KEY` (browser bookmarks, cron export scripts) gets `401` until updated — fetch the new key via `GET /admin_keys` with Bearer `BOT_TOKEN`. |
 
 Sentry setup: create a free Python project at [sentry.io](https://sentry.io) (Developer tier: 5,000 events/month as of 06.10.2026), copy the DSN from the project settings, and add it as a Space secret.

@@ -55,7 +55,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 Lumen is a single FastAPI + aiogram service. Telegram delivers updates to a webhook. Each message gets routed through a chain of candidate models, built on the fly from the message's content: attachments, links, and a couple of lightweight heuristics for "does this need current information" and "is this a heavy request." Plain text starts on Groq, search and link reading go to Gemini, OpenRouter covers the rest; the first provider that answers wins, the next one is tried as a fallback if its whole chain fails. Models that already returned 429 today are skipped by the router.
 
-The codebase is a modular monolith. `bot.py` is the entry point and composition root; the rest is split into focused modules: `lumen_admin.py` (FastAPI app, secret gates, admin/diag/export endpoints), `lumen_message_core.py` (message-handling core), `lumen_routes.py` (LLM calls with fallback, `_run_route`), `lumen_streaming.py` (provider-agnostic streaming), `lumen_chat_state.py` (chat state, quotas, locks), `lumen_commands.py` (commands, TTS/draw pipelines, pick buttons), `lumen_tiktok_flow.py` (TikTok send orchestration), `lumen_rich.py` (sending: guests, Rich Messages, chunking), `lumen_media_flow.py` (Telegram attachment downloads), `lumen_transport_calls.py` (sessions, proxy rotation, Telegram calls), `lumen_errors.py` (model error classification), `lumen_limits.py` (rate window, pick queue), `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, `lumen_typing_pace.py`, `lumen_model_speed.py`, and `lumen_lang.py` (bot language: system messages in 25 languages).
+The codebase is a modular monolith. `bot.py` is the entry point and composition root; the rest is split into focused modules: `lumen_admin.py` (FastAPI app, secret gates, admin/diag/export endpoints), `lumen_message_core.py` (message-handling core), `lumen_routes.py` (LLM calls with fallback, `_run_route`), `lumen_streaming.py` (provider-agnostic streaming), `lumen_chat_state.py` (chat state, quotas, locks), `lumen_commands.py` (commands, TTS/draw pipelines, pick buttons), `lumen_tiktok_flow.py` (TikTok send orchestration), `lumen_rich.py` (sending: guests, Rich Messages, chunking), `lumen_media_flow.py` (Telegram attachment downloads), `lumen_transport_calls.py` (sessions, proxy rotation, Telegram calls), `lumen_errors.py` (model error classification), `lumen_limits.py` (rate window, pick queue), `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, `lumen_typing_pace.py`, `lumen_model_speed.py`, and `lumen_lang.py` (bot language: system messages in 25 languages). `lumen_devtrace.py` writes an opt-in JSONL trace (requests, answers, passive background) for prompt debugging.
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for a deeper look at routing, streaming, the security layers, and the TikTok downloader.
 
@@ -94,13 +94,14 @@ The proxy only forwards to an explicit host allowlist (`api.telegram.org`, `www.
 
 ## Diagnostics
 
-All three endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/admin_keys`, covered in the deploy steps above, uses `BOT_TOKEN` instead):
+All endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/admin_keys`, covered in the deploy steps above, uses `BOT_TOKEN` instead):
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /diag` | Checks outbound network reachability (Telegram, Gemini, OpenRouter, TikWM, Pollinations, etc.) from inside the container. |
 | `GET /webhook_url` | Shows the computed webhook URL and a ready-to-open registration link. |
 | `GET /export_state` | Dumps all chat histories and quota counters as JSON, for manual backup. |
+| `GET /devtrace?n=200` | Tails the dev trace (requests, answers, passive background) as JSON, for prompt debugging. Needs `DEV_TRACE=1`. |
 
 `/logs` (a Telegram command, owner-only) sends the current `bot.log` with secrets redacted.
 
