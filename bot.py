@@ -689,6 +689,7 @@ from lumen_admin import (
     network_diagnostics,
     probe_url,
     export_state,
+    devtrace,
 )
 
 # ADMIN_SECRET_SEED — независимая соль для секретов (иначе всё выводилось из BOT_TOKEN и ротировалось только с ним). Пустой seed при пустом токене — случайный секрет процесса, а не захардкоженная строка.
@@ -756,6 +757,7 @@ __all__ = [
     "network_diagnostics",
     "probe_url",
     "export_state",
+    "devtrace",
     # Имена из lumen_streaming.py код bot.py сам не читает — они нужны как `bot.X`
     # существующим тестам и `_run_route` ниже.
     "_tick_waiting_dots",

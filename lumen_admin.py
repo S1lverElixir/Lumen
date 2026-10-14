@@ -258,3 +258,23 @@ async def export_state(request: Request) -> dict[str, Any]:
         "chats": chats,
         "global_quota": quota,
     }
+
+
+@app.get("/devtrace")
+async def devtrace(request: Request, n: int = 200) -> Any:
+    """Хвост JSONL-следа запросов и ответов для разбора багов; гейт ADMIN_PANEL_KEY."""
+    if not _check_admin_key(request):
+        _log_denied(request, "GET /devtrace")
+        return _forbidden()
+    import lumen_devtrace as _devtrace
+    try:
+        count = int(n)
+    except (TypeError, ValueError):
+        count = 200
+    entries = _devtrace.read_tail(count)
+    return {
+        "enabled": _devtrace.enabled(),
+        "path": str(_devtrace.trace_path()),
+        "count": len(entries),
+        "entries": entries,
+    }

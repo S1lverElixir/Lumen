@@ -41,6 +41,7 @@ from lumen_router_config import (
     _looks_like_search_request,
 )
 from lumen_search import (
+    answered_with_live_search,
     fetch_web_snippets,
     format_snippets_for_prompt,
     route_has_live_search,
@@ -49,6 +50,7 @@ from lumen_search import (
     web_search_timeout_sec,
 )
 from lumen_security import _looks_like_injection_probe
+import lumen_devtrace
 
 log = logging.getLogger("bot")
 
@@ -431,10 +433,13 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     is_private = message.chat.type == ChatType.PRIVATE
     is_guest = bot.is_guest_message(message)
     mentioned = bot.message_mentions_bot(message)
+    # Старт для замера задержки ответа в след.
+    _trace_start = time.monotonic()
 
     if bot._should_only_record_passively(message, t, is_private=is_private, is_guest=is_guest, mentioned=mentioned):
         # Пассивный фон — единственное место, где состояние нужно ДО лимита.
         bot._record_passive_group_context(message, bot.get_state(message.chat.id), t)
+        lumen_devtrace.record_passive(message.chat.id, t, is_private=is_private, mentioned=mentioned)
         return
 
     # Лимит проверяем ДО get_state: раньше отклонённое по лимиту сообщение всё равно
@@ -498,6 +503,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     if clean_prompt and _looks_like_injection_probe(clean_prompt):
         # Инъекция: отвечаем без LLM. Текст в лог не пишем, только длину (аудит M5, 10.2026).
         log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s (prompt_len=%d)', message.chat.id, len(clean_prompt))
+        lumen_devtrace.record_blocked(message.chat.id, reason="injection-probe", prompt_len=len(clean_prompt))
         await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
         return
 
@@ -560,6 +566,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             if _looks_like_injection_probe(clean_prompt):
                 # Голосовой транскрипт дописывается после первого префильтра (аудит A3-1).
                 log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s (prompt_len=%d)', message.chat.id, len(clean_prompt))
+                lumen_devtrace.record_blocked(message.chat.id, reason="injection-probe", prompt_len=len(clean_prompt))
                 await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
                 return
 
@@ -655,6 +662,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         and not route_has_live_search(route)
     )
     web_search_failed = False
+    snippets_injected = False
     if need_external_search and web_search_is_enabled():
         # Сниппеты DuckDuckGo едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
         # Поиск идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный вопрос получит "занято").
@@ -671,6 +679,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
                 log.warning("[web-search] Snippet fetch failed, answering with a no-search note: %s", exc.__class__.__name__)
         if snippets:
             ai_prompt += format_snippets_for_prompt(snippets)
+            snippets_injected = True
         else:
             web_search_failed = True
     elif need_external_search:
@@ -688,14 +697,57 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # Стриминг ("живой" эффект печати) имеет смысл только для простого
     # текстового обмена без вложений/YouTube — см. _run_route. При пометке
     # "без поиска" стрим гасим: она дописывается к готовому ответу.
-    allow_stream = not gemini_media_list and not youtube_url_to_analyze and not no_search_note
+    # Стрим головы без живого поиска при свежем запросе гасим: иначе ответ уйдёт
+    # без поиска до пост-проверки и ретрай уже невозможен (прод 12.10.2026).
+    head_has_live_search = (not route) or route_has_live_search(route[:1])
+    allow_stream = (
+        not gemini_media_list
+        and not youtube_url_to_analyze
+        and not no_search_note
+        and (not needs_freshness or head_has_live_search)
+    )
     try:
+        provenance: dict = {}
         ans, reply_already_sent = await bot._run_route(
             message.chat.id, ai_prompt, route, message,
             media=gemini_media_list, media_filename=med_name,
             youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
-            deadline=route_deadline,
+            deadline=route_deadline, provenance=provenance,
         )
+        answered_grounded = answered_with_live_search(provenance)
+        if needs_freshness and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:
+            # План маршрута содержал живой поиск, но ответила модель без него
+            # (граундинг-модели умерли на квоте по ходу). Догоняем DuckDuckGo
+            # и один ретрай со сниппетами; не вышло — честная пометка.
+            retry_snippets: list = []
+            try:
+                retry_budget = web_search_timeout_sec()
+                if route_deadline is not None:
+                    retry_budget = min(retry_budget, max(0.0, route_deadline - time.monotonic()))
+                if retry_budget > 0:
+                    retry_snippets = await fetch_web_snippets(
+                        clean_prompt, timeout_sec=retry_budget, max_results=web_search_max_results(),
+                    )
+            except Exception as exc:
+                log.warning("[web-search] Post-hoc snippet fetch failed: %s", exc.__class__.__name__)
+            if retry_snippets:
+                log.info("[web-search] Retrying route once with fresh snippets (first answer had no live search).")
+                ai_prompt += format_snippets_for_prompt(retry_snippets)
+                snippets_injected = True
+                try:
+                    ans, reply_already_sent = await bot._run_route(
+                        message.chat.id, ai_prompt, route, message,
+                        media=gemini_media_list, media_filename=med_name,
+                        youtube_url=youtube_url_to_analyze, allow_stream=False,
+                        deadline=route_deadline, provenance=provenance,
+                    )
+                except Exception as exc:
+                    log.warning("[web-search] Retry with snippets failed, keeping first answer with a no-search note: %s", exc.__class__.__name__)
+                    web_search_failed = True
+            else:
+                web_search_failed = True
+        elif needs_freshness and not snippets_injected and not answered_grounded:
+            log.warning("[web-search] Answer already streamed without live search; cannot retry cleanly.")
         if no_search_note:
             ans = bot._t(message.chat.id, "fallback_no_search") + "\n\n" + ans
         if web_search_failed:
@@ -705,7 +757,20 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         # Успешный ответ закрывает флаг обрыва (добивка тоже считается успехом).
         state.pop("interrupted", None)
         bot.mark_state_dirty(message.chat.id)
+        lumen_devtrace.record_answer(
+            message.chat.id, user_text=clean_prompt, route=route,
+            provider=provenance.get("provider", ""), model=provenance.get("model") or "",
+            latency_ms=int((time.monotonic() - _trace_start) * 1000), reply=ans,
+            ctx_tail=list(state.get("ctx") or [])[-3:],
+            flags={"fresh": bool(needs_freshness), "snippets": bool(snippets_injected),
+                   "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent)},
+        )
     except Exception as exc:
+        lumen_devtrace.record_failure(
+            message.chat.id, user_text=clean_prompt, route=route,
+            error=f"{type(exc).__name__}: {exc}",
+            latency_ms=int((time.monotonic() - _trace_start) * 1000),
+        )
         if isinstance(exc, (bot.GeminiAllModelsExhaustedError, bot.RouteBudgetExceededError)):
             # Квота/бюджет маршрута штатно, не баг: только warning, иначе Sentry тонет (LUMEN-3: 8 шумов за месяц).
             log.warning("Chat AI processing hit a known, already-handled outcome: %s", exc)
