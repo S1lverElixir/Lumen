@@ -148,3 +148,14 @@ def test_fetch_web_snippets_fails_open_on_network_error(monkeypatch):
     monkeypatch.setattr(lumen_search, "aiohttp", _stub_aiohttp(exc=ConnectionError("down")))
     assert asyncio.run(lumen_search.fetch_web_snippets("что с ДЦ Яндекса")) == []
     assert asyncio.run(lumen_search.fetch_web_snippets("   ")) == []
+
+
+def test_answered_with_live_search_checks_actual_model_not_route():
+    # Прод 12.10.2026: в плане маршрута граундинг-модель была, но она умерла
+    # на квоте и ответила модель без поиска — проверять надо ответившую.
+    assert lumen_search.answered_with_live_search({"provider": "gemini", "model": "gemini-2.5-flash"}) is True
+    assert lumen_search.answered_with_live_search({"provider": "gemini", "model": "gemini-3.8-flash"}) is False
+    assert lumen_search.answered_with_live_search({"provider": "groq", "model": "anything"}) is False
+    assert lumen_search.answered_with_live_search({"provider": "gemini", "model": None}) is False
+    assert lumen_search.answered_with_live_search({}) is False
+    assert lumen_search.answered_with_live_search(None) is False

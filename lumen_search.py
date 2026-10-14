@@ -62,6 +62,17 @@ def route_has_live_search(route: list[tuple[str, str]]) -> bool:
     )
 
 
+def answered_with_live_search(provenance: dict | None) -> bool:
+    """Отвечала ли ФАКТИЧЕСКИ ответившая модель с живым поиском (прод 12.10.2026:
+    в плане маршрута граундинг-модель была, но она умерла на квоте и ответила
+    модель без поиска — проверять надо ответившую, а не план)."""
+    if not provenance:
+        return False
+    if provenance.get("provider") != "gemini":
+        return False
+    return bool(GEMINI_MODELS.get(provenance.get("model") or "", {}).get("search_grounding"))
+
+
 _DDG_ANCHOR_RE = re.compile(
     r'<a\s[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
     re.IGNORECASE | re.DOTALL,

@@ -802,7 +802,7 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
 async def ask_gemini(
     chat_id: int, user_text: str, media: list[tuple[bytes, str]] | None = None,
     youtube_url: str | None = None, model_chain: list[str] | None = None,
-    deadline: float | None = None,
+    deadline: float | None = None, provenance: dict | None = None,
 ) -> str:
     import bot
     state = bot.get_state(chat_id)
@@ -935,6 +935,8 @@ async def ask_gemini(
     await bot._trim_history(hist)
     bot._trim_combined(state)
     bot._record_quota_usage("gemini", curr_model_id)
+    if provenance is not None:
+        provenance.update(provider="gemini", model=curr_model_id)
     return ans
 
 async def _build_gemini_turn_contents(
@@ -1000,7 +1002,7 @@ async def _run_route(
     chat_id: int, ai_prompt: str, route: list[tuple[str, str]], message: Message, *,
     media: list[tuple[bytes, str]] | None = None, media_filename: str = "",
     youtube_url: str | None = None, allow_stream: bool = False,
-    deadline: float | None = None,
+    deadline: float | None = None, provenance: dict | None = None,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
@@ -1024,6 +1026,11 @@ async def _run_route(
         bot._record_user_daily(bot._user_key_for_message(message), gemini=(provider_name == "gemini"))
         bot._record_stats_event("answers_sent")
 
+    # Кто фактически ответил (прод 12.10.2026): для пост-проверки живого поиска.
+    def _note_answered(provider_name: str, model_id: str | None) -> None:
+        if provenance is not None:
+            provenance.update(provider=provider_name, model=model_id)
+
     # Стримим только голову маршрута; плейсхолдер "…" переиспользуем под финальный текст следующей модели, а не сносим.
     tried_stream_model: str | None = None
     tried_stream_provider: str | None = None
@@ -1035,6 +1042,7 @@ async def _run_route(
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (gemini:%s)', chat_id, head_model)
                 _count_user_answer("gemini")
+                _note_answered("gemini", head_model)
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "gemini"
             reusable_placeholder = placeholder
@@ -1043,6 +1051,7 @@ async def _run_route(
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (openrouter:%s)', chat_id, head_model)
                 _count_user_answer("openrouter")
+                _note_answered("openrouter", head_model)
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "openrouter"
             reusable_placeholder = placeholder
@@ -1051,6 +1060,7 @@ async def _run_route(
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (groq:%s)', chat_id, head_model)
                 _count_user_answer("groq")
+                _note_answered("groq", head_model)
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "groq"
             reusable_placeholder = placeholder
@@ -1072,13 +1082,16 @@ async def _run_route(
             break
         try:
             if provider == "gemini":
-                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline)
+                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance)
             elif provider == "groq":
                 ans = await bot.ask_groq_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
+                _note_answered("groq", None)
             elif media:
                 ans = await bot.ask_openrouter_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline)
+                _note_answered("openrouter", None)
             else:
                 ans = await bot.ask_openrouter_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
+                _note_answered("openrouter", None)
 
             if reusable_placeholder is not None:
                 # Готовый ответ — прямо в плейсхолдер (если влезает в одно сообщение), иначе обычным путём с разбиением.

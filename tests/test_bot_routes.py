@@ -233,7 +233,7 @@ def test_run_route_falls_back_to_second_provider_when_first_fully_fails():
     async def failing_or_text(*args, **kwargs):
         raise bot.OpenRouterAPIError("всё сломано", status_code=500)
 
-    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None):
+    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None):
         return "Ответ от Gemini (резерв)"
 
     original_or_text = bot.ask_openrouter_text
@@ -1779,7 +1779,7 @@ def test_run_route_marks_unsupported_media_for_text_fallback(monkeypatch):
     chat_id = 999815
     captured = {}
 
-    async def failing_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None):
+    async def failing_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None):
         raise ValueError("Тип вложения 'application/x-foo' не поддерживается для анализа.")
 
     async def fake_groq_text(cid, prompt, model_chain, deadline=None):
@@ -1833,7 +1833,7 @@ def test_run_route_records_user_daily_on_gemini_success():
     incoming = _FakeIncomingMessage(chat_id)
     incoming.from_user = SimpleNamespace(id=777011)
 
-    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None):
+    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None):
         return "Ответ от Gemini"
 
     original = bot.ask_gemini
