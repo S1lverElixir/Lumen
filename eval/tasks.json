@@ -1,0 +1,47 @@
+{
+  "_comment": "Задачи взяты из истории репозитория: fix-коммит меняет код и тесты. Песочница собирается на fix^ (код до правки) + тесты из fix, поэтому целевые тесты падают, а остальные проходят. Целевые (FAIL_TO_PASS) считаются эмпирически: harness_eval.py compute_targets.",
+  "tasks": [
+    {
+      "id": "format-newlines-br",
+      "fix": "aa3af88",
+      "tests": ["tests/test_lumen_formatting.py"],
+      "subject": "Convert newlines to br in rich path so lists stop collapsing"
+    },
+    {
+      "id": "format-table-separator-bound",
+      "fix": "e89951a",
+      "tests": ["tests/test_lumen_formatting.py"],
+      "subject": "Bound table separator match length for pathological lines"
+    },
+    {
+      "id": "presplit-glued-bullets",
+      "fix": "1dfad36",
+      "tests": ["tests/test_lumen_formatting.py"],
+      "subject": "Presplit glued bullets before chunking so lists survive cutting"
+    },
+    {
+      "id": "state-corrupt-index",
+      "fix": "2111b5d",
+      "tests": ["tests/test_bot_state.py"],
+      "subject": "Fail closed when the chat index is corrupt without legacy"
+    },
+    {
+      "id": "state-dirty-counters",
+      "fix": "909b840",
+      "tests": ["tests/test_bot_state.py"],
+      "subject": "Guard state dirty flags with generation counters"
+    },
+    {
+      "id": "tiktok-dns-private-ips",
+      "fix": "6309600",
+      "tests": ["tests/test_bot_tiktok.py"],
+      "subject": "Filter non-public IPs on every DNS resolve"
+    },
+    {
+      "id": "streaming-catchup-throttle",
+      "fix": "c019423",
+      "tests": ["tests/test_bot_streaming.py"],
+      "subject": "Throttle streaming catch-up edits and pace chunk sends"
+    }
+  ]
+}
