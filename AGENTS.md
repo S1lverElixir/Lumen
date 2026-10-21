@@ -28,6 +28,8 @@
 ## Commands (verified against CI, .github/workflows/ci.yml)
 - Setup, once per session: pip install -r requirements.txt -r requirements-dev.txt
 - Gate: pyflakes bot.py lumen_*.py system_prompt.py tests/*.py; pytest -q
+- Gate on Windows (the line above is the CI form for Linux; globs do not expand here): pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name }); pytest -q
+- Shell on the dev machine is PowerShell: ls, cat, grep, tail and other unix commands do not exist, and globs like lumen_*.py do not expand for commands. Read and search with the read/glob/grep tools; in the shell use PowerShell (Get-Content, Get-ChildItem, Select-String, Select-Object -Last N). Do not wrap commands in bash -lc to get linux globs.
 - Proxy gate, required when proxy/ is touched, otherwise skip: deno test proxy/proxy_test.ts (no external imports, works offline; see proxy_test.ts header); deno check proxy/proxy.ts; deno lint proxy/proxy.ts
 - Dependency audit: pip-audit -r requirements.txt. CI runs it too, but it needs network and goes red when a new CVE appears in the pinned versions. Run it only when touching requirements.txt or when the owner asks; it is not part of the baseline.
 - Single test file: pytest tests/<file>.py -v; single test: pytest tests/<file>.py::<test_name> -v
