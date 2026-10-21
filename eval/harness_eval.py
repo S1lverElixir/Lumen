@@ -35,7 +35,9 @@ OUT_ROOT = Path(
 OPENCODE_DB = Path(os.environ.get("USERPROFILE", ".")) / ".local" / "share" / "opencode" / "opencode.db"
 
 AGENT_MODEL = os.environ.get("EVAL_AGENT_MODEL", "opencode/glm-5.3-flash-free")
-PROPOSER_MODEL = os.environ.get("EVAL_PROPOSER_MODEL", "google/gemini-3.5-flash")
+# Google-модели из этого аккаунта недоступны ("User location is not supported"),
+# поэтому и агент, и редактор берутся из бесплатной линейки opencode.
+PROPOSER_MODEL = os.environ.get("EVAL_PROPOSER_MODEL", "opencode/nemotron-3-ultra-free")
 AGENT_TIMEOUT = int(os.environ.get("EVAL_AGENT_TIMEOUT", "1200"))
 
 # Команды, которые агент в песочнице запускать не должен: часть из них ломает
@@ -226,7 +228,10 @@ def compute_targets(task: Task) -> dict:
     }
     cache[key] = entry
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    # запись через временный файл: батчи считают цели параллельно
+    tmp = cache_file.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(cache_file)
     return entry
 
 
@@ -256,10 +261,13 @@ def pytest_state(sandbox: Path) -> tuple[set[str], str]:
 
 
 def pyflakes_state(sandbox: Path) -> tuple[bool, str]:
-    # список модулей lumen_*.py собираем отдельно: гейт в CI так же собирает список
+    # Гейт как в CI: bot.py, system_prompt.py, все lumen_*.py и все tests/*.py.
     modules = sorted(p.name for p in sandbox.glob("lumen_*.py"))
+    tests = sorted(f"tests/{p.name}" for p in (sandbox / "tests").glob("*.py"))
     proc = run_cmd(
-        [sys.executable, "-m", "pyflakes", "bot.py", "system_prompt.py", *modules], cwd=sandbox, timeout=300
+        [sys.executable, "-m", "pyflakes", "bot.py", "system_prompt.py", *modules, *tests],
+        cwd=sandbox,
+        timeout=300,
     )
     return proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
 
@@ -347,15 +355,21 @@ def session_from_db(sandbox: Path, retries: int = 10) -> dict | None:
     return None
 
 
-def keep_sandbox(sandbox: Path, kept: Path) -> dict:
-    """Снимает слепок песочницы: после прогона содержимое могут снести."""
+def keep_sandbox(sandbox: Path, kept: Path, base_status: list[str]) -> dict:
+    """Снимает слепок песочницы: после прогона содержимое могут снести.
+
+    base_status — состояние git сразу после постановки задачи: staged-тесты и
+    записанные нами AGENTS.md/opencode.json не считаются правками агента.
+    """
     info = {"changed_files": [], "diff": ""}
     if not sandbox.exists():
         return info
     try:
-        info["changed_files"] = [line for line in git(sandbox, "status", "--porcelain").splitlines() if line]
+        status = [line for line in git(sandbox, "status", "--porcelain").splitlines() if line]
     except RuntimeError:
-        info["changed_files"] = []
+        status = []
+    base_keys = {line[3:] for line in base_status}
+    info["changed_files"] = [line for line in status if line[3:] not in base_keys]
     if kept.exists():
         shutil.rmtree(kept, ignore_errors=True)
     shutil.copytree(sandbox, kept, ignore=shutil.ignore_patterns(".pip-target"), dirs_exist_ok=True)
@@ -432,40 +446,39 @@ def score(task: Task, result: RunResult, targets: list[str]) -> None:
     result.solved = not result.target_failed and not result.new_failures
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, model: str) -> dict:
+    """Один прогон: песочница, агент, слепок, судья. Возвращает payload результата."""
     tasks = {t.id: t for t in load_tasks()}
-    task = tasks[args.task]
-    out_dir = Path(args.out) if args.out else OUT_ROOT / time.strftime("%Y%m%d-%H%M%S")
+    task = tasks[task_id]
     out_dir.mkdir(parents=True, exist_ok=True)
-    sandbox = out_dir / f"sandbox-{task.id}-{args.variant}"
-    kept = out_dir / f"kept-{task.id}-{args.variant}"
-    agents_md = Path(args.agents_md) if args.agents_md else None
-    model = args.model or AGENT_MODEL
+    sandbox = out_dir / f"sandbox-{task.id}-{variant}"
+    kept = out_dir / f"kept-{task.id}-{variant}"
 
-    log(f"песочница {task.id} ({args.variant}) на {task.base[:8]}")
+    log(f"песочница {task.id} ({variant}) на {task.base[:8]}")
     prepare(task, sandbox, agents_md)
 
     pre_fail, _ = pytest_state(sandbox)
     targets = compute_targets(task)["fail_to_pass"]
+    base_status = [line for line in git(sandbox, "status", "--porcelain").splitlines() if line]
     log(f"до агента падают {len(pre_fail)} тестов, целевых (FAIL_TO_PASS): {len(targets)}")
 
-    transcript = out_dir / f"{task.id}.{args.variant}.jsonl"
+    transcript = out_dir / f"{task.id}.{variant}.jsonl"
     log(f"агент: {model}, таймаут {AGENT_TIMEOUT}с")
     started = time.time()
     final, _ = run_agent(sandbox, task.prompt(), model, transcript, AGENT_TIMEOUT)
     duration = round(time.time() - started, 1)
 
     # Слепок снимаем сразу: содержимое песочницы могут снести (чистка temp, OpenCode).
-    snapshot = keep_sandbox(sandbox, kept)
+    snapshot = keep_sandbox(sandbox, kept, base_status)
     session = session_from_db(sandbox)
     if session:
-        (out_dir / f"{task.id}.{args.variant}.session.json").write_text(
+        (out_dir / f"{task.id}.{variant}.session.json").write_text(
             json.dumps(session, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     result = RunResult(
         task=task.id,
-        variant=args.variant,
+        variant=variant,
         model=model,
         duration_s=duration,
         final_message=final,
@@ -480,7 +493,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     payload = {
         "task": task.id,
-        "variant": args.variant,
+        "variant": variant,
         "model": model,
         "solved": result.solved,
         "pre_fail": result.pre_fail,
@@ -496,10 +509,42 @@ def cmd_run(args: argparse.Namespace) -> int:
         "diff": snapshot["diff"][-8000:],
         "post_pytest_tail": post_out[-1500:],
     }
-    result_file = out_dir / f"{task.id}.{args.variant}.json"
+    result_file = out_dir / f"{task.id}.{variant}.json"
     result_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"итог: {'решено' if result.solved else 'не решено'} ({duration}с) -> {result_file}")
     check_repo_untouched()
+    return payload
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    out_dir = Path(args.out) if args.out else OUT_ROOT / time.strftime("%Y%m%d-%H%M%S")
+    agents_md = Path(args.agents_md) if args.agents_md else None
+    run_one(args.task, args.variant, out_dir, agents_md, args.model or AGENT_MODEL)
+    return 0
+
+
+def cmd_batch(args: argparse.Namespace) -> int:
+    """Прогоняет набор задач одним вариантом AGENTS.md."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    tasks = [t.id for t in load_tasks()]
+    if args.tasks:
+        wanted = set(args.tasks.split(","))
+        tasks = [t for t in tasks if t in wanted]
+    out_dir = Path(args.out) if args.out else OUT_ROOT / time.strftime("%Y%m%d-%H%M%S")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    agents_md = Path(args.agents_md) if args.agents_md else None
+    model = args.model or AGENT_MODEL
+    log(f"batch: {len(tasks)} задач, вариант {args.variant}, потоков {args.jobs}")
+
+    def work(task_id: str) -> None:
+        try:
+            run_one(task_id, args.variant, out_dir, agents_md, model)
+        except Exception as exc:  # noqa: BLE001 — прогон не должен валить весь батч
+            log(f"ошибка на {task_id}: {exc}")
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        list(pool.map(work, tasks))
     return 0
 
 
@@ -510,7 +555,9 @@ def check_repo_untouched() -> None:
     except RuntimeError as exc:
         log(f"ВНИМАНИЕ: не смог проверить состояние репозитория: {exc}")
         return
-    unexpected = [line for line in status.splitlines() if line and not line.startswith("?? eval/")]
+    unexpected = [
+        line for line in status.splitlines() if line and not line[3:].startswith("eval/")
+    ]
     if unexpected:
         log(f"ВНИМАНИЕ: репозиторий изменён во время прогона: {unexpected[:5]}")
 
@@ -548,14 +595,14 @@ def cmd_propose(args: argparse.Namespace) -> int:
     reports.mkdir()
     for run_file in runs:
         data = json.loads(run_file.read_text(encoding="utf-8"))
-        if data.get("solved") and not data.get("violations", {}).get("tests_touched"):
-            continue
+        violations = data.get("violations") or {}
         body = [
             f"Задача: {data['task']}",
+            f"Итог: {'решено' if data.get('solved') else 'не решено'}, {data.get('duration_s')}с",
             f"Целевые тесты: {', '.join(data.get('target_tests') or [])}",
             f"Целевые тесты после прогона упали: {', '.join(data.get('target_failed') or [])}",
             f"Новые падения: {', '.join(data.get('new_failures') or [])}",
-            f"Нарушения правил: {json.dumps(data.get('violations') or {}, ensure_ascii=False)}",
+            f"Нарушения правил: {json.dumps(violations, ensure_ascii=False)}",
             f"pyflakes: {'ok' if data.get('pyflakes_ok') else 'ошибка'}",
             "",
             "Последнее сообщение агента:",
@@ -566,13 +613,15 @@ def cmd_propose(args: argparse.Namespace) -> int:
         ]
         (reports / f"{data['task']}.md").write_text("\n".join(body), encoding="utf-8")
     if not any(reports.iterdir()):
-        log("базовые прогоны без провалов — править нечего")
+        log("базовых прогонов нет — править нечего")
         return 0
 
     prompt = (
-        "Ты редактор правил проекта. Посмотри AGENTS.md и отчёты о провалах в папке failures.\n"
-        "Составь новый AGENTS.md: добавь правила, которые предотвратили бы эти провалы "
-        "(конкретные, в стиле существующих разделов).\n"
+        "Ты редактор правил проекта. Посмотри AGENTS.md и отчёты о прогонах в папке failures.\n"
+        "Составь новый AGENTS.md: добавь правила, которые предотвратили бы провалы "
+        "и убрали бы замеченную в отчётах неэффективность (лишние команды, unix-команды "
+        "в PowerShell, гейт не запускался). Правила конкретные, в стиле существующих разделов, "
+        "только по фактам из отчётов.\n"
         "Существующие правила не удаляй и не переписывай, только дополняй.\n"
         "Сохрани результат в файл AGENTS.candidate.md в этой же папке. Больше ничего не меняй."
     )
@@ -602,10 +651,8 @@ def cmd_propose(args: argparse.Namespace) -> int:
 
 def cmd_report(args: argparse.Namespace) -> int:
     out_dir = Path(args.out) if args.out else OUT_ROOT
-    files = sorted(out_dir.glob("*.json"))
-    files = [f for f in files if f.name not in {"propose.json"}]
     rows = []
-    for file in files:
+    for file in sorted(out_dir.glob("*.json")):
         try:
             data = json.loads(file.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
@@ -616,31 +663,37 @@ def cmd_report(args: argparse.Namespace) -> int:
     by_task: dict[str, dict[str, dict]] = {}
     for row in rows:
         by_task.setdefault(row["task"], {})[row["variant"]] = row
+    variants = sorted({v for task in by_task.values() for v in task})
 
+    header = "| Задача | " + " | ".join(variants) + " |"
+    sep = "|---|" + "---|" * len(variants)
     lines = [
-        "# Harness-eval: базовый AGENTS.md против кандидатного",
+        "# Harness-eval: варианты AGENTS.md на задачах из истории",
         "",
         f"Модель агента: {AGENT_MODEL} · Модель-редактор: {PROPOSER_MODEL}",
         "",
-        "| Задача | База | Кандидат | Тесты (база) | Тесты (кандидат) | Нарушения (база) | Нарушения (кандидат) |",
-        "|---|---|---|---|---|---|---|",
+        header,
+        sep,
     ]
-    base_score = cand_score = 0
-    for task_id, variants in sorted(by_task.items()):
-        base = variants.get("base", {})
-        cand = variants.get("candidate", {})
-        base_ok = bool(base.get("solved"))
-        cand_ok = bool(cand.get("solved"))
-        base_score += base_ok
-        cand_score += cand_ok
-        lines.append(
-            f"| {task_id} | {'решено' if base_ok else 'нет'} | "
-            f"{'решено' if cand_ok else 'нет'} | {len(base.get('target_failed') or [])} | "
-            f"{len(cand.get('target_failed') or [])} | "
-            f"{len(base.get('violations', {}).get('tests_touched') or [])} | "
-            f"{len(cand.get('violations', {}).get('tests_touched') or [])} |"
-        )
-    lines += ["", f"Решено базой: {base_score}/{len(by_task)} · Кандидатом: {cand_score}/{len(by_task)}", ""]
+    totals = {v: 0 for v in variants}
+    for task_id, task_variants in sorted(by_task.items()):
+        cells = []
+        for variant in variants:
+            data = task_variants.get(variant)
+            if not data:
+                cells.append("-")
+                continue
+            ok = bool(data.get("solved"))
+            totals[variant] += ok
+            viol = data.get("violations") or {}
+            mark = "решено" if ok else "нет"
+            if viol.get("tests_touched"):
+                mark += " (тесты правил)"
+            if viol.get("unix_shell_commands"):
+                mark += " (unix)"
+            cells.append(mark)
+        lines.append(f"| {task_id} | " + " | ".join(cells) + " |")
+    lines += ["", "Итог: " + " · ".join(f"{v}: {totals[v]}/{len(by_task)}" for v in variants), ""]
     text = "\n".join(lines)
     print(text)
     if args.out:
@@ -676,6 +729,15 @@ def main() -> int:
     run.add_argument("--model", default=None)
     run.add_argument("--out", default=None)
     run.set_defaults(func=cmd_run)
+
+    batch = sub.add_parser("batch", help="прогнать несколько задач одним вариантом")
+    batch.add_argument("--variant", default="base", choices=["base", "candidate", "weak"])
+    batch.add_argument("--tasks", default=None, help="список id через запятую")
+    batch.add_argument("--agents-md", default=None)
+    batch.add_argument("--model", default=None)
+    batch.add_argument("--jobs", type=int, default=1)
+    batch.add_argument("--out", default=None)
+    batch.set_defaults(func=cmd_batch)
 
     check = sub.add_parser("check", help="проверить, что задачи валидны на базе")
     check.add_argument("--out", default=None)
