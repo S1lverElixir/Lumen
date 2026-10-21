@@ -166,9 +166,18 @@ def sandbox_config() -> dict:
 def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool = False) -> None:
     """Клонирует репозиторий на состояние до правки и ставит тесты из fix-коммита."""
     if sandbox.exists():
-        shutil.rmtree(sandbox, ignore_errors=True)
-    sandbox.mkdir(parents=True)
-    run_cmd(["git", "clone", "--no-hardlinks", "--quiet", str(REPO), str(sandbox)])
+        for _ in range(5):
+            shutil.rmtree(sandbox, ignore_errors=True)
+            if not sandbox.exists():
+                break
+            time.sleep(2)
+        if sandbox.exists():
+            # каталог держит живой процесс OpenCode: берём другое имя, чтобы не мешать
+            sandbox = sandbox.with_name(f"{sandbox.name}-{int(time.time())}")
+    sandbox.parent.mkdir(parents=True, exist_ok=True)
+    clone = run_cmd(["git", "clone", "--no-hardlinks", "--quiet", str(REPO), str(sandbox)])
+    if clone.returncode != 0:
+        raise RuntimeError(f"git clone не удался: {clone.stderr.strip()}")
     git(sandbox, "checkout", "--quiet", "--detach", task.base)
     git(sandbox, "remote", "remove", "origin")
     git(sandbox, "config", "user.email", "eval@localhost")
@@ -187,6 +196,7 @@ def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool =
         shutil.copyfile(agents_md, target)
     else:
         shutil.copyfile(REPO / "AGENTS.md", target)
+    return sandbox
 
 
 def source_files_of(task: Task) -> list[str]:
@@ -455,7 +465,7 @@ def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, m
     kept = out_dir / f"kept-{task.id}-{variant}"
 
     log(f"песочница {task.id} ({variant}) на {task.base[:8]}")
-    prepare(task, sandbox, agents_md)
+    sandbox = prepare(task, sandbox, agents_md)
 
     pre_fail, _ = pytest_state(sandbox)
     targets = compute_targets(task)["fail_to_pass"]
