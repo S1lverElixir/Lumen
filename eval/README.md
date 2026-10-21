@@ -37,6 +37,8 @@ python eval/harness_eval.py report --out <каталог>
 
 Артефакты пишутся в `%LOCALAPPDATA%\Lumen\harness-eval` (важно: не в `%TEMP%\opencode`).
 
+Итоги прогона 21.10.2026 — в [RESULTS.md](RESULTS.md).
+
 ## Ограничения
 
 - Выборка маленькая (7 задач, по одному прогону на вариант) — это сигнал
