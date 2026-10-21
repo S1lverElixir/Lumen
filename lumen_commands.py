@@ -187,6 +187,10 @@ async def cmd_draw(message: Message) -> None:
 
 async def _fish_audio_tts_bytes(text: str) -> bytes | None:
     import bot
+    if not bot.OPENROUTER_API_KEY:
+        # Без ключа всё равно вернётся None: сессию не открываем (в тестах
+        # она оставалась жить до выхода интерпретатора и печатала в stderr).
+        return None
     session = await bot._get_http_session()
     return await _lumen_fish_audio_tts_bytes(
         session, text,

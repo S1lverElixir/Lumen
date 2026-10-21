@@ -466,6 +466,7 @@ def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, m
 
     log(f"песочница {task.id} ({variant}) на {task.base[:8]}")
     sandbox = prepare(task, sandbox, agents_md)
+    repo_status_before = [line for line in git(REPO, "status", "--porcelain").splitlines() if line]
 
     pre_fail, _ = pytest_state(sandbox)
     targets = compute_targets(task)["fail_to_pass"]
@@ -522,7 +523,7 @@ def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, m
     result_file = out_dir / f"{task.id}.{variant}.json"
     result_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     log(f"итог: {'решено' if result.solved else 'не решено'} ({duration}с) -> {result_file}")
-    check_repo_untouched()
+    check_repo_untouched(repo_status_before)
     return payload
 
 
@@ -558,16 +559,15 @@ def cmd_batch(args: argparse.Namespace) -> int:
     return 0
 
 
-def check_repo_untouched() -> None:
+def check_repo_untouched(before: list[str]) -> None:
     """Сторож: настоящий репозиторий не должен меняться во время прогона."""
     try:
-        status = git(REPO, "status", "--porcelain")
+        status = [line for line in git(REPO, "status", "--porcelain").splitlines() if line]
     except RuntimeError as exc:
         log(f"ВНИМАНИЕ: не смог проверить состояние репозитория: {exc}")
         return
-    unexpected = [
-        line for line in status.splitlines() if line and not line[3:].startswith("eval/")
-    ]
+    before_keys = {line[3:] for line in before}
+    unexpected = [line for line in status if line[3:] not in before_keys]
     if unexpected:
         log(f"ВНИМАНИЕ: репозиторий изменён во время прогона: {unexpected[:5]}")
 
@@ -741,7 +741,7 @@ def main() -> int:
     run.set_defaults(func=cmd_run)
 
     batch = sub.add_parser("batch", help="прогнать несколько задач одним вариантом")
-    batch.add_argument("--variant", default="base", choices=["base", "candidate", "weak"])
+    batch.add_argument("--variant", default="base", choices=["base", "candidate", "weak", "fixed"])
     batch.add_argument("--tasks", default=None, help="список id через запятую")
     batch.add_argument("--agents-md", default=None)
     batch.add_argument("--model", default=None)

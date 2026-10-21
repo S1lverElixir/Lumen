@@ -20,6 +20,17 @@ from tests.bot_test_helpers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stub_http_session(monkeypatch):
+    # Команды берут общую aiohttp-сессию бота. В юните она не нужна, а без
+    # закрытия живёт до выхода интерпретатора и печатает в stderr
+    # "Unclosed client session" — из-за этого прогон выглядит упавшим.
+    async def fake_get_http_session():
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+
+
 def test_cmd_logs_flushes_the_listeners_real_handlers_not_root():
     # РЕГРЕССИЯ (аудит логирования): cmd_logs раньше флашил
     # logging.getLogger().handlers — после перехода на QueueHandler/QueueListener
