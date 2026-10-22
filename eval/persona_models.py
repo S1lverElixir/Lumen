@@ -43,6 +43,11 @@ OPENROUTER_REFERER = "https://t.me/SilverElixirBot"
 # Пауза между вызовами: free-тайер Groq — 30 RPM, у Gemini — 5 RPM.
 CALL_GAP_SEC = float(os.environ.get("EVAL_CALL_GAP_SEC", "2.0"))
 JUDGE_MAX_TOKENS = 700
+# Судья оценивает чужую персону — свой системный промпт ему не нужен.
+JUDGE_SYSTEM_PROMPT = (
+    "You are a strict evaluator of chatbot answers. You score answers against a "
+    "given rubric and reply with JSON only. You never roleplay as the assistant."
+)
 
 
 def log(msg: str) -> None:
@@ -152,14 +157,18 @@ def gemma_identity_contents(model_id: str, contents: list) -> list:
     return call_contents
 
 
-def gemini_config(model_id: str, provider: str, last_user_text: str):
-    """Конфиг вызова Gemini как в боте: system_instruction (кроме Gemma), без инструментов поиска."""
+def gemini_config(model_id: str, provider: str, last_user_text: str, *, thinking: bool = True):
+    """Конфиг вызова Gemini как в боте: system_instruction (кроме Gemma), без инструментов поиска.
+
+    thinking=False — для судьи: там размыш полезен, а боевое «не думать на лёгких
+    запросах» (thinking_budget=0) мешает оценивать.
+    """
     from google.genai import types
 
     if provider == "gemma":
         return None
     kwargs: dict[str, Any] = {"system_instruction": get_system_prompt(model_id)}
-    if not _looks_like_heavy_query(last_user_text):
+    if thinking and not _looks_like_heavy_query(last_user_text):
         if model_id.startswith("gemini-3"):
             kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="low")
         elif model_id.startswith("gemini-2.5"):
@@ -169,7 +178,7 @@ def gemini_config(model_id: str, provider: str, last_user_text: str):
 
 # ── вызовы провайдеров ──
 
-def call_gemini(target: Target, history: list[dict], user_text: str) -> str:
+def call_gemini(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> str:
     from google import genai
     from google.genai import types
 
@@ -186,7 +195,9 @@ def call_gemini(target: Target, history: list[dict], user_text: str) -> str:
         contents = gemma_identity_contents(target.model_id, contents)
         config = None
     else:
-        config = gemini_config(target.model_id, target.provider, user_text)
+        config = gemini_config(target.model_id, target.provider, user_text, thinking=system_text is None)
+        if system_text is not None:
+            config = types.GenerateContentConfig(system_instruction=system_text)
     resp = client.models.generate_content(model=target.model_id, contents=contents, config=config)
     return (resp.text or "").strip()
 
@@ -207,7 +218,7 @@ def _openai_chat(url: str, headers: dict, payload: dict) -> str:
     return str(content or "").strip()
 
 
-def call_chat_completions(target: Target, history: list[dict], user_text: str) -> str:
+def call_chat_completions(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> str:
     if target.provider == "groq":
         key = os.environ.get("GROQ_API_KEY", "")
         if not key:
@@ -224,17 +235,17 @@ def call_chat_completions(target: Target, history: list[dict], user_text: str) -
             "HTTP-Referer": OPENROUTER_REFERER,
             "X-OpenRouter-Title": "Lumen persona eval",
         }
-    messages = [{"role": "system", "content": get_system_prompt(target.model_id)}]
+    messages = [{"role": "system", "content": system_text or get_system_prompt(target.model_id)}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     payload = {"model": target.model_id, "messages": messages, "stream": False}
     return _openai_chat(url, headers, payload)
 
 
-def call_model(target: Target, history: list[dict], user_text: str) -> str:
+def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> str:
     if target.provider in ("gemini", "gemma"):
-        return call_gemini(target, history, user_text)
-    return call_chat_completions(target, history, user_text)
+        return call_gemini(target, history, user_text, system_text=system_text)
+    return call_chat_completions(target, history, user_text, system_text=system_text)
 
 
 # ── замер ──
@@ -310,7 +321,9 @@ def parse_score(raw: str) -> tuple[int, str]:
 def run_judge(judge: Target, question: dict, answers: dict[str, Any], checks: list[int], data: dict) -> dict:
     prompt = judge_prompt(data, question, answers, checks)
     time.sleep(CALL_GAP_SEC)
-    raw = call_model(judge, [], prompt)
+    # Судью зовём с нейтральной системкой: с промптом самой Lumen модель
+    # подыгрывает персону вместо оценки.
+    raw = call_model(judge, [], prompt, system_text=JUDGE_SYSTEM_PROMPT)
     score, reason = parse_score(raw)
     return {"score": score, "reason": reason}
 
