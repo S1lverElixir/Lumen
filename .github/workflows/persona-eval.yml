@@ -49,11 +49,18 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           set -euo pipefail
-          ARGS="--models '${{ inputs.models }}' --judge '${{ inputs.judge }}' --out '$GITHUB_WORKSPACE/eval-out'"
           if [ -n "${{ inputs.only }}" ]; then
-            ARGS="$ARGS --only '${{ inputs.only }}'"
+            python eval/persona_models.py run \
+              --models "${{ inputs.models }}" \
+              --judge "${{ inputs.judge }}" \
+              --only "${{ inputs.only }}" \
+              --out "$GITHUB_WORKSPACE/eval-out"
+          else
+            python eval/persona_models.py run \
+              --models "${{ inputs.models }}" \
+              --judge "${{ inputs.judge }}" \
+              --out "$GITHUB_WORKSPACE/eval-out"
           fi
-          eval python eval/persona_models.py run $ARGS
 
       - name: Report to job summary
         if: always()
