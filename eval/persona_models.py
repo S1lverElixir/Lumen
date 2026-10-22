@@ -43,6 +43,25 @@ OPENROUTER_REFERER = "https://t.me/SilverElixirBot"
 # Пауза между вызовами: free-тайер Groq — 30 RPM, у Gemini — 5 RPM.
 CALL_GAP_SEC = float(os.environ.get("EVAL_CALL_GAP_SEC", "2.0"))
 JUDGE_MAX_TOKENS = 700
+
+# Квоты free-тайера AI Studio — скриншот дашборда владельца от 22.10.2026.
+# Нужны не для красоты: у Gemma 16K TPM, а промпт Lumen (~7k токенов с
+# чеклистом идентичности) съедает почти весь минутный запас — без паузы
+# замер ловит 429 и молча теряет модель.
+FREE_TIER_LIMITS: dict[str, dict[str, int]] = {
+    "gemma:gemma-4-31b-it": {"rpm": 30, "tpm": 16_000, "rpd": 14_400},
+    "gemma:gemma-4-26b-a4b-it": {"rpm": 30, "tpm": 16_000, "rpd": 14_400},
+    "gemini:gemini-2.5-flash": {"rpm": 5, "tpm": 250_000, "rpd": 20},
+    "gemini:gemini-2.5-flash-lite": {"rpm": 10, "tpm": 250_000, "rpd": 20},
+    "gemini:gemini-3.8-flash": {"rpm": 5, "tpm": 250_000, "rpd": 20},
+    "gemini:gemini-3.7-flash": {"rpm": 5, "tpm": 250_000, "rpd": 20},
+    "gemini:gemini-3.6-flash": {"rpm": 5, "tpm": 250_000, "rpd": 20},
+    "gemini:gemini-3.5-flash-lite": {"rpm": 15, "tpm": 250_000, "rpd": 500},
+    "gemini:gemini-3.1-flash-lite": {"rpm": 15, "tpm": 250_000, "rpd": 500},
+}
+# Прикидка токенов на один вызов: системный промпт ~6k + чеклист ~1k + ответ.
+TOKENS_PER_CALL = 7_500
+JUDGE_TOKENS_PER_CALL = 1_200
 # Судья оценивает чужую персону — свой системный промпт ему не нужен.
 JUDGE_SYSTEM_PROMPT = (
     "You are a strict evaluator of chatbot answers. You score answers against a "
@@ -250,9 +269,21 @@ def call_model(target: Target, history: list[dict], user_text: str, *, system_te
 
 # ── замер ──
 
+def call_gap(target: Target, tokens_per_call: int = TOKENS_PER_CALL) -> float:
+    """Пауза между вызовами под free-тайер: не выше RPM, не выше TPM."""
+    limits = FREE_TIER_LIMITS.get(target.label)
+    if not limits:
+        return CALL_GAP_SEC
+    by_rpm = 60.0 / max(1, limits["rpm"])
+    by_tpm = (tokens_per_call / max(1, limits["tpm"])) * 60.0
+    return max(CALL_GAP_SEC, by_rpm, by_tpm)
+
+
 def collect_answers(target: Target, questions: list[dict]) -> dict:
     """Прогоняет вопросы по модели, ведёт историю диалога как бот."""
     answers: dict[str, Any] = {}
+    gap = call_gap(target)
+    log(f"  пауза между вызовами {gap:.0f}с (лимиты {FREE_TIER_LIMITS.get(target.label, '—')})")
     for question in questions:
         if "checks" in question:
             continue
@@ -260,7 +291,7 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
         last = ""
         started = time.time()
         for turn in question["turns"]:
-            time.sleep(CALL_GAP_SEC)
+            time.sleep(gap)
             try:
                 last = call_model(target, history, turn)
             except urllib.error.HTTPError as exc:
@@ -327,12 +358,31 @@ def parse_score(raw: str) -> tuple[int, str]:
 
 def run_judge(judge: Target, question: dict, answers: dict[str, Any], checks: list[int], data: dict) -> dict:
     prompt = judge_prompt(data, question, answers, checks)
-    time.sleep(CALL_GAP_SEC)
+    time.sleep(call_gap(judge, JUDGE_TOKENS_PER_CALL))
     # Судью зовём с нейтральной системкой: с промптом самой Lumen модель
     # подыгрывает персону вместо оценки.
     raw = call_model(judge, [], prompt, system_text=JUDGE_SYSTEM_PROMPT)
     score, reason = parse_score(raw)
     return {"score": score, "reason": reason}
+
+
+def projected_calls(target: Target, questions: list[dict]) -> int:
+    """Сколько вызовов уйдёт на модель: по одному на каждое сообщение вопроса."""
+    return sum(len(q.get("turns") or []) for q in questions if "checks" not in q)
+
+
+def check_quota_budget(targets: list[Target], questions: list[dict], judge: Target) -> None:
+    """Предупреждает, если замер съест дневную квоту (у Gemini 2.5 Flash она 20/сутки)."""
+    for target in [*targets, judge]:
+        limits = FREE_TIER_LIMITS.get(target.label)
+        if not limits:
+            continue
+        calls = projected_calls(target, questions)
+        if target == judge:
+            calls = len(questions) * len(targets)
+        rpd = limits["rpd"]
+        marker = "ВНИМАНИЕ" if calls > rpd else "ок"
+        log(f"  {marker}: {target.label} — {calls} вызовов при RPD {rpd}")
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -348,6 +398,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     log(f"каталог: {out_dir}")
     log(f"вопросов: {len(questions)} · моделей: {len(targets)} · судья: {judge_target.label}")
+    check_quota_budget(targets, questions, judge_target)
 
     if args.dry_run:
         log("dry-run: ключи нужны для реальных вызовов")
@@ -426,6 +477,38 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_probe_tools(args: argparse.Namespace) -> int:
+    """Проверяет, умеет ли Gemma инструменты поиска (в боте у неё no_search=True).
+
+    В дашборде AI Studio есть бакет «Search grounding: Default — 1.5K/сутки», и
+    если Gemma его тянет, то ей можно отдать и свежесть, освободив ещё часть
+    драгоценных 20 запросов в сутки у Gemini 2.5 Flash.
+    """
+    load_env()
+    from google import genai
+    from google.genai import types
+
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        log("нет GEMINI_API_KEY")
+        return 1
+    client = genai.Client(api_key=key)
+    model = args.model
+    contents = [types.Content(role="user", parts=[types.Part.from_text(text="Сколько сегодня стоит доллар? Ответь коротко.")])]
+    for label, tools in (
+        ("без инструментов", None),
+        ("с google_search", [types.Tool(google_search=types.GoogleSearch())]),
+    ):
+        try:
+            config = types.GenerateContentConfig(system_instruction=get_system_prompt(model), tools=tools) if tools else types.GenerateContentConfig(system_instruction=get_system_prompt(model))
+            resp = client.models.generate_content(model=model, contents=contents, config=config)
+            answer = (resp.text or "").strip()
+            log(f"{model} {label}: ответ {len(answer)} симв. — {answer[:160]!r}")
+        except Exception as exc:
+            log(f"{model} {label}: ОШИБКА {exc}")
+    return 0
+
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -443,6 +526,10 @@ def main() -> int:
     report = sub.add_parser("report", help="перепечатать таблицу по сохранённым баллам")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
+
+    probe = sub.add_parser("probe-tools", help="проверить, тянет ли Gemma инструмент поиска")
+    probe.add_argument("--model", default="gemma-4-31b-it")
+    probe.set_defaults(func=cmd_probe_tools)
 
     args = parser.parse_args()
     return args.func(args)
