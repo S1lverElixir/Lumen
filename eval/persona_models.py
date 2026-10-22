@@ -200,7 +200,7 @@ def gemini_config(model_id: str, provider: str, last_user_text: str, *, thinking
 
 # ── вызовы провайдеров ──
 
-def call_gemini(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float]:
+def call_gemini(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     from google import genai
     from google.genai import types
 
@@ -239,8 +239,8 @@ def _openai_chat(url: str, headers: dict, payload: dict) -> str:
     return str(content or "").strip()
 
 
-def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, float]:
-    """Стриминг chat/completions: возвращает (текст, время до первого токена)."""
+def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, float, int]:
+    """Стриминг chat/completions: (текст, время до первого токена, токенов по usage)."""
     body = {**payload, "stream": True}
     req = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"),
@@ -249,6 +249,7 @@ def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, fl
     started = time.time()
     ttft = 0.0
     chunks: list[str] = []
+    tokens = 0
     with urllib.request.urlopen(req, timeout=180) as resp:
         for raw in resp:
             line = raw.decode("utf-8", errors="replace").strip()
@@ -261,6 +262,9 @@ def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, fl
                 event = json.loads(data)
             except json.JSONDecodeError:
                 continue
+            usage = event.get("usage") or {}
+            if isinstance(usage.get("total_tokens"), int):
+                tokens = max(tokens, usage["total_tokens"])
             for choice in event.get("choices") or []:
                 delta = (choice.get("delta") or {}).get("content")
                 if isinstance(delta, list):
@@ -269,24 +273,30 @@ def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, fl
                     if not ttft:
                         ttft = time.time() - started
                     chunks.append(delta)
-    return "".join(chunks).strip(), ttft
+    return "".join(chunks).strip(), ttft, tokens
 
 
-def _gemini_stream(client: Any, model_id: str, contents: list, config: Any) -> tuple[str, float]:
-    """Стриминг Gemini: возвращает (текст, время до первого токена)."""
+def _gemini_stream(client: Any, model_id: str, contents: list, config: Any) -> tuple[str, float, int]:
+    """Стриминг Gemini: (текст, время до первого токена, токенов по счётчику API)."""
     started = time.time()
     ttft = 0.0
     chunks: list[str] = []
+    tokens = 0
     for chunk in client.models.generate_content_stream(model=model_id, contents=contents, config=config):
         text = getattr(chunk, "text", "") or ""
         if text:
             if not ttft:
                 ttft = time.time() - started
             chunks.append(text)
-    return "".join(chunks).strip(), ttft
+        usage = getattr(chunk, "usage_metadata", None)
+        if usage is not None:
+            total = getattr(usage, "total_token_count", None)
+            if isinstance(total, int) and total > tokens:
+                tokens = total
+    return "".join(chunks).strip(), ttft, tokens
 
 
-def call_chat_completions(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float]:
+def call_chat_completions(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     if target.provider == "groq":
         key = os.environ.get("GROQ_API_KEY", "")
         if not key:
@@ -310,23 +320,23 @@ def call_chat_completions(target: Target, history: list[dict], user_text: str, *
     return _openai_chat_stream(url, headers, payload)
 
 
-def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float]:
+def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     if target.provider in ("gemini", "gemma"):
         return call_gemini(target, history, user_text, system_text=system_text)
     return call_chat_completions(target, history, user_text, system_text=system_text)
 
 
 def call_with_retry(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None,
-                    attempts: int = 4) -> tuple[str, float]:
+                    attempts: int = 5) -> tuple[str, float, int]:
     """Повторяет временные сбои (429/503/high demand): у free-тайера они обычное дело."""
-    delays = (5, 15, 30)
+    delays = (8, 20, 40, 60)
     last_error = ""
     for attempt in range(attempts):
         try:
-            text, ttft = call_model(target, history, user_text, system_text=system_text)
+            text, ttft, tokens = call_model(target, history, user_text, system_text=system_text)
             if not text:
                 raise RuntimeError("пустой ответ")
-            return text, ttft
+            return text, ttft, tokens
         except Exception as exc:
             last_error = str(exc)[:200]
             if attempt == attempts - 1:
@@ -339,20 +349,31 @@ def call_with_retry(target: Target, history: list[dict], user_text: str, *, syst
 # ── замер ──
 
 def call_gap(target: Target, tokens_per_call: int = TOKENS_PER_CALL) -> float:
-    """Пауза между вызовами под free-тайер: не выше RPM, не выше TPM."""
+    """Пауза между вызовами под free-тайер: не выше RPM, не выше TPM.
+
+    tokens_per_call — фактическое значение по счётчику API: у Gemma промпт
+    Lumen (~6k токенов) плюс чеклист идентичности, и при 28-секундной паузе
+    два вызова в минуту всё равно перебирают 16K TPM и дают 429.
+    """
     limits = FREE_TIER_LIMITS.get(target.label)
     if not limits:
         return CALL_GAP_SEC
     by_rpm = 60.0 / max(1, limits["rpm"])
-    by_tpm = (tokens_per_call / max(1, limits["tpm"])) * 60.0
+    by_tpm = (tokens_per_call / max(1, limits["tpm"])) * 60.0 * 1.25
     return max(CALL_GAP_SEC, by_rpm, by_tpm)
 
 
 def collect_answers(target: Target, questions: list[dict]) -> dict:
-    """Прогоняет вопросы по модели, ведёт историю диалога как бот."""
+    """Прогоняет вопросы по модели, ведёт историю диалога как бот.
+
+    Ошибка в одном вопросе не убивает руку: ответы по остальным вопросам
+    набираются, сбой пишется в поле error — иначе одна минутная просадка
+    Google обнуляла бы весь замер.
+    """
     answers: dict[str, Any] = {}
-    gap = call_gap(target)
-    log(f"  пауза между вызовами {gap:.0f}с (лимиты {FREE_TIER_LIMITS.get(target.label, '—')})")
+    tokens_seen = TOKENS_PER_CALL
+    gap = call_gap(target, tokens_seen)
+    log(f"  стартовая пауза {gap:.0f}с (лимиты {FREE_TIER_LIMITS.get(target.label, '—')})")
     for question in questions:
         if "checks" in question:
             continue
@@ -360,23 +381,32 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
         last = ""
         ttft_last = 0.0
         started = time.time()
+        failure = ""
         for turn in question["turns"]:
             time.sleep(gap)
             try:
-                last, ttft_last = call_with_retry(target, history, turn)
+                last, ttft_last, tokens_seen = call_with_retry(target, history, turn)
             except RuntimeError as exc:
-                raise RuntimeError(f"{target.label}: сбой на вопросе {question['id']}: {exc}") from exc
+                failure = str(exc)[:200]
+                break
             history.append({"role": "user", "content": turn})
             history.append({"role": "assistant", "content": last})
         elapsed = time.time() - started
-        answers[str(question["id"])] = {
-            "turns": question["turns"],
-            "answer": last,
-            "seconds": round(elapsed, 2),
-            "ttft": round(ttft_last, 2),
-            "chars": len(last),
-        }
-        log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., первый токен {ttft_last:.1f}с, всего {elapsed:.1f}с")
+        if failure:
+            answers[str(question["id"])] = {"turns": question["turns"], "error": failure}
+            log(f"  {target.label} вопрос {question['id']}: СБОЙ {failure[:120]}")
+        else:
+            answers[str(question["id"])] = {
+                "turns": question["turns"],
+                "answer": last,
+                "seconds": round(elapsed, 2),
+                "ttft": round(ttft_last, 2),
+                "chars": len(last),
+                "tokens": tokens_seen,
+            }
+            log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., {tokens_seen} токенов, первый токен {ttft_last:.1f}с, всего {elapsed:.1f}с")
+        # Пауза под фактический расход токенов: TPM у Gemma жёсткий.
+        gap = call_gap(target, tokens_seen)
     return answers
 
 
@@ -425,12 +455,18 @@ def parse_score(raw: str) -> tuple[int, str]:
 
 
 def run_judge(judge: Target, question: dict, answers: dict[str, Any], checks: list[int], data: dict) -> dict:
+    # Нет ответа — оценивать нечего: это не ноль баллов, а пробел в замере.
+    needed = [str(q) for q in checks] if checks else [str(question["id"])]
+    for qid in needed:
+        item = answers.get(qid) or {}
+        if not item.get("answer"):
+            return {"error": "нет ответа модели", "score": None}
     prompt = judge_prompt(data, question, answers, checks)
     time.sleep(call_gap(judge, JUDGE_TOKENS_PER_CALL))
     # Судью зовём с нейтральной системкой: с промптом самой Lumen модель
     # подыгрывает персону вместо оценки.
     try:
-        raw, _ = call_with_retry(judge, [], prompt, system_text=JUDGE_SYSTEM_PROMPT)
+        raw, _, _ = call_with_retry(judge, [], prompt, system_text=JUDGE_SYSTEM_PROMPT)
     except RuntimeError as exc:
         # Отказ судьи — это не ноль баллов: оценки нет, и она не должна портить итог.
         return {"error": str(exc)[:200], "score": None}
