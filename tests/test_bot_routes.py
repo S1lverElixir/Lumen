@@ -1911,7 +1911,10 @@ def test_handled_message_grows_provider_quota_user_daily_and_stats(rate_guard_se
         after = bot._stats_entry()
         assert after["messages_received"] - before.get("messages_received", 0) == 1
         assert after["answers_sent"] - before.get("answers_sent", 0) == 1
-        assert after["fallbacks"] - before.get("fallbacks", 0) == 1
+        # 22.10.2026: голова маршрута — Gemma (gemini-провайдер в заглушке падает),
+        # затем groq (заглушка "overloaded"); до успешного OR — два провайдерских
+        # падения, значит ровно 2 записи "fallbacks".
+        assert after["fallbacks"] - before.get("fallbacks", 0) == 2
         assert after.get("all_failed", 0) == before.get("all_failed", 0)
     finally:
         bot.chat_state.pop(123, None)

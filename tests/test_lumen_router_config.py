@@ -171,11 +171,14 @@ def test_build_route_freshness_query_prioritizes_search_capable_gemini_models():
     assert route[-1][0] == "groq"
 
 
-def test_build_route_plain_text_prefers_groq_to_save_quotas():
-    # Обычный текст — сначала Groq (1000/день против 50 у OpenRouter, калибровка 21.09.2026),
-    # дальше OpenRouter, Gemini — резервом.
+def test_build_route_plain_text_prefers_gemma_head():
+    # 22.10.2026 (офлайн-замер eval/, журнал docs/PROMPT_EVAL.md): Gemma 47/50
+    # против 42 у Гroq-эры; квота Gemma 14.4K/сутки на модель. Gemma головой,
+    # дальше Groq (независимый провайдер), OpenRouter, Gemini резервом.
     route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
-    assert route[0] == ("groq", "qwen/qwen3.8-27b")
+    assert route[0] == ("gemini", "gemma-4-26b-a4b-it")
+    assert route[1] == ("gemini", "gemma-4-31b-it")
+    assert route[2] == ("groq", "qwen/qwen3.8-27b")
     assert any(p == "openrouter" for p, _ in route)
     assert any(p == "gemini" for p, _ in route)  # Gemini всё ещё есть как резерв
 
@@ -442,11 +445,14 @@ def test_nemotron_3_5_lightning_promoted_to_light_order_head():
     # 08.10.2026: понижена в хвост — таймауты в проде 07.10.2026, каждая её
     # попытка стоила до 22 секунд до живой sante. Головой стала sante
     # (фактически отвечает в проде). Резервом перед openrouter/free, не в реестре.
+    # 22.10.2026: sante пропала из каталога — головой стал lfm-2.5-2.6b (вторая
+    # живая модель исходного порядка), lightning осталась резервом без карантина.
     order = lumen_router_config._OR_LIGHT_ORDER
-    assert order[0] == "inclusionai/ling-3.0-flash-sante:free"
-    assert order[-2] == "nvidia/nemotron-3.5-lightning:free"
+    assert order[0] == "liquid/lfm-2.5-2.6b:free"
+    assert order[1] == "nvidia/nemotron-3.5-lightning:free"
     assert order[-1] == "openrouter/free"
     assert "nvidia/nemotron-3.5-lightning:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "inclusionai/ling-3.0-flash-sante:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
 
 
 def test_nemotron_3_nano_30b_a3b_excluded_after_removal_date_passed():
@@ -487,19 +493,26 @@ def test_new_or_models_not_accidentally_health_excluded():
 
 def test_new_heavy_models_present_and_healthy():
     new_models = (
-        "z-ai/glm-5.2:free", "poolside/laguna-s-2.1:free",
-        "cohere/north-mini-code:free", "poolside/laguna-xs-2.1:free",
+        "poolside/laguna-s-2.1:free",
+        "cohere/north-mini-code:free",
+        "poolside/laguna-xs-2.1:free",
     )
     for model_id in new_models:
         assert model_id in lumen_router_config._OR_HEAVY_ORDER
         assert model_id not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
         assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+    # glm-5.2 пропала из живого каталога 22.10.2026 — снята (см. _OR_MODEL_HEALTH),
+    # но ID остаётся в детекте утечек.
+    assert "z-ai/glm-5.2:free" in lumen_router_config._OR_MODEL_HEALTH
+    assert "z-ai/glm-5.2:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "z-ai/glm-5.2:free" not in lumen_router_config._OR_HEAVY_ORDER
+    assert "z-ai/glm-5.2:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
 
 
 def test_new_heavy_models_ordered_before_expiring_dots3_note_preview():
     order = lumen_router_config._OR_HEAVY_ORDER
     dots_idx = order.index("dots-studio/dots-3-note-preview:free")
-    for model_id in ("z-ai/glm-5.2:free", "poolside/laguna-s-2.1:free", "cohere/north-mini-code:free", "poolside/laguna-xs-2.1:free"):
+    for model_id in ("poolside/laguna-s-2.1:free", "cohere/north-mini-code:free", "poolside/laguna-xs-2.1:free"):
         assert order.index(model_id) < dots_idx
 
 
@@ -623,16 +636,18 @@ def test_sept_2026_dead_models_excluded_but_kept_for_leak_detection():
 
 def test_sept_2026_new_light_models_after_proven_head_before_reserve():
     order = lumen_router_config._OR_LIGHT_ORDER
-    # 08.10.2026: голова — sante (фактически отвечает в проде), nemotron-3.5-lightning понижен в хвост за таймауты 07.10.2026.
-    assert order[0] == "inclusionai/ling-3.0-flash-sante:free"
+    # 22.10.2026: sante снята по каталогу — головой стал lfm-2.5-2.6b.
+    assert order[0] == "liquid/lfm-2.5-2.6b:free"
     assert order[-1] == "openrouter/free"
     for model_id in (
-        "inclusionai/ling-3.0-flash-sante:free",
         "liquid/lfm-2.5-2.6b:free",
     ):
         assert model_id in order
         assert model_id not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
         assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+    # sante переехала в реестр снятых, но из детекта утечек не убрана.
+    assert "inclusionai/ling-3.0-flash-sante:free" not in order
+    assert "inclusionai/ling-3.0-flash-sante:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
 
 
 def test_inkling_small_excluded_after_agentic_harness_refusal():
@@ -643,7 +658,8 @@ def test_inkling_small_excluded_after_agentic_harness_refusal():
     assert "thinkingmachines/inkling-small:free" not in lumen_router_config._OR_LIGHT_ORDER
     # nex-mini снят 05.10.2026 (платная отсечка) — второй стала sante.
     # 08.10.2026: sante уже голова (nemotron понижен за таймауты 07.10.2026).
-    assert lumen_router_config._OR_LIGHT_ORDER[0] == "inclusionai/ling-3.0-flash-sante:free"
+    # 22.10.2026: sante снята по каталогу — головой стал lfm-2.5-2.6b.
+    assert lumen_router_config._OR_LIGHT_ORDER[0] == "liquid/lfm-2.5-2.6b:free"
 
 
 def test_nex_mini_excluded_after_paid_tier_cutover():
@@ -672,9 +688,41 @@ def test_oct_2026_paid_cutover_excludes_ling_vl_fin_and_qwen():
         assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
     route = lumen_router_config._or_route([
         "inclusionai/ling-3.0-flash-fin:free",
-        "inclusionai/ling-3.0-flash-sante:free",
+        "liquid/lfm-2.5-2.6b:free",
     ])
-    assert [m for _, m in route] == ["inclusionai/ling-3.0-flash-sante:free"]
+    assert [m for _, m in route] == ["liquid/lfm-2.5-2.6b:free"]
+
+
+def test_oct_22_2026_catalog_removal_excludes_sante_glm_and_nex_pro():
+    # Каталог OpenRouter 22.10.2026 (468 моделей, 18 бесплатных): sante, glm-5.2
+    # и nex-n2.5-pro пропали из бесплатных; прямой вызов sante из Actions дал
+    # HTTP 404 (eval/persona_models.py). Мёртвые вне цепочек, но ID остаются
+    # в детекте утечек — их дословно нельзя в ответ.
+    for model_id in (
+        "inclusionai/ling-3.0-flash-sante:free",
+        "z-ai/glm-5.2:free",
+        "nex-agi/nex-n2.5-pro:free",
+    ):
+        assert model_id in lumen_router_config._OR_MODEL_HEALTH
+        assert model_id in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+        assert model_id not in lumen_router_config._OR_LIGHT_ORDER
+        assert model_id not in lumen_router_config._OR_HEAVY_ORDER
+        assert model_id not in lumen_router_config._OR_VISION_ORDER
+        assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+
+
+def test_gemma_text_chain_heads_plain_text_route():
+    # 22.10.2026 (офлайн-замер eval/): Gemma 47/50 у обеих — выше 42 из журнала
+    # владельца при Groq-эре. 26B-A4B головой (первый токен 13.5с против 26.4с
+    # у 31B), Groq второй — независимый от Google провайдер.
+    chain = lumen_router_config._GEMMA_TEXT_CHAIN
+    assert chain == ["gemma-4-26b-a4b-it", "gemma-4-31b-it"]
+    for model_id in chain:
+        # Gemma выделяется из общего ряда только фейковым обменом идентичности.
+        assert lumen_router_config.GEMINI_MODELS[model_id].get("no_system") is True
+    # Свежесть и ссылки по-прежнему уходят в цепочки с настоящим Gemini.
+    assert "gemma-4-26b-a4b-it" not in lumen_router_config.GEMINI_SEARCH_CHAIN
+    assert all(lumen_router_config.GEMINI_MODELS[m].get("no_system") for m in chain)
 
 
 def test_nemotron_super_demoted_below_ultra_after_second_mush_incident():
@@ -689,7 +737,9 @@ def test_nemotron_super_demoted_below_ultra_after_second_mush_incident():
 def test_sept_2026_new_heavy_and_vision_models_placed():
     heavy = lumen_router_config._OR_HEAVY_ORDER
     assert "thinkingmachines/inkling:free" in heavy
-    assert "nex-agi/nex-n2.5-pro:free" in heavy
+    # nex-n2.5-pro снят 22.10.2026 (пропал из живого каталога) — вне цепочки, но в детекте утечек.
+    assert "nex-agi/nex-n2.5-pro:free" not in heavy
+    assert "nex-agi/nex-n2.5-pro:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
     assert heavy.index("thinkingmachines/inkling:free") < heavy.index("dots-studio/dots-3-note-preview:free")
     vision = lumen_router_config._OR_VISION_ORDER
     assert vision[0] == "google/gemma-4-31b-it:free"

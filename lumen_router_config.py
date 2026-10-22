@@ -233,6 +233,17 @@ _OR_MODEL_HEALTH: dict[str, _ModelHealthNote] = {
     "qwen/qwen3.8-27b:free": _ModelHealthNote(
         reason="Liveness 07.10.2026: 'unavailable for free... use this slug instead: qwen/qwen3.8-27b' — тот же паттерн снятия с free."
     ),
+    # ── Каталог OpenRouter 22.10.2026 (468 моделей, 18 бесплатных; проба eval/persona_models.py из Actions) ──
+    "inclusionai/ling-3.0-flash-sante:free": _ModelHealthNote(
+        reason="Каталог 22.10.2026: слага нет среди бесплатных; прямой вызов из Actions дал HTTP 404. "
+               "Была головой лёгкой цепочки (08.10.2026) — понижена автоматически этим переносом."
+    ),
+    "z-ai/glm-5.2:free": _ModelHealthNote(
+        reason="Каталог 22.10.2026: слага нет среди бесплатных — тот же уход с free, что у sante выше и ling-flash (22.08.2026)."
+    ),
+    "nex-agi/nex-n2.5-pro:free": _ModelHealthNote(
+        reason="Каталог 22.10.2026: слага нет среди бесплатных; nex-mini ушла раньше 05.10.2026 той же платной отсечкой."
+    ),
 }
 
 # Вычисляется из _OR_MODEL_HEALTH — роутер не должен выбирать эти модели.
@@ -381,14 +392,28 @@ def _groq_route(models: list[str]) -> list[tuple[str, str]]:
     return [("groq", m) for m in _skip_exhausted("groq", models)]
 
 
+# ── Gemma в голове обычного текста (22.10.2026).
+# Офлайн-замер 25 вопросов (eval/persona_models.py, Actions): обе Gemma 47/50,
+# gemini-3.5-flash-lite 45/50, OR-lightning 39/50; Groq из Actions недоступен
+# (403 Cloudflare) — сравруется живым прогоном. Первой 26B-A4B: тот же балл,
+# но первый токен 13.5с против 26.4с у 31B. Квота Gemma 14.4K/сутки на модель
+# (дашборд 22.10.2026) против 20-500 у линейки Gemini; search grounding у Gemma
+# нет, поэтому свежесть шла в GEMINI_SEARCH_CHAIN как раньше.
+_GEMMA_TEXT_CHAIN: list[str] = [
+    "gemma-4-26b-a4b-it",
+    "gemma-4-31b-it",
+]
+
+
 # ── "Лёгкие" запросы — самый частый маршрут, целиком OpenRouter.
 # Порядок по аудитам 22.08/17.09.2026; nex-mini повышен продом 17.09.2026, снят
 # 05.10.2026 (платная отсечка — см. _OR_MODEL_HEALTH): второй стала sante.
 # 08.10.2026: fin и qwen3.8-27b:free сняты той же отсечкой — убраны из цепочки.
 # 08.10.2026: голова — sante (фактически отвечает в проде), nemotron-3.5-lightning
 # понижен в хвост (таймауты в проде 07.10.2026) — резервом перед openrouter/free.
+# 22.10.2026: sante пропала из живого каталога (вызов из Actions — HTTP 404) —
+# снята; обычный текст теперь уходит через Gemma/Groq раньше этого резерва.
 _OR_LIGHT_ORDER: list[str] = [
-    "inclusionai/ling-3.0-flash-sante:free",
     "liquid/lfm-2.5-2.6b:free",
     "nvidia/nemotron-3.5-lightning:free",
     "openrouter/free",
@@ -396,15 +421,14 @@ _OR_LIGHT_ORDER: list[str] = [
 
 # ── "Тяжёлые" запросы без медиа — сначала OpenRouter, квоту Gemini бережём.
 # super-120b понижен под ultra-550b (второй инцидент порчи текста 17.09.2026; при третьем — исключать).
+# 22.10.2026: glm-5.2 и nex-n2.5-pro пропали из живого каталога — сняты (см. _OR_MODEL_HEALTH).
 _OR_HEAVY_ORDER: list[str] = [
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "z-ai/glm-5.2:free",
     "poolside/laguna-s-2.1:free",
     "cohere/north-mini-code:free",
     "poolside/laguna-xs-2.1:free",
     "thinkingmachines/inkling:free",
-    "nex-agi/nex-n2.5-pro:free",
     "dots-studio/dots-3-note-preview:free",
     "openrouter/free",
 ]
@@ -566,9 +590,16 @@ def _build_route(
         # Текст со свежестью — Gemini с поиском; дальше OpenRouter и Groq резервом без поиска.
         return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_HEAVY_ORDER if is_heavy else _OR_LIGHT_ORDER) + _groq_route(_GROQ_LIGHT_ORDER)
 
-    # Обычный текст — сначала Groq (1000/день против 50 у OpenRouter), дальше OpenRouter, Gemini резервом.
-    # Тяжёлый — тоже с Groq первой: свободная квота Groq-Tier экономит scarce-квоты
-    # OR/Gemini (аудит D3, 30.09.2026); не потянет — цепочка уйдёт дальше сама.
+    # Обычный текст с 22.10.2026: Gemma первой (замер выше: 47/50 против 42 по
+    # журналу владельца в Groq-эре; квота 14.4K/сутки). Groq второй — независимый
+    # провайдер на случай отказа Google целиком; дальше OR и Gemini резервом.
+    # Тяжёлый — без изменения: Groq первой (аудит D3, 30.09.2026), свободная
+    # квота Groq-Tier экономит scarce-квоты OR/Gemini.
     if is_heavy:
         return _groq_route(_GROQ_LIGHT_ORDER) + _or_route(_OR_HEAVY_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
-    return _groq_route(_GROQ_LIGHT_ORDER) + _or_route(_OR_LIGHT_ORDER) + _gemini_route(GEMINI_SEARCH_CHAIN)
+    return (
+        _gemini_route(_GEMMA_TEXT_CHAIN)
+        + _groq_route(_GROQ_LIGHT_ORDER)
+        + _or_route(_OR_LIGHT_ORDER)
+        + _gemini_route(GEMINI_SEARCH_CHAIN)
+    )
