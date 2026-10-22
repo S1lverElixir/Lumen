@@ -197,7 +197,7 @@ def gemini_config(model_id: str, provider: str, last_user_text: str, *, thinking
 
 # ── вызовы провайдеров ──
 
-def call_gemini(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> str:
+def call_gemini(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float]:
     from google import genai
     from google.genai import types
 
@@ -217,8 +217,7 @@ def call_gemini(target: Target, history: list[dict], user_text: str, *, system_t
         config = gemini_config(target.model_id, target.provider, user_text, thinking=system_text is None)
         if system_text is not None:
             config = types.GenerateContentConfig(system_instruction=system_text)
-    resp = client.models.generate_content(model=target.model_id, contents=contents, config=config)
-    return (resp.text or "").strip()
+    return _gemini_stream(client, target.model_id, contents, config)
 
 
 def _openai_chat(url: str, headers: dict, payload: dict) -> str:
@@ -237,7 +236,54 @@ def _openai_chat(url: str, headers: dict, payload: dict) -> str:
     return str(content or "").strip()
 
 
-def call_chat_completions(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> str:
+def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, float]:
+    """Стриминг chat/completions: возвращает (текст, время до первого токена)."""
+    body = {**payload, "stream": True}
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers}, method="POST",
+    )
+    started = time.time()
+    ttft = 0.0
+    chunks: list[str] = []
+    with urllib.request.urlopen(req, timeout=180) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            for choice in event.get("choices") or []:
+                delta = (choice.get("delta") or {}).get("content")
+                if isinstance(delta, list):
+                    delta = "".join(str(p.get("text") or "") for p in delta if isinstance(p, dict))
+                if delta:
+                    if not ttft:
+                        ttft = time.time() - started
+                    chunks.append(delta)
+    return "".join(chunks).strip(), ttft
+
+
+def _gemini_stream(client: Any, model_id: str, contents: list, config: Any) -> tuple[str, float]:
+    """Стриминг Gemini: возвращает (текст, время до первого токена)."""
+    started = time.time()
+    ttft = 0.0
+    chunks: list[str] = []
+    for chunk in client.models.generate_content_stream(model=model_id, contents=contents, config=config):
+        text = getattr(chunk, "text", "") or ""
+        if text:
+            if not ttft:
+                ttft = time.time() - started
+            chunks.append(text)
+    return "".join(chunks).strip(), ttft
+
+
+def call_chat_completions(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float]:
     if target.provider == "groq":
         key = os.environ.get("GROQ_API_KEY", "")
         if not key:
@@ -258,13 +304,33 @@ def call_chat_completions(target: Target, history: list[dict], user_text: str, *
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     payload = {"model": target.model_id, "messages": messages, "stream": False}
-    return _openai_chat(url, headers, payload)
+    return _openai_chat_stream(url, headers, payload)
 
 
-def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> str:
+def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float]:
     if target.provider in ("gemini", "gemma"):
         return call_gemini(target, history, user_text, system_text=system_text)
     return call_chat_completions(target, history, user_text, system_text=system_text)
+
+
+def call_with_retry(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None,
+                    attempts: int = 4) -> tuple[str, float]:
+    """Повторяет временные сбои (429/503/high demand): у free-тайера они обычное дело."""
+    delays = (5, 15, 30)
+    last_error = ""
+    for attempt in range(attempts):
+        try:
+            text, ttft = call_model(target, history, user_text, system_text=system_text)
+            if not text:
+                raise RuntimeError("пустой ответ")
+            return text, ttft
+        except Exception as exc:
+            last_error = str(exc)[:200]
+            if attempt == attempts - 1:
+                break
+            log(f"    {target.label}: сбой ({last_error}) — повтор через {delays[attempt]}с")
+            time.sleep(delays[attempt])
+    raise RuntimeError(f"{target.label}: {last_error}")
 
 
 # ── замер ──
@@ -289,15 +355,13 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
             continue
         history: list[dict] = []
         last = ""
+        ttft_last = 0.0
         started = time.time()
         for turn in question["turns"]:
             time.sleep(gap)
             try:
-                last = call_model(target, history, turn)
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")[:300]
-                raise RuntimeError(f"{target.label}: HTTP {exc.code} на вопросе {question['id']}: {body}") from exc
-            except Exception as exc:
+                last, ttft_last = call_with_retry(target, history, turn)
+            except RuntimeError as exc:
                 raise RuntimeError(f"{target.label}: сбой на вопросе {question['id']}: {exc}") from exc
             history.append({"role": "user", "content": turn})
             history.append({"role": "assistant", "content": last})
@@ -306,9 +370,10 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
             "turns": question["turns"],
             "answer": last,
             "seconds": round(elapsed, 2),
+            "ttft": round(ttft_last, 2),
             "chars": len(last),
         }
-        log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., {elapsed:.1f}с")
+        log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., первый токен {ttft_last:.1f}с, всего {elapsed:.1f}с")
     return answers
 
 
@@ -361,7 +426,11 @@ def run_judge(judge: Target, question: dict, answers: dict[str, Any], checks: li
     time.sleep(call_gap(judge, JUDGE_TOKENS_PER_CALL))
     # Судью зовём с нейтральной системкой: с промптом самой Lumen модель
     # подыгрывает персону вместо оценки.
-    raw = call_model(judge, [], prompt, system_text=JUDGE_SYSTEM_PROMPT)
+    try:
+        raw, _ = call_with_retry(judge, [], prompt, system_text=JUDGE_SYSTEM_PROMPT)
+    except RuntimeError as exc:
+        # Отказ судьи — это не ноль баллов: оценки нет, и она не должна портить итог.
+        return {"error": str(exc)[:200], "score": None}
     score, reason = parse_score(raw)
     return {"score": score, "reason": reason}
 
@@ -427,16 +496,25 @@ def cmd_run(args: argparse.Namespace) -> int:
             continue
         items: dict[str, Any] = {}
         total = 0
+        judged = 0
+        errors = 0
         for question in questions:
             checks = question.get("checks") or []
-            try:
-                verdict = run_judge(judge_target, question, answers, checks, data)
-            except Exception as exc:
-                verdict = {"score": 0, "reason": f"сбой судьи: {exc}"}
+            verdict = run_judge(judge_target, question, answers, checks, data)
             items[str(question["id"])] = verdict
+            if verdict.get("score") is None:
+                errors += 1
+                continue
             total += verdict["score"]
-        scores[target.label] = {"total": total, "max": 2 * len(questions), "items": items}
-        log(f"  {target.label}: {total}/{2 * len(questions)}")
+            judged += 1
+        scores[target.label] = {
+            "total": total,
+            "judged": judged,
+            "errors": errors,
+            "max": 2 * len(questions),
+            "items": items,
+        }
+        log(f"  {target.label}: {total}/{2 * len(questions)} (оценено {judged}, ошибок судьи {errors})")
     (out_dir / "scores.json").write_text(
         json.dumps(scores, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -452,17 +530,28 @@ def print_report(scores: dict, questions: list[dict], out_dir: Path, answers: di
         cells = []
         for label in labels:
             item = (scores[label].get("items") or {}).get(str(qid))
-            cells.append(str(item["score"]) if item else "-")
+            if not item:
+                cells.append("-")
+            elif item.get("score") is None:
+                cells.append("ошибка")
+            else:
+                cells.append(str(item["score"]))
         lines.append(f"| {qid} | " + " | ".join(cells) + " |")
     lines.append("| **итог** | " + " | ".join(f"{scores[l].get('total', 0)}/{scores[l].get('max', 0)}" for l in labels) + " |")
     text = "\n".join(lines)
+    errors = {l: scores[l].get("errors", 0) for l in labels if scores[l].get("errors")}
+    if errors:
+        text += "\n\nОшибок судьи (оценки нет, в итог не идут): " + " · ".join(f"{k}: {v}" for k, v in errors.items())
     if answers:
         speed = []
         for label in labels:
             items = (answers.get(label) or {}).values()
+            ttfts = [i.get("ttft") for i in items if isinstance(i, dict) and i.get("ttft")]
             times = [i.get("seconds") for i in items if isinstance(i, dict) and i.get("seconds")]
-            if times:
-                speed.append(f"{label}: средний ответ {sum(times) / len(times):.1f}с")
+            if ttfts and times:
+                speed.append(
+                    f"{label}: первый токен {sum(ttfts) / len(ttfts):.1f}с, ответ {sum(times) / len(times):.1f}с"
+                )
         if speed:
             text += "\n\nСкорость: " + " · ".join(speed)
     print(text)
