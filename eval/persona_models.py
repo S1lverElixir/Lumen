@@ -258,6 +258,7 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
             continue
         history: list[dict] = []
         last = ""
+        started = time.time()
         for turn in question["turns"]:
             time.sleep(CALL_GAP_SEC)
             try:
@@ -269,8 +270,14 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
                 raise RuntimeError(f"{target.label}: сбой на вопросе {question['id']}: {exc}") from exc
             history.append({"role": "user", "content": turn})
             history.append({"role": "assistant", "content": last})
-        answers[str(question["id"])] = {"turns": question["turns"], "answer": last}
-        log(f"  {target.label} вопрос {question['id']}: {len(last)} симв.")
+        elapsed = time.time() - started
+        answers[str(question["id"])] = {
+            "turns": question["turns"],
+            "answer": last,
+            "seconds": round(elapsed, 2),
+            "chars": len(last),
+        }
+        log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., {elapsed:.1f}с")
     return answers
 
 
@@ -382,11 +389,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     (out_dir / "scores.json").write_text(
         json.dumps(scores, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    print_report(scores, questions, out_dir)
+    print_report(scores, questions, out_dir, answers=all_answers)
     return 0
 
 
-def print_report(scores: dict, questions: list[dict], out_dir: Path) -> None:
+def print_report(scores: dict, questions: list[dict], out_dir: Path, answers: dict | None = None) -> None:
     ids = [q["id"] for q in questions]
     labels = list(scores)
     lines = ["| # | " + " | ".join(labels) + " |", "|---|" + "---|" * len(labels)]
@@ -398,6 +405,15 @@ def print_report(scores: dict, questions: list[dict], out_dir: Path) -> None:
         lines.append(f"| {qid} | " + " | ".join(cells) + " |")
     lines.append("| **итог** | " + " | ".join(f"{scores[l].get('total', 0)}/{scores[l].get('max', 0)}" for l in labels) + " |")
     text = "\n".join(lines)
+    if answers:
+        speed = []
+        for label in labels:
+            items = (answers.get(label) or {}).values()
+            times = [i.get("seconds") for i in items if isinstance(i, dict) and i.get("seconds")]
+            if times:
+                speed.append(f"{label}: средний ответ {sum(times) / len(times):.1f}с")
+        if speed:
+            text += "\n\nСкорость: " + " · ".join(speed)
     print(text)
     (out_dir / "report.md").write_text(text + "\n", encoding="utf-8")
 
