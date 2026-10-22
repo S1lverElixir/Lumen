@@ -58,6 +58,9 @@ FREE_TIER_LIMITS: dict[str, dict[str, int]] = {
     "gemini:gemini-3.6-flash": {"rpm": 5, "tpm": 250_000, "rpd": 20},
     "gemini:gemini-3.5-flash-lite": {"rpm": 15, "tpm": 250_000, "rpd": 500},
     "gemini:gemini-3.1-flash-lite": {"rpm": 15, "tpm": 250_000, "rpd": 500},
+    # OpenRouter free: 50 запросов в сутки на модель (комментарий в
+    # lumen_router_config.py) — замер на 25 вопросов в этот лимит укладывается.
+    "or:inclusionai/ling-3.0-flash-sante:free": {"rpm": 20, "tpm": 100_000, "rpd": 50},
 }
 # Прикидка токенов на один вызов: системный промпт ~6k + чеклист ~1k + ответ.
 TOKENS_PER_CALL = 7_500

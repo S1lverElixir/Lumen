@@ -11,7 +11,7 @@ on:
       models:
         description: "Модели через запятую: provider:model (provider: gemini|gemma|groq|or)"
         required: false
-        default: "gemma:gemma-4-31b-it,gemma:gemma-4-26b-a4b-it,groq:qwen/qwen3.8-27b,gemini:gemini-3.5-flash-lite"
+        default: "gemma:gemma-4-31b-it,gemma:gemma-4-26b-a4b-it,gemini:gemini-3.5-flash-lite,or:inclusionai/ling-3.0-flash-sante:free"
       judge:
         description: "Модель-судья (provider:model)"
         required: false
