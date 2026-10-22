@@ -8,10 +8,18 @@ name: Persona eval
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "run (замер) или probe-tools (проверка поиска у Gemma)"
+        required: false
+        default: "run"
+      model:
+        description: "модель для probe-tools (без префикса провайдера)"
+        required: false
+        default: "gemma-4-31b-it"
       models:
         description: "Модели через запятую: provider:model (provider: gemini|gemma|groq|or)"
         required: false
-        default: "gemma:gemma-4-31b-it,gemma:gemma-4-26b-a4b-it,gemini:gemini-3.5-flash-lite,or:inclusionai/ling-3.0-flash-sante:free"
+        default: "gemma:gemma-4-31b-it,gemma:gemma-4-26b-a4b-it,gemini:gemini-3.5-flash-lite,or:nvidia/nemotron-3.5-lightning:free"
       judge:
         description: "Модель-судья (provider:model)"
         required: false
@@ -49,6 +57,10 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           set -euo pipefail
+          if [ "${{ inputs.mode }}" = "probe-tools" ]; then
+            python eval/persona_models.py probe-tools --model "${{ inputs.model }}"
+            exit 0
+          fi
           if [ -n "${{ inputs.only }}" ]; then
             python eval/persona_models.py run \
               --models "${{ inputs.models }}" \

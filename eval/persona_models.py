@@ -631,7 +631,11 @@ def cmd_probe_tools(args: argparse.Namespace) -> int:
             config = types.GenerateContentConfig(system_instruction=get_system_prompt(model), tools=tools) if tools else types.GenerateContentConfig(system_instruction=get_system_prompt(model))
             resp = client.models.generate_content(model=model, contents=contents, config=config)
             answer = (resp.text or "").strip()
-            log(f"{model} {label}: ответ {len(answer)} симв. — {answer[:160]!r}")
+            gm = None
+            cands = resp.candidates or []
+            if cands:
+                gm = getattr(cands[0], "grounding_metadata", None)
+            log(f"{model} {label}: ответ {len(answer)} симв., grounding {'ЕСТЬ' if gm else 'нет'} — {answer[:160]!r}")
         except Exception as exc:
             log(f"{model} {label}: ОШИБКА {exc}")
     return 0
