@@ -244,6 +244,14 @@ _OR_MODEL_HEALTH: dict[str, _ModelHealthNote] = {
     "nex-agi/nex-n2.5-pro:free": _ModelHealthNote(
         reason="Каталог 22.10.2026: слага нет среди бесплатных; nex-mini ушла раньше 05.10.2026 той же платной отсечкой."
     ),
+    # ── Замер цепочек 22.10.2026 (Actions 39818227233; каталог числит обе, вызовы не проходят) ──
+    "nvidia/nemotron-3-super-120b-a12b:free": _ModelHealthNote(
+        reason="Замер 22.10.2026 из Actions: оба вопроса HTTP 404 Not Found, несмотря на присутствие слага в каталоге (468 моделей) — эндпойнтов нет. "
+               "Третий инцидент подряд (порча текста 17.09.2026 дважды, теперь недоступность) — исключена из heavy-цепочки."
+    ),
+    "thinkingmachines/inkling:free": _ModelHealthNote(
+        reason="Замер 22.10.2026 из Actions: все попытки HTTP 403 Forbidden; сестринская inkling-small исключена той же историей 17.09.2026 ('only available on agentic harnesses')."
+    ),
 }
 
 # Вычисляется из _OR_MODEL_HEALTH — роутер не должен выбирать эти модели.
@@ -422,13 +430,13 @@ _OR_LIGHT_ORDER: list[str] = [
 # ── "Тяжёлые" запросы без медиа — сначала OpenRouter, квоту Gemini бережём.
 # super-120b понижен под ultra-550b (второй инцидент порчи текста 17.09.2026; при третьем — исключать).
 # 22.10.2026: glm-5.2 и nex-n2.5-pro пропали из живого каталога — сняты (см. _OR_MODEL_HEALTH).
+# 22.10.2026: super-120b (404 на каждый вызов, третий инцидент) и inkling (403 на каждый
+# вызов) сняты замером цепочек — иначе тяжёлые запросы тратили бы повторы впустую.
 _OR_HEAVY_ORDER: list[str] = [
     "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "nvidia/nemotron-3-super-120b-a12b:free",
     "poolside/laguna-s-2.1:free",
     "cohere/north-mini-code:free",
     "poolside/laguna-xs-2.1:free",
-    "thinkingmachines/inkling:free",
     "dots-studio/dots-3-note-preview:free",
     "openrouter/free",
 ]

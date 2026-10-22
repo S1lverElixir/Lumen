@@ -349,10 +349,10 @@ def test_check_unconfirmed_model_quotas_no_warnings_once_all_models_confirmed(ca
 def test_dead_qwen3_next_model_excluded_from_router():
     # Аудит 02.08.2026: glm-4.5-air сам умер (8/8 HTTP 404) — живым примером стал nemotron-3-super.
     assert "qwen/qwen3-next-80b-a3b-instruct:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    route = lumen_router_config._or_route(["qwen/qwen3-next-80b-a3b-instruct:free", "nvidia/nemotron-3-super-120b-a12b:free"])
+    route = lumen_router_config._or_route(["qwen/qwen3-next-80b-a3b-instruct:free", "poolside/laguna-s-2.1:free"])
     ids = [m for _, m in route]
     assert "qwen/qwen3-next-80b-a3b-instruct:free" not in ids
-    assert "nvidia/nemotron-3-super-120b-a12b:free" in ids
+    assert "poolside/laguna-s-2.1:free" in ids
 
 
 def test_or_light_order_no_longer_starts_with_dead_or_worst_offender_models():
@@ -507,6 +507,7 @@ def test_new_heavy_models_present_and_healthy():
         "poolside/laguna-s-2.1:free",
         "cohere/north-mini-code:free",
         "poolside/laguna-xs-2.1:free",
+        "dots-studio/dots-3-note-preview:free",
     )
     for model_id in new_models:
         assert model_id in lumen_router_config._OR_HEAVY_ORDER
@@ -520,6 +521,16 @@ def test_new_heavy_models_present_and_healthy():
     assert "z-ai/glm-5.2:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
 
 
+def test_inkling_removed_after_forbidden_calls():
+    # Замер 22.10.2026 (Actions 39818227233): каждый вызов — HTTP 403 Forbidden.
+    # Сестринская inkling-small исключена той же историей 17.09.2026 ('only
+    # available on agentic harnesses'). В детекте утечек ID остаётся.
+    assert "thinkingmachines/inkling:free" in lumen_router_config._OR_MODEL_HEALTH
+    assert "thinkingmachines/inkling:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "thinkingmachines/inkling:free" not in lumen_router_config._OR_HEAVY_ORDER
+    assert "thinkingmachines/inkling:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+
+
 def test_new_heavy_models_ordered_before_expiring_dots3_note_preview():
     order = lumen_router_config._OR_HEAVY_ORDER
     dots_idx = order.index("dots-studio/dots-3-note-preview:free")
@@ -530,8 +541,10 @@ def test_new_heavy_models_ordered_before_expiring_dots3_note_preview():
 def test_or_heavy_order_still_headed_by_calibrated_flagships():
     # Уже проверенные калибровкой сильные модели остаются головой — новые
     # некалиброванные модели добавлены строго после них, не выше.
+    # 22.10.2026: super-120b снят (404 на каждый вызов, третий инцидент) — вторая
+    # позиция перешла к laguna-s (в цепочке с 22.08, в смоук-замере 22.10 — 4/4).
     assert lumen_router_config._OR_HEAVY_ORDER[0] == "nvidia/nemotron-3-ultra-550b-a55b:free"
-    assert lumen_router_config._OR_HEAVY_ORDER[1] == "nvidia/nemotron-3-super-120b-a12b:free"
+    assert lumen_router_config._OR_HEAVY_ORDER[1] == "poolside/laguna-s-2.1:free"
 
 
 # ─────────────────── анонсированные ("Going away <дата>") даты снятия моделей ───────────────────
@@ -736,22 +749,25 @@ def test_gemma_text_chain_heads_plain_text_route():
     assert all(lumen_router_config.GEMINI_MODELS[m].get("no_system") for m in chain)
 
 
-def test_nemotron_super_demoted_below_ultra_after_second_mush_incident():
-    # Вечер 17.09.2026: super выдал "кашу" прямо в проде (второй инцидент после
-    # калибровочного) — понижен под ultra без инцидентов, но не исключён.
+def test_nemotron_super_excluded_after_third_incident():
+    # 17.09.2026: super выдал "кашу" прямо в проде (второй инцидент) — понижен под
+    # ultra без инцидентов. 22.10.2026 (Actions 39818227233): третий инцидент —
+    # HTTP 404 на оба вопроса при живом слаге в каталоге; предохранитель из
+    # комментария в _OR_HEAVY_ORDER сработал, модель исключена целиком.
     order = lumen_router_config._OR_HEAVY_ORDER
     assert order[0] == "nvidia/nemotron-3-ultra-550b-a55b:free"
-    assert order[1] == "nvidia/nemotron-3-super-120b-a12b:free"
-    assert "nvidia/nemotron-3-super-120b-a12b:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "nvidia/nemotron-3-super-120b-a12b:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+    assert "nvidia/nemotron-3-super-120b-a12b:free" not in order
 
 
 def test_sept_2026_new_heavy_and_vision_models_placed():
     heavy = lumen_router_config._OR_HEAVY_ORDER
-    assert "thinkingmachines/inkling:free" in heavy
+    # inkling снята 22.10.2026 (403 на все вызовы замера) — вне цепочки, но в детекте утечек.
+    assert "thinkingmachines/inkling:free" not in heavy
+    assert "thinkingmachines/inkling:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
     # nex-n2.5-pro снят 22.10.2026 (пропал из живого каталога) — вне цепочки, но в детекте утечек.
     assert "nex-agi/nex-n2.5-pro:free" not in heavy
     assert "nex-agi/nex-n2.5-pro:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-    assert heavy.index("thinkingmachines/inkling:free") < heavy.index("dots-studio/dots-3-note-preview:free")
     vision = lumen_router_config._OR_VISION_ORDER
     assert vision[0] == "google/gemma-4-31b-it:free"
     # ling-vl снят 08.10.2026 (платная отсечка) — вне цепочки, но в детекте утечек.
