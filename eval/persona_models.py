@@ -623,21 +623,31 @@ def cmd_probe_tools(args: argparse.Namespace) -> int:
     client = genai.Client(api_key=key)
     model = args.model
     contents = [types.Content(role="user", parts=[types.Part.from_text(text="Сколько сегодня стоит доллар? Ответь коротко.")])]
-    for label, tools in (
-        ("без инструментов", None),
-        ("с google_search", [types.Tool(google_search=types.GoogleSearch())]),
-    ):
-        try:
-            config = types.GenerateContentConfig(system_instruction=get_system_prompt(model), tools=tools) if tools else types.GenerateContentConfig(system_instruction=get_system_prompt(model))
-            resp = client.models.generate_content(model=model, contents=contents, config=config)
-            answer = (resp.text or "").strip()
-            gm = None
-            cands = resp.candidates or []
-            if cands:
-                gm = getattr(cands[0], "grounding_metadata", None)
-            log(f"{model} {label}: ответ {len(answer)} симв., grounding {'ЕСТЬ' if gm else 'нет'} — {answer[:160]!r}")
-        except Exception as exc:
-            log(f"{model} {label}: ОШИБКА {exc}")
+    rates = {"ok": 0, "search_ok": 0}
+    for attempt in range(args.repeat):
+        for label, tools in (
+            ("без инструментов", None),
+            ("с google_search", [types.Tool(google_search=types.GoogleSearch())]),
+        ):
+            try:
+                config = types.GenerateContentConfig(system_instruction=get_system_prompt(model), tools=tools) if tools else types.GenerateContentConfig(system_instruction=get_system_prompt(model))
+                resp = client.models.generate_content(model=model, contents=contents, config=config)
+                answer = (resp.text or "").strip()
+                gm = None
+                cands = resp.candidates or []
+                if cands:
+                    gm = getattr(cands[0], "grounding_metadata", None)
+                if tools:
+                    rates["search_ok"] += 1 if gm else 0
+                else:
+                    rates["ok"] += 1
+                time.sleep(20)
+                log(f"{model} {label}: ответ {len(answer)} симв., grounding {'ЕСТЬ' if gm else 'нет'} — {answer[:160]!r}")
+            except Exception as exc:
+                time.sleep(20)
+                log(f"{model} {label}: ОШИБКА {str(exc)[:140]}")
+    total = args.repeat
+    log(f"{model}: попыток с поиском {total}, успешных с grounding {rates['search_ok']}; без инструментов ok {rates['ok']}/{total}")
     return 0
 
 
@@ -661,6 +671,7 @@ def main() -> int:
 
     probe = sub.add_parser("probe-tools", help="проверить, тянет ли Gemma инструмент поиска")
     probe.add_argument("--model", default="gemma-4-31b-it")
+    probe.add_argument("--repeat", type=int, default=1, help="повторов каждой пробы — доля 500 у поиска")
     probe.set_defaults(func=cmd_probe_tools)
 
     args = parser.parse_args()
