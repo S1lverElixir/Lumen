@@ -87,6 +87,17 @@ def test_looks_like_freshness_query_detects_buying_advice():
     assert lumen_router_config._looks_like_freshness_query("какой телефон лучше взять") is True
 
 
+def test_looks_like_freshness_query_detects_date_dependent_astronomy():
+    # Eval 22.10.2026: «во сколько рассвет в Москве» не считался свежим — уезжал
+    # обычным текстом в Gemma без поиска и отвечал по памяти (Q6 провал).
+    assert lumen_router_config._looks_like_freshness_query("во сколько рассвет в Москве") is True
+    assert lumen_router_config._looks_like_freshness_query("когда закат солнца") is True
+    assert lumen_router_config._looks_like_freshness_query("восход солнца в Сочи") is True
+    assert lumen_router_config._looks_like_freshness_query("фаза луны") is True
+    assert lumen_router_config._looks_like_freshness_query("лунное затмение") is True
+    assert lumen_router_config._looks_like_freshness_query("люблю ночное небо") is False
+
+
 def test_looks_like_heavy_query_detects_bare_compare():
     # Прод-кейс 17.09.2026: "сравни конкурентов" без "и/с" между объектами
     # пролетал мимо тяжёлой ветки — сравнение ехало на слабую модель.

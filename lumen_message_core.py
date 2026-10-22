@@ -11,7 +11,9 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from aiogram.enums import ChatType
 from aiogram.types import Message, Update
@@ -53,6 +55,17 @@ from lumen_security import _looks_like_injection_probe
 import lumen_devtrace
 
 log = logging.getLogger("bot")
+
+# Дата для свежих вопросов считается внутри вызова; Москва как дефолт RU-аудитории —
+# часовой пояс пользователя боту неизвестен. %A/%B дают английские названия стабильно:
+# setlocale нигде не вызывается (локаль C и на HF, и в тестах).
+_MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
+
+def _fresh_date_context() -> str:
+    """Однострочный контекст текущей даты для промптов свежих вопросов."""
+    now = datetime.now(_MOSCOW_TZ)
+    return f"[Context: today is {now.strftime('%d %B %Y')}, {now.strftime('%A')} (Europe/Moscow).]"
 
 # Суммарный кап extra-файлов альбома: 9 файлов по 20МБ + base64 давали ~250МБ
 # в RAM (аудит D1, 30.09.2026). Обычный альбом — десятки МБ.
@@ -650,6 +663,11 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
 
     # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
     ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
+    # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
+    # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Инъекция
+    # до промпта — попадает и в пост-хок ретрай, он переиспользует этот ai_prompt.
+    if needs_freshness:
+        ai_prompt += "\n\n" + _fresh_date_context()
     # Внешний поиск нужен свежему запросу без живого поиска в маршруте (ссылки/YouTube
     # читает только Gemini — им сниппеты не замена). Дневной лимит пользователя — не сюда:
     # его квота потрачена, ответ идёт с честной пометкой без чужого поиска.

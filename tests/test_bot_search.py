@@ -10,6 +10,8 @@ test_bot_search.py — сквозные тесты внешнего поиска
     pytest tests/test_bot_search.py -v
 """
 import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import bot
 from tests.bot_test_helpers import _run_core_capturing_prompt
@@ -101,4 +103,43 @@ def test_daily_limit_keeps_note_and_skips_external_search(rate_guard_setup, monk
     asyncio.run(bot._handle_message_core(message))
     sent_text = bot._safe_reply.await_args[0][1]
     assert sent_text.startswith("Answering without web search")
+    bot.chat_state.pop(123, None)
+
+
+def test_freshness_prompt_carries_today_date(rate_guard_setup, monkeypatch):
+    # Контекст даты (eval 22.10.2026): модели без живого поиска не знали текущую
+    # дату и строили «завтра» по догадке. Дата обязана уехать в промпт свежего
+    # вопроса и соответствовать сегодняшнему дню в Москве — зашитая константа
+    # или опечатка формата поймаются сравнением с живым now.
+    message = rate_guard_setup()
+    message.text = "какая сегодня погода в Москве"
+    captured: dict = {}
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    prompt = captured["prompt"]
+    assert "[Context: today is" in prompt
+    assert "(Europe/Moscow)" in prompt
+    now = datetime.now(ZoneInfo("Europe/Moscow"))
+    assert f"{now.day} {now.strftime('%B')} {now.year}" in prompt
+    bot.chat_state.pop(123, None)
+
+
+def test_non_freshness_prompt_has_no_date_context(rate_guard_setup, monkeypatch):
+    # Вечные вопросы дату не получают: лишний контекст в обычном маршруте не нужен.
+    message = rate_guard_setup()
+    message.text = "объясни, как работает рекурсия"
+    captured: dict = {}
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert "[Context: today is" not in captured["prompt"]
     bot.chat_state.pop(123, None)
