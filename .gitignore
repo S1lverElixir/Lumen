@@ -21,6 +21,9 @@ global_quota.json
 global_quota.tmp
 # Выгрузка state-backup.yml: полные истории чатов — никогда в коммит (AUD-D-007)
 export_state.json
+# Dev-трейс: тексты чатов и ответы — та же приватность, что у export_state.json
+devtrace.jsonl
+devtrace.jsonl.1
 
 # Заметки аудитов — не часть кода
 audit-*.md
