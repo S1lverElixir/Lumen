@@ -132,6 +132,16 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     # целиком и в _handle_message_core не заходит.
     if await bot._reject_rate_limited_message(main_msg):
         return
+    # Дневные лимиты — до скачивания extras: отказ по общей квоте всё равно
+    # выкачивал девять файлов (аудит 26.10.2026).
+    uid = bot._user_key_for_message(main_msg)
+    entry = bot._user_daily_peek(uid)
+    if await _refuse_daily_total(main_msg, uid, entry):
+        return
+    # Видео-слайд делает весь альбом Gemini-only: без этой проверки extras
+    # качались бы до отказа по квоте Gemini.
+    if any(_direct_attachment_needs_gemini(m) for m in messages) and await _refuse_daily_gemini(main_msg, uid, entry):
+        return
     extra_media: list[tuple[bytes, str]] = []
     MAX_ALBUM_EXTRA = 9  # первое уходит как основное, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу)
     album_state = bot.get_state(main_msg.chat.id)
@@ -332,6 +342,35 @@ def _continue_after_interrupt(state: dict, clean_prompt: str) -> str | None:
     return None
 
 
+async def _refuse_daily_total(message: Message, uid: int | None, entry: dict | None) -> bool:
+    """Отказ по общему дневному лимиту; True — сообщение уже обработано отказом."""
+    import bot
+    if not bot._user_daily_total_exhausted(uid, entry):
+        return False
+    hours, mins = bot._user_daily_reset_in()
+    # Суточный счётчик /stats: отказ по лимиту, ответа модели не будет.
+    bot._record_stats_event("daily_limit_denials")
+    await bot._safe_reply(message, bot._t(
+        message.chat.id, "user_daily_total",
+        used=(entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", entry),
+        hours=hours, mins=mins,
+    ))
+    return True
+
+
+async def _refuse_daily_gemini(message: Message, uid: int | None, entry: dict | None) -> bool:
+    """Отказ по дневной квоте Gemini; True — сообщение уже обработано отказом."""
+    import bot
+    if not bot._user_daily_gemini_exhausted(uid, entry):
+        return False
+    bot._record_stats_event("daily_limit_denials")
+    await bot._safe_reply(message, bot._t(
+        message.chat.id, "user_daily_gemini",
+        used=(entry or {}).get("gemini", 0), limit=bot._user_daily_limit(uid, "gemini", entry),
+    ))
+    return True
+
+
 async def _reject_rate_limited_message(message: Message) -> bool:
     import bot
     if not bot._check_and_register_rate_limit(bot._rate_limit_key_for_message(message)):
@@ -465,25 +504,13 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # ни запись чата, ни запись пользователя, ни messages_received.
     uid_early = bot._user_key_for_message(message)
     _early_entry = bot._user_daily_peek(uid_early)
-    if bot._user_daily_total_exhausted(uid_early, _early_entry):
-        hours, mins = bot._user_daily_reset_in()
-        bot._record_stats_event("daily_limit_denials")
-        await bot._safe_reply(message, bot._t(
-            message.chat.id, "user_daily_total",
-            used=(_early_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid_early, "total", _early_entry),
-            hours=hours, mins=mins,
-        ))
+    if await _refuse_daily_total(message, uid_early, _early_entry):
         return
 
     # Видео/аудио при исчерпанном Gemini отказываем до скачивания: поздняя
     # проверка после маршрута уже скачала бы файл и пожгла транскрибацию.
     # Картинки пропускаем — их отдаст Groq/OpenRouter через поздний фолбэк.
-    if bot._user_daily_gemini_exhausted(uid_early, _early_entry) and _direct_attachment_needs_gemini(message):
-        bot._record_stats_event("daily_limit_denials")
-        await bot._safe_reply(message, bot._t(
-            message.chat.id, "user_daily_gemini",
-            used=(_early_entry or {}).get("gemini", 0), limit=bot._user_daily_limit(uid_early, "gemini", _early_entry),
-        ))
+    if _direct_attachment_needs_gemini(message) and await _refuse_daily_gemini(message, uid_early, _early_entry):
         return
 
     state = bot.get_state(message.chat.id)
@@ -555,249 +582,241 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             await bot._send_pick_question(message, pick_scenario, clean_prompt)
             return
 
-    media_too_big_mb = 0
+    # Временный файл вложения убираем на любом выходе: отказ по инъекции или
+    # квоте тоже успевает его скачать (аудит 26.10.2026).
+    med_path = None
     try:
-        med_path, med_mime, med_name, media_tuple = await bot._resolve_incoming_media(
-            message, state, clean_prompt, is_private=is_private,
+        media_too_big_mb = 0
+        try:
+            med_path, med_mime, med_name, media_tuple = await bot._resolve_incoming_media(
+                message, state, clean_prompt, is_private=is_private,
+            )
+        except bot._MediaTooLargeError as exc:
+            # Файл больше капа скачивания: честный отказ ниже вместо слепого ответа.
+            med_path, med_name, media_tuple = None, "", None
+            media_too_big_mb = max(1, round(exc.cap_bytes / (1024 * 1024)))
+
+        # Голос/аудио: сначала дешёвая транскрибация — дальше текст идёт общим роутингом по
+        # сценарию (тяжесть/свежесть определяются по сказанному). Не вышло — падает в прежний
+        # путь: аудио напрямую в Gemini (см. is_video_or_audio_media в роутере).
+        # Один бюджет на транскрибацию и маршрут: иначе войс держал лок сверх бюджета.
+        route_deadline: float | None = None
+        if media_tuple and media_tuple[1].startswith("audio/"):
+            route_deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
+            transcript = await bot._transcribe_audio(media_tuple[0], media_tuple[1], message.chat.id, deadline=route_deadline)
+            if transcript:
+                clean_prompt = (clean_prompt + "\n" + transcript).strip() if clean_prompt else transcript
+                media_tuple = None
+                if _looks_like_injection_probe(clean_prompt):
+                    # Голосовой транскрипт дописывается после первого префильтра (аудит A3-1).
+                    log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s (prompt_len=%d)', message.chat.id, len(clean_prompt))
+                    lumen_devtrace.record_blocked(message.chat.id, reason="injection-probe", prompt_len=len(clean_prompt))
+                    await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
+                    return
+
+        if media_tuple and not clean_prompt:
+             clean_prompt = _ensure_prompt_text(None, media_tuple[1])
+        if youtube_url_to_analyze and not clean_prompt:
+             clean_prompt = "Подробно перескажи и опиши содержание этого YouTube-видео."
+
+        if not clean_prompt and not media_tuple and not youtube_url_to_analyze:
+             src = _msg_media_source(message)
+             if src is not None and type(src).__name__ != "Sticker":
+                  # Вложение было, но скачать/распознать не вышло — честно говорим, а не "Слушаю" в пустоту.
+                  if media_too_big_mb:
+                       await bot._safe_reply(message, bot._t(message.chat.id, "media_too_big", limit_mb=media_too_big_mb))
+                  else:
+                       await bot._safe_reply(message, bot._model_error_text("fallback", bot._chat_lang(message.chat.id)))
+                  return
+             if mentioned:
+                  await bot._tg_call(message.reply, bot._t(message.chat.id, "status_listening"))
+             return
+
+        # Отправка typing экшена (bot.bot — инстанс aiogram Bot, не модуль).
+        try:
+            if not is_guest:
+                 await bot.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+        except Exception:
+             pass
+
+        media_mime = media_tuple[1] if media_tuple else None
+        # Смешанный альбом (фото + видео-слайды): достаточно одного видео — весь набор едет
+        # в Gemini-ветку, иначе видео-слайды молча терялись (ревью ветки: смотрели только media[0]).
+        if media_mime and media_mime.startswith("image/") and extra_media:
+            for _, extra_mime in extra_media:
+                if not (extra_mime or "").startswith("image/"):
+                    media_mime = extra_mime
+                    break
+        is_heavy = _looks_like_heavy_query(clean_prompt)
+        # Явная просьба искать тоже ведёт на свежий маршрут: иначе "погугли" без слов-маркеров уходило на модели без поиска (прод 11.10.2026).
+        needs_freshness = _looks_like_freshness_query(clean_prompt) or _looks_like_search_request(clean_prompt)
+        route = _build_route(
+            needs_youtube=needs_youtube, needs_website=needs_website,
+            media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
         )
-    except bot._MediaTooLargeError as exc:
-        # Файл больше капа скачивания: честный отказ ниже вместо слепого ответа.
-        med_path, med_name, media_tuple = None, "", None
-        media_too_big_mb = max(1, round(exc.cap_bytes / (1024 * 1024)))
+        log.info(
+            '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s route=%s',
+            message.chat.id, is_heavy, needs_freshness, needs_youtube, needs_website, media_mime,
+            [f"{p}:{m}" for p, m in route],
+        )
 
-    # Голос/аудио: сначала дешёвая транскрибация — дальше текст идёт общим роутингом по
-    # сценарию (тяжесть/свежесть определяются по сказанному). Не вышло — падает в прежний
-    # путь: аудио напрямую в Gemini (см. is_video_or_audio_media в роутере).
-    # Один бюджет на транскрибацию и маршрут: иначе войс держал лок сверх бюджета.
-    route_deadline: float | None = None
-    if media_tuple and media_tuple[1].startswith("audio/"):
-        route_deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
-        transcript = await bot._transcribe_audio(media_tuple[0], media_tuple[1], message.chat.id, deadline=route_deadline)
-        if transcript:
-            clean_prompt = (clean_prompt + "\n" + transcript).strip() if clean_prompt else transcript
-            media_tuple = None
-            if _looks_like_injection_probe(clean_prompt):
-                # Голосовой транскрипт дописывается после первого префильтра (аудит A3-1).
-                log.warning('[injection-probe] Blocked a prompt-injection attempt in chat %s (prompt_len=%d)', message.chat.id, len(clean_prompt))
-                lumen_devtrace.record_blocked(message.chat.id, reason="injection-probe", prompt_len=len(clean_prompt))
-                await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
-                return
-
-    if media_tuple and not clean_prompt:
-         clean_prompt = _ensure_prompt_text(None, media_tuple[1])
-    if youtube_url_to_analyze and not clean_prompt:
-         clean_prompt = "Подробно перескажи и опиши содержание этого YouTube-видео."
-
-    if not clean_prompt and not media_tuple and not youtube_url_to_analyze:
-         src = _msg_media_source(message)
-         if src is not None and type(src).__name__ != "Sticker":
-              # Вложение было, но скачать/распознать не вышло — честно говорим, а не "Слушаю" в пустоту.
-              if media_too_big_mb:
-                   await bot._safe_reply(message, bot._t(message.chat.id, "media_too_big", limit_mb=media_too_big_mb))
-              else:
-                   await bot._safe_reply(message, bot._model_error_text("fallback", bot._chat_lang(message.chat.id)))
-              return
-         if mentioned:
-              await bot._tg_call(message.reply, bot._t(message.chat.id, "status_listening"))
-         return
-
-    # Отправка typing экшена (bot.bot — инстанс aiogram Bot, не модуль).
-    try:
-        if not is_guest:
-             await bot.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    except Exception:
-         pass
-
-    media_mime = media_tuple[1] if media_tuple else None
-    # Смешанный альбом (фото + видео-слайды): достаточно одного видео — весь набор едет
-    # в Gemini-ветку, иначе видео-слайды молча терялись (ревью ветки: смотрели только media[0]).
-    if media_mime and media_mime.startswith("image/") and extra_media:
-        for _, extra_mime in extra_media:
-            if not (extra_mime or "").startswith("image/"):
-                media_mime = extra_mime
-                break
-    is_heavy = _looks_like_heavy_query(clean_prompt)
-    # Явная просьба искать тоже ведёт на свежий маршрут: иначе "погугли" без слов-маркеров уходило на модели без поиска (прод 11.10.2026).
-    needs_freshness = _looks_like_freshness_query(clean_prompt) or _looks_like_search_request(clean_prompt)
-    route = _build_route(
-        needs_youtube=needs_youtube, needs_website=needs_website,
-        media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
-    )
-    log.info(
-        '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s route=%s',
-        message.chat.id, is_heavy, needs_freshness, needs_youtube, needs_website, media_mime,
-        [f"{p}:{m}" for p, m in route],
-    )
-
-    # Дневные лимиты на пользователя — до скачивания/маршрута уже поздно, но до
-    # вызова моделей: отказы и неудачи не считаются, только успешные ответы.
-    # Проба без создания: иначе отказ заводил бы запись и раздувал day_users.
-    uid = bot._user_key_for_message(message)
-    _late_entry = bot._user_daily_peek(uid)
-    if bot._user_daily_total_exhausted(uid, _late_entry):
-        hours, mins = bot._user_daily_reset_in()
-        # Суточный счётчик /stats: отказ по лимиту, ответа модели не будет.
-        bot._record_stats_event("daily_limit_denials")
-        await bot._safe_reply(message, bot._t(
-            message.chat.id, "user_daily_total",
-            used=(_late_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _late_entry),
-            hours=hours, mins=mins,
-        ))
-        return
-    no_search_note = False
-    if bot._user_daily_gemini_exhausted(uid, _late_entry):
-        non_gemini = [(p, m) for p, m in route if p != "gemini"]
-        if not non_gemini:
-            # Ссылки, YouTube, видео/аудио и документы читает только Gemini.
-            bot._record_stats_event("daily_limit_denials")
-            await bot._safe_reply(message, bot._t(
-                message.chat.id, "user_daily_gemini",
-                used=(_late_entry or {}).get("gemini", 0), limit=bot._user_daily_limit(uid, "gemini", _late_entry),
-            ))
+        # Дневные лимиты на пользователя — до скачивания/маршрута уже поздно, но до
+        # вызова моделей: отказы и неудачи не считаются, только успешные ответы.
+        # Проба без создания: иначе отказ заводил бы запись и раздувал day_users.
+        uid = bot._user_key_for_message(message)
+        _late_entry = bot._user_daily_peek(uid)
+        if await _refuse_daily_total(message, uid, _late_entry):
             return
-        route = non_gemini
-        # Свежесть без Gemini — честная пометка, что ответ без поиска.
-        no_search_note = needs_freshness
-    # Дошло до обработки: фон, инъекции и отказы выше уже отсеяны.
-    bot._record_stats_event("messages_received")
+        no_search_note = False
+        if bot._user_daily_gemini_exhausted(uid, _late_entry):
+            non_gemini = [(p, m) for p, m in route if p != "gemini"]
+            if not non_gemini:
+                # Ссылки, YouTube, видео/аудио и документы читает только Gemini.
+                await _refuse_daily_gemini(message, uid, _late_entry)
+                return
+            route = non_gemini
+            # Свежесть без Gemini — честная пометка, что ответ без поиска.
+            no_search_note = needs_freshness
+        # Дошло до обработки: фон, инъекции и отказы выше уже отсеяны.
+        bot._record_stats_event("messages_received")
 
-    # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
-    ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
-    # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
-    # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Инъекция
-    # до промпта — попадает и в пост-хок ретрай, он переиспользует этот ai_prompt.
-    if needs_freshness:
-        ai_prompt += "\n\n" + _fresh_date_context()
-    # Внешний поиск нужен свежему запросу без живого поиска в маршруте (ссылки/YouTube
-    # читает только Gemini — им сниппеты не замена). Дневной лимит пользователя — не сюда:
-    # его квота потрачена, ответ идёт с честной пометкой без чужого поиска.
-    # Выключен свитчом или пуст — тоже отвечаем с пометкой.
-    need_external_search = (
-        needs_freshness
-        and not needs_youtube
-        and not needs_website
-        and not no_search_note
-        and not route_has_live_search(route)
-    )
-    web_search_failed = False
-    snippets_injected = False
-    if need_external_search and web_search_is_enabled():
-        # Сниппеты DuckDuckGo едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
-        # Поиск идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный вопрос получит "занято").
-        search_budget = web_search_timeout_sec()
-        if route_deadline is not None:
-            search_budget = min(search_budget, max(0.0, route_deadline - time.monotonic()))
-        snippets: list = []
-        if search_budget > 0:
-            try:
-                snippets = await fetch_web_snippets(
-                    clean_prompt, timeout_sec=search_budget, max_results=web_search_max_results(),
-                )
-            except Exception as exc:
-                log.warning("[web-search] Snippet fetch failed, answering with a no-search note: %s", exc.__class__.__name__)
-        if snippets:
-            ai_prompt += format_snippets_for_prompt(snippets)
-            snippets_injected = True
-        else:
-            web_search_failed = True
-    elif need_external_search:
-        web_search_failed = True
-    if (
-        media_tuple is None
-        and not extra_media
-        and youtube_url_to_analyze is None
-        and _media_reference_category(clean_prompt) is not None
-    ):
-        # Прод-кейс 17.09.2026: без файла модель выдумывала фото. Дописываем _NO_MEDIA_NOTE, историю не режем.
-        ai_prompt += _NO_MEDIA_NOTE
-    gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
-    gemini_media_list = gemini_media_list or None
-    # Стриминг ("живой" эффект печати) имеет смысл только для простого
-    # текстового обмена без вложений/YouTube — см. _run_route. При пометке
-    # "без поиска" стрим гасим: она дописывается к готовому ответу.
-    # Стрим головы без живого поиска при свежем запросе гасим: иначе ответ уйдёт
-    # без поиска до пост-проверки и ретрай уже невозможен (прод 12.10.2026).
-    head_has_live_search = (not route) or route_has_live_search(route[:1])
-    allow_stream = (
-        not gemini_media_list
-        and not youtube_url_to_analyze
-        and not no_search_note
-        and (not needs_freshness or head_has_live_search)
-    )
-    try:
-        provenance: dict = {}
-        ans, reply_already_sent = await bot._run_route(
-            message.chat.id, ai_prompt, route, message,
-            media=gemini_media_list, media_filename=med_name,
-            youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
-            deadline=route_deadline, provenance=provenance,
+        # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
+        ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
+        # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
+        # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Инъекция
+        # до промпта — попадает и в пост-хок ретрай, он переиспользует этот ai_prompt.
+        if needs_freshness:
+            ai_prompt += "\n\n" + _fresh_date_context()
+        # Внешний поиск нужен свежему запросу без живого поиска в маршруте (ссылки/YouTube
+        # читает только Gemini — им сниппеты не замена). Дневной лимит пользователя — не сюда:
+        # его квота потрачена, ответ идёт с честной пометкой без чужого поиска.
+        # Выключен свитчом или пуст — тоже отвечаем с пометкой.
+        need_external_search = (
+            needs_freshness
+            and not needs_youtube
+            and not needs_website
+            and not no_search_note
+            and not route_has_live_search(route)
         )
-        answered_grounded = answered_with_live_search(provenance)
-        if needs_freshness and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:
-            # План маршрута содержал живой поиск, но ответила модель без него
-            # (граундинг-модели умерли на квоте по ходу). Догоняем DuckDuckGo
-            # и один ретрай со сниппетами; не вышло — честная пометка.
-            retry_snippets: list = []
-            try:
-                retry_budget = web_search_timeout_sec()
-                if route_deadline is not None:
-                    retry_budget = min(retry_budget, max(0.0, route_deadline - time.monotonic()))
-                if retry_budget > 0:
-                    retry_snippets = await fetch_web_snippets(
-                        clean_prompt, timeout_sec=retry_budget, max_results=web_search_max_results(),
-                    )
-            except Exception as exc:
-                log.warning("[web-search] Post-hoc snippet fetch failed: %s", exc.__class__.__name__)
-            if retry_snippets:
-                log.info("[web-search] Retrying route once with fresh snippets (first answer had no live search).")
-                ai_prompt += format_snippets_for_prompt(retry_snippets)
-                snippets_injected = True
+        web_search_failed = False
+        snippets_injected = False
+        if need_external_search and web_search_is_enabled():
+            # Сниппеты DuckDuckGo едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
+            # Поиск идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный вопрос получит "занято").
+            search_budget = web_search_timeout_sec()
+            if route_deadline is not None:
+                search_budget = min(search_budget, max(0.0, route_deadline - time.monotonic()))
+            snippets: list = []
+            if search_budget > 0:
                 try:
-                    ans, reply_already_sent = await bot._run_route(
-                        message.chat.id, ai_prompt, route, message,
-                        media=gemini_media_list, media_filename=med_name,
-                        youtube_url=youtube_url_to_analyze, allow_stream=False,
-                        deadline=route_deadline, provenance=provenance,
+                    snippets = await fetch_web_snippets(
+                        clean_prompt, timeout_sec=search_budget, max_results=web_search_max_results(),
                     )
                 except Exception as exc:
-                    log.warning("[web-search] Retry with snippets failed, keeping first answer with a no-search note: %s", exc.__class__.__name__)
-                    web_search_failed = True
+                    log.warning("[web-search] Snippet fetch failed, answering with a no-search note: %s", exc.__class__.__name__)
+            if snippets:
+                ai_prompt += format_snippets_for_prompt(snippets)
+                snippets_injected = True
             else:
                 web_search_failed = True
-        elif needs_freshness and not snippets_injected and not answered_grounded:
-            log.warning("[web-search] Answer already streamed without live search; cannot retry cleanly.")
-        if no_search_note:
-            ans = bot._t(message.chat.id, "fallback_no_search") + "\n\n" + ans
-        if web_search_failed:
-            ans = bot._t(message.chat.id, "fallback_no_live_search") + "\n\n" + ans
-        if not reply_already_sent:
-            await bot._safe_reply(message, ans)
-        # Успешный ответ закрывает флаг обрыва (добивка тоже считается успехом).
-        state.pop("interrupted", None)
-        bot.mark_state_dirty(message.chat.id)
-        lumen_devtrace.record_answer(
-            message.chat.id, user_text=clean_prompt, route=route,
-            provider=provenance.get("provider", ""), model=provenance.get("model") or "",
-            latency_ms=int((time.monotonic() - _trace_start) * 1000), reply=ans,
-            ctx_tail=list(state.get("ctx") or [])[-3:],
-            flags={"fresh": bool(needs_freshness), "snippets": bool(snippets_injected),
-                   "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent)},
+        elif need_external_search:
+            web_search_failed = True
+        if (
+            media_tuple is None
+            and not extra_media
+            and youtube_url_to_analyze is None
+            and _media_reference_category(clean_prompt) is not None
+        ):
+            # Прод-кейс 17.09.2026: без файла модель выдумывала фото. Дописываем _NO_MEDIA_NOTE, историю не режем.
+            ai_prompt += _NO_MEDIA_NOTE
+        gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
+        gemini_media_list = gemini_media_list or None
+        # Стриминг ("живой" эффект печати) имеет смысл только для простого
+        # текстового обмена без вложений/YouTube — см. _run_route. При пометке
+        # "без поиска" стрим гасим: она дописывается к готовому ответу.
+        # Стрим головы без живого поиска при свежем запросе гасим: иначе ответ уйдёт
+        # без поиска до пост-проверки и ретрай уже невозможен (прод 12.10.2026).
+        head_has_live_search = (not route) or route_has_live_search(route[:1])
+        allow_stream = (
+            not gemini_media_list
+            and not youtube_url_to_analyze
+            and not no_search_note
+            and (not needs_freshness or head_has_live_search)
         )
-    except Exception as exc:
-        lumen_devtrace.record_failure(
-            message.chat.id, user_text=clean_prompt, route=route,
-            error=f"{type(exc).__name__}: {exc}",
-            latency_ms=int((time.monotonic() - _trace_start) * 1000),
-        )
-        if isinstance(exc, (bot.GeminiAllModelsExhaustedError, bot.RouteBudgetExceededError)):
-            # Квота/бюджет маршрута штатно, не баг: только warning, иначе Sentry тонет (LUMEN-3: 8 шумов за месяц).
-            log.warning("Chat AI processing hit a known, already-handled outcome: %s", exc)
-        else:
-            log.exception("Chat AI processing failed:")
-        head_model = route[0][1] if route else bot.DEFAULT_GEMINI_MODEL
-        if isinstance(exc, bot.GeminiAllModelsExhaustedError):
-            await bot._maybe_alert_gemini_exhausted()
-        await bot._safe_reply(message, bot._route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze, lang=bot._chat_lang(message.chat.id)))
+        try:
+            provenance: dict = {}
+            ans, reply_already_sent = await bot._run_route(
+                message.chat.id, ai_prompt, route, message,
+                media=gemini_media_list, media_filename=med_name,
+                youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
+                deadline=route_deadline, provenance=provenance,
+            )
+            answered_grounded = answered_with_live_search(provenance)
+            if needs_freshness and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:
+                # План маршрута содержал живой поиск, но ответила модель без него
+                # (граундинг-модели умерли на квоте по ходу). Догоняем DuckDuckGo
+                # и один ретрай со сниппетами; не вышло — честная пометка.
+                retry_snippets: list = []
+                try:
+                    retry_budget = web_search_timeout_sec()
+                    if route_deadline is not None:
+                        retry_budget = min(retry_budget, max(0.0, route_deadline - time.monotonic()))
+                    if retry_budget > 0:
+                        retry_snippets = await fetch_web_snippets(
+                            clean_prompt, timeout_sec=retry_budget, max_results=web_search_max_results(),
+                        )
+                except Exception as exc:
+                    log.warning("[web-search] Post-hoc snippet fetch failed: %s", exc.__class__.__name__)
+                if retry_snippets:
+                    log.info("[web-search] Retrying route once with fresh snippets (first answer had no live search).")
+                    ai_prompt += format_snippets_for_prompt(retry_snippets)
+                    snippets_injected = True
+                    try:
+                        ans, reply_already_sent = await bot._run_route(
+                            message.chat.id, ai_prompt, route, message,
+                            media=gemini_media_list, media_filename=med_name,
+                            youtube_url=youtube_url_to_analyze, allow_stream=False,
+                            deadline=route_deadline, provenance=provenance,
+                        )
+                    except Exception as exc:
+                        log.warning("[web-search] Retry with snippets failed, keeping first answer with a no-search note: %s", exc.__class__.__name__)
+                        web_search_failed = True
+                else:
+                    web_search_failed = True
+            elif needs_freshness and not snippets_injected and not answered_grounded:
+                log.warning("[web-search] Answer already streamed without live search; cannot retry cleanly.")
+            if no_search_note:
+                ans = bot._t(message.chat.id, "fallback_no_search") + "\n\n" + ans
+            if web_search_failed:
+                ans = bot._t(message.chat.id, "fallback_no_live_search") + "\n\n" + ans
+            if not reply_already_sent:
+                await bot._safe_reply(message, ans)
+            # Успешный ответ закрывает флаг обрыва (добивка тоже считается успехом).
+            state.pop("interrupted", None)
+            bot.mark_state_dirty(message.chat.id)
+            lumen_devtrace.record_answer(
+                message.chat.id, user_text=clean_prompt, route=route,
+                provider=provenance.get("provider", ""), model=provenance.get("model") or "",
+                latency_ms=int((time.monotonic() - _trace_start) * 1000), reply=ans,
+                ctx_tail=list(state.get("ctx") or [])[-3:],
+                flags={"fresh": bool(needs_freshness), "snippets": bool(snippets_injected),
+                       "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent)},
+            )
+        except Exception as exc:
+            lumen_devtrace.record_failure(
+                message.chat.id, user_text=clean_prompt, route=route,
+                error=f"{type(exc).__name__}: {exc}",
+                latency_ms=int((time.monotonic() - _trace_start) * 1000),
+            )
+            if isinstance(exc, (bot.GeminiAllModelsExhaustedError, bot.RouteBudgetExceededError)):
+                # Квота/бюджет маршрута штатно, не баг: только warning, иначе Sentry тонет (LUMEN-3: 8 шумов за месяц).
+                log.warning("Chat AI processing hit a known, already-handled outcome: %s", exc)
+            else:
+                log.exception("Chat AI processing failed:")
+            head_model = route[0][1] if route else bot.DEFAULT_GEMINI_MODEL
+            if isinstance(exc, bot.GeminiAllModelsExhaustedError):
+                await bot._maybe_alert_gemini_exhausted()
+            await bot._safe_reply(message, bot._route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze, lang=bot._chat_lang(message.chat.id)))
     finally:
         if med_path and os.path.exists(med_path):
              with contextlib.suppress(Exception):
