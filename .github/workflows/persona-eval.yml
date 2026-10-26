@@ -55,22 +55,30 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          # Входы workflow_dispatch идут в окружение, а не в текст скрипта:
+          # подстановка ${{ inputs.* }} в run позволяла инъекцию команд рядом
+          # с ключами провайдеров (аудит 26.10.2026).
+          EVAL_MODE: ${{ inputs.mode }}
+          EVAL_MODEL: ${{ inputs.model }}
+          EVAL_MODELS: ${{ inputs.models }}
+          EVAL_JUDGE: ${{ inputs.judge }}
+          EVAL_ONLY: ${{ inputs.only }}
         run: |
           set -euo pipefail
-          if [ "${{ inputs.mode }}" = "probe-tools" ]; then
-            python eval/persona_models.py probe-tools --model "${{ inputs.model }}"
+          if [ "$EVAL_MODE" = "probe-tools" ]; then
+            python eval/persona_models.py probe-tools --model "$EVAL_MODEL"
             exit 0
           fi
-          if [ -n "${{ inputs.only }}" ]; then
+          if [ -n "$EVAL_ONLY" ]; then
             python eval/persona_models.py run \
-              --models "${{ inputs.models }}" \
-              --judge "${{ inputs.judge }}" \
-              --only "${{ inputs.only }}" \
+              --models "$EVAL_MODELS" \
+              --judge "$EVAL_JUDGE" \
+              --only "$EVAL_ONLY" \
               --out "$GITHUB_WORKSPACE/eval-out"
           else
             python eval/persona_models.py run \
-              --models "${{ inputs.models }}" \
-              --judge "${{ inputs.judge }}" \
+              --models "$EVAL_MODELS" \
+              --judge "$EVAL_JUDGE" \
               --out "$GITHUB_WORKSPACE/eval-out"
           fi
 
