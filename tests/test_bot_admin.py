@@ -311,7 +311,7 @@ def test_webhook_handler_rejects_oversized_body_before_reading():
             body={"update_id": 1},
         )
         assert asyncio.run(_run_webhook_handler(req)) == {"ok": False}
-        assert req.body_calls == 0
+        assert req.stream_calls == 0
         # Заголовок соврал (маленький), тело большое — тоже отказ.
         req2 = _FakeWebhookRequest(
             headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
@@ -319,6 +319,14 @@ def test_webhook_handler_rejects_oversized_body_before_reading():
         )
         req2._raw = b"x" * (lumen_admin.WEBHOOK_MAX_BODY_BYTES + 1)
         assert asyncio.run(_run_webhook_handler(req2)) == {"ok": False}
+        # Chunked-тело без Content-Length: читаем потоком и рвём на капе, а не
+        # вытягиваем все 3 МБ в память (аудит 26.10.2026).
+        req3 = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            chunks=[b"x" * (64 * 1024)] * 48,
+        )
+        assert asyncio.run(_run_webhook_handler(req3)) == {"ok": False}
+        assert req3.chunks_read <= 9, req3.chunks_read
     finally:
         bot.WEBHOOK_SECRET = original_secret
 

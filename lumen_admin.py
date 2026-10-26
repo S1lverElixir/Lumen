@@ -150,12 +150,17 @@ async def webhook_handler(request: Request) -> Any:
         log.warning("[webhook] Too many in-flight updates (%d), asking Telegram to retry", len(bot._inflight_tasks))
         return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     try:
-        raw_body = await request.body()
-        if len(raw_body) > WEBHOOK_MAX_BODY_BYTES:
-            # Заголовок соврал или его не было: сырые байты сверх капа не разбираем.
-            _log_webhook_denied(f"body larger than the {WEBHOOK_MAX_BODY_BYTES} byte cap")
-            return {"ok": False}
-        body = _json.loads(raw_body)
+        # Читаем потоком и рвём на капе: request.body() втягивал chunked-тело
+        # целиком, и лимит срабатывал после чтения (аудит 26.10.2026).
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > WEBHOOK_MAX_BODY_BYTES:
+                _log_webhook_denied(f"body larger than the {WEBHOOK_MAX_BODY_BYTES} byte cap")
+                return {"ok": False}
+            chunks.append(chunk)
+        body = _json.loads(b"".join(chunks))
         if bot.bot is not None:
             bot._track_inflight_task(asyncio.create_task(bot._process_raw_update(body)))
         else:
