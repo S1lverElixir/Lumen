@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from typing import Any
 
 import aiohttp
@@ -237,6 +238,9 @@ async def _try_send_tiktok_slideshow(
     if images and isinstance(images, list):
           # TikTok разрешает до 35 слайдов, Telegram — 10 за вызов: берём весь пост и шлём несколькими группами.
          images_to_fetch = images[:bot.TIKTOK_SLIDESHOW_MAX_ITEMS]
+         # Тайминги и счётчики в итоговую строку: раньше успех нигде не писался и
+         # проверка сводилась к скриншотам (прод 27.10.2026).
+         started_at = time.perf_counter()
          # Статус слайдшоу — через переводы (был захардкожен по-русски).
          await bot._edit_message_quietly(status, bot._t(
              message.chat.id, "tiktok_dl_slideshow",
@@ -292,6 +296,8 @@ async def _try_send_tiktok_slideshow(
          downloaded = list(await asyncio.gather(
               *(_download_slide_bounded(u) for u in fetch_urls)
          ))
+         download_elapsed = time.perf_counter() - started_at
+         downloaded_bytes = sum(len(b) for b in downloaded if b)
          skipped_slides = sum(1 for b in downloaded if not b)
          if skipped_slides:
               log.warning("[tiktok] Slideshow: %d of %d slides skipped (failed or over the post size cap).", skipped_slides, len(downloaded))
@@ -368,6 +374,15 @@ async def _try_send_tiktok_slideshow(
                         if chunk_idx + 1 < len(chunks):
                               # Пауза между группами — против анти-флуда.
                              await asyncio.sleep(0.3)
+              total_elapsed = time.perf_counter() - started_at
+              log.info(
+                   '[tiktok] Slideshow delivered: %d of %d slides (%d video, %d photo) in %d group(s), %.1f MB, download %.1fs, send %.1fs.',
+                   len(media_items), len(images_to_fetch), len(probe_results),
+                   len(media_items) - len(probe_results),
+                   len(_chunk_tiktok_media_items(media_items)),
+                   downloaded_bytes / (1024 * 1024),
+                   download_elapsed, total_elapsed - download_elapsed,
+              )
               await _send_tiktok_music(session, media_data, message, author, headers)
               await bot._delete_message_quietly(status)
               return True
