@@ -86,6 +86,23 @@ def _current_log_secrets() -> tuple[str, ...]:
 # id, и собрать путь одного запроса по логу было нельзя (прод 27.10.2026).
 _LOG_CHAT: contextvars.ContextVar[str] = contextvars.ContextVar("log_chat", default="")
 
+# Общий дедлайн сообщения: каждый этап берёт min(свой таймаут, остаток), иначе
+# лок + поиск + маршрут + саммари в сумме давали до двух минут (аудит 27.10.2026).
+_MSG_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("msg_deadline", default=None)
+
+
+def _msg_remaining_sec() -> float | None:
+    """Сколько осталось до потолка сообщения; None — обработка вне handle_message."""
+    deadline = _MSG_DEADLINE.get()
+    return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+
+def _deadline_within_message(seconds: float) -> float:
+    """Дедлайн этапа, не выходящий за общий потолок сообщения."""
+    now = time.monotonic()
+    remaining = _msg_remaining_sec()
+    return now + seconds if remaining is None else now + min(seconds, remaining)
+
 
 class _SecretLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord, _secrets=_current_log_secrets) -> str:
@@ -405,6 +422,9 @@ ROUTE_MODEL_TIMEOUT_SEC = _env_number("ROUTE_MODEL_TIMEOUT_SEC", 22, min_value=1
 # ROUTE_TOTAL_BUDGET_SEC — общий бюджет на ВЕСЬ маршрут одного сообщения. Без него
 # каскадный сбой у многих моделей растягивал бы один ответ на минуты под локом чата.
 ROUTE_TOTAL_BUDGET_SEC = _env_number("ROUTE_TOTAL_BUDGET_SEC", 40, min_value=1)
+# MESSAGE_TOTAL_BUDGET_SEC — потолок на всё сообщение (лок + поиск + маршрут).
+# Этапы ниже берут min(свой таймаут, остаток), иначе их сумма выходила за бюджет.
+MESSAGE_TOTAL_BUDGET_SEC = _env_number("MESSAGE_TOTAL_BUDGET_SEC", 90, min_value=10)
 # HISTORY_SUMMARY_BUDGET_SEC — потолок саммаризации истории: без него висящие
 # вызовы держали бы лок чата десятки секунд уже после готового ответа.
 HISTORY_SUMMARY_BUDGET_SEC = _env_number("HISTORY_SUMMARY_BUDGET_SEC", 30, min_value=1)
@@ -1301,10 +1321,13 @@ async def handle_message(message: Message) -> None:
     # Метка чата на всех строках обработки (см. _LOG_CHAT); сброс в finally —
     # иначе значение утечёт в следующий апдейт этого же процесса.
     token = _LOG_CHAT.set(f"chat={message.chat.id if message.chat else 0}")
+    # Потолок сообщения ставится здесь: альбомные задачи наследуют контекст.
+    dtoken = _MSG_DEADLINE.set(time.monotonic() + MESSAGE_TOTAL_BUDGET_SEC)
     try:
         await _handle_message(message)
     finally:
         _LOG_CHAT.reset(token)
+        _MSG_DEADLINE.reset(dtoken)
 
 
 async def _handle_message(message: Message) -> None:
@@ -1339,8 +1362,10 @@ async def _handle_message(message: Message) -> None:
         await _handle_message_core(message)
         return
 
+    remaining = _msg_remaining_sec()
+    lock_timeout = CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(CHAT_LOCK_TIMEOUT_SEC, remaining))
     try:
-        lock = await acquire_chat_lock(chat_id, CHAT_LOCK_TIMEOUT_SEC)
+        lock = await acquire_chat_lock(chat_id, lock_timeout)
     except asyncio.TimeoutError:
         log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
         with contextlib.suppress(Exception):

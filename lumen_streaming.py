@@ -251,9 +251,14 @@ async def _run_streaming_reply(
         bot._record_stats_event("model_attempts")
 
         # Дальше цикл читает генератор напрямую — проверки кусков/утечек/троттлинга ниже без изменений.
+        first_chunk_limit = _model_first_chunk_limit(_model_speed_key(provider, model_id), bot.FIRST_CHUNK_TIMEOUT_SEC)
+        if deadline is not None:
+            # Первый кусок не должен ждать дольше общего бюджета сообщения: до него
+            # дедлайн не проверялся и ожидание могло выйти за бюджет (аудит 27.10.2026).
+            first_chunk_limit = min(first_chunk_limit, max(0.5, deadline - time.monotonic()))
         piece_agen = _pieces_with_waiting_feedback(
             piece_agen, placeholder,
-            first_chunk_limit=_model_first_chunk_limit(_model_speed_key(provider, model_id), bot.FIRST_CHUNK_TIMEOUT_SEC),
+            first_chunk_limit=first_chunk_limit,
         )
         async for piece in piece_agen:
             if not piece:
@@ -433,7 +438,10 @@ async def _run_streaming_reply(
                 await bot._tg_call(sent_messages[-1].edit_text, _md_to_html(final_text + note), parse_mode=ParseMode.HTML, call_timeout=15.0)
             # Частичный ответ уже показан и ляжет в историю ниже — запоминаем, что
             # его оборвало: слово «продолжи» добьёт с места обрыва (_continue_after_interrupt).
+            # stream_interrupted переживает успешный возврат: иначе _handle_message_core
+            # снимал общий флаг и «продолжи» не срабатывал (аудит 27.10.2026).
             state["interrupted"] = True
+            state["stream_interrupted"] = True
             bot.mark_state_dirty(chat_id)
     finally:
         aclose = getattr(piece_agen, "aclose", None)

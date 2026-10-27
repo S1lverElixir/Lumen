@@ -581,6 +581,36 @@ def test_streaming_respects_route_deadline():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
+    # Что защищает: ожидание первого куска не выходит за бюджет маршрута.
+    # Регрессия: предел модели (по замерам до 75с) игнорировал дедлайн, и стрим
+    # держал лок сверх бюджета (аудит 27.10.2026).
+    import lumen_streaming
+    seen = {}
+
+    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit):
+        seen["limit"] = first_chunk_limit
+        async for piece in piece_agen:
+            yield piece
+
+    async def one_piece():
+        yield "готово"
+
+    monkeypatch.setattr(lumen_streaming, "_pieces_with_waiting_feedback", fake_feedback)
+    monkeypatch.setattr(lumen_streaming, "_model_first_chunk_limit", lambda key, floor: 3600)
+    chat_id = 999318
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="w:free",
+            piece_agen=one_piece(), deadline=time.monotonic() + 1,
+        ))
+        assert answer == "готово"
+        assert seen["limit"] <= 1.1
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def _streaming_rate_limit_quotas(chat_id, model_id, error_text):
     async def pieces_429():
         raise bot.OpenRouterAPIError(error_text, status_code=429)

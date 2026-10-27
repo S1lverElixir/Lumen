@@ -525,3 +525,34 @@ def test_telegram_api_call_ok_false_reports_description(monkeypatch):
     assert "400" in msg
     assert "'ok'" not in msg
 
+
+def test_message_deadline_caps_stage_budget():
+    # Что защищает: общий потолок сообщения (MESSAGE_TOTAL_BUDGET_SEC). Регрессия:
+    # таймауты этапов складывались без учёта остатка, и обработка выходила за
+    # бюджет (аудит 27.10.2026).
+    token = bot._MSG_DEADLINE.set(time.monotonic() + 5)
+    try:
+        assert bot._msg_remaining_sec() <= 5
+        assert bot._deadline_within_message(40) <= time.monotonic() + 5.1
+    finally:
+        bot._MSG_DEADLINE.reset(token)
+    assert bot._msg_remaining_sec() is None
+    assert bot._deadline_within_message(40) > time.monotonic() + 39
+
+
+def test_handle_message_sets_and_resets_message_deadline(monkeypatch):
+    # Что защищает: установку потолка на входе в обработчик. Регрессия: дедлайн
+    # оставался бы в контексте после обработки и урезал следующий апдейт
+    # (аудит 27.10.2026).
+    from types import SimpleNamespace
+    seen = {}
+
+    async def fake_handle(message):
+        seen["remaining"] = bot._msg_remaining_sec()
+
+    monkeypatch.setattr(bot, "_handle_message", fake_handle)
+    asyncio.run(bot.handle_message(SimpleNamespace(chat=None, from_user=None)))
+    assert seen["remaining"] is not None and seen["remaining"] > 0
+    assert bot._msg_remaining_sec() is None
+
+

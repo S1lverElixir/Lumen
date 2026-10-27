@@ -1325,9 +1325,14 @@ async def _trim_history(history: list[dict[str, Any]]) -> None:
     digest_input = "\n".join(lines)[:_HISTORY_SUMMARY_INPUT_MAX_CHARS]
     summary = ""
     if digest_input.strip():
+        # Саммари не должно выходить за потолок сообщения: оно идёт под локом чата.
+        budget = bot.HISTORY_SUMMARY_BUDGET_SEC
+        remaining = bot._msg_remaining_sec()
+        if remaining is not None:
+            budget = max(0.1, min(budget, remaining))
         try:
             summary = await asyncio.wait_for(
-                _summarize_text(digest_input), timeout=bot.HISTORY_SUMMARY_BUDGET_SEC,
+                _summarize_text(digest_input), timeout=budget,
             )
         except Exception as exc:
             log.warning("[history] Summarization over budget/failed, plain cut: %s", exc)
