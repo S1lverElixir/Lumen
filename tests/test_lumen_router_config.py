@@ -562,10 +562,12 @@ def test_or_heavy_order_still_headed_by_calibrated_flagships():
 # игнорировать анонс нельзя (см. tencent/hy3 — истечение промо было замечено
 # только постфактум). _check_scheduled_removals_due закрывает этот пробел.
 
-def test_scheduled_removals_registered_for_dots3_preview_only():
-    # Аудит 17.09.2026: nano-30b-a3b умер и переехал в реестр — в будущих снятиях только dots-3-note-preview.
+def test_scheduled_removals_registry_empty_after_dots3_stayed_alive():
+    # Аудит 17.09.2026: nano-30b-a3b умер и переехал в реестр здоровья. 28.10.2026:
+    # анонс снятия dots-3-note-preview (30.09.2026) не сработал, модель жива в живом
+    # каталоге — просроченная запись убрана, иначе она шумела бы на каждом старте.
     assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._SCHEDULED_OR_REMOVALS
-    assert lumen_router_config._SCHEDULED_OR_REMOVALS["dots-studio/dots-3-note-preview:free"].isoformat() == "2026-09-30"
+    assert "dots-studio/dots-3-note-preview:free" not in lumen_router_config._SCHEDULED_OR_REMOVALS
 
 
 def test_check_scheduled_removals_due_warns_after_date_passed(caplog):

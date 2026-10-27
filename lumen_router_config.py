@@ -273,9 +273,9 @@ def _check_temporary_free_models_expiry() -> None:
 
 # ── Анонсированные даты снятия ("Going away <дата>" на карточке OpenRouter) ──
 # Будущий анонс не исключает живую модель: только подтверждённые логи; реестр лишь предупреждает.
-_SCHEDULED_OR_REMOVALS: dict[str, date] = {
-    "dots-studio/dots-3-note-preview:free": date(2026, 9, 30),
-}
+# 28.10.2026: dots-3-note-preview снят из реестра — анонс 30.09.2026 не сработал,
+# модель жива в живом каталоге OpenRouter, и просроченная дата только шумела на старте.
+_SCHEDULED_OR_REMOVALS: dict[str, date] = {}
 
 def _check_scheduled_removals_due() -> None:
     """Предупреждает, когда дата снятия наступила. >= вместо >: анонс действует уже в день снятия."""
