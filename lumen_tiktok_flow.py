@@ -149,7 +149,7 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
                         # Длительность — явно: без неё Telegram показывает 0:00 (та же история, что была с видео).
                         music_duration = await bot._probe_audio_duration(tmp_mp3_path)
          except Exception as tag_err:
-              log.warning("[tiktok] failed to write embedded tags to MP3: %s", tag_err)
+              log.warning("[tiktok] failed to write embedded tags to MP3: %s", tag_err, exc_info=True)
 
          # Слэш и управляющие из чужого названия — в "_" (AUD-E-005),
          # иначе multipart-имя файла битое.
@@ -517,10 +517,11 @@ async def handle_tiktok(message: Message, url: str) -> None:
          # Полные подписанные URL не пишем, только счётчики (аудит M7, 10.2026).
          if images_debug := media_data.get("images"):
               log.info(
-                   '[tikwm][diag] slideshow post: response keys=%s, images=%d, has_live_images=%s, has_play=%s has_hdplay=%s has_wmplay=%s',
-                   sorted(media_data.keys()), len(images_debug), bool(media_data.get("live_images")),
+                   '[tikwm][diag] slideshow post: images=%d, has_live_images=%s, has_play=%s has_hdplay=%s has_wmplay=%s',
+                   len(images_debug), bool(media_data.get("live_images")),
                    bool(media_data.get("play")), bool(media_data.get("hdplay")), bool(media_data.get("wmplay")),
               )
+              log.debug('[tikwm][diag] slideshow post keys=%s', sorted(media_data.keys()))
 
          author = (media_data.get("author") or {}).get("nickname") or bot._t(message.chat.id, "tiktok_author")
 

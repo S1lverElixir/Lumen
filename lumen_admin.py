@@ -168,7 +168,7 @@ async def webhook_handler(request: Request) -> Any:
             log.warning("[webhook] Bot not initialized yet, asking Telegram to retry")
             return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     except Exception as exc:
-        log.warning("[webhook] Failed to process incoming update: %s", exc)
+        log.warning("[webhook] Failed to process incoming update: %s", exc, exc_info=True)
         # Битое тело — не успех: пусть Telegram повторит, а не считает дроп
         # обработанным (аудит M2, 10.2026).
         return JSONResponse(status_code=503, content={"ok": False, "retry": True})

@@ -15,6 +15,7 @@ del _sys
 import asyncio
 import atexit
 import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -81,6 +82,11 @@ def _current_log_secrets() -> tuple[str, ...]:
     return tuple(sorted(set(values), key=len, reverse=True))
 
 
+# Метка текущего чата на всех строках обработки: aiogram печатает только update
+# id, и собрать путь одного запроса по логу было нельзя (прод 27.10.2026).
+_LOG_CHAT: contextvars.ContextVar[str] = contextvars.ContextVar("log_chat", default="")
+
+
 class _SecretLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord, _secrets=_current_log_secrets) -> str:
         # Секреты через замыкание, а не глобал: при финализации интерпретатора
@@ -88,6 +94,9 @@ class _SecretLogFormatter(logging.Formatter):
         # Остатки teardown глушим: строка без вычистки лучше шумного трейсбека.
         text = super().format(record)
         with contextlib.suppress(Exception):
+            chat = _LOG_CHAT.get()
+            if chat:
+                text = f"[{chat}] {text}"
             for secret in _secrets():
                 text = text.replace(secret, "<REDACTED>")
         return text
@@ -127,7 +136,9 @@ def _setup_logging() -> logging.Logger:
     for name in ("httpx", "google_genai", "aiohttp", "uvicorn.access"):
         logging.getLogger(name).setLevel(logging.WARNING)
     # Единый логгер "bot": __main__ в проде расходился с lumen_*.py (видно в Sentry).
-    return logging.getLogger("bot")
+    logger = logging.getLogger("bot")
+    logger.info("[setup] Logging: level=%s, file=%s", logging.getLevelName(level), LOG_FILE_PATH)
+    return logger
 
 logger = _setup_logging()
 log = logger
@@ -1287,6 +1298,16 @@ async def global_error_handler(event: Any) -> bool:
 
 @dp.message()
 async def handle_message(message: Message) -> None:
+    # Метка чата на всех строках обработки (см. _LOG_CHAT); сброс в finally —
+    # иначе значение утечёт в следующий апдейт этого же процесса.
+    token = _LOG_CHAT.set(f"chat={message.chat.id if message.chat else 0}")
+    try:
+        await _handle_message(message)
+    finally:
+        _LOG_CHAT.reset(token)
+
+
+async def _handle_message(message: Message) -> None:
     # Владельческая блокировка: ни ответа, ни контекста группы, ни счётчиков —
     # отсекаем раньше всего, включая медиагруппы и пассивный фон.
     if message.from_user is not None and _is_banned(message.from_user.id):
@@ -1574,7 +1595,10 @@ async def main() -> None:
     startup_task = asyncio.create_task(_webhook_startup(), name="webhook_startup")
     flush_task = asyncio.create_task(_flush_dirty_state(), name="state_flush")
     srv_config = uvicorn.Config(
-        app=app, host="0.0.0.0", port=7860, log_level="info", loop="asyncio", log_config=None,
+        # log_level=None: uvicorn с любым уровнем сам выставляет uvicorn.access
+        # обратно в INFO и перебивает глушение в _setup_logging — health-check
+        # GET / шёл в лог раз в минуту (прод 27.10.2026).
+        app=app, host="0.0.0.0", port=7860, log_level=None, loop="asyncio", log_config=None,
     )
     server = uvicorn.Server(srv_config)
     try:

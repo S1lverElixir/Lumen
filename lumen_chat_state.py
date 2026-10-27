@@ -719,7 +719,7 @@ async def _flush_dirty_state_once() -> None:
                     if _quota_generation == started_quota_generation:
                         _quota_dirty = False
     except Exception as exc:
-        log.warning('[state] Periodic state flush failed: %s', exc)
+        log.warning('[state] Periodic state flush failed: %s', exc, exc_info=True)
 
 
 async def _flush_dirty_state() -> None:

@@ -327,7 +327,7 @@ async def _synthesize_tts_voice(text: str) -> tuple[bytes, str, int]:
                 log.warning("[tts] ffmpeg OGG conversion failed, falling back to raw audio")
                 final_filename = f"speech{src_ext}"
     except Exception as conv_exc:
-        log.warning("[tts] ffmpeg conversion error: %s", conv_exc)
+        log.warning("[tts] ffmpeg conversion error: %s", conv_exc, exc_info=True)
         final_filename = f"speech{src_ext}"
     return final_audio, final_filename, voice_duration
 

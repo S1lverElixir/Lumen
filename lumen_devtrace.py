@@ -88,7 +88,7 @@ def _append(kind: str, payload: dict) -> bool:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
         return True
     except Exception as exc:
-        log.warning("[devtrace] Failed to append trace entry: %s", exc.__class__.__name__)
+        log.warning("[devtrace] Failed to append trace entry: %s", exc.__class__.__name__, exc_info=True)
         return False
 
 

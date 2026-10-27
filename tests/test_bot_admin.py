@@ -535,6 +535,20 @@ def test_secret_log_formatter_survives_interpreter_teardown():
         bot._SECRET_NAMES = orig
 
 
+def test_secret_log_formatter_prefixes_and_clears_chat_context():
+    # Метка чата на строках обработки — единственная связь лога с чатом;
+    # сброс обязателен, иначе метка утечёт в следующий апдейт (прод 27.10.2026).
+    import logging
+    fmt = bot._SecretLogFormatter()
+    rec = logging.LogRecord("bot", logging.INFO, __file__, 1, "hello", (), None)
+    token = bot._LOG_CHAT.set("chat=42")
+    try:
+        assert fmt.format(rec) == "[chat=42] hello"
+    finally:
+        bot._LOG_CHAT.reset(token)
+    assert fmt.format(rec) == "hello"
+
+
 def _sleep_then_cancel(loop_sleeps):
     # Первые loop_sleeps+1 вызовов sleep проходят (1.5с старта + тики),
     # дальше CancelledError останавливает бесконечный цикл стартапа.
