@@ -246,26 +246,48 @@ async def _try_send_tiktok_slideshow(
          fetch_urls = _slideshow_slide_urls(media_data, images_to_fetch)
          # Общий кап RAM на пост: больше не качаем и остаток пропускаем.
          post_budget = [bot.TIKTOK_SLIDESHOW_MAX_BYTES]
-         # Резерв бюджета — под локом ДО скачивания: проверка и вычитание иначе
-         # неатомарны при параллельных загрузках и кап пробивается (аудит H4, 10.2026).
-         _post_budget_lock = asyncio.Lock()
+         # Резерв — под локом ДО скачивания: иначе параллельные слайды пробивают
+         # кап (аудит H4, 10.2026). Если бюджет занят резервами, ждём освобождения,
+         # а не пропускаем слайд: резерв 75 МБ на 200 МБ поста выбирали первые три
+         # слайда, остальные терялись (прод 08-26.10.2026).
+         _budget_cond = asyncio.Condition()
+         _reserved = [0]
 
-         async def _download_slide_bounded(slide_url: str) -> bytes | None:
-              async with bot._tiktok_slide_download_semaphore:
-                   async with _post_budget_lock:
+         async def _reserve_budget() -> int | None:
+              async with _budget_cond:
+                   while True:
+                        # Свободно = остаток минус уже обещанное другим слайдам.
+                        free = post_budget[0] - _reserved[0]
+                        if free > 0:
+                             reservation = min(TIKTOK_DOWNLOAD_MAX_BYTES, free)
+                             _reserved[0] += reservation
+                             return reservation
+                        # Бюджет выбран реальными байтами — остаток слайдов не влезет.
                         if post_budget[0] <= 0:
                              return None
-                        # Резерв до скачивания: кап слайда — остаток бюджета.
-                        reservation = min(TIKTOK_DOWNLOAD_MAX_BYTES, post_budget[0])
-                        post_budget[0] -= reservation
-                   data = await bot._download_url_bin(
-                        session, slide_url, headers=headers,
-                        cap_bytes=reservation,
-                   )
+                        await _budget_cond.wait()
+
+         async def _release_budget(reservation: int, data: bytes | None) -> None:
+              async with _budget_cond:
+                   _reserved[0] -= reservation
+                   post_budget[0] -= len(data or b"")
+                   _budget_cond.notify_all()
+
+         async def _download_slide_bounded(slide_url: str) -> bytes | None:
+              reservation = await _reserve_budget()
+              if reservation is None:
+                   return None
+              data = None
+              try:
+                   async with bot._tiktok_slide_download_semaphore:
+                        data = await bot._download_url_bin(
+                             session, slide_url, headers=headers,
+                             cap_bytes=reservation,
+                        )
+              finally:
                    # Неиспользованный резерв возвращаем: реальный расход — только len(data).
-                   async with _post_budget_lock:
-                        post_budget[0] += reservation - len(data or b"")
-                   return data or None
+                   await _release_budget(reservation, data)
+              return data or None
 
          downloaded = list(await asyncio.gather(
               *(_download_slide_bounded(u) for u in fetch_urls)

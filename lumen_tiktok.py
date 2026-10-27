@@ -401,6 +401,10 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
     # URL — из JSON чужого сервиса (TikWM): качаем только http(s) (AUD-D-003)
     # и только с публичных адресов (SSRF-гард ниже). cap_bytes — отдельный кап
     # вызывающего (видео режем лимитом отправки Telegram, а не общим 75МБ).
+    # Не-строка вместо ссылки раньше роняла urlsplit и весь пост.
+    if not isinstance(url, str):
+        log.warning("[download] Refusing non-string URL %r.", url)
+        return None
     cap = cap_bytes if cap_bytes is not None else TIKTOK_DOWNLOAD_MAX_BYTES
     scheme = urllib.parse.urlsplit(url).scheme.lower()
     if scheme not in ("http", "https"):

@@ -1848,6 +1848,11 @@ def test_download_url_bin_honors_caller_cap():
     assert result is None
 
 
+def test_download_url_bin_rejects_non_string_url():
+    # TikWM — чужой JSON: число или объект вместо ссылки раньше роняли urlsplit.
+    assert asyncio.run(lumen_tiktok._download_url_bin(None, 123)) is None
+
+
 def test_slideshow_stops_at_post_budget(monkeypatch):
     # Аудит D1/A7-1: общий кап RAM на пост — остаток слайдов пропускается.
     calls = {}
@@ -1934,6 +1939,55 @@ def test_slideshow_slide_download_reserves_post_budget(monkeypatch):
         assert all(cap <= lumen_tiktok.TIKTOK_DOWNLOAD_MAX_BYTES for cap in seen_caps.values())
     finally:
         bot.chat_state.pop(999984, None)
+
+
+def test_slideshow_waits_for_post_budget_instead_of_dropping_slides(monkeypatch):
+    # 08-26.10.2026: резерв 75МБ на слайд при 200МБ на пост выбирали весь бюджет
+    # первыми тремя слайдами, остальные молча пропускались.
+    sent_media = []
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        # Задержка нужна, чтобы слайды реально шли параллельно: без неё первый
+        # успевает вернуть резерв до старта второго и старый баг не виден.
+        await asyncio.sleep(0.01)
+        # Честный фейк: сверх капа не отдаёт, как настоящий _download_url_bin.
+        payload = b"k" * 1024
+        if cap_bytes is not None and cap_bytes < len(payload):
+            return None
+        return payload
+
+    class _FakeTgBot:
+        async def send_photo(self, **kwargs):
+            sent_media.append(kwargs["photo"])
+            return SimpleNamespace()
+
+        async def send_video(self, **kwargs):
+            sent_media.append(kwargs["video"])
+            return SimpleNamespace()
+
+        async def send_media_group(self, **kwargs):
+            sent_media.extend(kwargs["media"])
+            return SimpleNamespace()
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "TIKTOK_SLIDESHOW_MAX_BYTES", 10 * 1024)
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "_delete_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "bot", _FakeTgBot())
+    incoming = _FakeIncomingMessage(999986)
+    incoming.message_id = 7
+    media_data = {"images": [f"http://x/{i}.jpg" for i in range(5)]}
+    try:
+        result = asyncio.run(bot._try_send_tiktok_slideshow(
+            None, media_data, incoming, None, "author", {},
+        ))
+        assert result is True
+        assert len(sent_media) == 5
+    finally:
+        bot.chat_state.pop(999986, None)
 
 
 def test_group_tiktok_link_passive_only_when_mention_required(monkeypatch):

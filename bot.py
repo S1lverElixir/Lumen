@@ -1110,6 +1110,7 @@ from lumen_tiktok import (
     _tiktok_music_page_id,
     _write_mp3_tags,
     _download_url_bin,
+    TIKTOK_DOWNLOAD_MAX_BYTES,
     _probe_audio_duration,
     _probe_video_dimensions,
     _generate_video_thumbnail,
@@ -1355,6 +1356,15 @@ async def _webhook_startup() -> None:
     # Синхронное дисковое чтение в потоке: иначе старт стопорит приём /webhook.
     await asyncio.to_thread(load_state_from_disk)
     log.info("Bot startup: webhook mode.")
+    # На Space кап можно переопределить env: без этой строки в логах не видно,
+    # какой лимит реально работает (разбор 26.10.2026).
+    log.info(
+        "[setup] TikTok limits: post=%.0fMB, slide=%.0fMB, slide concurrency=%d, Telegram upload=%.0fMB",
+        TIKTOK_SLIDESHOW_MAX_BYTES / (1024 * 1024),
+        TIKTOK_DOWNLOAD_MAX_BYTES / (1024 * 1024),
+        TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY,
+        TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES / (1024 * 1024),
+    )
     _check_temporary_free_models_expiry()
     _check_unconfirmed_model_quotas()
     _check_scheduled_removals_due()
