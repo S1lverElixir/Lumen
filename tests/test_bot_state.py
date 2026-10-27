@@ -1366,6 +1366,45 @@ def test_continue_rewrites_prompt_and_clears_flag(rate_guard_setup, monkeypatch)
     bot.chat_state.pop(123, None)
 
 
+def test_stream_interrupted_survives_successful_answer(rate_guard_setup, monkeypatch):
+    # Что защищает: пометку «продолжи» после оборванного стрима. Регрессия:
+    # успешный возврат _run_route снимал state["interrupted"], который ставил
+    # стрим, и добивка переставала работать (аудит 27.10.2026).
+    message = rate_guard_setup()
+    state = _continue_state()
+    state.pop("interrupted", None)
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    message.text = "расскажи про фотосинтез"
+
+    async def fake_run_route(*args, **kwargs):
+        state["stream_interrupted"] = True
+        return "Фотосинтез — это", True
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert state.get("interrupted") is True
+    assert "stream_interrupted" not in state
+    bot.chat_state.pop(123, None)
+
+
+def test_attachment_download_failure_replies_with_fallback(rate_guard_setup, monkeypatch):
+    # Что защищает: ответ пользователю, когда файл не скачался. Регрессия:
+    # исключение вылетало из обработчика, и сообщение оставалось без ответа
+    # (аудит 27.10.2026).
+    message = rate_guard_setup()
+    message.text = "что на фото?"
+    message.photo = [SimpleNamespace(file_id="fid", mime_type="image/jpeg")]
+
+    async def failing_resolve(*args, **kwargs):
+        raise RuntimeError("network is down")
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", failing_resolve)
+    asyncio.run(bot._handle_message_core(message))
+    bot._safe_reply.assert_awaited_once()
+    reply_text = bot._safe_reply.await_args[0][1]
+    assert reply_text == bot._model_error_text("fallback", bot._chat_lang(message.chat.id))
+
+
 def test_voice_message_transcribed_into_normal_routing(rate_guard_setup, monkeypatch):
     # Войс: транскрибация уходит в общий роутинг как текст, аудио дальше не едет.
     message = rate_guard_setup()
@@ -2055,6 +2094,17 @@ def test_should_only_record_passively(text, is_private, is_guest, mentioned, exp
     ) is expected
 
 
+def test_pick_request_in_group_is_not_passive():
+    # Что защищает: выбор кнопки в группе без упоминания бота. Регрессия:
+    # сообщение уходило в пассивный фон, и человек не получал ответа (аудит 27.10.2026).
+    msg = _FakeIncomingMessage(1)
+    msg._pick_resolved = True
+    assert bot._should_only_record_passively(
+        msg, "посоветуй фильм (жанр: Триллер)",
+        is_private=False, is_guest=False, mentioned=False,
+    ) is False
+
+
 def test_handle_message_core_known_route_outcome_logs_as_warning_not_exception(caplog):
     # РЕГРЕССИЯ (аудит логирования): GeminiAllModelsExhaustedError/
     # RouteBudgetExceededError — известные, уже обрабатываемые исходы (реальный
@@ -2613,6 +2663,18 @@ def test_album_logs_skipped_files(monkeypatch, caplog):
         assert "Skipped 1 of 2" in caplog.text
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def test_album_extras_exclude_main_message_not_position():
+    # Что защищает: состав extra_media альбома. Регрессия: старый код брал
+    # messages[1:10] и при подписи на втором фото терял первый файл, а основное
+    # сообщение отправлял ещё раз как дополнительное (аудит 27.10.2026).
+    import lumen_message_core
+    first = _album_message(999981, caption="опиши", file_id="fid-a")
+    main = _album_message(999982, file_id="fid-b")
+    third = _album_message(999983, file_id="fid-c")
+    extras = lumen_message_core._album_extra_sources([first, main, third], main)
+    assert [fid for fid, _, _ in extras] == ["fid-a", "fid-c"]
 
 
 def test_mg_evict_if_full_bounds_buffers():

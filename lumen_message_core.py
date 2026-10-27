@@ -37,6 +37,7 @@ from lumen_media import (
     _msg_media_source,
 )
 from lumen_router_config import (
+    _GEMMA_TEXT_CHAIN,
     _build_route,
     _looks_like_freshness_query,
     _looks_like_heavy_query,
@@ -143,18 +144,9 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     if any(_direct_attachment_needs_gemini(m) for m in messages) and await _refuse_daily_gemini(main_msg, uid, entry):
         return
     extra_media: list[tuple[bytes, str]] = []
-    MAX_ALBUM_EXTRA = 9  # первое уходит как основное, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу)
     album_state = bot.get_state(main_msg.chat.id)
     album_user_id = main_msg.from_user.id if main_msg.from_user else None
-    targets: list[tuple[str, str, Any]] = []
-    for m in messages[1:1 + MAX_ALBUM_EXTRA]:
-        src = _msg_media_source(m)
-        if not src:
-            continue
-        fid, mime, _ = _media_file_id_and_mime(src)
-        if not fid:
-            continue
-        targets.append((fid, mime, src))
+    targets = _album_extra_sources(messages, main_msg)
     # Качаем параллельно, а не по очереди: альбом из 9 фото иначе ждал бы до ~10-20с последовательных скачиваний.
     fetched_list: list = [None] * len(targets)
     # Семафор режет in-flight память, суммарный кап — накопленную (аудит D1, 30.09.2026).
@@ -195,6 +187,29 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
         # Большие отклонены капом: честный отказ пользователю — из _handle_message_core.
         log.warning("[album] Skipped %d of %d files: over the download size cap.", too_big, len(targets))
     await bot._handle_message_core(main_msg, extra_media=extra_media or None)
+
+
+# Основное сообщение уходит отдельно, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу).
+_MAX_ALBUM_EXTRA = 9
+
+
+def _album_extra_sources(messages: list, main_msg: Any) -> list[tuple[str, str, Any]]:
+    """Файлы альбома кроме основного: подпись бывает не на первом фото (аудит 27.10.2026)."""
+    sources: list[tuple[str, str, Any]] = []
+    for m in messages:
+        if m is main_msg:
+            continue
+        if len(sources) >= _MAX_ALBUM_EXTRA:
+            break
+        src = _msg_media_source(m)
+        if not src:
+            continue
+        fid, mime, _ = _media_file_id_and_mime(src)
+        if not fid:
+            continue
+        sources.append((fid, mime, src))
+    return sources
+
 
 def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
     """Фон группы без упоминания: только контекст и медиа в state, без ответа."""
@@ -296,6 +311,10 @@ def _should_only_record_passively(message: Message, t: str, *, is_private: bool,
     упоминания бота (исторически так и задумано, см. комментарий в исходной
     _handle_message_core)."""
     if is_private or is_guest or mentioned:
+        return False
+    if getattr(message, "_pick_resolved", False):
+        # Выбор кнопки — уже прямой ответ боту: в группе без этой проверки он
+        # уходил в пассивный фон и человек не получал ответа (аудит 27.10.2026).
         return False
     url = extract_url(t)
     if url and is_tiktok(url):
@@ -595,6 +614,12 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             # Файл больше капа скачивания: честный отказ ниже вместо слепого ответа.
             med_path, med_name, media_tuple = None, "", None
             media_too_big_mb = max(1, round(exc.cap_bytes / (1024 * 1024)))
+        except Exception as exc:
+            # Сеть/прокси не отдали файл: исключение уходило из обработчика,
+            # пользователь оставался без ответа (аудит 27.10.2026).
+            log.warning("[media] Attachment download failed, replying with a fallback: %s", exc)
+            await bot._safe_reply(message, bot._model_error_text("fallback", bot._chat_lang(message.chat.id)))
+            return
 
         # Голос/аудио: сначала дешёвая транскрибация — дальше текст идёт общим роутингом по
         # сценарию (тяжесть/свежесть определяются по сказанному). Не вышло — падает в прежний
@@ -602,7 +627,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         # Один бюджет на транскрибацию и маршрут: иначе войс держал лок сверх бюджета.
         route_deadline: float | None = None
         if media_tuple and media_tuple[1].startswith("audio/"):
-            route_deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
+            route_deadline = bot._deadline_within_message(bot.ROUTE_TOTAL_BUDGET_SEC)
             transcript = await bot._transcribe_audio(media_tuple[0], media_tuple[1], message.chat.id, deadline=route_deadline)
             if transcript:
                 clean_prompt = (clean_prompt + "\n" + transcript).strip() if clean_prompt else transcript
@@ -654,10 +679,17 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             needs_youtube=needs_youtube, needs_website=needs_website,
             media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
         )
+        # Блоки и число моделей в них: полный список из 16 строк не читался.
+        route_shape: list[list[Any]] = []
+        for provider, _model_id in route:
+            if route_shape and route_shape[-1][0] == provider:
+                route_shape[-1][1] += 1
+            else:
+                route_shape.append([provider, 1])
         log.info(
-            '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s route=%s',
+            '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s route=%s (%d)',
             message.chat.id, is_heavy, needs_freshness, needs_youtube, needs_website, media_mime,
-            [f"{p}:{m}" for p, m in route],
+            " -> ".join(f"{p}:{n}" for p, n in route_shape), len(route),
         )
 
         # Дневные лимиты на пользователя — до скачивания/маршрута уже поздно, но до
@@ -669,14 +701,16 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             return
         no_search_note = False
         if bot._user_daily_gemini_exhausted(uid, _late_entry):
-            non_gemini = [(p, m) for p, m in route if p != "gemini"]
-            if not non_gemini:
+            # Gemma не тратит дефицитную квоту, поэтому остаётся и после лимита:
+            # обычный текст должен работать, как и обещает отказ (аудит 27.10.2026).
+            allowed = [(p, m) for p, m in route if p != "gemini" or m in _GEMMA_TEXT_CHAIN]
+            if not allowed:
                 # Ссылки, YouTube, видео/аудио и документы читает только Gemini.
                 await _refuse_daily_gemini(message, uid, _late_entry)
                 return
-            route = non_gemini
+            route = allowed
             # Свежесть без Gemini — честная пометка, что ответ без поиска.
-            no_search_note = needs_freshness
+            no_search_note = needs_freshness and not route_has_live_search(route)
         # Дошло до обработки: фон, инъекции и отказы выше уже отсеяны.
         bot._record_stats_event("messages_received")
 
@@ -706,6 +740,10 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             search_budget = web_search_timeout_sec()
             if route_deadline is not None:
                 search_budget = min(search_budget, max(0.0, route_deadline - time.monotonic()))
+            else:
+                remaining = bot._msg_remaining_sec()
+                if remaining is not None:
+                    search_budget = min(search_budget, remaining)
             snippets: list = []
             if search_budget > 0:
                 try:
@@ -743,6 +781,12 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             and not no_search_note
             and (not needs_freshness or head_has_live_search)
         )
+        if route_deadline is None:
+            # Один дедлайн на первый проход и пост-хок ретрай: раньше ретрай
+            # получал свежие 40с и суммарно выходил за потолок сообщения.
+            route_deadline = bot._deadline_within_message(bot.ROUTE_TOTAL_BUDGET_SEC)
+        # Маркер обрыва прошлого сообщения не должен влиять на это.
+        state.pop("stream_interrupted", None)
         try:
             provenance: dict = {}
             ans, reply_already_sent = await bot._run_route(
@@ -791,8 +835,12 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
                 ans = bot._t(message.chat.id, "fallback_no_live_search") + "\n\n" + ans
             if not reply_already_sent:
                 await bot._safe_reply(message, ans)
-            # Успешный ответ закрывает флаг обрыва (добивка тоже считается успехом).
-            state.pop("interrupted", None)
+            # Частичный стрим тоже «успешен» для вызывающего, но его пометка
+            # «продолжи» должна пережить этот блок (аудит 27.10.2026).
+            if state.pop("stream_interrupted", False):
+                state["interrupted"] = True
+            else:
+                state.pop("interrupted", None)
             bot.mark_state_dirty(message.chat.id)
             lumen_devtrace.record_answer(
                 message.chat.id, user_text=clean_prompt, route=route,
