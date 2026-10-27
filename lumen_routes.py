@@ -30,6 +30,7 @@ from lumen_model_speed import (
 )
 from lumen_router_config import (
     GEMINI_MODELS,
+    _GEMMA_TEXT_CHAIN,
     _OR_LIGHT_ORDER,
     _OR_HEAVY_ORDER,
     _OR_VISION_ORDER,
@@ -752,7 +753,6 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                          except Exception:
                              tool_calls.append("response")
         if not ans and (tool_calls or reasons):
-            retry_failed = False
             if tool_calls or any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
                 # Ответ без текста: битый вызов или голый tool_call — пользователю
                 # JSON инструментов не показываем (прод 07.10.2026), повторяем без них.
@@ -778,24 +778,19 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                         log.warning("[gemini] Model %s had MALFORMED_FUNCTION_CALL, retried without tools successfully.", model_id)
                     elif retry_resp is not None:
                         # Повтор прошёл, но вернул пусто без исчерпания бюджета:
-                        # это повод на следующую модель, а не заглушка успеха.
-                        retry_failed = True
+                        # это повод на следующую модель.
                         log.warning("[gemini] Retry after MALFORMED_FUNCTION_CALL returned empty text, trying the next model.")
                     elif deadline is not None and deadline - time.monotonic() <= 0:
-                        # Повтор не успел уложиться в бюджет маршрута. Возвращаем ПУСТОЙ
-                        # ответ, чтобы ask_gemini ушёл на следующую модель, а не подсунул
-                        # пользователю "[Ответ заблокирован...]" (враждебное ревью 27.09.2026):
-                        # раньше повтор выполнялся почти всегда, и эта ветка не всплывала.
-                        retry_failed = True
+                        # Повтор не успел уложиться в бюджет маршрута: отдаём пусто,
+                        # ask_gemini перейдёт к следующей модели.
                         log.warning("[gemini] Retry after MALFORMED_FUNCTION_CALL skipped: route budget is exhausted, trying the next model.")
                 except Exception as retry_exc:
                     log.warning("[gemini] Retry without tools after MALFORMED_FUNCTION_CALL also failed: %s", retry_exc)
-                    # Повтор упал — тоже отдаём пусто: маршрут должен уйти на следующую
-                    # модель, а не показывать заглушку блокировки как готовый ответ
-                    # (иначе цепочка останавливалась на первой же битой модели).
-                    retry_failed = True
-            if not ans and not retry_failed and reasons:
-                ans = f"[Ответ заблокирован или пуст. Причина: {', '.join(reasons)}]"
+                    # Повтор упал — отдаём пусто: маршрут уйдёт к следующей модели,
+                    # а не остановится на первой же битой.
+            # Блокировка (SAFETY/RECITATION) — не ответ: пустая строка двигает цепочку
+            # дальше, а локализованный отказ пользователь увидит, только если не ответил
+            # никто (аудит 27.10.2026: русская заглушка останавливала маршрут).
     # Пустая строка без блокировки — не "Empty response": ask_gemini пробует следующую модель.
     return ans.strip()
 
@@ -1014,16 +1009,23 @@ async def _run_route(
         # Снаружи дедлайн приходит с транскрибацией: она уже потратила часть бюджета.
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
 
-    groups: dict[str, list[str]] = {"gemini": [], "openrouter": [], "groq": []}
+    # Блоки идут ПОДРЯД, как собраны: Gemma → Groq → OpenRouter → Gemini-резерв.
+    # Склейка по провайдеру ставила 11 Gemini-моделей впереди Groq и съедала
+    # 40-секундный бюджет до первого независимого провайдера (аудит 27.10.2026).
+    runs: list[tuple[str, list[str]]] = []
     for provider, model_id in route:
-        groups.setdefault(provider, []).append(model_id)
+        if runs and runs[-1][0] == provider:
+            runs[-1][1].append(model_id)
+        else:
+            runs.append((provider, [model_id]))
     first_provider = route[0][0]
-    # Порядок провайдеров — по первому появлению в маршруте (для прежних двухпровайдерных маршрутов то же самое: голова + второй).
-    provider_order = list(dict.fromkeys(p for p, _ in route))
 
     # Учёт дневных лимитов пользователя — только дошедшие до модели ответы.
-    def _count_user_answer(provider_name: str) -> None:
-        bot._record_user_daily(bot._user_key_for_message(message), gemini=(provider_name == "gemini"))
+    # Gemma не в счёт: у неё отдельная большая квота, иначе 5 обычных сообщений
+    # запирали голос/видео на день (аудит 27.10.2026).
+    def _count_user_answer(provider_name: str, model_id: str | None = None) -> None:
+        counts_gemini = provider_name == "gemini" and (model_id or "") not in _GEMMA_TEXT_CHAIN
+        bot._record_user_daily(bot._user_key_for_message(message), gemini=counts_gemini)
         bot._record_stats_event("answers_sent")
 
     # Кто фактически ответил (прод 12.10.2026): для пост-проверки живого поиска.
@@ -1041,7 +1043,7 @@ async def _run_route(
             streamed, placeholder = await bot._try_gemini_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (gemini:%s)', chat_id, head_model)
-                _count_user_answer("gemini")
+                _count_user_answer("gemini", head_model)
                 _note_answered("gemini", head_model)
                 return streamed, True
             tried_stream_model, tried_stream_provider = head_model, "gemini"
@@ -1068,8 +1070,8 @@ async def _run_route(
     is_video_or_audio = bool(media) and any(not (m[1] or "").startswith("image/") for m in media)
     last_exc: Exception | None = None
     media_note_added = False
-    for provider in provider_order:
-        ids = list(groups.get(provider) or [])
+    for run_index, (provider, run_ids) in enumerate(runs):
+        ids = list(run_ids)
         if provider == tried_stream_provider and tried_stream_model in ids:
             ids = [m for m in ids if m != tried_stream_model]
         if not ids:
@@ -1101,9 +1103,9 @@ async def _run_route(
                     await bot._delete_message_quietly(reusable_placeholder)
                 reusable_placeholder = None
                 if reused:
-                    _count_user_answer(provider)
+                    _count_user_answer(provider, (provenance or {}).get("model"))
                     return ans, True
-            _count_user_answer(provider)
+            _count_user_answer(provider, (provenance or {}).get("model"))
             return ans, False
         except asyncio.CancelledError:
             # Отмена посреди ответа: плейсхолдер чистим, отмену пробрасываем —
@@ -1124,11 +1126,7 @@ async def _run_route(
                 media_note_added = True
             log.warning('[router] Provider %s failed completely (%s), trying the next one on the route, if any.', provider, exc)
             # Суточный счётчик /stats: дальше по маршруту есть кому ответить.
-            try:
-                _left = provider_order.index(provider) + 1
-            except ValueError:
-                _left = len(provider_order)
-            if any(groups.get(_p) for _p in provider_order[_left:]):
+            if any(ids for _, ids in runs[run_index + 1:]):
                 bot._record_stats_event("fallbacks")
 
     if reusable_placeholder is not None:

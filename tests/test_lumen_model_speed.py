@@ -71,7 +71,7 @@ def test_first_chunk_limit_respects_floor_and_adapts():
     assert lumen_model_speed.first_chunk_limit_sec(slow, 12.0) == 75.0
 
 
-def test_reorder_route_sorts_within_provider_blocks_only():
+def test_reorder_route_sorts_within_consecutive_runs_only():
     _reset()
     slow = ("openrouter", "slow:free")
     fast = ("openrouter", "fast:free")
@@ -79,8 +79,10 @@ def test_reorder_route_sorts_within_provider_blocks_only():
     lumen_model_speed.record_response(lumen_model_speed.speed_key(*fast), total_sec=5.0)
     route = [slow, ("gemini", "gemini-3.8-flash"), fast, ("openrouter", "openrouter/free")]
     reordered = lumen_model_speed.reorder_route(route)
+    # Блоки не склеиваются по провайдеру: медленная голова не переезжает через
+    # Gemini, порядок блоков остаётся кураторским (аудит 27.10.2026).
     assert [m for _, m in reordered] == [
-        "fast:free", "openrouter/free", "slow:free", "gemini-3.8-flash",
+        "slow:free", "gemini-3.8-flash", "fast:free", "openrouter/free",
     ]
 
 

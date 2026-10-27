@@ -366,14 +366,14 @@ def test_extract_gemini_answer_skips_retry_when_route_budget_spent():
         bot.client = original_client
 
 
-def test_extract_gemini_answer_reports_non_malformed_block_without_retry_state():    # Пустой ответ с причиной без MALFORMED_FUNCTION_CALL не должен падать из-за
-    # неинициализированного флага пропуска ретрая. Раньше правка оставляла переменную
-    # только внутри MALFORMED-ветки и такой ответ давал UnboundLocalError.
+def test_extract_gemini_answer_returns_empty_for_blocked_response():
+    # Блокировка (SAFETY) — не ответ: пустая строка двигает цепочку дальше,
+    # а не подсовывает пользователю русскую техническую заглушку (аудит 27.10.2026).
     resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="SAFETY")])
     ans = asyncio.run(bot._extract_gemini_answer_text(
         resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
     ))
-    assert "SAFETY" in ans
+    assert ans == ""
 
 
 def test_extract_gemini_answer_retries_without_tools_on_tool_only_response():
@@ -1871,6 +1871,81 @@ def test_run_route_failure_records_no_user_daily():
         assert "777012" not in bot.GLOBAL_QUOTA.get("user_daily", {})
     finally:
         bot.ask_openrouter_text = original
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_run_route_keeps_route_block_order(monkeypatch):
+    # Что защищает: маршрут исполняется блоками в том порядке, как собран
+    # (Gemma → Groq → OpenRouter → Gemini-резерв). Регрессия: склейка блоков по
+    # провайдеру отправляла Gemma одним вызовом со всей Gemini-цепочкой и съедала
+    # бюджет до первого независимого провайдера (аудит 27.10.2026).
+    calls = []
+
+    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None,
+                              deadline=None, provenance=None):
+        calls.append(("gemini", list(model_chain)))
+        if model_chain == ["gemini-3.8-flash"]:
+            if provenance is not None:
+                provenance.update(provider="gemini", model="gemini-3.8-flash")
+            return "резерв Gemini"
+        raise RuntimeError("gemma недоступна")
+
+    async def failing_groq(cid, prompt, model_chain, deadline=None):
+        calls.append(("groq", list(model_chain)))
+        raise bot.GroqAPIError("overloaded", status_code=503)
+
+    async def failing_or(cid, prompt, model_chain, deadline=None):
+        calls.append(("openrouter", list(model_chain)))
+        raise bot.OpenRouterAPIError("сломано", status_code=500)
+
+    monkeypatch.setattr(bot, "ask_gemini", fake_ask_gemini)
+    monkeypatch.setattr(bot, "ask_groq_text", failing_groq)
+    monkeypatch.setattr(bot, "ask_openrouter_text", failing_or)
+    route = [
+        ("gemini", "gemma-4-26b-a4b-it"),
+        ("groq", "qwen/qwen3.8-27b"),
+        ("openrouter", "liquid/lfm-2.5-2.6b:free"),
+        ("gemini", "gemini-3.8-flash"),
+    ]
+    ans, sent = asyncio.run(bot._run_route(999310, "привет", route, message=None, allow_stream=False))
+    assert ans == "резерв Gemini" and sent is False
+    assert calls == [
+        ("gemini", ["gemma-4-26b-a4b-it"]),
+        ("groq", ["qwen/qwen3.8-27b"]),
+        ("openrouter", ["liquid/lfm-2.5-2.6b:free"]),
+        ("gemini", ["gemini-3.8-flash"]),
+    ]
+
+
+def test_run_route_gemma_answer_does_not_spend_gemini_user_limit():
+    # Что защищает: дневной лимит Gemini у пользователя. Регрессия: ответ Gemma
+    # считался как Gemini, и несколько обычных сообщений запирали голос/видео
+    # на сутки (аудит 27.10.2026). Модель берётся из provenance, как в проде.
+    from types import SimpleNamespace
+    chat_id = 999311
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777013)
+
+    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None,
+                              deadline=None, provenance=None):
+        if provenance is not None:
+            provenance.update(provider="gemini", model="gemma-4-26b-a4b-it")
+        return "Ответ Gemma"
+
+    original = bot.ask_gemini
+    bot.ask_gemini = fake_ask_gemini
+    try:
+        ans, _ = asyncio.run(bot._run_route(
+            chat_id, "привет", [("gemini", "gemma-4-26b-a4b-it")], incoming,
+            allow_stream=False, provenance={},
+        ))
+        assert ans == "Ответ Gemma"
+        entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("777013")
+        assert entry is not None
+        assert entry["total"] == 1 and entry["gemini"] == 0
+    finally:
+        bot.ask_gemini = original
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777013", None)
         bot.chat_state.pop(chat_id, None)
 
 

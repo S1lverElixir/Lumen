@@ -68,16 +68,18 @@ def first_chunk_limit_sec(key: str, floor_sec: float) -> float:
 
 
 def reorder_route(route: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Переупорядочить маршрут по задержкам, не ломая архитектуру: блоки провайдеров на месте, внутри блока — по ожидаемому времени. Сортировка стабильная, новички сохраняют кураторский порядок."""
-    blocks: list[list[tuple[str, str]]] = []
-    block_index: dict[str, int] = {}
-    for item in route:
-        provider = item[0]
-        if provider not in block_index:
-            block_index[provider] = len(blocks)
-            blocks.append([])
-        blocks[block_index[provider]].append(item)
+    """Переставить модели по задержкам внутри подряд идущего блока одного провайдера.
+
+    Склейка блоков по провайдеру уводила резервную Gemini-цепочку вперёд Groq
+    (аудит 27.10.2026); порядок блоков — часть защиты квот, поэтому не трогаем его.
+    """
     ordered: list[tuple[str, str]] = []
-    for block in blocks:
-        ordered.extend(sorted(block, key=lambda item: expected_total_sec(speed_key(item[0], item[1]))))
+    run: list[tuple[str, str]] = []
+    for item in route:
+        if run and item[0] != run[-1][0]:
+            ordered.extend(sorted(run, key=lambda i: expected_total_sec(speed_key(i[0], i[1]))))
+            run = []
+        run.append(item)
+    if run:
+        ordered.extend(sorted(run, key=lambda i: expected_total_sec(speed_key(i[0], i[1]))))
     return ordered
