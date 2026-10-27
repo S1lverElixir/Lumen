@@ -261,6 +261,10 @@ def _check_temporary_free_models_expiry() -> None:
     """Предупреждает про модели с истёкшим промо (для снятых навсегда предупреждать не о чем)."""
     today = date.today()
     for model_id, note in _OR_MODEL_HEALTH.items():
+        # Реестр целиком уходит в исключённые, поэтому на деле ветка молчит: строки
+        # про снятые модели повторялись при каждом рестарте без пользы (прод 27.10.2026).
+        if model_id in _ROUTER_EXCLUDED_OR_MODELS:
+            continue
         if note.promo_expiry is not None and today > note.promo_expiry:
             log.warning(
                 '[or] Temporary free access to model %s expired on %s (today is %s) — %s The router no longer selects it (_ROUTER_EXCLUDED_OR_MODELS), but check the current price on openrouter.ai if you ever need to bring it back.',

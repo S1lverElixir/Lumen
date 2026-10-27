@@ -401,15 +401,23 @@ def test_model_health_registry_contains_all_three_known_incidents():
         assert lumen_router_config._OR_MODEL_HEALTH[model_id].reason
 
 
-def test_check_temporary_free_models_expiry_warns_using_registry_reason(caplog):
+def test_check_temporary_free_models_expiry_warns_only_for_selectable_models(caplog, monkeypatch):
     import logging
+    # Снятые модели уже вне роутера — предупреждать не о чем (прод 27.10.2026).
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        lumen_router_config._check_temporary_free_models_expiry()
+    assert not [r for r in caplog.records if "Temporary free access" in r.getMessage()]
+
+    # Ещё выбираемая модель с истёкшим промо — предупреждение с причиной из реестра,
+    # а не отдельным захардкоженным текстом.
+    caplog.clear()
+    monkeypatch.setattr(lumen_router_config, "_ROUTER_EXCLUDED_OR_MODELS", frozenset())
     with caplog.at_level(logging.WARNING, logger="bot"):
         lumen_router_config._check_temporary_free_models_expiry()
     messages = "\n".join(r.getMessage() for r in caplog.records)
-    # qwen3-coder/hy3 промо давно истекло (даты в прошлом) — предупреждение должно
-    # включать причину прямо из реестра, а не отдельный захардкоженный текст.
     assert "qwen/qwen3-coder:free" in messages
     assert "tencent/hy3:free" in messages
+    assert lumen_router_config._OR_MODEL_HEALTH["qwen/qwen3-coder:free"].reason in messages
 
 
 def test_model_health_note_without_promo_expiry_is_permanent_exclusion():
