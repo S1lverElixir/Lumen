@@ -1384,7 +1384,7 @@ async def _handle_message(message: Message) -> None:
     if waiters >= _MAX_CHAT_LOCK_WAITERS:
         log.warning("[lock] Too many waiters for chat %s", chat_id)
         with contextlib.suppress(Exception):
-            await _tg_call(message.reply, _t_no_create(chat_id, "lock_busy"))
+            await _tg_call(_answer_sender(message), _t_no_create(chat_id, "lock_busy"))
         return
     _chat_lock_waiters[chat_id] = waiters + 1
     try:
@@ -1395,7 +1395,7 @@ async def _handle_message(message: Message) -> None:
             with contextlib.suppress(Exception):
                  # Ответ без создания чата: обычный _t через get_state завёл бы запись
                  # даже тому, кого отшили «занято» (та же причина, что у лимита).
-                 await _tg_call(message.reply, _t_no_create(chat_id, "lock_busy"))
+                 await _tg_call(_answer_sender(message), _t_no_create(chat_id, "lock_busy"))
             return
     finally:
         left = _chat_lock_waiters.get(chat_id, 1) - 1
