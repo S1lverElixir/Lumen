@@ -69,6 +69,38 @@ def test_simple_thought_activity_is_italic_not_quote(monkeypatch):
     bot.chat_state.pop(999902, None)
 
 
+def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
+    # Фото/видео скачаны раньше вызова модели: этап закрывается галочкой,
+    # а в статусе тикает «Думаю… N с», как в Claude (ревью 28.10.2026).
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999903)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_viewing_image")
+        await status.mark_stage_done()
+        await status.finish()
+        return status
+
+    status = asyncio.run(scenario())
+    live = incoming.sent[0].edits[-1][0]
+    assert "✓ Looking at the image" in live
+    assert "Thinking… 0s" in live
+    _, plain = status.activity_prefix()
+    assert "✓ Looking at the image" in plain
+    assert "Thought for" in plain
+    bot.chat_state.pop(999903, None)
+
+
+def test_initial_status_never_calls_audio_or_documents_a_video():
+    # Голосовое и PDF раньше показывали «Смотрю видео» — ложный этап.
+    from lumen_message_core import _initial_status
+    assert _initial_status(False, False, "image/jpeg", False) == ("progress_viewing_image", False)
+    assert _initial_status(False, False, "video/mp4", False) == ("progress_watching_video", False)
+    assert _initial_status(False, False, "audio/ogg", False) == ("progress_thinking", True)
+    assert _initial_status(False, False, "application/pdf", False) == ("progress_thinking", True)
+    assert _initial_status(False, False, None, True) == ("progress_searching", False)
+
+
 def test_retry_phase_is_not_a_completed_step(monkeypatch):
     # Прод 28.10.2026: фолбэк «пробую ещё раз» попадал в итоговый блок как
     # выполненный шаг и обнулял таймер «Думал N с».

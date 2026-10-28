@@ -96,6 +96,15 @@ class StatusMessage:
             self._thought_seconds = self._elapsed_seconds()
         await self.stop()
 
+    async def mark_stage_done(self) -> None:
+        """Ранний этап (файл уже скачан) закрываем галочкой и включаем живой
+        таймер размышления: иначе фото/видео висели статичной фразой без
+        секунд, пока модель отвечает (ревью 28.10.2026)."""
+        if self._phrase_key and not self._timed and self._phrase_key not in (
+                "progress_thinking", "progress_retry"):
+            self.add_done(self._phrase_key)
+            await self.set_phase("progress_thinking", timed=True)
+
     def _elapsed_seconds(self) -> int:
         # Длительность считаем от начала thinking, а не от последней фазы:
         # фолбэк «пробую ещё раз» сбрасывал таймер в 0 (прод 28.10.2026).

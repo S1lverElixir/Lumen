@@ -588,7 +588,7 @@ def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
     import lumen_streaming
     seen = {}
 
-    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit, first_task=None, status=None):
+    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit, first_task=None, status=None, wait_started=None):
         seen["limit"] = first_chunk_limit
         if first_task is not None:
             yield await first_task
@@ -715,6 +715,10 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     import lumen_status
     assert all(text[0] in lumen_status._SPINNER_FRAMES and "Thinking" in text
                for text, _ in placeholder.edits)
+    # Плейсхолдер уже показывает кадр 0 (✻): тикер обязан начать со второго,
+    # иначе первая же правка повторяет тот же символ (ревью 28.10.2026).
+    assert placeholder.edits[0][0].startswith(lumen_status._SPINNER_FRAMES[1])
+    assert len({text[0] for text, _ in placeholder.edits}) == 3
     # Код языка не должен утечь в chat_state строковым ключом (прод 28.10.2026).
     assert "en" not in bot.chat_state
 

@@ -43,15 +43,19 @@ from lumen_typing_pace import (
 
 log = logging.getLogger("bot")
 
-async def _tick_waiting_dots(placeholder: Message) -> None:
+async def _tick_waiting_dots(placeholder: Message, *, started: float | None = None) -> None:
     """Фраза ожидания до первого куска (как в Claude): «Думаю…» с анимацией, не голые точки. Первый кадр после паузы (быстрые модели анимации не видят), дальше кадр по тику. Правки через _tg_call с глотанием ошибок, отмена — штатная остановка."""
     import bot
-    started = time.monotonic()
+    # started — общий старт ожидания маршрута: после сбоя одной модели таймер
+    # продолжает идти, а не откатывается к нулю (ревью 28.10.2026).
+    started = started if started is not None else time.monotonic()
     try:
         await bot._dots_sleep(bot._DOTS_START_AFTER_SEC)
         chat = getattr(placeholder, "chat", None)
         lang = bot._chat_lang(getattr(chat, "id", None))
-        frame_idx = 0
+        # Первый кадр (✻) уже стоит в отправленном плейсхолдере: начинаем со
+        # второго, иначе 0.5с спустя искра «замирает» на том же символе.
+        frame_idx = 1
         while True:
             elapsed = max(0, int(time.monotonic() - started))
             spark = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
@@ -66,7 +70,7 @@ async def _tick_waiting_dots(placeholder: Message) -> None:
         raise
 
 
-async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, first_chunk_limit: float, first_task=None, status=None):
+async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, first_chunk_limit: float, first_task=None, status=None, wait_started: float | None = None):
     """Генератор + ожидание первого куска: адаптивный предел (зависшая попытка — TimeoutError, плейсхолдер уйдёт следующей модели) и живой статус строго до первого yield. Пустой стрим — просто конец.
 
     status — живой статус из lumen_status.StatusMessage: его тикер уже рисует
@@ -75,7 +79,9 @@ async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, fir
 
     first_task — уже запущенный запрос первого куска (см. _run_streaming_reply):
     он стартует параллельно с отправкой плейсхолдера."""
-    dots_task = None if status is not None else asyncio.create_task(_tick_waiting_dots(placeholder))
+    dots_task = None if status is not None else asyncio.create_task(
+        _tick_waiting_dots(placeholder, started=wait_started)
+    )
     try:
         try:
             pending = first_task if first_task is not None else piece_agen.__anext__()
@@ -238,7 +244,7 @@ async def _groq_stream_pieces(model_id: str, messages: list[dict], *, deadline: 
 async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
     deadline: float | None = None, status=None, history_text=None,
-    reuse_placeholder: Message | None = None,
+    reuse_placeholder: Message | None = None, wait_started: float | None = None,
 ) -> tuple[str | None, Message | None]:
     """Стриминг: генератор кусков + плейсхолдер, чанкинг, троттлинг, обрыв при утечке/инъекции, HTML-финал, запись в историю. Возвращает (ответ, плейсхолдер): успех — (текст, None); сбой до показа — (None, плейсхолдер для следующей модели); сбой после — (показанное + пометка, None)."""
     import bot
@@ -299,6 +305,7 @@ async def _run_streaming_reply(
             first_chunk_limit=first_chunk_limit,
             first_task=first_task,
             status=status,
+            wait_started=wait_started,
         )
         async for piece in piece_agen:
             if not piece:
@@ -564,7 +571,7 @@ async def _run_streaming_reply(
     bot._record_quota_usage(provider, model_id)
     return final_answer, None
 
-async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None) -> tuple[str | None, Message | None]:
+async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Gemini (строит contents/config)."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
@@ -573,21 +580,21 @@ async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, 
     contents = await bot._build_gemini_turn_contents(chat_id, user_text)
     call_contents, gconfig = bot._build_gemini_call_config(model_id, contents)
     piece_agen = _gemini_stream_pieces(model_id, call_contents, gconfig, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
 
-async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None) -> tuple[str | None, Message | None]:
+async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для OpenRouter (SSE через chat/completions)."""
     import bot
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
     # Генератор — через bot.: тесты подменяют bot._openrouter_stream_pieces фейком.
     piece_agen = bot._openrouter_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
 
-async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None) -> tuple[str | None, Message | None]:
+async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Groq (SSE через chat/completions). Историю режем тем же _trim_messages_for_groq, что обычный путь, — иначе стрим-проба падает с 413 ещё до цепочки."""
     import bot
     from lumen_routes import _trim_messages_for_groq
     messages = _trim_messages_for_groq(bot._build_openrouter_turn_messages(chat_id, user_text, model_id))
     # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
     piece_agen = bot._groq_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)

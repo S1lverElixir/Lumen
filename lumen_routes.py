@@ -1046,6 +1046,9 @@ async def _run_route(
     # Ранний сбой стрима не отменяет обычный вызов: модель пробуется ещё раз
     # без потока, иначе сломанный SSE у провайдера остался бы без ответа вовсе.
     reusable_placeholder: Message | None = status.message if status is not None else None
+    # Единый старт ожидания на весь маршрут: таймер «Думаю… N с» не должен
+    # откатываться при переходе к следующей модели (ревью 28.10.2026).
+    stream_wait_started: float | None = None
     if allow_stream and (media or youtube_url):
         # Стрим-обёртки собирают контекст без вложений: с медиа только обычный путь.
         allow_stream = False
@@ -1058,7 +1061,7 @@ async def _run_route(
     async def _try_stream(provider_name: str, model_id: str):
         kwargs = dict(
             deadline=deadline, status=status, history_text=history_text,
-            reuse_placeholder=reusable_placeholder,
+            reuse_placeholder=reusable_placeholder, wait_started=stream_wait_started,
         )
         if provider_name == "gemini":
             return await bot._try_gemini_streaming(chat_id, ai_prompt, message, model_id, **kwargs)
@@ -1084,6 +1087,8 @@ async def _run_route(
                 if time.monotonic() > deadline:
                     log.warning('[router] Route time budget exhausted before streaming %s/%s.', provider, stream_model)
                     break
+                if stream_wait_started is None:
+                    stream_wait_started = time.monotonic()
                 streamed, placeholder = await _try_stream(provider, stream_model)
                 if placeholder is not None:
                     reusable_placeholder = placeholder

@@ -99,7 +99,11 @@ def _initial_status(needs_youtube: bool, needs_website: bool, media_mime: str | 
     if media_mime:
         if media_mime.startswith("image/"):
             return "progress_viewing_image", False
-        return "progress_watching_video", False
+        if media_mime.startswith("video/"):
+            return "progress_watching_video", False
+        # Аудио и документы — не видео: раньше голосовое показывало
+        # «Смотрю видео», а PDF — то же самое (ревью 28.10.2026).
+        return "progress_thinking", True
     return "progress_thinking", True
 
 # Суммарный кап extra-файлов альбома: 9 файлов по 20МБ + base64 давали ~250МБ
@@ -840,6 +844,10 @@ async def _handle_message_core(
         web_search_failed = True
     if status is None and status_task is not None:
         status = await status_task
+    if status is not None and not search_will_run and (media_tuple or extra_media):
+        # Файл уже скачан: этап просмотра закрываем галочкой и показываем
+        # живой таймер размышления, как в Claude (ревью 28.10.2026).
+        await status.mark_stage_done()
     # Пометка «без поиска» — только если поиск реально не дал результатов: при
     # исчерпанном лимите Gemini сниппеты едут дешёвым моделям, а не отключаются.
     no_search_note = user_gemini_limited and needs_freshness and not snippets_injected

@@ -666,7 +666,7 @@ def test_run_route_streams_fallback_model_after_head_stream_failure(monkeypatch)
     calls = []
 
     async def fake_stream(cid, prompt, message, model_id, **kwargs):
-        calls.append((model_id, kwargs.get("reuse_placeholder")))
+        calls.append((model_id, kwargs.get("reuse_placeholder"), kwargs.get("wait_started")))
         if model_id == "gemini-3.8-flash":
             return None, placeholder
         return "Ответ со стрима резерва", None
@@ -683,8 +683,10 @@ def test_run_route_streams_fallback_model_after_head_stream_failure(monkeypatch)
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert ans == "Ответ со стрима резерва"
         assert sent is True
-        assert [model for model, _ in calls] == ["gemini-3.8-flash", "meta-llama/llama-3.3-70b-instruct:free"]
+        assert [model for model, _, _ in calls] == ["gemini-3.8-flash", "meta-llama/llama-3.3-70b-instruct:free"]
         assert calls[1][1] is placeholder
+        # Таймер ожидания общий на маршрут: переход к резерву не откатывает его в 0.
+        assert calls[0][2] is not None and calls[0][2] == calls[1][2]
     finally:
         bot.chat_state.pop(chat_id, None)
 
