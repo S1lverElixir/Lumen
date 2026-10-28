@@ -121,6 +121,44 @@ def test_looks_like_freshness_query_ignores_substrings():
     assert lumen_router_config._looks_like_freshness_query("groundbreaking discovery") is False
 
 
+def test_looks_like_freshness_query_detects_multilingual():
+    # Аудит 28.10.2026: бот говорит на 25 языках, а детект свежести был RU/EN —
+    # остальные языки уезжали обычным текстом без даты и внешнего поиска.
+    assert lumen_router_config._looks_like_freshness_query("¿Cuánto cuesta el iPhone hoy?") is True
+    assert lumen_router_config._looks_like_freshness_query("Wie ist das Wetter heute?") is True
+    assert lumen_router_config._looks_like_freshness_query("Quelles sont les actualités aujourd'hui ?") is True
+    assert lumen_router_config._looks_like_freshness_query("Qual è il prezzo oggi?") is True
+    assert lumen_router_config._looks_like_freshness_query("Qual é a previsão para amanhã?") is True
+    assert lumen_router_config._looks_like_freshness_query("Wat is het nieuws vandaag?") is True
+    assert lumen_router_config._looks_like_freshness_query("Jaka jest pogoda dziś?") is True
+    assert lumen_router_config._looks_like_freshness_query("Bugün hava nasıl?") is True
+    assert lumen_router_config._looks_like_freshness_query("ما هو سعر الدولار اليوم؟") is True
+    assert lumen_router_config._looks_like_freshness_query("आज समाचार क्या हैं?") is True
+    assert lumen_router_config._looks_like_freshness_query("Berapa harga emas hari ini?") is True
+    assert lumen_router_config._looks_like_freshness_query("Giá vàng hôm nay bao nhiêu?") is True
+    assert lumen_router_config._looks_like_freshness_query("วันนี้ราคาทองเท่าไหร่") is True
+    assert lumen_router_config._looks_like_freshness_query("قیمت دلار امروز چقدر است؟") is True
+    assert lumen_router_config._looks_like_freshness_query("آج موسم کیسا ہے؟") is True
+    assert lumen_router_config._looks_like_freshness_query("Bugun ob-havo qanday?") is True
+    assert lumen_router_config._looks_like_freshness_query("আজ আবহাওয়া কেমন?") is True
+    assert lumen_router_config._looks_like_freshness_query("Ano ang balita ngayon?") is True
+    assert lumen_router_config._looks_like_freshness_query("Yini izindaba namuhla?") is True
+    assert lumen_router_config._looks_like_freshness_query("Які навіны сёння?") is True
+    assert lumen_router_config._looks_like_freshness_query("Яка погода сьогодні?") is True
+    assert lumen_router_config._looks_like_freshness_query("Бүгін ауа райы қандай?") is True
+
+
+def test_looks_like_freshness_query_multilingual_ignores_common_words():
+    # Тот же аудит: слова «время/снова/конец/утро» есть почти в каждой бытовой
+    # фразе — их в детекте нет, иначе поиск включался бы на болтовне.
+    assert lumen_router_config._looks_like_freshness_query("me gusta el tiempo libre") is False
+    assert lumen_router_config._looks_like_freshness_query("no meu tempo livre") is False
+    assert lumen_router_config._looks_like_freshness_query("Ik kom weer terug") is False
+    assert lumen_router_config._looks_like_freshness_query("son derece güzel") is False
+    assert lumen_router_config._looks_like_freshness_query("Sa panahong ito") is False
+    assert lumen_router_config._looks_like_freshness_query("Guten Morgen") is False
+
+
 def test_looks_like_search_request_detects_explicit_tool_asks():
     # Прод 11.10.2026: "найди с веб поиском" без слов свежести уходило на модели
     # без поиска — явная просьба искать теперь тоже ведёт на свежий маршрут.

@@ -426,7 +426,9 @@ async def inline_tts(message: Message, text: str) -> None:
         if sent is None:
             # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
             bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
-            raise RuntimeError("Telegram send_voice failed: connection timeout or proxy unavailable")
+            # Не оставляем пользователя без сообщения: статус уже удалён.
+            await bot._safe_reply(message, bot._t(message.chat.id, "tts_err_generic"))
+            return
     unsent = len(chunks) - len(voices)
     if unsent > 0:
         # Обрезка по общему дедлайну: за несозданные чанки не списываем.

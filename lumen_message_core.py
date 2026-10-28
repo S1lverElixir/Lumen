@@ -203,7 +203,9 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     if too_big:
         # Большие отклонены капом: честный отказ пользователю — из _handle_message_core.
         log.warning("[album] Skipped %d of %d files: over the download size cap.", too_big, len(targets))
-    await bot._handle_message_core(main_msg, extra_media=extra_media or None)
+    # Рейт-лимит уже списан в _process_media_group_buffers_locked: второй раз
+    # альбом не должен занимать слот (аудит 28.10.2026).
+    await bot._handle_message_core(main_msg, extra_media=extra_media or None, skip_rate_limit=True)
 
 
 # Основное сообщение уходит отдельно, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу).
@@ -529,7 +531,10 @@ def _direct_attachment_needs_gemini(message: Message) -> bool:
     return False
 
 
-async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, str]] | None = None) -> None:
+async def _handle_message_core(
+    message: Message, extra_media: list[tuple[bytes, str]] | None = None, *,
+    skip_rate_limit: bool = False,
+) -> None:
     import bot
     t = message.text or message.caption or ""
     is_private = message.chat.type == ChatType.PRIVATE
@@ -547,7 +552,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # Лимит проверяем ДО get_state: раньше отклонённое по лимиту сообщение всё равно
     # заводило запись чата (и переписывало индекс), раздувая состояние и вытесняя
     # реальные чаты (аудит 26.09.2026).
-    if await bot._reject_rate_limited_message(message):
+    if not skip_rate_limit and await bot._reject_rate_limited_message(message):
         return
 
     # Общий дневной лимит — до любой обработки и до get_state: отказ не создаёт
@@ -646,6 +651,12 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         # пользователь оставался без ответа (аудит 27.10.2026).
         log.warning("[media] Attachment download failed, replying with a fallback: %s", exc)
         await bot._safe_reply(message, bot._model_error_text("fallback", bot._chat_lang(message.chat.id)))
+        return
+
+    if media_too_big_mb and media_tuple is None:
+        # Подпись не должна уводить в ответ «будто файл прочитан»: честно
+        # отказываем, даже если текст непустой (аудит 28.10.2026).
+        await bot._safe_reply(message, bot._t(message.chat.id, "media_too_big", limit_mb=media_too_big_mb))
         return
 
     # Голос/аудио: сначала дешёвая транскрибация — дальше текст идёт общим роутингом по
@@ -835,6 +846,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         not gemini_media_list
         and not youtube_url_to_analyze
         and not no_search_note
+        and not is_guest
         and (not needs_freshness or head_has_live_search or snippets_injected)
     )
     if route_deadline is None:
@@ -878,7 +890,11 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
                         media=gemini_media_list, media_filename=med_name,
                         youtube_url=youtube_url_to_analyze, allow_stream=False,
                         deadline=route_deadline, provenance=provenance,
+                        history_text=clean_prompt,
                     )
+                    # Ретрай уже с найденными сниппетами: пометка «без поиска»
+                    # была бы ложью (аудит 28.10.2026).
+                    web_search_failed = False
                 except Exception as exc:
                     log.warning("[web-search] Retry with snippets failed, keeping first answer with a no-search note: %s", exc.__class__.__name__)
                     web_search_failed = True

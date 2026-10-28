@@ -764,6 +764,46 @@ def test_streaming_plain_text_adds_subtle_thought_line():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_streaming_final_split_sends_missing_continuation(monkeypatch):
+    # 4×1000 + 200 символов: инкрементальное разбиение видело один кусок,
+    # финальное дало два; раньше последняя правка затирала ответ хвостом.
+    chat_id = 999324
+
+    class _RecordingBot:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, **kwargs):
+            message = _FakeSentMessage()
+            self.sent.append((kwargs, message))
+            return message
+
+    fake_bot = _RecordingBot()
+    monkeypatch.setattr(bot, "bot", fake_bot)
+
+    async def pieces():
+        for _ in range(4):
+            yield "а" * 1000
+        yield "б" * 200
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "длинный", incoming, provider="openrouter", model_id="y:free",
+            piece_agen=pieces(),
+        ))
+        assert answer and answer.startswith("а" * 1000) and answer.endswith("б" * 200)
+        assert len(fake_bot.sent) == 1
+        first_edit = incoming.sent[0].edits[-1][0]
+        tail_edit = fake_bot.sent[0][1].edits[-1][0]
+        assert first_edit.startswith("а")
+        assert tail_edit.endswith("б")
+        # Оба сообщения вместе покрывают весь ответ, а не только хвост.
+        assert len(first_edit) + len(tail_edit) == len(answer)
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_streaming_stores_clean_history_text_not_full_prompt():
     # Аудит 28.10.2026: в историю уходил ai_prompt со сниппетами и датой;
     # сохраняем только чистый запрос пользователя.

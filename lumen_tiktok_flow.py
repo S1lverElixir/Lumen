@@ -437,8 +437,10 @@ async def _send_tiktok_single_video(
                         # Запись до 50МБ в потоке: в loop стопорила всех.
                         await asyncio.to_thread(_write_file_sync, raw_path, video_bytes)
                         # Длительность/размеры — явно: TikTok-контейнер Telegram сам не всегда разбирает (иначе "файл" 0:00).
-                        duration, width, height = await bot._probe_video_dimensions(raw_path)
-                        thumb_bytes = await bot._generate_video_thumbnail(raw_path, duration)
+                        # Общий кап ffprobe/ffmpeg: одиночные видео тоже его уважают (аудит 28.10.2026).
+                        async with bot._tiktok_probe_semaphore:
+                             duration, width, height = await bot._probe_video_dimensions(raw_path)
+                             thumb_bytes = await bot._generate_video_thumbnail(raw_path, duration)
               except Exception as probe_exc:
                    log.warning("[tiktok] Video metadata probe failed, sending without: %s", probe_exc)
 

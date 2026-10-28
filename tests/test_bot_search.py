@@ -243,6 +243,25 @@ def test_daily_limit_with_empty_search_keeps_no_search_note(rate_guard_setup, mo
     bot.chat_state.pop(123, None)
 
 
+def test_guest_message_never_streams(rate_guard_setup, monkeypatch):
+    # Аудит 28.10.2026: гостевой ответ уходит через answerGuestQuery, а не
+    # правкой сообщения — стрим редактировал бы несуществующее сообщение.
+    message = rate_guard_setup()
+    message.text = "привет"
+    message.guest_query_id = "g1"
+    monkeypatch.setattr(bot, "is_guest_message", lambda m: True)
+    captured: dict = {}
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["allow_stream"] = kwargs.get("allow_stream")
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert captured["allow_stream"] is False
+    bot.chat_state.pop(123, None)
+
+
 def test_freshness_prompt_carries_today_date(rate_guard_setup, monkeypatch):
     # Контекст даты (eval 22.10.2026): модели без живого поиска не знали текущую
     # дату и строили «завтра» по догадке. Дата обязана уехать в промпт свежего

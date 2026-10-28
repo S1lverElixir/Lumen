@@ -402,6 +402,32 @@ async def _run_streaming_reply(
         full_text = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
         # "Довывод" остатка: бэкенды одним куском в конце показывали бы "…" до самого финала. Ограничено catchup-лимитом сверху.
         final_chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
+        if not edits_dead and len(final_chunks) > len(sent_messages):
+            # Инкрементальное разбиение отстаёт на 1000 символов: к финалу
+            # мог появиться новый кусок, и последняя правка затирала ответ
+            # хвостом. Досылаем недостающие сообщения (аудит 28.10.2026).
+            while len(final_chunks) > len(sent_messages):
+                idx = len(sent_messages) - 1
+                edit_ok = await bot._tg_call(
+                    sent_messages[idx].edit_text, _md_to_html(final_chunks[idx]),
+                    parse_mode=ParseMode.HTML, call_timeout=15.0,
+                )
+                if edit_ok is None or bot.bot is None:
+                    edits_dead = True
+                    break
+                next_chunk = final_chunks[idx + 1]
+                new_msg = await bot._tg_call(
+                    bot.bot.send_message, chat_id=message.chat.id,
+                    text=_md_to_html(next_chunk),
+                    parse_mode=ParseMode.HTML, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                )
+                if new_msg is None:
+                    edits_dead = True
+                    break
+                sent_messages.append(new_msg)
+                # Новое сообщение уже содержит полный кусок: catch-up для него не нужен.
+                last_edited_plain = next_chunk
+                reveal_base_ts = time.monotonic()
         target_full = final_chunks[-1]
         already_shown_len = len(last_edited_plain) if last_edited_plain and target_full.startswith(last_edited_plain) else 0
         remaining_len = len(target_full) - already_shown_len

@@ -94,14 +94,15 @@ def test_fetch_web_snippets_merges_google_news_for_news_query(monkeypatch):
     assert lumen_search._GOOGLE_NEWS_URL in session.requested
 
 
-def test_format_snippets_for_prompt_demands_answer_only_from_snippets():
+def test_format_snippets_for_prompt_grounds_answers_and_bans_guessing():
     # Прод 28.10.2026: слабая резервная модель гадала имена/должности, хотя
-    # нужного факта в сниппетах не было. Промпт обязан запрещать догадки.
+    # нужного факта в сниппетах не было. Промпт обязан запрещать догадки и
+    # не отменять живой поиск grounding-модели.
     block = lumen_search.format_snippets_for_prompt(
         [{"title": "T", "url": "https://example.com", "snippet": "S"}]
     )
-    assert "ONLY facts explicitly present" in block
-    assert "do not guess" in block
+    assert "live search results" in block
+    assert "Do not invent" in block
     assert "say plainly that the sources do not contain it" in block
 
 

@@ -1337,11 +1337,13 @@ def test_inline_tts_sends_voice_via_tg_call(monkeypatch):
     direct.assert_not_awaited()
 
 
-def test_inline_tts_send_failure_raises(monkeypatch):
-    # Регрессия A8-01: None от _tg_call — наружу исключение, как раньше при прямом вызове.
+def test_inline_tts_send_failure_replies_with_error(monkeypatch):
+    # Аудит 28.10.2026: None от _tg_call раньше уходил исключением, а статус
+    # уже удалён — пользователь оставался без ответа. Теперь честная ошибка.
     chat_id = 999436
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
+    replies = []
 
     async def fake_tg_call(method, *args, **kwargs):
         if "voice" in kwargs:
@@ -1351,12 +1353,16 @@ def test_inline_tts_send_failure_raises(monkeypatch):
     async def fake_synth(text):
         return (b"fake-ogg", "speech.ogg", 5)
 
+    async def fake_reply(message, text, **kwargs):
+        replies.append(text)
+
     monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
     monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fake_synth)
+    monkeypatch.setattr(bot, "_safe_reply", fake_reply)
     monkeypatch.setattr(bot, "bot", SimpleNamespace(send_voice=AsyncMock(return_value=SimpleNamespace())))
     try:
-        with pytest.raises(RuntimeError, match="send_voice"):
-            asyncio.run(bot.inline_tts(incoming, "привет"))
+        asyncio.run(bot.inline_tts(incoming, "привет"))
+        assert replies == [bot._t(chat_id, "tts_err_generic")]
     finally:
         bot.chat_state.pop(chat_id, None)
 

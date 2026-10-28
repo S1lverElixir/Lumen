@@ -478,6 +478,38 @@ def test_inline_tts_sends_partial_with_shortened_note(monkeypatch):
         bot.chat_state.pop(999987, None)
 
 
+def test_inline_tts_replies_when_voice_send_fails(monkeypatch):
+    # Аудит 28.10.2026: статус «Озвучиваю» уже удалён, а send_voice вернул None —
+    # раньше пользователь оставался в полной тишине. Теперь честная ошибка,
+    # а неотправленный чанк возвращается в дневной лимит.
+    import lumen_commands
+
+    class _SilentVoiceBot(_FakeVoiceBot):
+        async def send_voice(self, **kwargs):
+            return None
+
+    async def fake_synth(text):
+        return (b"audio1", "speech.ogg", 5)
+
+    sent = {}
+
+    async def fake_reply(message, text, **kwargs):
+        sent["text"] = text
+
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fake_synth)
+    monkeypatch.setattr(bot, "_safe_reply", fake_reply)
+    monkeypatch.setattr(bot, "bot", _SilentVoiceBot())
+    incoming = _FakeIncomingMessage(999989)
+    incoming.message_id = 12353
+    bot.chat_state.pop(999989, None)
+    try:
+        asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+        assert sent.get("text") == bot._t(999989, "tts_err_generic")
+        assert int((bot._user_daily_peek(999989) or {}).get("total") or 0) == 0
+    finally:
+        bot.chat_state.pop(999989, None)
+
+
 def test_inline_tts_refuses_when_user_tts_limit_exhausted(monkeypatch):
     # Новое: исчерпанный TTS-лимит — отказ до синтеза, модель не вызывается.
     incoming = _FakeIncomingMessage(999988)

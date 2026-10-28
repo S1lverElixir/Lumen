@@ -792,7 +792,7 @@ def test_process_media_group_buffers_skips_download_when_rate_limited(monkeypatc
         downloaded.append(file_id)
         return (b"x", "image/jpeg")
 
-    async def fake_core(message, extra_media=None):
+    async def fake_core(message, extra_media=None, **kwargs):
         handled.append(extra_media)
 
     monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=True))
@@ -832,7 +832,7 @@ def test_process_media_group_buffers_checks_daily_total_before_downloading(monke
         downloaded.append(file_id)
         return (b"x", "image/jpeg")
 
-    async def fake_core(message, extra_media=None):
+    async def fake_core(message, extra_media=None, **kwargs):
         handled.append(extra_media)
 
     async def fake_safe_reply(msg, text, **kwargs):
@@ -883,7 +883,10 @@ def test_process_media_group_buffers_spends_exactly_one_rate_limit_slot(monkeypa
         downloaded.append(file_id)
         return (b"x", "image/jpeg")
 
-    async def fake_core(message, extra_media=None):
+    async def fake_core(message, extra_media=None, **kwargs):
+        # Альбомный обработчик уже списал слот — ядро не должно списывать второй
+        # (аудит 28.10.2026: двойной рейт-лимит на альбом).
+        assert kwargs.get("skip_rate_limit") is True
         return None
 
     monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
@@ -923,7 +926,7 @@ def test_process_media_group_buffers_ignores_passive_group_album(monkeypatch):  
         downloaded.append(file_id)
         return (b"x", "image/jpeg")
 
-    async def fake_core(message, extra_media=None):
+    async def fake_core(message, extra_media=None, **kwargs):
         handled.append(extra_media)
 
     async def fake_rate_limit(message):
@@ -967,7 +970,7 @@ def test_process_media_group_buffers_records_extra_photos_to_recent_media(monkey
     async def fake_fetch_media(file_id, mime):
         return (b"bytes", "image/jpeg")
 
-    async def fake_handle_core(message, extra_media=None):
+    async def fake_handle_core(message, extra_media=None, **kwargs):
         pass  # основное фото (index 0) сохраняет _resolve_incoming_media — не в фокусе этого теста
 
     original_fetch, original_core = bot._fetch_media, bot._handle_message_core
@@ -1021,7 +1024,7 @@ def test_process_media_group_buffers_holds_chat_lock(monkeypatch):
 
     rec_lock = _RecLock()
 
-    async def fake_handle_core(message, extra_media=None):
+    async def fake_handle_core(message, extra_media=None, **kwargs):
         held_during_core["held"] = rec_lock.held
 
     original_fetch, original_core, original_acquire = bot._fetch_media, bot._handle_message_core, bot.acquire_chat_lock
@@ -1288,7 +1291,7 @@ def test_process_media_group_buffers_fetches_extras_in_parallel_keeping_order(mo
         finally:
             concurrent -= 1
 
-    async def fake_handle_core(message, extra_media=None):
+    async def fake_handle_core(message, extra_media=None, **kwargs):
         captured["extra"] = extra_media
 
     original_fetch, original_core = bot._fetch_media, bot._handle_message_core
@@ -1402,6 +1405,31 @@ def test_attachment_download_failure_replies_with_fallback(rate_guard_setup, mon
     bot._safe_reply.assert_awaited_once()
     reply_text = bot._safe_reply.await_args[0][1]
     assert reply_text == bot._model_error_text("fallback", bot._chat_lang(message.chat.id))
+
+
+def test_oversized_attachment_with_caption_refuses_instead_of_answering(rate_guard_setup, monkeypatch):
+    # Аудит 28.10.2026: при подписи отказ по размеру терялся — модель отвечала
+    # так, будто файл прочитан. Теперь честный отказ до маршрута.
+    message = rate_guard_setup()
+    message.text = "что тут на фото?"
+    message.photo = [SimpleNamespace(file_id="fid", mime_type="image/jpeg")]
+
+    async def too_big(*args, **kwargs):
+        raise bot._MediaTooLargeError(30 * 1024 * 1024, 20 * 1024 * 1024)
+
+    route_calls = []
+
+    async def fake_run_route(*args, **kwargs):
+        route_calls.append(1)
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", too_big)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert route_calls == []
+    bot._safe_reply.assert_awaited_once()
+    assert bot._safe_reply.await_args[0][1] == bot._t(123, "media_too_big", limit_mb=20)
+    bot.chat_state.pop(123, None)
 
 
 def test_voice_message_transcribed_into_normal_routing(rate_guard_setup, monkeypatch):
@@ -2535,7 +2563,7 @@ def test_album_main_message_is_captioned_photo(monkeypatch):
 
     seen = {}
 
-    async def fake_core(message, extra_media=None):
+    async def fake_core(message, extra_media=None, **kwargs):
         seen["main"] = message
 
     async def allow_all(message):
@@ -2648,7 +2676,7 @@ def test_album_logs_skipped_files(monkeypatch, caplog):
 
     seen = {}
 
-    async def fake_core(message, extra_media=None):
+    async def fake_core(message, extra_media=None, **kwargs):
         seen["extra"] = extra_media
 
     monkeypatch.setattr(bot, "_fetch_media", flaky_fetch)
@@ -2851,7 +2879,7 @@ def test_album_skips_files_over_running_total(monkeypatch):
 
     seen = {}
 
-    async def fake_core(message, extra_media=None):
+    async def fake_core(message, extra_media=None, **kwargs):
         seen["extra"] = extra_media
 
     monkeypatch.setattr(bot, "_fetch_media", big_fetch)
@@ -2887,7 +2915,7 @@ def test_album_downloads_bounded_concurrency(monkeypatch):
 
     seen = {}
 
-    async def fake_core(message, extra_media=None):
+    async def fake_core(message, extra_media=None, **kwargs):
         seen["extra"] = extra_media
 
     monkeypatch.setattr(bot, "_fetch_media", slow_fetch)

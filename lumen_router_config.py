@@ -552,10 +552,39 @@ _FRESHNESS_QUERY_RE = re.compile(
     r"|в\s+эт(ом|ой)\s+(году|месяце|неделе)"
     rf"|\b(?:{_FRESHNESS_YEAR_ALTS})\b"
     # EN-набор: детект был только русским при 25 языках (внешний аудит). Границы слов обязательны: now ловил know/snow.
-    r"|\bnow\b|\btoday\b|current\w*|latest|recent\w*|\bbreaking\b"
+    r"|\bnow\b|\btoday\b|\btomorrow\b|\byesterday\b|current\w*|latest|recent\w*|\bbreaking\b"
     r"|\bnews\b|weather|forecast|price\w*|\bcost\w*|how\s+much|exchange|\bscore\w*|schedule"
     r"|who\s+is\s+(now|currently|the\s+(president|ceo|prime\s+minister|mayor))"
-    r"|best\s+(to\s+buy|buy)|should\s+i\s+buy|worth\s+buying",
+    r"|best\s+(to\s+buy|buy)|should\s+i\s+buy|worth\s+buying"
+    # Мультиязычный набор: те же сигналы для основных языков бота, иначе
+    # не-RU/EN свежие вопросы уходили в обычный текст без даты (аудит 28.10.2026).
+    # Без tiempo/tempo/weer/son/panahon/morgen: они значат ещё «время», «снова»,
+    # «конец», «утро» — ложные срабатывания на обычной болтовне дороже пропуска.
+    r"|\b(hoy|ahora|actual|reciente|noticias|precio|clima|mañana|ayer)\b"
+    r"|\b(heute|jetzt|aktuell|neueste|nachrichten|preis|wetter|vorhersage|gestern)\b"
+    r"|\b(aujourd'hui|maintenant|actuel|récent|actualités|prix|météo|prévisions|demain|hier)\b"
+    r"|\b(oggi|adesso|attuale|recente|notizie|prezzo|meteo|previsioni|domani|ieri)\b"
+    r"|\b(hoje|agora|atual|recente|notícias|preço|previsão|amanhã|ontem)\b"
+    # morgen с оговоркой: «Guten Morgen» — приветствие, а не завтра (мультиязычный бот).
+    r"|\b(vandaag|nu|actueel|recent|nieuws|prijs|voorspelling|(?<!guten )morgen|gisteren)\b"
+    r"|\b(dziś|teraz|aktualn\w*|ostatni\w*|wiadomości|cena|pogoda|prognoza|jutro|wczoraj)\b"
+    r"|\b(bugün|şimdi|güncel|haberler|fiyat|hava|tahmini|yarın|dün)\b"
+    r"|\b(اليوم|الآن|الحالي|الأخير|أخبار|سعر|الطقس|توقعات|غدا|أمس)\b"
+    r"|(आज|अभी|वर्तमान|हाल|समाचार|खबर|कीमत|मौसम|पूर्वानुमान|कल)"
+    r"|\b(hari ini|sekarang|terbaru|berita|harga|cuaca|prakiraan|besok|kemarin)\b"
+    r"|\b(hari ini|sekarang|terkini|berita|harga|cuaca|ramalan|esok|semalam)\b"
+    r"|\b(hôm nay|bây giờ|hiện tại|mới nhất|tin tức|giá|thời tiết|dự báo|ngày mai|hôm qua)\b"
+    r"|(วันนี้|ตอนนี้|ปัจจุบัน|ล่าสุด|ข่าว|ราคา|อากาศ|พยากรณ์|พรุ่งนี้|เมื่อวาน)"
+    r"|\b(امروز|اکنون|فعلی|اخیر|اخبار|قیمت|هوا|پیش‌بینی|فردا|دیروز)\b"
+    r"|\b(آج|ابھی|موجودہ|حالیہ|خبریں|قیمت|موسم|پیش گوئی|کل)\b"
+    r"|\b(bugun|hozir|joriy|so'nggi|yangiliklar|narx|ob-havo|prognoz|ertaga|kecha)\b"
+    r"|(আজ|এখন|বর্তমান|সাম্প্রতিক|সংবাদ|খবর|দাম|আবহাওয়া|পূর্বাভাস|আগামীকাল|গতকাল)"
+    r"|\b(ngayon|kasalukuyan|pinakabago|balita|presyo|bukas|kahapon)\b"
+    r"|\b(namuhla|manje|okwamanje|kwakamuva|izindaba|intengo|isimo sezulu|isibikezelo|kusasa|izolo)\b"
+    r"|\b(сёння|зараз|актуальн\w*|апошн\w*|навіны|кошт|цана|надвор'е|прагноз|заўтра|учора)\b"
+    r"|\b(сьогодні|зараз|актуальн\w*|останн\w*|новини|ціна|погода|прогноз|завтра|вчора)\b"
+    r"|\b(бүгін|қазір|ағымдағы|соңғы|жаңалықтар|баға|ауа райы|болжам|ертең|кеше)\b"
+    r"|завтра|вчера",
     re.IGNORECASE,
 )
 
