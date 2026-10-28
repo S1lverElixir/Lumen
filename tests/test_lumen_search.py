@@ -105,7 +105,8 @@ class _StubResp:
         return self._text
 
     def raise_for_status(self):
-        raise RuntimeError(f"http {self.status}")
+        if self.status >= 400:
+            raise RuntimeError(f"http {self.status}")
 
 
 class _StubSession:
@@ -135,6 +136,64 @@ def _stub_aiohttp(resp=None, exc=None):
         ClientSession=lambda *args, **kwargs: _StubSession(resp, exc),
         ClientTimeout=aiohttp.ClientTimeout,
     )
+
+
+class _RoutedSession:
+    """Разные страницы по URL: DDG пустой, RSS-источники — со своими фикстурами."""
+
+    def __init__(self, pages):
+        self._pages = pages
+        self.requested = []
+
+    def _resp(self, url):
+        self.requested.append(url)
+        return _StubResp(200, self._pages.get(url, "<html></html>"))
+
+    def post(self, url, *args, **kwargs):
+        return self._resp(url)
+
+    def get(self, url, *args, **kwargs):
+        return self._resp(url)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+
+_RSS_FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
+<rss><channel>
+<item><title>Свежая новость</title><link>https://example.com/fresh</link>
+<description>Текст свежей новости</description></item>
+<item><title>Дубль</title><link>https://example.com/fresh</link>
+<description>Тот же адрес</description></item>
+<item><title>Без ссылки</title><description>мусор</description></item>
+</channel></rss>"""
+
+
+def test_parse_rss_snippets_reads_items_and_drops_duplicates():
+    out = lumen_search.parse_rss_snippets(_RSS_FIXTURE)
+    assert out == [{"title": "Свежая новость", "url": "https://example.com/fresh",
+                    "snippet": "Текст свежей новости"}]
+    assert lumen_search.parse_rss_snippets("<rss><broken") == []
+
+
+def test_fetch_web_snippets_falls_back_to_rss_when_ddg_returns_empty(monkeypatch):
+    # Прод 28.10.2026: DuckDuckGo с адресов Space отдавал страницу без выдачи,
+    # и бот отвечал «поиск ничего не дал» — RSS-фолбэк обязан дать сниппеты.
+    session = _RoutedSession({
+        lumen_search._BING_SEARCH_URL: _RSS_FIXTURE,
+        lumen_search._GOOGLE_NEWS_URL: "",
+    })
+    monkeypatch.setattr(
+        lumen_search, "aiohttp",
+        SimpleNamespace(ClientSession=lambda *args, **kwargs: session,
+                        ClientTimeout=aiohttp.ClientTimeout),
+    )
+    out = asyncio.run(lumen_search.fetch_web_snippets("свежие новости"))
+    assert [item["url"] for item in out] == ["https://example.com/fresh"]
+    assert lumen_search._BING_SEARCH_URL in session.requested
 
 
 def test_fetch_web_snippets_parses_stubbed_page(monkeypatch):
