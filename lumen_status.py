@@ -11,8 +11,9 @@ from aiogram.types import Message
 from lumen_formatting import _is_table_separator, _md_to_html
 from lumen_lang import t as _lang_t
 
-# Искры как в Claude Code: кадры спиннера, а не точки.
-_SPINNER_FRAMES = ("·", "✢", "✳", "✶", "✻", "✽")
+# Искры как в Claude Code: кадры спиннера, а не точки. Первый кадр — яркая
+# искра, а не точка: статус должен сразу читаться как иконка, а не как буллет.
+_SPINNER_FRAMES = ("✻", "✽", "·", "✢", "✳", "✶")
 # Страховка от утечки тикера, если обработчик упал между созданием статуса и
 # маршрутом: дольше этого статус сам себя останавливает.
 _STATUS_MAX_LIFETIME_SEC = 300.0
@@ -41,6 +42,7 @@ class StatusMessage:
         self._timed = False
         self._phase_started = time.monotonic()
         self._created = time.monotonic()
+        self._thinking_started: float | None = None
         self._thought_seconds: int | None = None
         self._task: asyncio.Task | None = None
         self._stopped = False
@@ -79,16 +81,22 @@ class StatusMessage:
     async def finish(self) -> None:
         """Фиксирует длительность ожидания и останавливает анимацию."""
         if self._thought_seconds is None:
-            self._thought_seconds = max(0, int(time.monotonic() - self._phase_started))
+            self._thought_seconds = self._elapsed_seconds()
         await self.stop()
+
+    def _elapsed_seconds(self) -> int:
+        # Длительность считаем от начала thinking, а не от последней фазы:
+        # фолбэк «пробую ещё раз» сбрасывал таймер в 0 (прод 28.10.2026).
+        start = self._thinking_started or self._created
+        return max(0, int(time.monotonic() - start))
 
     def activity_prefix(self) -> tuple[str, str]:
         """(HTML-блок для ответа, тот же блок простым текстом); пусто — активности нет."""
-        thought = self._thought_seconds if self._thought_seconds is not None else max(
-            0, int(time.monotonic() - self._phase_started))
+        thought = self._thought_seconds if self._thought_seconds is not None else self._elapsed_seconds()
         lines = ["✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)]
         lines.extend(self._done)
-        if self._phrase_key and not self._timed and self._phrase_key != "progress_thinking":
+        if (self._phrase_key and not self._timed
+                and self._phrase_key not in ("progress_thinking", "progress_retry")):
             lines.append("✓ " + _lang_t(self.lang, self._phrase_key))
         if self._sources:
             lines.extend("· " + host for host in self._sources)
@@ -107,6 +115,8 @@ class StatusMessage:
         return html_block + "\n\n" + _md_to_html(answer_md), plain_block + "\n\n" + answer_md
 
     def _set_phrase(self, key: str, *, timed: bool) -> None:
+        if key == "progress_thinking" and self._thinking_started is None:
+            self._thinking_started = time.monotonic()
         self._phrase_key = key
         self._timed = timed
         self._phase_started = time.monotonic()

@@ -49,3 +49,24 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     # попасть в chat_state как ключ (прод 28.10.2026).
     assert "en" not in bot.chat_state
     bot.chat_state.pop(999900, None)
+
+
+def test_retry_phase_is_not_a_completed_step(monkeypatch):
+    # Прод 28.10.2026: фолбэк «пробую ещё раз» попадал в итоговый блок как
+    # выполненный шаг и обнулял таймер «Думал N с».
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999901)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_searching")
+        await status.set_phase("progress_thinking", timed=True)
+        await asyncio.sleep(0.01)
+        await status.set_phase("progress_retry")
+        await status.finish()
+        return status
+
+    status = asyncio.run(scenario())
+    _, plain = status.activity_prefix()
+    assert "Trying again" not in plain
+    assert "Thought for" in plain
+    bot.chat_state.pop(999901, None)
