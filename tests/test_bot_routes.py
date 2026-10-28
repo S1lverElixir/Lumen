@@ -768,8 +768,7 @@ def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
     assert ans == "Ответ от резервной модели"
     assert sent is True
     final_text = placeholder.edits[-1][0]
-    assert final_text.startswith("<blockquote expandable>")
-    assert "Thought for" in final_text
+    assert final_text.startswith("<i>✻ Thought for")
     assert "Ответ от резервной модели" in final_text
     bot.chat_state.pop(chat_id, None)
 

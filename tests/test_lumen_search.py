@@ -59,6 +59,17 @@ def test_format_snippets_for_prompt_marks_data_and_skips_empties():
     assert lumen_search.format_snippets_for_prompt([{"title": "", "url": "", "snippet": ""}]) == ""
 
 
+def test_format_snippets_for_prompt_demands_answer_only_from_snippets():
+    # Прод 28.10.2026: слабая резервная модель гадала имена/должности, хотя
+    # нужного факта в сниппетах не было. Промпт обязан запрещать догадки.
+    block = lumen_search.format_snippets_for_prompt(
+        [{"title": "T", "url": "https://example.com", "snippet": "S"}]
+    )
+    assert "ONLY facts explicitly present" in block
+    assert "do not guess" in block
+    assert "say plainly that the sources do not contain it" in block
+
+
 def test_format_snippets_for_prompt_cuts_on_whole_lines():
     # Ревью: срез на 1500 символах рвал URL посередине — режем по целым строкам.
     long_snippets = [

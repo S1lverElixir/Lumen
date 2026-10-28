@@ -740,9 +740,9 @@ def test_streaming_fast_path_shows_no_dots_frames():
         bot.chat_state.pop(chat_id, None)
 
 
-def test_streaming_plain_text_adds_collapsed_thought_block():
-    # Даже без раннего статуса обычный ответ получает свёрнутый «Thought for Ns»,
-    # как в Claude: вопрос не ждал bubble, но финальный вид — с трейсом.
+def test_streaming_plain_text_adds_subtle_thought_line():
+    # Даже без раннего статуса обычный ответ получает «✻ Thought for Ns»,
+    # как в Claude: без рамки-цитаты, одной курсивной строкой.
     chat_id = 999321
 
     async def pieces():
@@ -757,8 +757,8 @@ def test_streaming_plain_text_adds_collapsed_thought_block():
         assert answer == "Привет"
         final_text, parse_mode = incoming.sent[0].edits[-1]
         assert parse_mode == bot.ParseMode.HTML
-        assert final_text.startswith("<blockquote expandable>")
-        assert "Thought for" in final_text
+        assert final_text.startswith("<i>✻ Thought for")
+        assert "<blockquote" not in final_text
         assert "Привет" in final_text
     finally:
         bot.chat_state.pop(chat_id, None)

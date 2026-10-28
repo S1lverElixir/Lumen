@@ -51,6 +51,23 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     bot.chat_state.pop(999900, None)
 
 
+def test_simple_thought_activity_is_italic_not_quote(monkeypatch):
+    # Простое ожидание без поиска/медиа — лёгкая курсивная строка, не цитата.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999902)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
+        await status.finish()
+        return status
+
+    status = asyncio.run(scenario())
+    html_block, plain = status.activity_prefix()
+    assert html_block.startswith("<i>") and "blockquote" not in html_block
+    assert "Thought for" in plain
+    bot.chat_state.pop(999902, None)
+
+
 def test_retry_phase_is_not_a_completed_step(monkeypatch):
     # Прод 28.10.2026: фолбэк «пробую ещё раз» попадал в итоговый блок как
     # выполненный шаг и обнулял таймер «Думал N с».

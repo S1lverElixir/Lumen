@@ -24,8 +24,10 @@ def thought_block(lang: str, sec: int, answer_md: str) -> tuple[str | None, str]
     Таблицы возвращают None — их показываем обычным rich-путём без блока."""
     if any(_is_table_separator(line) for line in answer_md.splitlines()):
         return None, answer_md
+    # Обычный ответ без поиска: одна курсивная строка, как «Thought for Ns»
+    # в Claude. Цитата с рамкой тут выглядела тяжело (ревью 28.10.2026).
     line = "✻ " + _lang_t(lang, "progress_thought_for", sec=max(0, int(sec)))
-    html_block = "<blockquote expandable>" + html.escape(line) + "</blockquote>\n\n" + _md_to_html(answer_md)
+    html_block = "<i>" + html.escape(line) + "</i>\n\n" + _md_to_html(answer_md)
     return html_block, line + "\n\n" + answer_md
 
 
@@ -91,8 +93,15 @@ class StatusMessage:
         return max(0, int(time.monotonic() - start))
 
     def activity_prefix(self) -> tuple[str, str]:
-        """(HTML-блок для ответа, тот же блок простым текстом); пусто — активности нет."""
+        """(HTML-префикс ответа, тот же префикс простым текстом). Простое ожидание —
+        курсивная строка как в Claude; поиск/медиа с этапами — свёрнутая цитата."""
         thought = self._thought_seconds if self._thought_seconds is not None else self._elapsed_seconds()
+        only_thought = not self._done and not self._sources and (
+            not self._phrase_key or self._timed
+            or self._phrase_key in ("progress_thinking", "progress_retry"))
+        if only_thought:
+            line = "✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)
+            return "<i>" + html.escape(line) + "</i>", line
         lines = ["✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)]
         lines.extend(self._done)
         if (self._phrase_key and not self._timed
