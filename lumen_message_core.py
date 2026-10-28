@@ -243,7 +243,9 @@ def _record_passive_group_context(message: Message, state: dict[str, Any], t: st
             getattr(sender, "username", None) if sender is not None else None,
             getattr(sender, "first_name", None) if sender is not None else None,
         )
-        state["ctx"].append(f"{display}: {t.strip()[:_PASSIVE_LINE_MAX_CHARS]}")
+        display = _flatten_untrusted(display, 80)
+        text_line = _flatten_untrusted(t, _PASSIVE_LINE_MAX_CHARS)
+        state["ctx"].append(f"{display}: {text_line}")
         # Общий лимит 100 сообщений на чат, старые фоновые уходят первыми.
         bot._trim_combined(state)
         # Кап по символам: 100 сообщений по 4096 символов раздували промпт
@@ -258,17 +260,24 @@ def _record_passive_group_context(message: Message, state: dict[str, Any], t: st
 _REPLY_TARGET_MAX_CHARS = 1000
 
 
+def _flatten_untrusted(text: str, limit: int = _REPLY_TARGET_MAX_CHARS) -> str:
+    """Чужой текст в промпте: одна строка, скобочные метки не подделать.
+    Natural-language инъекции остаются за системным промптом и выходными
+    фильтрами, но структурный breakout через ] и перевод строки закрыт."""
+    clean = re.sub(r"[\r\n\t]+", " ", str(text or ""))
+    clean = clean.replace("[", "(").replace("]", ")")
+    return clean.strip()[:limit]
+
+
 def _reply_target_block(message: Message, state: dict[str, Any]) -> str:
     """Цитата сообщения-реплая: реплай на бота отвечает по нему, а не по последнему."""
     import bot
     reply = getattr(message, "reply_to_message", None)
     if reply is None:
         return ""
-    text = (getattr(reply, "text", None) or getattr(reply, "caption", None) or "").strip()
+    text = _flatten_untrusted(getattr(reply, "text", None) or getattr(reply, "caption", None) or "")
     if not text:
         return ""
-    if len(text) > _REPLY_TARGET_MAX_CHARS:
-        text = text[:_REPLY_TARGET_MAX_CHARS].rstrip() + "…"
     ruser = getattr(reply, "from_user", None)
     try:
         bot_username = (bot.BOT_USERNAME or "").lower()
@@ -284,6 +293,7 @@ def _reply_target_block(message: Message, state: dict[str, Any]) -> str:
         )
     else:
         display = "User"
+    display = _flatten_untrusted(display, 80)
     return f"[Отвечаешь именно на это сообщение (реплай) от {display}: {text}]\n"
 
 
@@ -291,12 +301,12 @@ def _tagged_prompt(state: dict[str, Any], message: Message, clean_prompt: str) -
     """Вопрос с автором и реплаем: модель знает кто спрашивает и на что отвечает."""
     import bot
     sender = message.from_user
-    display = bot._note_sender(
+    display = _flatten_untrusted(bot._note_sender(
         state,
         sender.id if sender is not None else None,
         getattr(sender, "username", None) if sender is not None else None,
         getattr(sender, "first_name", None) if sender is not None else None,
-    )
+    ), 80)
     tagged = f"[{display}] {clean_prompt}" if (clean_prompt or "").strip() else f"[{display}]"
     return _reply_target_block(message, state) + tagged + _nick_hints(state, clean_prompt)
 
@@ -321,7 +331,8 @@ def _nick_hints(state: dict[str, Any], clean_prompt: str) -> str:
         if len(surface) < _NICK_HINT_MIN_LEN or surface.lower() in seen:
             continue
         seen.add(surface.lower())
-        resolved = bot._resolve_nick(state, surface)
+        resolved = _flatten_untrusted(bot._resolve_nick(state, surface) or "", 80)
+        surface = _flatten_untrusted(surface, 40)
         if resolved and resolved not in hints:
             hints.append(f"[Подсказка: «{surface}» — это {resolved}.]")
         if len(hints) >= _NICK_HINT_MAX:
