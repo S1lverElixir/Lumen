@@ -16,7 +16,7 @@ from datetime import date, datetime
 from typing import Any, Callable
 
 import aiohttp
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatType, ParseMode
 from aiogram.types import Message
 from google.genai import types
 
@@ -39,6 +39,7 @@ from lumen_router_config import (
     _looks_like_heavy_query,
 )
 from lumen_security import _scrub_identity_leak, _detect_garbled_mix, _is_garbled_echo
+from lumen_status import thought_block
 
 # Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
 _TRANSCRIPT_MAX_CHARS = 4000
@@ -1005,6 +1006,7 @@ async def _run_route(
     import bot
     if not route:
         raise RuntimeError("Empty route — no model to choose from.")
+    route_started = time.monotonic()
     # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
     route = _reorder_route_by_speed(route)
     if deadline is None:
@@ -1110,7 +1112,16 @@ async def _run_route(
                 fits_one_message = len(_split_text_chunks(ans, bot.TG_MAX_LEN)) == 1
                 reused = False
                 if fits_one_message:
-                    html_text, plain_text = status.compose_answer(ans) if status is not None else (None, ans)
+                    if status is not None:
+                        html_text, plain_text = status.compose_answer(ans)
+                    elif getattr(getattr(message, "chat", None), "type", None) == ChatType.PRIVATE:
+                        # Обычный текст после раннего сбоя стрима: статуса нет,
+                        # но «Thought for Ns» над ответом всё равно показываем.
+                        html_text, plain_text = thought_block(
+                            bot._chat_lang(chat_id), int(time.monotonic() - route_started), ans,
+                        )
+                    else:
+                        html_text, plain_text = None, ans
                     if html_text is not None:
                         edited = await bot._tg_call(
                             reusable_placeholder.edit_text, html_text,

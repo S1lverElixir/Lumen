@@ -747,6 +747,33 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
         bot.ask_openrouter_text = original_or_text
 
 
+def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
+    # Обычный текст после раннего сбоя стрима не должен терять «Thought for Ns»:
+    # статуса в этом пути нет, блок строим по времени маршрута.
+    chat_id = 999322
+    placeholder = _FakeSentMessage()
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def fake_stream_fail(cid, prompt, message, model_id, deadline=None, status=None):
+        return None, placeholder
+
+    async def fake_text(cid, prompt, model_chain, deadline=None):
+        return "Ответ от резервной модели"
+
+    monkeypatch.setattr(bot, "_try_openrouter_streaming", fake_stream_fail)
+    monkeypatch.setattr(bot, "ask_openrouter_text", fake_text)
+    route = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
+             ("openrouter", "openai/gpt-oss-20b:free")]
+    ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=incoming, allow_stream=True))
+    assert ans == "Ответ от резервной модели"
+    assert sent is True
+    final_text = placeholder.edits[-1][0]
+    assert final_text.startswith("<blockquote expandable>")
+    assert "Thought for" in final_text
+    assert "Ответ от резервной модели" in final_text
+    bot.chat_state.pop(chat_id, None)
+
+
 def test_run_route_deletes_orphaned_placeholder_when_whole_route_fails():
     chat_id = 999308
     placeholder = _FakeSentMessage()
