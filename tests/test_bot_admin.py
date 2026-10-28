@@ -29,6 +29,17 @@ def _clear_webhook_update_dedup():
     lumen_admin._seen_update_id_set.clear()
 
 
+def test_public_log_formatter_hashes_long_numeric_ids():
+    # Публичные логи Space не должны содержать chat/user id (аудит 28.10.2026).
+    import logging
+    record = logging.LogRecord("bot", logging.INFO, __file__, 1,
+                               "[chat=123456789] user 987654321 ok", None, None)
+    text = bot._PublicLogFormatter("%(message)s").format(record)
+    assert "123456789" not in text
+    assert "987654321" not in text
+    assert "#" in text
+
+
 def test_check_bot_token_auth_accepts_correct_bearer_header():
     original = bot.BOT_TOKEN
     bot.BOT_TOKEN = "real-secret-token"

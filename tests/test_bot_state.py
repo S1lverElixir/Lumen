@@ -3172,6 +3172,31 @@ def test_combined_memory_caps_background_at_100():
         bot._dirty_chat_ids.discard(9001)
 
 
+def test_media_download_slot_limits_global_concurrency(monkeypatch):
+    # Аудит 28.10.2026: без общего лимита альбомы и TikTok из разных чатов
+    # складывались в память без предела.
+    import asyncio
+    monkeypatch.setattr(bot, "MEDIA_GLOBAL_CONCURRENCY", 1)
+    bot._media_semaphores.clear()
+
+    async def scenario():
+        order = []
+
+        async def job(n):
+            async with bot._media_download_slot():
+                order.append(f"start{n}")
+                await asyncio.sleep(0.02)
+                order.append(f"end{n}")
+
+        await asyncio.gather(job(1), job(2))
+        return order
+
+    try:
+        assert asyncio.run(scenario()) == ["start1", "end1", "start2", "end2"]
+    finally:
+        bot._media_semaphores.clear()
+
+
 def test_passive_context_caps_line_and_total_chars():
     # Аудит 28.10.2026: 100 сообщений по 4096 символов раздували промпт и
     # позволяли одному участнику забить чужой контекст.

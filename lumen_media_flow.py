@@ -41,10 +41,11 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
                 raise _MediaTooLargeError(declared_size, bot.TELEGRAM_DOWNLOAD_MAX_BYTES)
             session = await bot._get_telegram_session()
             url = f"{bot.TELEGRAM_API_BASE_URL}/file/bot{bot.BOT_TOKEN}/{file_path}"
-            async with session.get(url, timeout=timeout or bot.TELEGRAM_MEDIA_TIMEOUT) as resp:
-                resp.raise_for_status()
-                data = await _read_capped_telegram_body(resp, url)
-                mime = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip()
+            async with bot._media_download_slot():
+                async with session.get(url, timeout=timeout or bot.TELEGRAM_MEDIA_TIMEOUT) as resp:
+                    resp.raise_for_status()
+                    data = await _read_capped_telegram_body(resp, url)
+                    mime = resp.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip()
             real_mime = _sanitize_mime_type(file_path, mime)
             return data, real_mime
         except _MediaTooLargeError:

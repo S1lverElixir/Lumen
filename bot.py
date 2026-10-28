@@ -119,6 +119,16 @@ class _SecretLogFormatter(logging.Formatter):
         return text
 
 
+class _PublicLogFormatter(logging.Formatter):
+    """Публичные логи HF Space: длинные числовые id (чаты/пользователи) заменяем
+    стабильным хешем. Файловый лог сохраняет полные id для разбора (аудит 28.10.2026)."""
+    _ID_RE = re.compile(r"(?<!\d)(-?\d{6,})(?!\d)")
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        return self._ID_RE.sub(lambda m: "#" + hashlib.sha1(m.group(1).encode()).hexdigest()[:8], text)
+
+
 def _setup_logging() -> logging.Logger:
     # LOG_LEVEL из env: раньше INFO был зашит везде и глушил все debug.
     level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").strip().upper(), logging.INFO)
@@ -135,7 +145,9 @@ def _setup_logging() -> logging.Logger:
     file_handler.setLevel(level)
 
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    console_handler.setFormatter(fmt)
+    # stdout на публичном Space хеширует id; файл (эфемерный, не публичный)
+    # остаётся с полными id.
+    console_handler.setFormatter(_PublicLogFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     file_handler.setFormatter(fmt)
 
     _LOG_QUEUE_HANDLER.setFormatter(_SecretLogFormatter())
@@ -343,6 +355,27 @@ TELEGRAM_MEDIA_TIMEOUT = _env_number("TELEGRAM_MEDIA_TIMEOUT", 25, min_value=1)
 # Потолок скачивания из Telegram: Bot API не отдаёт файлы больше 20МБ через
 # getFile/путь (аудит D1, 30.09.2026) — большее отклоняем до скачивания.
 TELEGRAM_DOWNLOAD_MAX_BYTES = _env_number("TELEGRAM_DOWNLOAD_MAX_BYTES", 20 * 1024 * 1024, cast=int, min_value=1024 * 1024)
+# Глобальный кап одновременных скачиваний медиа: альбомы и TikTok-слайдшоу из
+# разных чатов иначе складывались в память без общего предела (аудит 28.10.2026).
+MEDIA_GLOBAL_CONCURRENCY = _env_number("MEDIA_GLOBAL_CONCURRENCY", 2, min_value=1)
+_media_semaphores: dict[Any, asyncio.Semaphore] = {}
+
+
+def _media_semaphore() -> asyncio.Semaphore:
+    # Семафор на каждый event loop: тесты гоняют много коротких asyncio.run,
+    # один общий объект привязался бы к первому циклу.
+    loop = asyncio.get_running_loop()
+    sem = _media_semaphores.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(MEDIA_GLOBAL_CONCURRENCY)
+        _media_semaphores[loop] = sem
+    return sem
+
+
+@contextlib.asynccontextmanager
+async def _media_download_slot():
+    async with _media_semaphore():
+        yield
 # Раньше было захардкожено как 15.0 прямо внутри _download_telegram_file_bytes —
 # несогласованно с остальными таймаутами, которые все конфигурируются через env.
 TELEGRAM_GET_FILE_TIMEOUT = _env_number("TELEGRAM_GET_FILE_TIMEOUT", 15, min_value=1)
@@ -737,12 +770,20 @@ from lumen_admin import (
 )
 
 # ADMIN_SECRET_SEED — независимая соль для секретов (иначе всё выводилось из BOT_TOKEN и ротировалось только с ним). Пустой seed при пустом токене — случайный секрет процесса, а не захардкоженная строка.
-_ADMIN_SECRET_SEED = os.getenv("ADMIN_SECRET_SEED", "").strip() or BOT_TOKEN or secrets.token_hex(32)
-if not os.getenv("ADMIN_SECRET_SEED", "").strip() and BOT_TOKEN:
-    # Не поломка, а громкое предупреждение: ключи сейчас выводятся из токена
-    # бота, поэтому любая утечка токена (логи, сторонний сервис) = выгрузка всех
-    # чатов и подделка апдейтов. Задай ADMIN_SECRET_SEED в HF Space — и выводить
-    # ключи из токена перестанет (аудит 26.09.2026).
+_ADMIN_SECRET_SEED_ENV = os.getenv("ADMIN_SECRET_SEED", "").strip()
+if not _ADMIN_SECRET_SEED_ENV and BOT_TOKEN and (os.getenv("SPACE_ID") or os.getenv("SPACE_HOST")):
+    # В проде слабый фолбэк запрещён: утечка токена иначе даёт /export_state
+    # и подделку апдейтов. На HF Space сид задан; потеря конфигурации должна
+    # ронять старт, а не молча ослаблять админку (аудит 28.10.2026).
+    raise RuntimeError(
+        "ADMIN_SECRET_SEED is required in production (HF Space): without it "
+        "WEBHOOK_SECRET/ADMIN_PANEL_KEY are derived from BOT_TOKEN."
+    )
+_ADMIN_SECRET_SEED = _ADMIN_SECRET_SEED_ENV or BOT_TOKEN or secrets.token_hex(32)
+if not _ADMIN_SECRET_SEED_ENV and BOT_TOKEN:
+    # Не поломка, а громкое предупреждение в локальной разработке: ключи
+    # выводятся из токена бота, поэтому утечка токена = выгрузка всех чатов
+    # и подделка апдейтов (аудит 26.09.2026).
     log.warning(
         "[setup] ADMIN_SECRET_SEED is not set — WEBHOOK_SECRET/ADMIN_PANEL_KEY are derived from BOT_TOKEN. "
         "A leaked bot token then exposes /export_state and /webhook. Set ADMIN_SECRET_SEED as an HF Space secret.",

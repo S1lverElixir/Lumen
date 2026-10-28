@@ -54,7 +54,8 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          return
 
     try:
-         music_bytes = await bot._download_url_bin(session, music_url, headers=headers)
+         async with bot._media_download_slot():
+              music_bytes = await bot._download_url_bin(session, music_url, headers=headers)
          if not music_bytes:
               return
 
@@ -127,7 +128,8 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          cover_bytes = None
          if cover_url:
               try:
-                   cover_bytes = await bot._download_url_bin(session, cover_url, headers=headers, cap_bytes=2 * 1024 * 1024)
+                   async with bot._media_download_slot():
+                        cover_bytes = await bot._download_url_bin(session, cover_url, headers=headers, cap_bytes=2 * 1024 * 1024)
               except Exception as e:
                    log.warning("[tiktok] failed to download cover image: %s", e)
 
@@ -284,10 +286,11 @@ async def _try_send_tiktok_slideshow(
               data = None
               try:
                    async with bot._tiktok_slide_download_semaphore:
-                        data = await bot._download_url_bin(
-                             session, slide_url, headers=headers,
-                             cap_bytes=reservation,
-                        )
+                        async with bot._media_download_slot():
+                             data = await bot._download_url_bin(
+                                  session, slide_url, headers=headers,
+                                  cap_bytes=reservation,
+                             )
               finally:
                    # Неиспользованный резерв возвращаем: реальный расход — только len(data).
                    await _release_budget(reservation, data)
@@ -416,12 +419,13 @@ async def _send_tiktok_single_video(
                    status_msg = bot._t(message.chat.id, "tiktok_dl_plain")
               await bot._edit_message_quietly(status, status_msg)
 
-              video_bytes = await bot._download_url_bin(
-                  session, candidate["url"], headers=headers,
-                  # Видео больше лимита отправки всё равно не уйдёт — режем капом
-                  # отправки, а не общим 75МБ (аудит A7-5: 50-75МБ качались зря).
-                  cap_bytes=bot.TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES,
-              )
+              async with bot._media_download_slot():
+                   video_bytes = await bot._download_url_bin(
+                       session, candidate["url"], headers=headers,
+                       # Видео больше лимита отправки всё равно не уйдёт — режем капом
+                       # отправки, а не общим 75МБ (аудит A7-5: 50-75МБ качались зря).
+                       cap_bytes=bot.TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES,
+                   )
               if not video_bytes:
                    continue
 
