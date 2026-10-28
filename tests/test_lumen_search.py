@@ -59,6 +59,12 @@ def test_format_snippets_for_prompt_marks_data_and_skips_empties():
     assert lumen_search.format_snippets_for_prompt([{"title": "", "url": "", "snippet": ""}]) == ""
 
 
+def test_google_news_query_adds_freshness_filters():
+    assert lumen_search.google_news_query("главные новости технологий сегодня").endswith(" when:1d")
+    assert lumen_search.google_news_query("новости технологий").endswith(" when:7d")
+    assert lumen_search.google_news_query("что с ДЦ Яндекса") == "что с ДЦ Яндекса"
+
+
 def test_parse_rss_snippets_includes_pub_date():
     # Дата публикации нужна, чтобы модель могла подтвердить «за сегодня».
     xml = ("<rss><channel><item><title>T</title><link>https://example.com/n</link>"

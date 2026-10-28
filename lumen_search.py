@@ -33,10 +33,20 @@ _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 # Новостной запрос: DDG часто отдаёт общие страницы без дат, а Google News —
 # датированные заголовки. Для таких запросов источники смешиваем (прод 28.10.2026).
 _NEWS_QUERY_RE = re.compile(r"\bновост\w*|\bnews\b|headlines|главные\s+новости", re.IGNORECASE)
+_TODAY_QUERY_RE = re.compile(r"\bсегодня\b|\btoday\b|за\s+сегодня", re.IGNORECASE)
 
 
 def _looks_like_news_query(text: str) -> bool:
     return bool(text) and bool(_NEWS_QUERY_RE.search(text))
+
+
+def google_news_query(query: str) -> str:
+    """Добавляет к новостному запросу фильтр свежести Google News: when:1d для
+    «за сегодня» и when:7d для остальных новостей. Без фильтра RSS отдавал
+    статьи полугодовой давности (проверено 28.10.2026)."""
+    if not _looks_like_news_query(query):
+        return query
+    return query + (" when:1d" if _TODAY_QUERY_RE.search(query) else " when:7d")
 # Выдача чужая и грязная: режем число и длину, иначе раздует промпт и квоту токенов.
 _DEFAULT_MAX_RESULTS = 5
 _SNIPPET_MAX_CHARS = 300
@@ -275,7 +285,7 @@ async def _google_news_snippets(session: aiohttp.ClientSession, query: str, time
         hl, gl, ceid = "en-US", "US", "US:en"
     budget = aiohttp.ClientTimeout(total=max(1.0, timeout))
     async with session.get(
-        _GOOGLE_NEWS_URL, params={"q": query, "hl": hl, "gl": gl, "ceid": ceid},
+        _GOOGLE_NEWS_URL, params={"q": google_news_query(query), "hl": hl, "gl": gl, "ceid": ceid},
         headers=_SEARCH_HEADERS, timeout=budget,
     ) as resp:
         resp.raise_for_status()

@@ -70,8 +70,18 @@ class StatusMessage:
         self._done.append("✓ " + _lang_t(self.lang, key, **kwargs))
 
     def set_sources(self, hosts: list[str]) -> None:
-        """Домены найденных источников для раскрытого блока активности."""
-        self._sources = [h for h in hosts if h][:5]
+        """Домены найденных источников для раскрытого блока активности.
+        Дубли убираем: Google News отдаёт несколько ссылок с одного домена."""
+        seen: set[str] = set()
+        unique: list[str] = []
+        for host in hosts:
+            if not host or host in seen:
+                continue
+            seen.add(host)
+            unique.append(host)
+            if len(unique) >= 5:
+                break
+        self._sources = unique
 
     async def set_phase(self, key: str, *, timed: bool = False) -> None:
         """Смена текущей фразы с немедленной правкой, не дожидаясь тика."""
