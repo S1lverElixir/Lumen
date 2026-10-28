@@ -24,7 +24,9 @@ import os
 import queue
 import re
 import secrets
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from datetime import date
@@ -1469,9 +1471,17 @@ from lumen_message_core import (
 SETWEBHOOK_MAX_ATTEMPTS = 5
 SETWEBHOOK_BACKOFF_SEC = 5.0
 
+# /webhook отвечает 503, пока старт не загрузил состояние: иначе апдейт,
+# пришедший во время загрузки, создаёт пустой чат и перезаписывает удалённую
+# историю/индекс (аудит 28.10.2026).
+_state_ready = True
+
+
 async def _webhook_startup() -> None:
+    global _state_ready
     # Синхронное дисковое чтение в потоке: иначе старт стопорит приём /webhook.
     await asyncio.to_thread(load_state_from_disk)
+    _state_ready = True
     log.info("Bot startup: webhook mode.")
     # На Space кап можно переопределить env: без этой строки в логах не видно,
     # какой лимит реально работает (разбор 26.10.2026).
@@ -1669,8 +1679,32 @@ def _require_bot_token() -> str:
     return BOT_TOKEN
 
 
+@contextlib.contextmanager
+def _capture_signals_gracefully(server: Any):
+    """SIGTERM/SIGINT: uvicorn по умолчанию пере-поднимает сигнал после
+    serve(), и finally с финальным сбросом состояния не выполняется
+    (аудит 28.10.2026). Перехватываем сигнал и только просим сервер выйти."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    original = {}
+
+    def _stop(signum, frame):
+        server.should_exit = True
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(Exception):
+            original[sig] = signal.signal(sig, _stop)
+    try:
+        yield
+    finally:
+        for sig, handler in original.items():
+            with contextlib.suppress(Exception):
+                signal.signal(sig, handler)
+
+
 async def main() -> None:
-    global bot, client
+    global bot, client, _state_ready
 
     _require_bot_token()
 
@@ -1688,6 +1722,7 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN, session=sess)
     client = genai.Client(api_key=GEMINI_API_KEY)
 
+    _state_ready = False
     startup_task = asyncio.create_task(_webhook_startup(), name="webhook_startup")
     flush_task = asyncio.create_task(_flush_dirty_state(), name="state_flush")
     srv_config = uvicorn.Config(
@@ -1697,6 +1732,9 @@ async def main() -> None:
         app=app, host="0.0.0.0", port=7860, log_level=None, loop="asyncio", log_config=None,
     )
     server = uvicorn.Server(srv_config)
+    # Не даём uvicorn пере-поднять SIGTERM после serve(): иначе финальный
+    # сброс состояния и закрытие сессий не выполняются.
+    server.capture_signals = lambda: _capture_signals_gracefully(server)
     try:
         serve_task = asyncio.create_task(server.serve(), name="uvicorn_serve")
         done, _pending = await asyncio.wait(
@@ -1720,8 +1758,11 @@ async def main() -> None:
             if exc is not None:
                 log.error("[serve] HTTP server failed, stopping: %s", exc)
                 raise SystemExit(1) from exc
-            log.error("[serve] HTTP server exited unexpectedly, stopping")
-            raise SystemExit(1)
+            if getattr(server, "should_exit", False):
+                log.info("[serve] HTTP server stopped gracefully")
+            else:
+                log.error("[serve] HTTP server exited unexpectedly, stopping")
+                raise SystemExit(1)
     finally:
         startup_task.cancel()
         flush_task.cancel()
@@ -1737,10 +1778,21 @@ async def main() -> None:
         # Флаги — канонически в lumen_chat_state (P2): множества общие объектом,
         # bool-флаги читаем из модуля, т.к. bot-привязки после выноса stale.
         # Синхронная запись в потоке: loop уже дренирует задачи, висеть нельзя.
-        if _dirty_chat_ids or lumen_chat_state._index_dirty or _pending_chat_deletions:
-            await asyncio.to_thread(_flush_state_now)
-        if lumen_chat_state._quota_dirty:
-            await asyncio.to_thread(save_global_quota)
+        if lumen_chat_state._state_load_failed:
+            # Стартовая загрузка не удалась: не затираем удалённые данные
+            # (аудит 28.10.2026).
+            log.warning('[state] Startup load failed: skipping the final flush to keep remote data intact.')
+        else:
+            if _dirty_chat_ids or lumen_chat_state._index_dirty or _pending_chat_deletions:
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(_flush_state_now), timeout=15.0)
+                except asyncio.TimeoutError:
+                    log.warning('[state] Final flush exceeded 15s; abandoning the remainder.')
+            if lumen_chat_state._quota_dirty:
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(save_global_quota), timeout=10.0)
+                except asyncio.TimeoutError:
+                    log.warning('[state] Final quota save exceeded 10s; abandoning the remainder.')
         await _close_sessions()
 
 if __name__ == "__main__":

@@ -155,6 +155,11 @@ async def webhook_handler(request: Request) -> Any:
     if not bot.WEBHOOK_SECRET or not token or not hmac.compare_digest(token.encode(), bot.WEBHOOK_SECRET.encode()):
         _log_webhook_denied("invalid secret token")
         return {"ok": False}
+    # Состояние ещё грузится: 503, чтобы Telegram повторил позже, а не создал
+    # пустой чат и не перезаписал удалённую историю (аудит 28.10.2026).
+    if not getattr(bot, "_state_ready", True):
+        log.info("[webhook] State is still loading, asking Telegram to retry")
+        return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     # Тело апдейта маленькое: отсекаем мусор по заголовку до чтения.
     content_length = request.headers.get("Content-Length")
     if content_length is not None:

@@ -10,7 +10,7 @@ import os
 import threading
 import time
 import pytest
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 from tests.bot_test_helpers import (
     _FakeAdminRequest,
     _FakeWebhookRequest,
@@ -24,9 +24,11 @@ def _clear_webhook_update_dedup():
     import lumen_admin
     lumen_admin._seen_update_ids.clear()
     lumen_admin._seen_update_id_set.clear()
+    bot._state_ready = True
     yield
     lumen_admin._seen_update_ids.clear()
     lumen_admin._seen_update_id_set.clear()
+    bot._state_ready = True
 
 
 def test_public_log_formatter_hashes_long_numeric_ids():
@@ -160,6 +162,33 @@ def test_webhook_handler_tracks_dispatched_task_for_shutdown():
         bot.WEBHOOK_SECRET = original_secret
         bot.bot = original_bot_obj
         bot._process_raw_update = original_process
+
+
+def test_webhook_returns_503_until_state_is_ready():
+    # Апдейт во время загрузки состояния не должен создавать пустой чат и
+    # перезаписывать удалённую историю (аудит 28.10.2026).
+    original_secret = bot.WEBHOOK_SECRET
+    original_bot_obj = bot.bot
+    original_process = bot._process_raw_update
+    original_ready = bot._state_ready
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    bot.bot = object()
+    bot._state_ready = False
+    process = AsyncMock()
+    bot._process_raw_update = process
+    try:
+        req = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 778},
+        )
+        result = asyncio.run(_run_webhook_handler(req))
+        assert getattr(result, "status_code", None) == 503
+        process.assert_not_called()
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        bot.bot = original_bot_obj
+        bot._process_raw_update = original_process
+        bot._state_ready = original_ready
 
 
 def test_webhook_handler_ignores_duplicate_update_id():
@@ -798,6 +827,64 @@ def test_main_exits_nonzero_when_server_dies_first(monkeypatch, caplog):
         bot._pending_chat_deletions.update(orig_deletions)
         lumen_chat_state._index_dirty = orig_index_dirty
         lumen_chat_state._quota_dirty = orig_quota_dirty
+
+
+def test_main_flushes_on_graceful_server_exit(monkeypatch, caplog):
+    # SIGTERM/SIGINT: сервер завершился штатно — финальный сброс состояния и
+    # закрытие сессий обязаны выполниться (аудит 28.10.2026).
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    import lumen_chat_state
+    monkeypatch.setattr(bot, "_require_bot_token", lambda: "123:abc")
+    monkeypatch.setattr(bot, "Bot", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(bot, "IPv4AiohttpSession", lambda *a, **k: SimpleNamespace())
+    monkeypatch.setattr(bot.genai, "Client", lambda *a, **k: SimpleNamespace())
+
+    async def _never():
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(bot, "_webhook_startup", _never)
+    monkeypatch.setattr(bot, "_flush_dirty_state", _never)
+    monkeypatch.setattr(bot, "_drain_inflight_tasks", AsyncMock())
+    monkeypatch.setattr(bot, "_close_sessions", AsyncMock())
+    monkeypatch.setattr(bot.uvicorn, "Config", lambda *a, **k: SimpleNamespace())
+
+    class _StoppedServer:
+        should_exit = True
+
+        async def serve(self):
+            return None
+
+    monkeypatch.setattr(bot.uvicorn, "Server", lambda cfg: _StoppedServer())
+    emitted = []
+    monkeypatch.setattr(bot, "_flush_state_now", lambda: emitted.append("chats"))
+    monkeypatch.setattr(bot, "save_global_quota", lambda: emitted.append("quota"))
+    orig_bot, orig_client = bot.bot, bot.client
+    orig_ready = bot._state_ready
+    orig_dirty, orig_deletions = set(bot._dirty_chat_ids), set(bot._pending_chat_deletions)
+    orig_index_dirty, orig_quota_dirty = lumen_chat_state._index_dirty, lumen_chat_state._quota_dirty
+    orig_load_failed = lumen_chat_state._state_load_failed
+    bot._dirty_chat_ids.clear()
+    bot._dirty_chat_ids.add(999001)
+    bot._pending_chat_deletions.clear()
+    lumen_chat_state._index_dirty = False
+    lumen_chat_state._quota_dirty = True
+    lumen_chat_state._state_load_failed = False
+    try:
+        with caplog.at_level(logging.INFO, logger="bot"):
+            asyncio.run(bot.main())
+        assert "[serve] HTTP server stopped gracefully" in caplog.text
+        assert "chats" in emitted and "quota" in emitted
+    finally:
+        bot.bot, bot.client = orig_bot, orig_client
+        bot._state_ready = orig_ready
+        bot._dirty_chat_ids.clear()
+        bot._dirty_chat_ids.update(orig_dirty)
+        bot._pending_chat_deletions.clear()
+        bot._pending_chat_deletions.update(orig_deletions)
+        lumen_chat_state._index_dirty = orig_index_dirty
+        lumen_chat_state._quota_dirty = orig_quota_dirty
+        lumen_chat_state._state_load_failed = orig_load_failed
 
 
 def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():

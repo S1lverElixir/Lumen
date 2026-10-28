@@ -675,6 +675,11 @@ async def _flush_dirty_state_once() -> None:
                     '[state] %d chat deletion(s) failed, will retry next cycle: %s',
                     len(failed_deletes), ", ".join(str(c) for c in sorted(failed_deletes)),
                 )
+        if _state_load_failed and _dirty_chat_ids:
+            # Удалённые истории не затёрты: файл в памяти — это либо новый чат,
+            # либо всё, что осталось после сбоя загрузки; индекс и квота при
+            # этом не пишутся (аудит A5-2, 28.10.2026).
+            log.warning('[state] Startup load failed; saving chats from memory, index stays untouched.')
         if _dirty_chat_ids:
             to_save = list(_dirty_chat_ids)
             _dirty_chat_ids.clear()
