@@ -18,6 +18,17 @@ from tests.bot_test_helpers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_webhook_update_dedup():
+    """Дедупликация update_id глобальна: тесты не должны видеть id друг друга."""
+    import lumen_admin
+    lumen_admin._seen_update_ids.clear()
+    lumen_admin._seen_update_id_set.clear()
+    yield
+    lumen_admin._seen_update_ids.clear()
+    lumen_admin._seen_update_id_set.clear()
+
+
 def test_check_bot_token_auth_accepts_correct_bearer_header():
     original = bot.BOT_TOKEN
     bot.BOT_TOKEN = "real-secret-token"
@@ -138,6 +149,39 @@ def test_webhook_handler_tracks_dispatched_task_for_shutdown():
         bot.WEBHOOK_SECRET = original_secret
         bot.bot = original_bot_obj
         bot._process_raw_update = original_process
+
+
+def test_webhook_handler_ignores_duplicate_update_id():
+    # Telegram повторяет доставку при таймауте/сбое: один update_id не должен
+    # давать второй ответ, скачивание и трату квоты (аудит 28.10.2026).
+    original_secret = bot.WEBHOOK_SECRET
+    original_bot_obj = bot.bot
+    original_process = bot._process_raw_update
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    bot.bot = object()
+    bot._inflight_tasks.clear()
+    import lumen_admin
+    lumen_admin._seen_update_ids.clear()
+    lumen_admin._seen_update_id_set.clear()
+    calls = []
+
+    async def fake_process(raw_update):
+        calls.append(raw_update)
+        await asyncio.sleep(0)
+
+    bot._process_raw_update = fake_process
+    try:
+        headers = {"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"}
+        for _ in range(2):
+            req = _FakeWebhookRequest(headers=headers, body={"update_id": 777})
+            asyncio.run(_run_webhook_handler(req))
+        assert len(calls) == 1
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        bot.bot = original_bot_obj
+        bot._process_raw_update = original_process
+        lumen_admin._seen_update_ids.clear()
+        lumen_admin._seen_update_id_set.clear()
 
 
 def test_healthcheck_reports_not_ready_when_bot_or_client_uninitialized():

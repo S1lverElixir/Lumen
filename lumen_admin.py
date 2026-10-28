@@ -11,6 +11,7 @@ import hmac
 import logging
 import os
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
@@ -111,6 +112,24 @@ WEBHOOK_MAX_INFLIGHT_TASKS = 100
 _WEBHOOK_DENIED_LOG_INTERVAL_SEC = 60.0
 _webhook_denied_count = 0
 _webhook_denied_last_log = 0.0
+# Telegram может доставить один update_id повторно (retry после таймаута).
+# Помним последние N: дубль не должен дать второй ответ, скачивание и трату квоты.
+_SEEN_UPDATE_IDS_MAX = 2000
+_seen_update_ids: deque[int] = deque()
+_seen_update_id_set: set[int] = set()
+
+
+def _is_duplicate_update(update_id: Any) -> bool:
+    if not isinstance(update_id, int):
+        return False
+    if update_id in _seen_update_id_set:
+        return True
+    if len(_seen_update_ids) >= _SEEN_UPDATE_IDS_MAX:
+        old = _seen_update_ids.popleft()
+        _seen_update_id_set.discard(old)
+    _seen_update_ids.append(update_id)
+    _seen_update_id_set.add(update_id)
+    return False
 
 
 def _log_webhook_denied(reason: str) -> None:
@@ -161,6 +180,9 @@ async def webhook_handler(request: Request) -> Any:
                 return {"ok": False}
             chunks.append(chunk)
         body = _json.loads(b"".join(chunks))
+        if isinstance(body, dict) and _is_duplicate_update(body.get("update_id")):
+            log.info("[webhook] Duplicate update_id %s ignored", body.get("update_id"))
+            return {"ok": True}
         if bot.bot is not None:
             bot._track_inflight_task(asyncio.create_task(bot._process_raw_update(body)))
         else:
