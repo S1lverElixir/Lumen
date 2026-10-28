@@ -32,6 +32,35 @@ from lumen_tiktok import (
     TikTokUserFacingError,
     _tiktok_music_page_id,
 )
+from lumen_status import StatusMessage
+
+
+def _status_message(status: "StatusMessage | Message | None"):
+    """Реальное сообщение статуса для правок ошибок (актор или голый Message)."""
+    return status.message if isinstance(status, StatusMessage) else status
+
+
+async def _status_set(status: "StatusMessage | Message | None", text: str) -> None:
+    """Смена фразы статуса без остановки анимации: у актора — литерал,
+    у голого сообщения — обычная правка (тесты и старый путь)."""
+    import bot
+    if isinstance(status, StatusMessage):
+        await status.set_action(text)
+    elif status is not None:
+        await bot._edit_message_quietly(status, text)
+
+
+async def _status_stop(status: "StatusMessage | Message | None") -> None:
+    if isinstance(status, StatusMessage):
+        await status.stop()
+
+
+async def _status_delete(status: "StatusMessage | Message | None") -> None:
+    import bot
+    if isinstance(status, StatusMessage):
+        await status.delete()
+    else:
+        await bot._delete_message_quietly(status)
 
 log = logging.getLogger("bot")
 
@@ -231,7 +260,7 @@ async def _fetch_tikwm_media_data_with_proxy_fallback(session: aiohttp.ClientSes
 
 
 async def _try_send_tiktok_slideshow(
-    session: aiohttp.ClientSession, media_data: dict, message: Message, status: Message | None,
+    session: aiohttp.ClientSession, media_data: dict, message: Message, status: "StatusMessage | Message | None",
     author: str, headers: dict,
 ) -> bool:
     """Слайдшоу из images TikWM. True — слайды отправлены, False — нет images или ничего не скачалось, вызывающий код идёт веткой видео."""
@@ -244,7 +273,7 @@ async def _try_send_tiktok_slideshow(
          # проверка сводилась к скриншотам (прод 27.10.2026).
          started_at = time.perf_counter()
          # Статус слайдшоу — через переводы (был захардкожен по-русски).
-         await bot._edit_message_quietly(status, bot._t(
+         await _status_set(status, bot._t(
              message.chat.id, "tiktok_dl_slideshow",
              shown=len(images_to_fetch), total=len(images),
          ))
@@ -387,12 +416,12 @@ async def _try_send_tiktok_slideshow(
                    download_elapsed, total_elapsed - download_elapsed,
               )
               await _send_tiktok_music(session, media_data, message, author, headers)
-              await bot._delete_message_quietly(status)
+              await _status_delete(status)
               return True
     return False
 
 async def _send_tiktok_single_video(
-    session: aiohttp.ClientSession, media_data: dict, message: Message, status: Message | None,
+    session: aiohttp.ClientSession, media_data: dict, message: Message, status: "StatusMessage | Message | None",
     author: str, headers: dict,
 ) -> None:
     """Пробуем качества HD → обычное → с водяным; переполнение лимита — следующий вариант, не сдаёмся."""
@@ -417,7 +446,7 @@ async def _send_tiktok_single_video(
                    status_msg = bot._t(message.chat.id, "tiktok_dl_as_is")
               else:
                    status_msg = bot._t(message.chat.id, "tiktok_dl_plain")
-              await bot._edit_message_quietly(status, status_msg)
+              await _status_set(status, status_msg)
 
               async with bot._media_download_slot():
                    video_bytes = await bot._download_url_bin(
@@ -474,7 +503,7 @@ async def _send_tiktok_single_video(
                    continue
 
               await _send_tiktok_music(session, media_data, message, author, headers)
-              await bot._delete_message_quietly(status)
+              await _status_delete(status)
               return
 
          if send_failed:
@@ -502,7 +531,9 @@ async def handle_tiktok(message: Message, url: str) -> None:
          # Гостю файл не отдать (answerGuestQuery — только текст): зовём в личку вместо заглушки.
          await bot._answer_guest_text(message, bot._t(message.chat.id, "tiktok_guest_dm_hint"))
          return
-    status = await bot._tg_call(message.reply, bot._t(message.chat.id, "tiktok_processing"))
+    status = await StatusMessage.start_action(
+        message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "tiktok_processing"),
+    )
     try:
          session = await bot._get_http_session()
          resolved_url = await bot._resolve_tiktok_short(session, url)
@@ -543,6 +574,10 @@ async def handle_tiktok(message: Message, url: str) -> None:
               return
          await _send_tiktok_single_video(session, media_data, message, status, author, headers)
          _record_tiktok_quota(message)
+    except asyncio.CancelledError:
+          # Отмена (рестарт/таймаут) не должна оставлять тикер статуса жить 5 минут.
+          await _status_stop(status)
+          raise
     except Exception as exc:
           if isinstance(exc, (TelegramEntityTooLarge, TikTokUserFacingError)):
               # Известные исходы — warning без Sentry, неожиданные — exception с трейсбеком (LUMEN-1).
@@ -558,7 +593,8 @@ async def handle_tiktok(message: Message, url: str) -> None:
           else:
                # Сырые исключения — generic-текст (та же логика, что в остальных обработчиках).
               err_text = bot._t(message.chat.id, "tiktok_generic_fail")
-          edited = await bot._edit_message_quietly(status, err_text)
+          await _status_stop(status)
+          edited = await bot._edit_message_quietly(_status_message(status), err_text)
           if not edited:
                # status мог быть удалён — дублируем реплаем, иначе юзер ничего не увидит.
               await bot._safe_reply(message, err_text)

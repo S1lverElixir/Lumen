@@ -41,6 +41,8 @@ class StatusMessage:
         self._done: list[str] = []
         self._sources: list[str] = []
         self._phrase_key = ""
+        self._literal = ""
+        self._literal_timed = False
         self._timed = False
         self._phase_started = time.monotonic()
         self._created = time.monotonic()
@@ -89,6 +91,35 @@ class StatusMessage:
         self._set_phrase(key, timed=timed)
         with contextlib.suppress(Exception):
             await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+
+    @classmethod
+    async def start_action(cls, reply_to: Message, lang: str, text: str) -> "StatusMessage | None":
+        """Статус действия (скачивание/генерация/озвучка): искра, фраза и живой
+        счётчик секунд, как у инструментов в Claude."""
+        import bot
+        status = cls(message=reply_to, lang=lang)
+        status._literal = text
+        status._literal_timed = True
+        sent = await bot._tg_call(
+            bot._answer_sender(reply_to), status._render(0), parse_mode=None,
+            call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+        )
+        if sent is None:
+            return None
+        status.message = sent
+        status._task = asyncio.create_task(status._tick())
+        return status
+
+    async def set_action(self, text: str, *, timed: bool = True) -> None:
+        """Смена фразы действия без остановки анимации."""
+        import bot
+        self._literal = text
+        self._literal_timed = timed
+        with contextlib.suppress(Exception):
+            await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+
+    async def set_action_key(self, key: str) -> None:
+        await self.set_action(_lang_t(self.lang, key), timed=self._literal_timed)
 
     async def finish(self) -> None:
         """Фиксирует длительность ожидания и останавливает анимацию."""
@@ -146,13 +177,20 @@ class StatusMessage:
         if key == "progress_thinking" and self._thinking_started is None:
             self._thinking_started = time.monotonic()
         self._phrase_key = key
+        self._literal = ""
         self._timed = timed
         self._phase_started = time.monotonic()
 
     def _render(self, frame_idx: int) -> str:
         spark = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
         lines = list(self._done)
-        if self._timed:
+        if self._literal:
+            line = spark + " " + self._literal
+            if self._literal_timed:
+                elapsed = max(0, int(time.monotonic() - self._created))
+                line += " · " + _lang_t(self.lang, "progress_seconds", sec=elapsed)
+            lines.append(line)
+        elif self._timed:
             elapsed = max(0, int(time.monotonic() - self._phase_started))
             lines.append(spark + " " + _lang_t(self.lang, self._phrase_key, sec=elapsed))
         else:

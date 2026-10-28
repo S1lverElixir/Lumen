@@ -77,7 +77,11 @@ async def inline_draw(message: Message, prompt: str) -> None:
             hours=hours, mins=mins,
         ))
         return
-    status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_generating_image"))
+    from lumen_status import StatusMessage
+    status_obj = await StatusMessage.start_action(
+        message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_generating_image"),
+    )
+    status = status_obj.message if status_obj is not None else None
     try:
         session = await bot._get_http_session()
         # Модель — автовыбором по промпту (/imgmodel убран 19.08.2026), без состояния чата.
@@ -104,7 +108,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
             try:
                 # Статус без названий моделей (см. ИДЕНТИЧНОСТЬ в system_prompt.py); на первой попытке статус и так стоит.
                 if attempt_model != primary_model:
-                    await bot._edit_message_quietly(status, bot._t(message.chat.id, "status_taking_longer"))
+                    if status_obj is not None:
+                        await status_obj.set_action_key("status_taking_longer")
+                    else:
+                        await bot._edit_message_quietly(status, bot._t(message.chat.id, "status_taking_longer"))
                 # Таймаут попытки — остаток общего бюджета: зависшая модель не
                 # переживает дедлайн цепочки.
                 attempt_timeout = max(1.0, deadline - time.monotonic())
@@ -127,7 +134,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 continue
 
         if image_bytes:
-            await bot._delete_message_quietly(status)
+            if status_obj is not None:
+                await status_obj.delete()
+            else:
+                await bot._delete_message_quietly(status)
             # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_photo.
             # _tg_call отдаёт None вместо исключения — внешний except ждёт исключение,
             # поэтому отсутствие результата превращаем в ошибку сервиса здесь.
@@ -150,6 +160,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 raise RuntimeError("image generation total time budget exceeded") from last_error
             raise last_error or RuntimeError("all image generation models unavailable")
 
+    except asyncio.CancelledError:
+        if status_obj is not None:
+            await status_obj.stop()
+        raise
     except Exception as exc:
         log.exception("Pollinations image generation failed:")
         txt = bot._error_text(exc).strip()
@@ -167,6 +181,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
             user_err = bot._t(cid, "draw_err_generic")
         # Статус уже снесён выше (перед send_photo): если правка не прошла — дублируем реплаем,
         # иначе пользователь не увидит вообще ничего (найдено внешним аудитом).
+        if status_obj is not None:
+            await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
 
@@ -376,7 +392,11 @@ async def inline_tts(message: Message, text: str) -> None:
             ))
             return
         return
-    status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_voicing"))
+    from lumen_status import StatusMessage
+    status_obj = await StatusMessage.start_action(
+        message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_voicing"),
+    )
+    status = status_obj.message if status_obj is not None else None
     # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
     deadline = time.monotonic() + bot.TTS_TOTAL_BUDGET_SEC
     shortened = False
@@ -396,6 +416,10 @@ async def inline_tts(message: Message, text: str) -> None:
         if not voices:
             # Даже первый кусок не уложился — честная ошибка, а не пустота.
             raise RuntimeError("TTS total budget exceeded before the first chunk")
+    except asyncio.CancelledError:
+        if status_obj is not None:
+            await status_obj.stop()
+        raise
     except Exception as exc:
         log.exception("TTS synthesis failed:")
         # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
@@ -407,11 +431,16 @@ async def inline_tts(message: Message, text: str) -> None:
         else:
             user_err = bot._t(cid, "tts_err_generic")
         # Статус уже снесён выше (перед send_voice): если правка не прошла — дублируем реплаем.
+        if status_obj is not None:
+            await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
         bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         return
-    await bot._delete_message_quietly(status)
+    if status_obj is not None:
+        await status_obj.delete()
+    else:
+        await bot._delete_message_quietly(status)
     for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
         # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
         # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.

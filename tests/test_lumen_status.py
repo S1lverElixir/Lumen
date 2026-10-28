@@ -101,6 +101,27 @@ def test_initial_status_never_calls_audio_or_documents_a_video():
     assert _initial_status(False, False, None, True) == ("progress_searching", False)
 
 
+def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
+    # TikTok/рисование/озвучка: одна анимированная строка с секундами,
+    # смена фразы не откатывает счётчик (ревью 28.10.2026).
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999904)
+
+    async def scenario():
+        status = await StatusMessage.start_action(incoming, "en", "Processing the TikTok link")
+        await status.set_action("Taking a little longer")
+        await status.finish()
+        return status
+
+    status = asyncio.run(scenario())
+    assert status.message is incoming.sent[0]
+    live = incoming.sent[0].edits[-1][0]
+    assert "Taking a little longer" in live
+    assert "0s" in live
+    assert live[0] in ("✻", "✽", "·", "✢", "✳", "✶")
+    bot.chat_state.pop(999904, None)
+
+
 def test_retry_phase_is_not_a_completed_step(monkeypatch):
     # Прод 28.10.2026: фолбэк «пробую ещё раз» попадал в итоговый блок как
     # выполненный шаг и обнулял таймер «Думал N с».
