@@ -20,7 +20,7 @@
 - If you find a leaked secret, tell the owner to rotate it. Do not rewrite git history without asking.
 
 ## What this repo is
-- Lumen: a Telegram bot (persona styled after Claude) running as a single FastAPI + aiogram webhook service on a Hugging Face Space (Docker, Python 3.13, entry: python -u bot.py). LLM backbone: Google Gemini + free OpenRouter models + Groq with per-message routing (web search and link reading go to Gemini, plain text starts at Groq, OpenRouter covers the rest, to protect Gemini's daily quota).
+- Lumen: a Telegram bot (persona styled after Claude) running as a single FastAPI + aiogram webhook service on a Hugging Face Space (Docker, Python 3.13, entry: python -u bot.py). LLM backbone: Google Gemini + free OpenRouter models + Groq with per-message routing (plain text starts at Gemma, then Groq/OpenRouter; web search and link reading use Gemini; every fresh query also gets external DuckDuckGo/Google News snippets for all providers, to protect Gemini's daily quota).
 - bot.py is the entry point and composition root (env, logging, Dispatcher, main). Domain logic lives in lumen_*.py; list the directory to find the module you need.
 - Model routing lives in lumen_router_config.py, injection and leak defenses in lumen_security.py.
 - Tests need no real secrets: conftest.py stubs BOT_TOKEN, GEMINI_API_KEY and BOT_LOG_PATH. Do not add real keys to tests or fixtures.
@@ -43,9 +43,9 @@
 - If nothing is unverified or risky, say so in one phrase instead of padding.
 
 ## Gotchas
-- Every push to main that passes CI auto-deploys to the live HF Space (.github/workflows/sync-to-hf.yml waits for the CI workflow, then force-pushes the checked commit). A green CI run is a deploy.
+- Every push to main that passes CI auto-deploys to the live HF Space (.github/workflows/sync-to-hf.yml waits for the CI workflow, then pushes the checked commit with a lease). A direct Space hotfix makes the sync fail loudly instead of being overwritten. A green CI run is a deploy.
 - The Telegram proxy (proxy.ts, Deno Deploy) is deployed separately from the HF Space. Pushing a change to it does not update the running proxy: after any proxy change, tell the owner it needs a manual redeploy.
-- Streaming has only been tested against mocks, not live Gemini/OpenRouter SSE. Before touching streaming code, read the manual smoke-test checklist in docs/ARCHITECTURE.md and list in the report which of its points the owner must run by hand.
+- Automated streaming tests use mocked clients; live Gemini/OpenRouter SSE has been exercised manually through the smoke bot, but there is no controlled integration test. Before touching streaming code, read the manual smoke-test checklist in docs/ARCHITECTURE.md and list in the report which of its points the owner must run by hand.
 - Versions in requirements.txt are pinned with == (HF rebuilds the image from scratch on every deploy; see the file header comment). Bumping a version is a deliberate decision followed by a manual smoke test (/diag + main commands), not a side effect.
 - A model leaves the routing only with dated evidence (production log errors or provider docs), written in a comment. _OR_MODEL_HEALTH is the single source of truth for exclusions. Never remove a model on a guess.
 - unittest.mock.patch only changes the namespace it targets: patch the module that reads the name (for example lumen_router_config.X), not bot.X.

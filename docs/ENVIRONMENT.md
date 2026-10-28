@@ -1,6 +1,6 @@
 # Environment variables
 
-`BOT_TOKEN` and `GEMINI_API_KEY` are required. Deployments using the authenticated proxy also require `LUMEN_PROXY_SECRET` on both the bot and every proxy instance.
+`BOT_TOKEN` and `GEMINI_API_KEY` are required. On the Hugging Face Space `ADMIN_SECRET_SEED` is required too: without it the bot refuses to start, because admin keys must not be derived from the bot token. Deployments using the authenticated proxy also require `LUMEN_PROXY_SECRET` on both the bot and every proxy instance.
 
 Naming convention (frozen for existing names — renaming a live variable needs a
 simultaneous code + platform change, so existing names stay even when imperfect):
@@ -39,7 +39,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ADMIN_SECRET_SEED` | falls back to `BOT_TOKEN`, then to a random value if that's empty too | Salt used to derive `WEBHOOK_SECRET`/`ADMIN_PANEL_KEY`. Set it independently to rotate those two secrets without touching the bot's actual Telegram token. |
+| `ADMIN_SECRET_SEED` | required on HF Spaces; local dev falls back to `BOT_TOKEN`, then to a random value | Salt used to derive `WEBHOOK_SECRET`/`ADMIN_PANEL_KEY`. Set it independently to rotate those two secrets without touching the bot's actual Telegram token. In production (HF Space) an unset seed aborts startup. |
 | `OWNER_ID` / `BOT_OWNER_ID` / `ADMIN_ID` / `TELEGRAM_OWNER_ID` | — | Telegram user ID that unlocks `/logs` and `/stats`. The first non-empty variable found is used. |
 | `BOT_USERNAME` | `LumenAI_bot` | Fallback username; the bot fetches its real one via `getMe` on startup and uses that instead. |
 
@@ -48,7 +48,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | Variable | Default | Purpose |
 |---|---|---|
 | `OPENROUTER_API_KEY` / `OPENROUTER_KEY` | — | OpenRouter API key. The chain is built regardless of which keys are set, so a missing key means every OpenRouter candidate fails fast with a logged "is not set" rather than being silently routed around. |
-| `GROQ_API_KEY` | — | Groq API key (free plan, no card: 1000 req/day). Heads plain-text routes; without it those routes fall through to OpenRouter. Also powers voice transcription (Whisper). |
+| `GROQ_API_KEY` | — | Groq API key (free plan, no card: 1000 req/day). Second plain-text candidate after Gemma; without it those routes fall through to OpenRouter. Also powers voice transcription (Whisper). |
 | `OPENROUTER_DAILY_LIMIT` | `50` | Daily free-model request budget shown in `/stats` (OpenRouter section). Raise it if the plan changes, so the remainder stays honest. |
 | `GROQ_DAILY_LIMIT` | `1000` | Same for Groq (free plan: 1000 req/day). |
 | `GEMINI_DAILY_LIMITS` | — | Per-model Gemini daily limits for `/stats` as `model=limit` pairs (`gemini-2.5-flash=1500`). Models missing here show usage without a limit. |
@@ -56,8 +56,8 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `OPENROUTER_TITLE` | `BOT_USERNAME` | App title header sent with OpenRouter requests. |
 | `POLLINATIONS_IMAGE_MODEL` | `flux` | Default image-generation model (used only if the prompt doesn't match a more specific style). Renamed from `HF_IMAGE_MODEL` (Sept 2026) — the backend is Pollinations.ai, not Hugging Face; the old name is no longer read. |
 | `VOICE_TRANSCRIBE_MAX_BYTES` | `10485760` (10 MB) | Voice/audio attachments larger than this skip Whisper transcription and go straight to Gemini audio, as before. |
-| `WEB_SEARCH_ENABLED` | `1` | Free DuckDuckGo snippet fallback for fresh-info requests when no live-search Gemini model is left in the route (quota exhausted). Set to `0` (plus restart) to answer from knowledge with an honest "without live search" note instead. |
-| `WEB_SEARCH_TIMEOUT_SEC` | `8s` | Cap for one DuckDuckGo fetch, inside the shared `ROUTE_TOTAL_BUDGET_SEC`. |
+| `WEB_SEARCH_ENABLED` | `1` | Free external snippets for every fresh-info request, regardless of whether the route contains a grounded Gemini model. News queries merge DuckDuckGo with Google News (freshness-filtered, publication dates included). Set to `0` (plus restart) to answer from knowledge with an honest "without live search" note instead. |
+| `WEB_SEARCH_TIMEOUT_SEC` | `8s` | Cap for the whole external search phase (DuckDuckGo plus RSS fallbacks), inside the shared `ROUTE_TOTAL_BUDGET_SEC`. |
 | `WEB_SEARCH_MAX_RESULTS` | `5` | How many snippets are attached to the prompt (each capped, whole block capped). |
 
 ## Timeouts, rate limiting & routing budgets
@@ -77,11 +77,12 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `RATE_LIMIT_MAX_REQUESTS` | `5` | Max requests per user within `RATE_LIMIT_WINDOW_SEC`. |
 | `RATE_LIMIT_WINDOW_SEC` | `30s` | Sliding window width for rate limiting. |
 | `DAILY_USER_MESSAGE_LIMIT` | `30` | Max model answers per user per day (day boundary: midnight America/Los_Angeles, same as quota). Only successful model answers count; `/reset`/`/lang`/`/start`, failed calls and limit denials don't. `OWNER_ID` is unlimited. |
-| `DAILY_USER_GEMINI_LIMIT` | `5` | Of the above, max answers that actually went through Gemini (links, YouTube, video/audio, fresh data with search). Past it, links/YouTube/video are refused, the rest is served via Groq/OpenRouter (fresh data marked as answered without search). |
+| `DAILY_USER_GEMINI_LIMIT` | `5` | Of the above, max answers that actually went through Gemini (links, YouTube, video/audio, native grounding). Past it, links/YouTube/video are refused; text and freshness queries are served via Gemma/Groq/OpenRouter, and external search snippets still run for them. The "answered without search" note appears only if that external search also returns nothing. |
 | `DAILY_USER_TTS_LIMIT` | `5` | Max `/tts` voicings per user per day (counts toward `DAILY_USER_MESSAGE_LIMIT` too). |
 | `ROUTE_MODEL_TIMEOUT_SEC` | `22s` | Timeout for a single attempt at a single model. No retries: any failure moves straight to the next model. |
 | `MODEL_QUARANTINE_BAD_LIMIT` | `3` | How many consecutive bad responses (empty or garbled) put a model in temporary quarantine until the end of the quota day. A good response resets the counter; the last available model of a route is never quarantined. In-memory only. |
 | `ROUTE_TOTAL_BUDGET_SEC` | `40s` | Total time budget for the whole routing chain of one message, across all providers (Gemini, OpenRouter, Groq). |
+| `MESSAGE_TOTAL_BUDGET_SEC` | `90s` | Ceiling for one message end to end (chat lock wait, external search, routing and post-hoc retry); each stage takes the smaller of its own timeout and the remaining message budget. |
 | `DRAW_TOTAL_BUDGET_SEC` | `120s` | Same idea, for the `/draw` fallback chain across image models. |
 | `CHAT_LOCK_TIMEOUT_SEC` | `45s` | How long an incoming message waits for that chat's lock before replying "busy". Deliberately shorter than `DRAW_TOTAL_BUDGET_SEC`: a second message during a long drawing gets "busy" instead of hanging. Shared by normal messages, pick-buttons and albums. |
 | `STREAM_CHUNK_TIMEOUT_SEC` | `30s` | Timeout waiting for the next streamed chunk, shared by Gemini, OpenRouter and Groq. |
@@ -142,14 +143,14 @@ These ceilings are fixed in code; change them only with a code edit:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SENTRY_DSN` | — | Enables Sentry error tracking if set. Every event is scrubbed of known secrets (`BOT_TOKEN`, API keys, `WEBHOOK_SECRET`, etc.) before it's sent. |
+| `SENTRY_DSN` | — | Enables Sentry error tracking if set. Local variables and request bodies are disabled (they can contain prompts/history); every event is scrubbed of known secrets (`BOT_TOKEN`, API keys, `WEBHOOK_SECRET`, etc.) before it's sent. |
 | `BOT_LOG_PATH` | `/app/bot.log` | Log file path. Mainly relevant for tests; leave it alone in production. |
 | `LOG_LEVEL` | `INFO` | Standard logging level (`DEBUG`/`INFO`/`WARNING`/...). |
 | `DIAG_TOTAL_BUDGET_SEC` | `25s` | Total budget for the `/diag` network check across all probed hosts, so a hanging host cannot hang the diagnostic. |
 | `DEV_TRACE` | `0` | Set to `1` to log every request, answer and passive group background as JSONL (`devtrace.jsonl` next to `bot.log`), for prompt debugging. Off by default: the file holds chat texts. |
 | `DEV_TRACE_PATH` | `<BOT_LOG_PATH dir>/devtrace.jsonl` | Where the dev trace file lives. Point it at a temp dir in tests. |
 | `DEV_TRACE_MAX_BYTES` | `5 MB` | File size cap before rotation to a single `.1` backup; garbage values fall back to the default. |
-| `ADMIN_SECRET_SEED` | — | Secret seed for deriving `WEBHOOK_SECRET` and `ADMIN_PANEL_KEY`. **Set it to its own random value, separate from `BOT_TOKEN`.** Without it both keys are derived from `BOT_TOKEN`, so a leaked token also exposes `/export_state` and `/webhook` (the bot logs a warning at startup). Changing the seed (or setting it for the first time) rotates both keys at once: on restart the bot re-registers the Telegram webhook with the new `WEBHOOK_SECRET` by itself, but anything using the old `ADMIN_PANEL_KEY` (browser bookmarks, cron export scripts) gets `401` until updated — fetch the new key via `GET /admin_keys` with Bearer `BOT_TOKEN`. |
+| `ADMIN_SECRET_SEED` | required on HF Spaces | Secret seed for deriving `WEBHOOK_SECRET` and `ADMIN_PANEL_KEY`. **Set it to its own random value, separate from `BOT_TOKEN`.** On production (HF Space) an unset seed aborts startup; local development falls back to `BOT_TOKEN` with a warning. Changing the seed (or setting it for the first time) rotates both keys at once: on restart the bot re-registers the Telegram webhook with the new `WEBHOOK_SECRET` by itself, but anything using the old `ADMIN_PANEL_KEY` (browser bookmarks, cron export scripts) gets `401` until updated — fetch the new key via `GET /admin_keys` with Bearer `BOT_TOKEN`. |
 
 Sentry setup: create a free Python project at [sentry.io](https://sentry.io) (Developer tier: 5,000 events/month as of 06.10.2026), copy the DSN from the project settings, and add it as a Space secret.
 
@@ -157,5 +158,6 @@ Sentry setup: create a free Python project at [sentry.io](https://sentry.io) (De
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `SPACE_ID` | set by Hugging Face | Platform-provided Space identifier. Its presence marks the runtime as production for the mandatory `ADMIN_SECRET_SEED` check. |
 | `SPACE_HOST` | computed from the two below | Host used to register the Telegram webhook. Hugging Face usually sets this automatically. |
 | `SPACE_AUTHOR_NAME` / `SPACE_REPO_NAME` | `silverelixir` / `lumen` | Used only if `SPACE_HOST` isn't set. |

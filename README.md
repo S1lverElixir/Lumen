@@ -39,8 +39,9 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 ## Features
 
-- **Automatic model routing.** Every message goes to whichever provider actually has what it needs: plain text starts at Groq (1000 free requests/day), web search and link reading go to Gemini, OpenRouter covers the rest — protecting Gemini's tight daily quota.
+- **Automatic model routing.** Every message goes to whichever provider actually has what it needs: plain text starts at Gemma (the largest free quota), then Groq and OpenRouter; web search and link reading go to Gemini. Every fresh query also gets external snippets (DuckDuckGo and Google News with publication dates) for whichever model answers, including the non-Gemini reserves.
 - **Streaming replies** with a self-calibrating typing-speed pacer, so answers type themselves in instead of landing in a few large chunks.
+- **Claude-style live status.** In private chats search and media requests show a sparkle timeline ("Searching the web", found sources, a thinking timer) and finish with a collapsed "Thought for Ns" block; simple answers get a subtle italic thought line. Private answers are plain messages, without Telegram reply quotes.
 - **Defenses against prompt injection and identity leaks.** A deterministic input filter plus output scrubbers keep the bot from revealing which model or provider actually answered.
 - **TikTok downloads** (usually without watermarks; a watermarked copy is the last resort): video, slideshows (including "live" photo slides), and original sound.
 - **Image generation** through Pollinations.ai. The model is picked from the prompt itself (anime, fantasy, realism, quick sketch, or a general default).
@@ -53,23 +54,23 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 ## How it works
 
-Lumen is a single FastAPI + aiogram service. Telegram delivers updates to a webhook. Each message gets routed through a chain of candidate models, built on the fly from the message's content: attachments, links, and a couple of lightweight heuristics for "does this need current information" and "is this a heavy request." Plain text starts on Groq, search and link reading go to Gemini, OpenRouter covers the rest; the first provider that answers wins, the next one is tried as a fallback if its whole chain fails. Models that already returned 429 today are skipped by the router.
+Lumen is a single FastAPI + aiogram service. Telegram delivers updates to a webhook; duplicate `update_id` deliveries are ignored. Each message gets routed through a chain of candidate models, built on the fly from the message's content: attachments, links, and a couple of lightweight heuristics for "does this need current information" and "is this a heavy request." Plain text starts on Gemma, then Groq and OpenRouter; search and link reading go to Gemini; every fresh query also gets external DuckDuckGo/Google News snippets attached for any provider. The first provider that answers wins, the next one is tried as a fallback if its whole chain fails. Models that already returned 429 today are skipped by the router.
 
-The codebase is a modular monolith. `bot.py` is the entry point and composition root; the rest is split into focused modules: `lumen_admin.py` (FastAPI app, secret gates, admin/diag/export endpoints), `lumen_message_core.py` (message-handling core), `lumen_routes.py` (LLM calls with fallback, `_run_route`), `lumen_streaming.py` (provider-agnostic streaming), `lumen_chat_state.py` (chat state, quotas, locks), `lumen_commands.py` (commands, TTS/draw pipelines, pick buttons), `lumen_tiktok_flow.py` (TikTok send orchestration), `lumen_rich.py` (sending: guests, Rich Messages, chunking), `lumen_media_flow.py` (Telegram attachment downloads), `lumen_transport_calls.py` (sessions, proxy rotation, Telegram calls), `lumen_errors.py` (model error classification), `lumen_limits.py` (rate window, pick queue), `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, `lumen_typing_pace.py`, `lumen_model_speed.py`, and `lumen_lang.py` (bot language: system messages in 25 languages). `lumen_devtrace.py` writes an opt-in JSONL trace (requests, answers, passive background) for prompt debugging.
+The codebase is a modular monolith. `bot.py` is the entry point and composition root; the rest is split into focused modules: `lumen_admin.py` (FastAPI app, secret gates, admin/diag/export endpoints), `lumen_message_core.py` (message-handling core), `lumen_routes.py` (LLM calls with fallback, `_run_route`), `lumen_streaming.py` (provider-agnostic streaming), `lumen_status.py` (Claude-style live status/activity bubble), `lumen_search.py` (external DuckDuckGo/Bing/Google News snippets), `lumen_chat_state.py` (chat state, quotas, locks), `lumen_commands.py` (commands, TTS/draw pipelines, pick buttons), `lumen_tiktok_flow.py` (TikTok send orchestration), `lumen_rich.py` (sending: guests, Rich Messages, chunking), `lumen_media_flow.py` (Telegram attachment downloads), `lumen_transport_calls.py` (sessions, proxy rotation, Telegram calls), `lumen_errors.py` (model error classification), `lumen_limits.py` (rate window, pick queue), `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, `lumen_typing_pace.py`, `lumen_model_speed.py`, and `lumen_lang.py` (bot language: system messages in 25 languages). `lumen_devtrace.py` writes an opt-in JSONL trace (requests, answers, passive background) for prompt debugging.
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for a deeper look at routing, streaming, the security layers, and the TikTok downloader.
 
 ## Deploying on Hugging Face Spaces
 
 1. Push this repository to a Space (`sdk: docker` is already set in the frontmatter above).
-2. Set the two required secrets: `BOT_TOKEN` and `GEMINI_API_KEY`.
+2. Set the required secrets: `BOT_TOKEN`, `GEMINI_API_KEY`, and `ADMIN_SECRET_SEED`. Production refuses to start without the seed: admin keys must not be derived from the bot token.
 3. Hugging Face builds the image from `Dockerfile` and runs `python -u bot.py`.
 4. On startup the bot registers its own webhook. If that fails, check the logs for `[webhook] setWebhook failed` and register it manually:
    ```bash
    curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://<space-host>/webhook_url
    ```
     then fill the `register_url_template` it returns (token by hand, via curl — never open a token URL in a browser).
-5. `WEBHOOK_SECRET` and `ADMIN_PANEL_KEY` are derived deterministically from `BOT_TOKEN` (or from `ADMIN_SECRET_SEED`, if set). Fetch them with:
+5. `WEBHOOK_SECRET` and `ADMIN_PANEL_KEY` are derived deterministically from `ADMIN_SECRET_SEED`. Fetch them with:
    ```bash
    curl -H "Authorization: Bearer <BOT_TOKEN>" https://<space-host>/admin_keys
    ```
@@ -78,7 +79,7 @@ Hugging Face Spaces' outbound IPs are blocked by Telegram's API at the network l
 
 ## Configuration
 
-Only `BOT_TOKEN` and `GEMINI_API_KEY` are required. Everything else has a sane default; the full reference (proxy addresses, timeouts, storage, rate limiting, TikTok tuning) lives in **[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)**.
+Locally only `BOT_TOKEN` and `GEMINI_API_KEY` are required; on the HF Space `ADMIN_SECRET_SEED` is required as well. Everything else has a sane default; the full reference (proxy addresses, timeouts, storage, rate limiting, TikTok tuning, media concurrency) lives in **[docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)**.
 
 ## Proxy setup
 
@@ -127,7 +128,7 @@ More owner-only commands stay out of the menu on purpose, since they surface int
 | `/ban <ID>` / `/unban <ID>` (or as a reply) | bot owner, DMs only | Block/unblock a user by Telegram ID. Banned users are fully ignored: no answers, no group context, no limit counters. Survives restarts. |
 | `/banlist` | bot owner, DMs only | Shows banned user IDs. |
 
-In groups the bot keeps recent messages (up to 100) as context and sends them to the model providers together with the question; `/reset` (group admins/owner) clears them.
+In groups the bot keeps recent messages (up to 100, with a total character cap) as context and sends them to the model providers together with the question; `/reset` (group admins/owner) clears them.
 
 ## Testing
 
@@ -136,20 +137,20 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest -v
 ```
 
-Test files live in `tests/` and mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, `test_lumen_media.py`, and `test_lumen_model_speed.py` each test their matching module directly, while `test_bot_admin.py`, `test_bot_commands.py`, `test_bot_routes.py`, `test_bot_state.py`, `test_bot_streaming.py`, `test_bot_tiktok.py`, `test_bot_transport.py`, and `test_bot_tts.py` cover `bot.py` by domain (shared fakes live in `bot_test_helpers.py`). `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets.
+Test files live in `tests/` and mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, `test_lumen_media.py`, `test_lumen_model_speed.py`, `test_lumen_search.py`, `test_lumen_status.py`, and `test_lumen_devtrace.py` each test their matching module directly, while `test_bot_admin.py`, `test_bot_commands.py`, `test_bot_routes.py`, `test_bot_search.py`, `test_bot_state.py`, `test_bot_streaming.py`, `test_bot_tiktok.py`, `test_bot_transport.py`, and `test_bot_tts.py` cover `bot.py` by domain (shared fakes live in `bot_test_helpers.py`). `test_eval_persona.py` covers the persona eval fixtures. `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets.
 
-CI (`.github/workflows/ci.yml`) runs `pyflakes` + `pytest` + `pip-audit` + `deno test` on every push and pull request; a successful run triggers `sync-to-hf.yml`, which mirrors the commit to the Hugging Face Space.
+CI (`.github/workflows/ci.yml`) runs `pyflakes` + `pytest` + `pip-audit` + `deno test` on every push and pull request, plus a weekly scheduled run; a successful push run triggers `sync-to-hf.yml`, which mirrors the commit to the Hugging Face Space (and refuses to overwrite a direct Space hotfix).
 
 ## Known limitations
 
 - Chat history and quota counters survive redeploys only if Upstash is configured (see [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md)); otherwise they live on the container's ephemeral disk and reset on every rebuild.
 - YouTube downloading isn't supported, because Hugging Face Spaces' outbound IPs are blocked at the TLS handshake level. Viewing and analyzing a video by link still works.
 - TikTok downloading depends on the unofficial TikWM API, not an official TikTok endpoint, and needs the proxy above to work from Hugging Face Spaces at all.
-- Streaming has only been exercised against mocked clients, not live Gemini/OpenRouter SSE traffic. See the manual smoke-test checklist in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before touching that code path.
+- Automated tests exercise streaming against mocked clients; live SSE has been run manually through the smoke bot, but there is no controlled integration test. See the manual smoke-test checklist in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before touching that code path.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for how to report a vulnerability. Secrets are scrubbed from logs and Sentry events before they leave the container.
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability. Secrets are scrubbed from logs and Sentry events before they leave the container; public Space logs hash long numeric chat/user IDs. The webhook verifies Telegram's secret header, caps body size, and ignores duplicate `update_id` deliveries. `ADMIN_SECRET_SEED` is mandatory in production, so admin keys are never derived from the bot token.
 
 ## License
 
