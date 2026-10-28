@@ -21,6 +21,8 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 **Stack:** Python 3.13 · aiogram · FastAPI · google-genai · Docker
 
+**Русская версия: [README.ru.md](README.ru.md).**
+
 ## Contents
 
 - [Features](#features)

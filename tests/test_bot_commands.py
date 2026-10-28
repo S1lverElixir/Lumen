@@ -1147,6 +1147,17 @@ def test_expired_picks_purged_on_new_pick(rate_guard_setup, monkeypatch):
         bot._pending_picks.clear()
 
 
+def test_start_text_examples_cover_every_language():
+    # Приветствие должно иметь одинаковый состав во всех языках, а не только
+    # в en/ru (аудит 28.10.2026).
+    import lumen_lang
+    assert set(lumen_lang._START_EXAMPLES) == set(lumen_lang.SUPPORTED_LANGS)
+    for lang in lumen_lang.SUPPORTED_LANGS:
+        examples = lumen_lang._START_EXAMPLES[lang]
+        assert examples
+        assert lumen_lang.t(lang, "start_text").endswith(examples)
+
+
 def test_lang_table_covers_all_keys_in_all_languages():
     import lumen_lang
     assert tuple(lumen_lang.SUPPORTED_LANGS) == tuple(sorted(lumen_lang.SUPPORTED_LANGS))
@@ -1157,9 +1168,10 @@ def test_lang_table_covers_all_keys_in_all_languages():
     for key, table in lumen_lang.STRINGS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
             explicit = lumen_lang.LANG_PACKS.get(lang, {}).get(key) or table.get(lang)
-            resolved = explicit or table.get("en")
-            assert resolved, f"missing {key}[{lang}]"
-            if explicit is not None and lang != "en" and explicit == table.get("en"):
+            # Фолбэк на английский скрывал пропуски в переводе; теперь каждый
+            # ключ обязан иметь явный перевод во всех 25 языках (аудит 28.10.2026).
+            assert explicit, f"missing translation {key}[{lang}]"
+            if lang != "en" and explicit == table.get("en"):
                 assert (key, lang) in allowed_en_duplicates, (
                     f"untranslated duplicate {key}[{lang}]: delete it, English fallback covers display"
                 )

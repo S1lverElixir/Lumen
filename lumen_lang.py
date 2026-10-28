@@ -150,8 +150,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "You can also draw and voice just with words, no commands — e.g. “draw a cat” or “read this out loud”.\n\n"
             "<b>TikTok</b>\n"
             "Send a link — I'll download video or photos without watermarks.\n\n"
-            "Ask anything — I'm listening.\n\n"
-            "Try right now: “who are you?”, send a photo with “what's in it?”, or “recommend a movie”."
+            "Ask anything — I'm listening."
         ),
         "es": (
             "<b>Lumen</b>\n\n"
@@ -190,8 +189,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "Рисовать и озвучивать можно и просто словами, без команд — например «нарисуй кота» или «озвучь это».\n\n"
             "<b>TikTok</b>\n"
             "Пришли ссылку — скачаю видео или фото без водяных знаков.\n\n"
-            "Спрашивай что угодно — я слушаю.\n\n"
-            "Попробуй прямо сейчас: «кто ты?», пришли фото с вопросом «что на нём?», кинь ссылку на TikTok."
+            "Спрашивай что угодно — я слушаю."
         ),
         "uk": (
             "<b>Lumen</b>\n\n"
@@ -423,6 +421,8 @@ STRINGS: dict[str, dict[str, str]] = {
     "fallback_no_live_search": {
         "be": "Адказваю без жывога пошуку (пошукавая квота вычарпана, знешні пошук нічога не даў) — даныя могуць быць не самымі свежымі.",
         "en": "Answering without live web search (search quota exhausted and fallback search returned nothing) — the details may not be fully up to date.",
+        "es": "Respondo sin búsqueda web en vivo (cuota de búsqueda agotada y la búsqueda externa no devolvió nada); los datos pueden no estar totalmente actualizados.",
+        "kk": "Тірі іздеусіз жауап беремін (іздеу квотасы таусылды, сыртқы іздеу ештеңе қайтармады) — деректер толық өзекті болмауы мүмкін.",
         "ru": "Отвечаю без живого поиска (поисковая квота исчерпана, внешний поиск ничего не дал) — данные могут быть не самыми свежими.",
         "uk": "Відповідаю без живого пошуку (пошукова квота вичерпана, зовнішній пошук нічого не дав) — дані можуть бути не найсвіжішими.",
     },
@@ -909,12 +909,12 @@ STRINGS: dict[str, dict[str, str]] = {
     },
     # ── Владелец ──
     "owner_quota_notice": {
-        "be": "⚠️ Квота Gemini вычарпана цалкам па ўсіх мадэлях у маршруце (гл. /stats для дэталяў).",
-        "en": "⚠️ Gemini quota fully exhausted across all route models (see /stats for details).",
-        "es": "⚠️ Cuota de Gemini agotada por completo en todos los modelos de la ruta (ver /stats para detalles).",
-        "kk": "⚠️ Маршруттағы барлық модель бойынша Gemini квотасы толық таусылды (егжей-тегжей /stats).",
-        "ru": "⚠️ Квота Gemini исчерпана целиком по всем моделям в маршруте (см. /stats для деталей).",
-        "uk": "⚠️ Квоту Gemini вичерпано цілком за всіма моделями в маршруті (див. /stats для деталей).",
+        "be": "Квота Gemini вычарпана цалкам па ўсіх мадэлях у маршруце (гл. /stats для дэталяў).",
+        "en": "Gemini quota fully exhausted across all route models (see /stats for details).",
+        "es": "Cuota de Gemini agotada por completo en todos los modelos de la ruta (ver /stats para detalles).",
+        "kk": "Маршруттағы барлық модель бойынша Gemini квотасы толық таусылды (егжей-тегжей /stats).",
+        "ru": "Квота Gemini исчерпана целиком по всем моделям в маршруте (см. /stats для деталей).",
+        "uk": "Квоту Gemini вичерпано цілком за всіма моделями в маршруті (див. /stats для деталей).",
     },
 }
 
@@ -1022,7 +1022,9 @@ PACK_PT: dict[str, str] = {
     "pick_expired": "Botões expirados — escreva em texto.",
     "pick_not_yours": "Estes não são seus botões.",
     "pick_choice": "Escolha: {choice}",
-    "owner_quota_notice": "⚠️ Cota do Gemini totalmente esgotada em todos os modelos da rota (ver /stats para detalhes).",
+    "owner_quota_notice": "Cota do Gemini totalmente esgotada em todos os modelos da rota (ver /stats para detalhes).",
+    "group_history_notice": "Em grupos, guardo as mensagens recentes (até 100) como contexto e as envio aos provedores de modelos junto com a tua pergunta.",
+    "fallback_no_live_search": "Respondo sem busca na web ao vivo (cota de busca esgotada e a busca alternativa não retornou nada) — os detalhes podem não estar totalmente atualizados.",
     "user_daily_total": "Limite diário de mensagens esgotado ({used}/{limit}). Novas estarão disponíveis em {hours} h {mins} min.",
     "user_daily_gemini": "Limite diário de solicitações complexas esgotado ({used}/{limit}). Poderei abrir links, vídeos e YouTube amanhã. Mas faça sua pergunta normal — responderei.",
     "user_daily_tts": "Limite diário de voz esgotado ({used}/{limit}). Poderei dar voz de novo amanhã.",
@@ -1131,7 +1133,9 @@ PACK_AR: dict[str, str] = {
     "pick_expired": "انتهت صلاحية الأزرار — اكتبها نصًا.",
     "pick_not_yours": "هذه ليست أزرارك.",
     "pick_choice": "الاختيار: {choice}",
-    "owner_quota_notice": "⚠️ حصة Gemini مستنفدة بالكامل عبر كل نماذج المسار (انظر /stats للتفاصيل).",
+    "owner_quota_notice": "حصة Gemini مستنفدة بالكامل عبر كل نماذج المسار (انظر /stats للتفاصيل).",
+    "group_history_notice": "في المجموعات أحتفظ بالرسائل الأخيرة (حتى 100) كسياق وأرسلها إلى مزوّدي النماذج مع سؤالك.",
+    "fallback_no_live_search": "أجيب دون بحث حي في الويب (انتهت حصة البحث ولم تُرجع عملية البحث البديلة شيئًا) — قد لا تكون البيانات محدثة بالكامل.",
     "user_daily_total": "تم استنفاد الحد اليومي للرسائل ({used}/{limit}). ستتوفر رسائل جديدة بعد {hours} س {mins} د.",
     "user_daily_gemini": "تم استنفاد الحد اليومي للطلبات المعقدة ({used}/{limit}). سأتمكن من فتح الروابط والفيديو وYouTube غدًا. أما سؤالك العادي فاطرحه — وسأجيب.",
     "user_daily_tts": "تم استنفاد الحد اليومي للتحويل إلى صوت ({used}/{limit}). سأتمكن من التحويل غدًا.",
@@ -1240,7 +1244,9 @@ PACK_TR: dict[str, str] = {
     "pick_expired": "Düğmelerin süresi doldu — metinle yaz.",
     "pick_not_yours": "Bunlar senin düğmelerin değil.",
     "pick_choice": "Seçim: {choice}",
-    "owner_quota_notice": "⚠️ Gemini kotası rotadaki tüm modellerde tamamen doldu (detaylar için /stats).",
+    "owner_quota_notice": "Gemini kotası rotadaki tüm modellerde tamamen doldu (detaylar için /stats).",
+    "group_history_notice": "Gruplarda son mesajları (100'e kadar) bağlam olarak tutarım ve sorunla birlikte model sağlayıcılarına gönderirim.",
+    "fallback_no_live_search": "Canlı web araması olmadan yanıtlıyorum (arama kotası doldu ve yedek arama hiçbir şey döndürmedi) — ayrıntılar tamamen güncel olmayabilir.",
     "user_daily_total": "Günlük mesaj limiti doldu ({used}/{limit}). Yenileri {hours} sa {mins} dk sonra kullanılabilir.",
     "user_daily_gemini": "Günlük karmaşık istek limiti doldu ({used}/{limit}). Bağlantı, video ve YouTube'u yarın açabilirim. Sıradan sorunu sor — yanıtlarım.",
     "user_daily_tts": "Günlük seslendirme limiti doldu ({used}/{limit}). Yarın seslendirebilirim.",
@@ -1349,7 +1355,9 @@ PACK_DE: dict[str, str] = {
     "pick_expired": "Buttons abgelaufen — als Text schreiben.",
     "pick_not_yours": "Das sind nicht deine Buttons.",
     "pick_choice": "Wahl: {choice}",
-    "owner_quota_notice": "⚠️ Gemini-Kontingent über alle Routenmodelle restlos erschöpft (Details siehe /stats).",
+    "owner_quota_notice": "Gemini-Kontingent über alle Routenmodelle restlos erschöpft (Details siehe /stats).",
+    "group_history_notice": "In Gruppen behalte ich die letzten Nachrichten (bis zu 100) als Kontext und sende sie zusammen mit deiner Frage an die Modellanbieter.",
+    "fallback_no_live_search": "Ich antworte ohne Live-Websuche (Suchkontingent erschöpft und die Ausweichsuche lieferte nichts) — die Angaben sind möglicherweise nicht ganz aktuell.",
     "user_daily_total": "Tageslimit für Nachrichten erreicht ({used}/{limit}). Neue gibt es in {hours} Std. {mins} Min.",
     "user_daily_gemini": "Tageslimit für komplexe Anfragen erreicht ({used}/{limit}). Links, Videos und YouTube kann ich morgen öffnen. Eine normale Frage aber gern — ich antworte.",
     "user_daily_tts": "Tageslimit für Vertonung erreicht ({used}/{limit}). Morgen kann ich wieder vertonen.",
@@ -1458,7 +1466,9 @@ PACK_FR: dict[str, str] = {
     "pick_expired": "Boutons expirés — écris en texte.",
     "pick_not_yours": "Ce ne sont pas tes boutons.",
     "pick_choice": "Choix : {choice}",
-    "owner_quota_notice": "⚠️ Quota Gemini entièrement épuisé sur tous les modèles de la route (voir /stats pour les détails).",
+    "owner_quota_notice": "Quota Gemini entièrement épuisé sur tous les modèles de la route (voir /stats pour les détails).",
+    "group_history_notice": "Dans les groupes, je garde les messages récents (jusqu'à 100) comme contexte et les envoie aux fournisseurs de modèles avec ta question.",
+    "fallback_no_live_search": "Je réponds sans recherche web en direct (quota de recherche épuisé et la recherche de secours n'a rien renvoyé) — les informations peuvent ne pas être parfaitement à jour.",
     "user_daily_total": "Limite quotidienne de messages atteinte ({used}/{limit}). Les prochains seront disponibles dans {hours} h {mins} min.",
     "user_daily_gemini": "Limite quotidienne de requêtes complexes atteinte ({used}/{limit}). Je pourrai ouvrir liens, vidéos et YouTube demain. Mais pose ta question ordinaire — je répondrai.",
     "user_daily_tts": "Limite quotidienne de voix atteinte ({used}/{limit}). Je pourrai remettre en voix demain.",
@@ -1567,7 +1577,9 @@ PACK_IT: dict[str, str] = {
     "pick_expired": "Pulsanti scaduti — scrivi in testo.",
     "pick_not_yours": "Non sono i tuoi pulsanti.",
     "pick_choice": "Scelta: {choice}",
-    "owner_quota_notice": "⚠️ Quota Gemini completamente esaurita su tutti i modelli del percorso (vedi /stats per i dettagli).",
+    "owner_quota_notice": "Quota Gemini completamente esaurita su tutti i modelli del percorso (vedi /stats per i dettagli).",
+    "group_history_notice": "Nei gruppi conservo i messaggi recenti (fino a 100) come contesto e li invio ai fornitori dei modelli insieme alla tua domanda.",
+    "fallback_no_live_search": "Rispondo senza ricerca web in tempo reale (quota di ricerca esaurita e la ricerca alternativa non ha restituito nulla) — i dettagli potrebbero non essere del tutto aggiornati.",
     "user_daily_total": "Limite giornaliero di messaggi raggiunto ({used}/{limit}). Nuovi disponibili tra {hours} h {mins} min.",
     "user_daily_gemini": "Limite giornaliero di richieste complesse raggiunto ({used}/{limit}). Link, video e YouTube potrò aprirli domani. Ma fai pure la tua domanda normale — risponderò.",
     "user_daily_tts": "Limite giornaliero di voce raggiunto ({used}/{limit}). Potrò dare voce di nuovo domani.",
@@ -1676,7 +1688,9 @@ PACK_HI: dict[str, str] = {
     "pick_expired": "बटन समाप्त हो गए — टेक्स्ट में लिखो।",
     "pick_not_yours": "ये तुम्हारे बटन नहीं हैं।",
     "pick_choice": "चयन: {choice}",
-    "owner_quota_notice": "⚠️ रूट के सभी मॉडलों में Gemini कोटा पूरी तरह समाप्त (विवरण के लिए /stats)।",
+    "owner_quota_notice": "रूट के सभी मॉडलों में Gemini कोटा पूरी तरह समाप्त (विवरण के लिए /stats)।",
+    "group_history_notice": "समूहों में मैं हाल के संदेश (100 तक) संदर्भ के रूप में रखता हूँ और तुम्हारे सवाल के साथ मॉडल प्रदाताओं को भेजता हूँ।",
+    "fallback_no_live_search": "मैं लाइव वेब खोज के बिना उत्तर दे रहा हूँ (खोज कोटा खत्म और वैकल्पिक खोज से कुछ नहीं मिला) — जानकारी पूरी तरह ताज़ा न हो सकती है।",
     "user_daily_total": "दैनिक संदेश सीमा पूरी ({used}/{limit})। नए संदेश {hours} घंटे {mins} मिनट में मिलेंगे।",
     "user_daily_gemini": "जटिल अनुरोधों की दैनिक सीमा पूरी ({used}/{limit})। लिंक, वीडियो और YouTube कल खोल पाऊंगा। साधारण सवाल पूछो — जवाब दूंगा।",
     "user_daily_tts": "दैनिक वॉयस सीमा पूरी ({used}/{limit})। कल फिर से सुना पाऊंगा।",
@@ -1785,7 +1799,9 @@ PACK_ID: dict[str, str] = {
     "pick_expired": "Tombol kedaluwarsa — tulis sebagai teks.",
     "pick_not_yours": "Itu bukan tombolmu.",
     "pick_choice": "Pilihan: {choice}",
-    "owner_quota_notice": "⚠️ Kuota Gemini habis total di semua model rute (lihat /stats untuk detail).",
+    "owner_quota_notice": "Kuota Gemini habis total di semua model rute (lihat /stats untuk detail).",
+    "group_history_notice": "Di grup, saya menyimpan pesan terbaru (hingga 100) sebagai konteks dan mengirimkannya ke penyedia model bersama pertanyaanmu.",
+    "fallback_no_live_search": "Saya menjawab tanpa pencarian web langsung (kuota pencarian habis dan pencarian cadangan tidak mengembalikan apa pun) — detailnya mungkin tidak sepenuhnya terbaru.",
     "user_daily_total": "Batas harian pesan tercapai ({used}/{limit}). Pesan baru tersedia dalam {hours} jam {mins} mnt.",
     "user_daily_gemini": "Batas harian permintaan kompleks tercapai ({used}/{limit}). Link, video dan YouTube bisa kubuka besok. Pertanyaan biasa silakan — akan kujawab.",
     "user_daily_tts": "Batas harian suara tercapai ({used}/{limit}). Besok bisa bersuara lagi.",
@@ -1894,7 +1910,9 @@ PACK_MS: dict[str, str] = {
     "pick_expired": "Butang luput — tulis sebagai teks.",
     "pick_not_yours": "Itu bukan butang awak.",
     "pick_choice": "Pilihan: {choice}",
-    "owner_quota_notice": "⚠️ Kuota Gemini habis sepenuhnya di semua model laluan (lihat /stats untuk butiran).",
+    "owner_quota_notice": "Kuota Gemini habis sepenuhnya di semua model laluan (lihat /stats untuk butiran).",
+    "group_history_notice": "Dalam kumpulan, saya menyimpan mesej terkini (sehingga 100) sebagai konteks dan menghantarnya kepada penyedia model bersama soalan kamu.",
+    "fallback_no_live_search": "Saya menjawab tanpa carian web langsung (kuota carian habis dan carian sandaran tidak mengembalikan apa-apa) — butirannya mungkin tidak sepenuhnya terkini.",
     "user_daily_total": "Had harian mesej tercapai ({used}/{limit}). Mesej baharu tersedia dalam {hours} jam {mins} minit.",
     "user_daily_gemini": "Had harian permintaan kompleks tercapai ({used}/{limit}). Pautan, video dan YouTube boleh kubuka esok. Soalan biasa silakan — akan kujawab.",
     "user_daily_tts": "Had harian suara tercapai ({used}/{limit}). Esok boleh bersuara lagi.",
@@ -2003,7 +2021,9 @@ PACK_VI: dict[str, str] = {
     "pick_expired": "Các nút đã hết hạn — viết bằng chữ.",
     "pick_not_yours": "Đó không phải nút của bạn.",
     "pick_choice": "Lựa chọn: {choice}",
-    "owner_quota_notice": "⚠️ Hạn mức Gemini đã hết sạch trên mọi model của tuyến (xem /stats để biết chi tiết).",
+    "owner_quota_notice": "Hạn mức Gemini đã hết sạch trên mọi model của tuyến (xem /stats để biết chi tiết).",
+    "group_history_notice": "Trong nhóm, tôi giữ các tin nhắn gần đây (tối đa 100) làm ngữ cảnh và gửi chúng cho các nhà cung cấp mô hình cùng với câu hỏi của bạn.",
+    "fallback_no_live_search": "Tôi trả lời mà không có tìm kiếm web trực tiếp (hết hạn mức tìm kiếm và tìm kiếm dự phòng không trả về gì) — thông tin có thể không hoàn toàn mới nhất.",
     "user_daily_total": "Đã hết hạn mức tin nhắn trong ngày ({used}/{limit}). Tin mới sẽ có sau {hours} giờ {mins} phút.",
     "user_daily_gemini": "Đã hết hạn mức yêu cầu phức tạp trong ngày ({used}/{limit}). Link, video và YouTube để mai mình mở. Cứ hỏi bình thường — mình trả lời.",
     "user_daily_tts": "Đã hết hạn mức lồng tiếng trong ngày ({used}/{limit}). Mai mình lồng tiếng tiếp được.",
@@ -2112,7 +2132,9 @@ PACK_TH: dict[str, str] = {
     "pick_expired": "ปุ่มหมดอายุแล้ว — พิมพ์เป็นข้อความ",
     "pick_not_yours": "นั่นไม่ใช่ปุ่มของคุณ",
     "pick_choice": "ตัวเลือก: {choice}",
-    "owner_quota_notice": "⚠️ โควต้า Gemini หมดเกลี้ยงในทุกโมเดลของเส้นทาง (ดูรายละเอียดที่ /stats)",
+    "owner_quota_notice": "โควต้า Gemini หมดเกลี้ยงในทุกโมเดลของเส้นทาง (ดูรายละเอียดที่ /stats)",
+    "group_history_notice": "ในกลุ่ม ฉันเก็บข้อความล่าสุด (สูงสุด 100) เป็นบริบทและส่งให้ผู้ให้บริการโมเดลพร้อมคำถามของคุณ",
+    "fallback_no_live_search": "ฉันตอบโดยไม่มีการค้นหาเว็บสด (โควต้าค้นหาหมดและค้นหาสำรองไม่พบอะไร) — ข้อมูลอาจไม่เป็นปัจจุบันทั้งหมด",
     "user_daily_total": "โควต้ารายวันหมดแล้ว ({used}/{limit}) จะใช้ได้อีกใน {hours} ชม. {mins} นาที",
     "user_daily_gemini": "โควต้าคำขอซับซ้อนรายวันหมดแล้ว ({used}/{limit}) ลิงก์ วิดีโอ และ YouTube เปิดได้พรุ่งนี้ ถามธรรมดามาได้เลย — จะตอบให้",
     "user_daily_tts": "โควต้าเสียงรายวันหมดแล้ว ({used}/{limit}) พรุ่งนี้พากย์เสียงได้ใหม่",
@@ -2221,7 +2243,9 @@ PACK_FA: dict[str, str] = {
     "pick_expired": "دکمه‌ها منقضی شدند — متنی بنویس.",
     "pick_not_yours": "این‌ها دکمه‌های تو نیستند.",
     "pick_choice": "انتخاب: {choice}",
-    "owner_quota_notice": "⚠️ سهمیه Gemini در همه مدل‌های مسیر کاملاً تمام شد (جزئیات: /stats).",
+    "owner_quota_notice": "سهمیه Gemini در همه مدل‌های مسیر کاملاً تمام شد (جزئیات: /stats).",
+    "group_history_notice": "در گروه‌ها پیام‌های اخیر (تا ۱۰۰) را به‌عنوان زمینه نگه می‌دارم و همراه با سؤال تو به ارائه‌دهندگان مدل می‌فرستم.",
+    "fallback_no_live_search": "بدون جستجوی زندهٔ وب پاسخ می‌دهم (سهمیهٔ جستجو تمام شد و جستجوی جایگزین چیزی برنگرداند) — ممکن است اطلاعات کاملاً به‌روز نباشد.",
     "user_daily_total": "سقف روزانه پیام‌ها تمام شد ({used}/{limit}). پیام‌های جدید بعد از {hours} ساعت و {mins} دقیقه.",
     "user_daily_gemini": "سقف روزانه درخواست‌های پیچیده تمام شد ({used}/{limit}). لینک، ویدیو و YouTube را فردا باز می‌کنم. سؤال عادی بپرس — جواب می‌دهم.",
     "user_daily_tts": "سقف روزانه صوتی تمام شد ({used}/{limit}). فردا دوباره می‌توانم بخوانم.",
@@ -2330,7 +2354,9 @@ PACK_UR: dict[str, str] = {
     "pick_expired": "بٹن ختم ہو گئے — متن میں لکھو۔",
     "pick_not_yours": "یہ تمہارے بٹن نہیں ہیں۔",
     "pick_choice": "انتخاب: {choice}",
-    "owner_quota_notice": "⚠️ روٹ کے تمام ماڈلز میں Gemini کوٹا مکمل ختم (تفصیل کے لیے /stats)۔",
+    "owner_quota_notice": "روٹ کے تمام ماڈلز میں Gemini کوٹا مکمل ختم (تفصیل کے لیے /stats)۔",
+    "group_history_notice": "گروپوں میں حالیہ پیغامات (100 تک) سیاق کے طور پر رکھتا ہوں اور آپ کے سوال کے ساتھ ماڈل فراہم کنندگان کو بھیجتا ہوں۔",
+    "fallback_no_live_search": "میں لائیو ویب تلاش کے بغیر جواب دے رہا ہوں (تلاش کا کوٹہ ختم اور متبادل تلاش نے کچھ نہیں دیا) — تفصیلات مکمل طور پر تازہ نہ ہو سکیں۔",
     "user_daily_total": "روزانہ پیغامات کی حد پوری ({used}/{limit})۔ نئے پیغامات {hours} گھنٹے {mins} منٹ بعد ملیں گے۔",
     "user_daily_gemini": "پیچیدہ درخواستوں کی روزانہ حد پوری ({used}/{limit})۔ لنکس، ویڈیو اور YouTube کل کھول سکوں گا۔ عام سوال پوچھو — جواب دوں گا۔",
     "user_daily_tts": "روزانہ وائس کی حد پوری ({used}/{limit})۔ کل پھر سنا سکوں گا۔",
@@ -2439,7 +2465,9 @@ PACK_UZ: dict[str, str] = {
     "pick_expired": "Tugmalar eskirgan — matn bilan yoz.",
     "pick_not_yours": "Bular sening tugmalaring emas.",
     "pick_choice": "Tanlov: {choice}",
-    "owner_quota_notice": "⚠️ Marshrutdagi barcha modellarda Gemini kvotasi butunlay tugadi (batafsil /stats).",
+    "owner_quota_notice": "Marshrutdagi barcha modellarda Gemini kvotasi butunlay tugadi (batafsil /stats).",
+    "group_history_notice": "Guruhlarda oxirgi xabarlarni (100 tagacha) kontekst sifatida saqlayman va ularni savoling bilan birga model provayderlariga yuboraman.",
+    "fallback_no_live_search": "Jonli veb-qidiruvsiz javob beraman (qidiruv kvotasi tugadi va zaxira qidiruv hech narsa qaytarmadi) — ma'lumotlar to'liq dolzarb bo'lmasligi mumkin.",
     "user_daily_total": "Kunlik xabar limiti tugadi ({used}/{limit}). Yangilari {hours} soat {mins} daqiqadan keyin bo'ladi.",
     "user_daily_gemini": "Murakkab so'rovlarning kunlik limiti tugadi ({used}/{limit}). Havola, video va YouTube'ni ertaga ochaman. Oddiy savolingni ber — javob beraman.",
     "user_daily_tts": "Kunlik ovozlash limiti tugadi ({used}/{limit}). Ertaga yana ovozlay olaman.",
@@ -2548,7 +2576,9 @@ PACK_BN: dict[str, str] = {
     "pick_expired": "বোতাম মেয়াদোত্তীর্ণ — টেক্সটে লেখো।",
     "pick_not_yours": "এগুলো তোমার বোতাম নয়।",
     "pick_choice": "পছন্দ: {choice}",
-    "owner_quota_notice": "⚠️ রুটের সব মডেলে Gemini কোটা সম্পূর্ণ শেষ (বিস্তারিত /stats)।",
+    "owner_quota_notice": "রুটের সব মডেলে Gemini কোটা সম্পূর্ণ শেষ (বিস্তারিত /stats)।",
+    "group_history_notice": "গ্রুপে আমি সাম্প্রতিক বার্তাগুলো (সর্বোচ্চ ১০০) প্রসঙ্গ হিসেবে রাখি এবং আপনার প্রশ্নের সাথে মডেল প্রদানকারীদের পাঠাই।",
+    "fallback_no_live_search": "লাইভ ওয়েব অনুসন্ধান ছাড়াই উত্তর দিচ্ছি (অনুসন্ধান কোটা শেষ এবং বিকল্প অনুসন্ধানে কিছু পাওয়া যায়নি) — তথ্যগুলো পুরোপুরি হালনাগাদ নাও হতে পারে।",
     "user_daily_total": "দৈনিক বার্তা সীমা শেষ ({used}/{limit})। নতুন বার্তা {hours} ঘণ্টা {mins} মিনিট পরে পাওয়া যাবে।",
     "user_daily_gemini": "জটিল অনুরোধের দৈনিক সীমা শেষ ({used}/{limit})। লিংক, ভিডিও আর YouTube কাল খুলতে পারব। সাধারণ প্রশ্ন করো — উত্তর দেব।",
     "user_daily_tts": "দৈনিক ভয়েস সীমা শেষ ({used}/{limit})। কাল আবার শোনাতে পারব।",
@@ -2657,7 +2687,9 @@ PACK_FIL: dict[str, str] = {
     "pick_expired": "Expired na ang mga button — isulat sa text.",
     "pick_not_yours": "Hindi sa iyo ang mga button na iyan.",
     "pick_choice": "Pinili: {choice}",
-    "owner_quota_notice": "⚠️ Ubos na ubos ang Gemini quota sa lahat ng model ng ruta (tingnan ang /stats para sa detalye).",
+    "owner_quota_notice": "Ubos na ubos ang Gemini quota sa lahat ng model ng ruta (tingnan ang /stats para sa detalye).",
+    "group_history_notice": "Sa mga grupo, itinatago ko ang mga kamakailang mensahe (hanggang 100) bilang konteksto at ipinapadala kasama ng tanong mo sa mga provider ng modelo.",
+    "fallback_no_live_search": "Sasagot ako nang walang live na web search (naubos ang quota sa paghahanap at walang nakuha ang fallback search) — maaaring hindi ganap na napapanahon ang mga detalye.",
     "user_daily_total": "Naabot na ang daily limit ng mensahe ({used}/{limit}). May bago ulit sa {hours} oras {mins} minuto.",
     "user_daily_gemini": "Naabot na ang daily limit ng complex request ({used}/{limit}). Bukas ko na mabubuksan ang links, videos at YouTube. Pero magtanong ka lang — sasagutin ko.",
     "user_daily_tts": "Naabot na ang daily limit ng boses ({used}/{limit}). Bukas pwede ulit.",
@@ -2766,7 +2798,9 @@ PACK_PL: dict[str, str] = {
     "pick_expired": "Przyciski wygasły — napisz tekstem.",
     "pick_not_yours": "To nie twoje przyciski.",
     "pick_choice": "Wybór: {choice}",
-    "owner_quota_notice": "⚠️ Limit Gemini wyczerpany w całości we wszystkich modelach trasy (szczegóły w /stats).",
+    "owner_quota_notice": "Limit Gemini wyczerpany w całości we wszystkich modelach trasy (szczegóły w /stats).",
+    "group_history_notice": "W grupach zachowuję ostatnie wiadomości (do 100) jako kontekst i wysyłam je dostawcom modeli razem z twoim pytaniem.",
+    "fallback_no_live_search": "Odpowiadam bez wyszukiwania w sieci na żywo (limit wyszukiwania wyczerpany, a wyszukiwanie zastępcze nic nie zwróciło) — dane mogą nie być w pełni aktualne.",
     "user_daily_total": "Dzienny limit wiadomości wyczerpany ({used}/{limit}). Nowe będą za {hours} godz. {mins} min.",
     "user_daily_gemini": "Dzienny limit złożonych zapytań wyczerpany ({used}/{limit}). Linki, wideo i YouTube otworzę jutro. Zwykłe pytanie śmiało — odpowiem.",
     "user_daily_tts": "Dzienny limit głosu wyczerpany ({used}/{limit}). Jutro znów będę mógł udźwiękowić.",
@@ -2875,7 +2909,9 @@ PACK_NL: dict[str, str] = {
     "pick_expired": "Knoppen verlopen — schrijf als tekst.",
     "pick_not_yours": "Dit zijn niet jouw knoppen.",
     "pick_choice": "Keuze: {choice}",
-    "owner_quota_notice": "⚠️ Gemini-quota volledig op over alle routemodellen (details zie /stats).",
+    "owner_quota_notice": "Gemini-quota volledig op over alle routemodellen (details zie /stats).",
+    "group_history_notice": "In groepen bewaar ik recente berichten (tot 100) als context en stuur ze samen met je vraag naar de modelproviders.",
+    "fallback_no_live_search": "Ik antwoord zonder live webzoekopdracht (zoekquotum uitgeput en de fallbackzoekopdracht leverde niets op) — de details zijn mogelijk niet helemaal actueel.",
     "user_daily_total": "Daglimiet voor berichten bereikt ({used}/{limit}). Nieuwe over {hours} u {mins} min.",
     "user_daily_gemini": "Daglimiet voor complexe verzoeken bereikt ({used}/{limit}). Links, video's en YouTube kan ik morgen openen. Een gewone vraag mag — ik antwoord.",
     "user_daily_tts": "Daglimiet voor spraak bereikt ({used}/{limit}). Morgen kan ik weer inspreken.",
@@ -2984,7 +3020,9 @@ PACK_ZU: dict[str, str] = {
     "pick_expired": "Izinkinobho ziphelelwe yisikhathi — bhala ngombiko.",
     "pick_not_yours": "Lezi akuzona izinkinobho zakho.",
     "pick_choice": "Okukhethiwe: {choice}",
-    "owner_quota_notice": "⚠️ I-quot ye-Gemini iphele ngokuphelele kuwo wonke amamodeli omzila (bona /stats ngemininingwane).",
+    "owner_quota_notice": "I-quot ye-Gemini iphele ngokuphelele kuwo wonke amamodeli omzila (bona /stats ngemininingwane).",
+    "group_history_notice": "Emaqenjini ngigcina imilayezo yakamuva (kuze kufike ku-100) njengomongo futhi ngiyithumela kubaphovidi bamamodeli kanye nombuzo wakho.",
+    "fallback_no_live_search": "Ngiphendula ngaphandle kokusesha kuwebhu bukhoma (isabelo sokususha siphelile futhi ukusesha okulandelayo akubuyisanga lutho) — imininingwane kungenzeka ingabi sesikhathini ngokuphelele.",
     "user_daily_total": "Umkhawulo wansuku zonke wemilayezo ufinyelelwe ({used}/{limit}). Emisha izotholakala ngemuva kwamahora angu-{hours} namaminithi angu-{mins}.",
     "user_daily_gemini": "Umkhawulo wansuku zonke wezicelo ezinzima ufinyelelwe ({used}/{limit}). Izixhumanisi, amavidiyo ne-YouTube ngizovavula kusasa. Buza umbuzo ojwayelekile — ngizowuphendula.",
     "user_daily_tts": "Umkhawulo wansuku zonke wezwi ufinyelelwe ({used}/{limit}). Ngizokwazi ukukhuluma futhi kusasa.",
@@ -3196,6 +3234,38 @@ PICK_TABLE: dict[str, dict[str, dict[str, object]]] = {
 }
 
 
+# Один и тот же блок живых примеров во всех языках: состав приветствия не
+# должен различаться между переводами (аудит 28.10.2026). Хранится отдельно,
+# чтобы не дублировать одну и ту же строку в 25 значениях start_text.
+_START_EXAMPLES: dict[str, str] = {
+    "ar": "جرّب الآن: «من أنت؟»، أرسل صورة مع «ماذا فيها؟» أو «اقترح فيلمًا».",
+    "be": "Паспрабуй прама зараз: «хто ты?», дашлі фота з пытаннем «што на ім?» або «парай фільм».",
+    "bn": "এখনই চেষ্টা করো: «তুমি কে?», «এতে কী আছে?» লিখে ছবি পাঠাও বা «একটি সিনেমা সুপারিশ করো»।",
+    "de": "Probier es gleich aus: „Wer bist du?“, schick ein Foto mit „Was ist darauf?“ oder „Empfiehl mir einen Film“.",
+    "en": "Try right now: “who are you?”, send a photo with “what's in it?”, or “recommend a movie”.",
+    "es": "Pruébalo ahora: «¿quién eres?», envía una foto con «¿qué hay en ella?» o «recomiéndame una película».",
+    "fa": "همین حالا امتحان کن: «تو کی هستی؟»، عکسی با «چه چیزی در آن است؟» بفرست یا «یک فیلم پیشنهاد بده».",
+    "fil": "Subukan ngayon: «sino ka?», magpadala ng larawan na may «ano ang nasa loob?» o «magrekomenda ng pelikula».",
+    "fr": "Essaie tout de suite : « qui es-tu ? », envoie une photo avec « qu'y a-t-il dessus ? » ou « recommande-moi un film ».",
+    "hi": "अभी आज़माओ: «तुम कौन हो?», «इसमें क्या है?» के साथ फोटो भेजो या «कोई फिल्म सुझाओ»।",
+    "id": "Coba sekarang: «siapa kamu?», kirim foto dengan «ada apa di dalamnya?» atau «rekomendasikan film».",
+    "it": "Provalo subito: «chi sei?», invia una foto con «cosa c'è dentro?» o «consigliami un film».",
+    "kk": "Дәл қазір байқап көр: «сен кімсің?», сурет жіберіп «онда не бар?» деп сұра немесе «фильм ұсын».",
+    "ms": "Cuba sekarang: «siapa kamu?», hantar foto dengan «apa di dalamnya?» atau «syorkan filem».",
+    "nl": "Probeer het nu: 'wie ben je?', stuur een foto met 'wat staat erop?' of 'raad een film aan'.",
+    "pl": "Wypróbuj teraz: „kim jesteś?”, wyślij zdjęcie z „co na nim jest?” albo „poleć film”.",
+    "pt": "Experimente agora: «quem é você?», envie uma foto com «o que há nela?» ou «recomende um filme».",
+    "ru": "Попробуй прямо сейчас: «кто ты?», пришли фото с вопросом «что на нём?», или «посоветуй фильм».",
+    "th": "ลองเลย: «คุณเป็นใคร?», ส่งรูปพร้อม «ในรูปมีอะไร?» หรือ «แนะนำหนัง»",
+    "tr": "Hemen dene: «sen kimsin?», «üzerinde ne var?» diye bir fotoğraf gönder veya «film öner».",
+    "uk": "Спробуй прямо зараз: «хто ти?», надішли фото із запитанням «що на ньому?» або «порадь фільм».",
+    "ur": "ابھی آزمائیں: «آپ کون ہیں؟»، «اس میں کیا ہے؟» کے ساتھ تصویر بھیجیں یا «کوئی فلم تجویز کریں»۔",
+    "uz": "Hoziroq sinab ko'r: «sen kimsan?», «unda nima bor?» deb rasm yubor yoki «film tavsiya qil».",
+    "vi": "Thử ngay: «bạn là ai?», gửi ảnh với «có gì trong đó?» hoặc «gợi ý một bộ phim».",
+    "zu": "Zama manje: «ungubani?», thumela isithombe esinombuzo «kukhona ini kuso?» noma «phakamisa ifilimu».",
+}
+
+
 def t(lang: str | None, key: str, **kwargs: object) -> str:
     """Строка key на языке lang (фолбэк — английский). Плейсхолдеры вида
     {error}/{choice}/{name} подставляются из kwargs. Новые языки лежат в
@@ -3203,6 +3273,10 @@ def t(lang: str | None, key: str, **kwargs: object) -> str:
     lang = normalize_lang(lang)
     table = STRINGS.get(key, {})
     text = LANG_PACKS.get(lang, {}).get(key) or table.get(lang) or table.get(DEFAULT_LANG) or key
+    if key == "start_text":
+        examples = _START_EXAMPLES.get(lang)
+        if examples:
+            text = text.rstrip() + "\n\n" + examples
     if kwargs:
         try:
             return text.format(**kwargs)
