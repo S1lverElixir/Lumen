@@ -30,6 +30,13 @@ _SEARCH_HEADERS = {
 _BING_SEARCH_URL = "https://www.bing.com/search"
 _GOOGLE_NEWS_URL = "https://news.google.com/rss/search"
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+# Новостной запрос: DDG часто отдаёт общие страницы без дат, а Google News —
+# датированные заголовки. Для таких запросов источники смешиваем (прод 28.10.2026).
+_NEWS_QUERY_RE = re.compile(r"\bновост\w*|\bnews\b|headlines|главные\s+новости", re.IGNORECASE)
+
+
+def _looks_like_news_query(text: str) -> bool:
+    return bool(text) and bool(_NEWS_QUERY_RE.search(text))
 # Выдача чужая и грязная: режем число и длину, иначе раздует промпт и квоту токенов.
 _DEFAULT_MAX_RESULTS = 5
 _SNIPPET_MAX_CHARS = 300
@@ -210,6 +217,11 @@ def parse_rss_snippets(xml_page: str, max_results: int = _DEFAULT_MAX_RESULTS) -
         url = (item.findtext("link") or "").strip()
         title = _clean_text(item.findtext("title") or "", _SNIPPET_MAX_CHARS)
         snippet = _clean_text(item.findtext("description") or "", _SNIPPET_MAX_CHARS)
+        published = (item.findtext("pubDate") or "").strip()
+        if published:
+            # Дата публикации нужна свежим ответам: без неё модель не может
+            # подтвердить «за сегодня» и начинает оговариваться (прод 28.10.2026).
+            snippet = _clean_text(f"{snippet} · {published}".strip(" ·"), _SNIPPET_MAX_CHARS)
         if not url.startswith(("http://", "https://")) or url in seen:
             continue
         if not title and not snippet:
@@ -284,6 +296,35 @@ async def fetch_web_snippets(query: str, *, timeout_sec: float | None = None, ma
     try:
         async with _search_session() as session:
             ddg_budget = max(1.0, min(4.0, deadline - time.monotonic()))
+            if _looks_like_news_query(query):
+                # Новости: DDG и Google News параллельно. Google — первым в выдаче,
+                # потому что его сниппеты содержат дату публикации (прод 28.10.2026).
+                google_budget = max(1.0, deadline - time.monotonic())
+                page, google_result = await asyncio.gather(
+                    _fetch_ddg_page(session, query, ddg_budget),
+                    _google_news_snippets(session, query, google_budget, limit),
+                    return_exceptions=True,
+                )
+                if isinstance(page, BaseException):
+                    log.warning("[web-search] DuckDuckGo fetch failed (query_len=%d): %s", len(query), type(page).__name__)
+                    page = ""
+                if isinstance(google_result, BaseException):
+                    log.warning("[web-search] google_news failed: %s", type(google_result).__name__)
+                    google_items: list[dict] = []
+                else:
+                    google_items = google_result
+                ddg_items = parse_ddg_lite_html(page, limit) if page else []
+                diagnostics["ddg"] = len(ddg_items)
+                diagnostics["google_news"] = len(google_items)
+                merged = _merge_snippets([google_items, ddg_items], limit)
+                if merged:
+                    log.info(
+                        "[web-search] Snippets: google_news=%d duckduckgo=%d (query_len=%d)",
+                        len(google_items), len(ddg_items), len(query),
+                    )
+                    return merged
+                log.warning("[web-search] No snippets from any provider (query_len=%d): %s", len(query), diagnostics)
+                return []
             page = ""
             try:
                 page = await _fetch_ddg_page(session, query, ddg_budget)

@@ -59,6 +59,35 @@ def test_format_snippets_for_prompt_marks_data_and_skips_empties():
     assert lumen_search.format_snippets_for_prompt([{"title": "", "url": "", "snippet": ""}]) == ""
 
 
+def test_parse_rss_snippets_includes_pub_date():
+    # Дата публикации нужна, чтобы модель могла подтвердить «за сегодня».
+    xml = ("<rss><channel><item><title>T</title><link>https://example.com/n</link>"
+           "<description>S</description><pubDate>Wed, 28 Oct 2026 10:00:00 GMT</pubDate>"
+           "</item></channel></rss>")
+    out = lumen_search.parse_rss_snippets(xml)
+    assert "Wed, 28 Oct 2026" in out[0]["snippet"]
+
+
+def test_fetch_web_snippets_merges_google_news_for_news_query(monkeypatch):
+    # Прод 28.10.2026: для новостей DDG отдавал общие страницы без дат, а Google
+    # News не спрашивался, потому что DDG уже что-то вернул. Теперь источники
+    # смешиваются, Google — первым.
+    session = _RoutedSession({
+        lumen_search._DDG_LITE_URL: _DDG_FIXTURE,
+        lumen_search._GOOGLE_NEWS_URL: _RSS_FIXTURE,
+    })
+    monkeypatch.setattr(
+        lumen_search, "aiohttp",
+        SimpleNamespace(ClientSession=lambda *args, **kwargs: session,
+                        ClientTimeout=aiohttp.ClientTimeout),
+    )
+    out = asyncio.run(lumen_search.fetch_web_snippets("свежие новости"))
+    urls = [item["url"] for item in out]
+    assert urls[0] == "https://example.com/fresh"
+    assert "https://example.com/news" in urls
+    assert lumen_search._GOOGLE_NEWS_URL in session.requested
+
+
 def test_format_snippets_for_prompt_demands_answer_only_from_snippets():
     # Прод 28.10.2026: слабая резервная модель гадала имена/должности, хотя
     # нужного факта в сниппетах не было. Промпт обязан запрещать догадки.
@@ -204,7 +233,7 @@ def test_fetch_web_snippets_falls_back_to_rss_when_ddg_returns_empty(monkeypatch
                         ClientTimeout=aiohttp.ClientTimeout),
     )
     with caplog.at_level(logging.INFO, logger="bot"):
-        out = asyncio.run(lumen_search.fetch_web_snippets("свежие новости"))
+        out = asyncio.run(lumen_search.fetch_web_snippets("что с ДЦ Яндекса"))
     assert [item["url"] for item in out] == ["https://example.com/fresh"]
     assert lumen_search._BING_SEARCH_URL in session.requested
     # Успешная выдача логируется источником и числом сниппетов.
