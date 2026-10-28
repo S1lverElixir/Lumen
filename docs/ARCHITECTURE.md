@@ -40,6 +40,8 @@ This speed estimate is measured, not hardcoded. There is no table of "model X do
 
 If the streaming attempt for the head-of-route model fails before showing any text, the bot falls back to a normal (non-streaming) call further down the chain, reusing the same placeholder message rather than sending a new one.
 
+In private chats every request with a real early stage (web search, media, a link or YouTube) first gets a live status bubble (`lumen_status.py`): "Searching the web…", then "Searched the web · found N" plus "Thinking… Ns" while the model call runs. The same bubble is reused: the streamed or non-streamed answer replaces the status text, so no extra message appears. Plain text without an early stage skips the bubble and shows the same "Thinking… Ns" line once streaming starts. Status phrases are fixed pipeline facts (never model reasoning or model identity) and are localized in `lumen_lang.py`.
+
 Final answers go out via `sendRichMessage` (Bot API 10.1: real tables, headings, math) with automatic fallback to plain HTML; streaming edits always use HTML. Kill-switch: `RICH_MESSAGES_ENABLED=0` (plus restart) forces legacy HTML.
 
 ### Manual smoke test before touching streaming code

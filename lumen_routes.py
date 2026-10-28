@@ -998,6 +998,7 @@ async def _run_route(
     media: list[tuple[bytes, str]] | None = None, media_filename: str = "",
     youtube_url: str | None = None, allow_stream: bool = False,
     deadline: float | None = None, provenance: dict | None = None,
+    status: Any | None = None,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
@@ -1033,14 +1034,16 @@ async def _run_route(
         if provenance is not None:
             provenance.update(provider=provider_name, model=model_id)
 
-    # Стримим только голову маршрута; плейсхолдер "…" переиспользуем под финальный текст следующей модели, а не сносим.
+    # Стримим только голову маршрута; статус-пузырь (или плейсхолдер "…" после
+    # раннего сбоя) переиспользуем под финальный текст следующей модели.
     tried_stream_model: str | None = None
     tried_stream_provider: str | None = None
-    reusable_placeholder: Message | None = None
+    reusable_placeholder: Message | None = status.message if status is not None else None
     if allow_stream and route:
         head_model = route[0][1]
         if first_provider == "gemini" and GEMINI_MODELS.get(head_model, {}).get("stream", True):
-            streamed, placeholder = await bot._try_gemini_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
+            streamed, placeholder = await bot._try_gemini_streaming(
+                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (gemini:%s)', chat_id, head_model)
                 _count_user_answer("gemini", head_model)
@@ -1049,7 +1052,8 @@ async def _run_route(
             tried_stream_model, tried_stream_provider = head_model, "gemini"
             reusable_placeholder = placeholder
         elif first_provider == "openrouter":
-            streamed, placeholder = await bot._try_openrouter_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
+            streamed, placeholder = await bot._try_openrouter_streaming(
+                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (openrouter:%s)', chat_id, head_model)
                 _count_user_answer("openrouter")
@@ -1058,7 +1062,8 @@ async def _run_route(
             tried_stream_model, tried_stream_provider = head_model, "openrouter"
             reusable_placeholder = placeholder
         elif first_provider == "groq":
-            streamed, placeholder = await bot._try_groq_streaming(chat_id, ai_prompt, message, head_model, deadline=deadline)
+            streamed, placeholder = await bot._try_groq_streaming(
+                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (groq:%s)', chat_id, head_model)
                 _count_user_answer("groq")
@@ -1095,6 +1100,10 @@ async def _run_route(
                 ans = await bot.ask_openrouter_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
                 _note_answered("openrouter", None)
 
+            if status is not None:
+                # Останавливаем анимацию статуса до записи ответа, иначе тикер
+                # перезапишет готовый текст.
+                await status.stop()
             if reusable_placeholder is not None:
                 # Готовый ответ — прямо в плейсхолдер (если влезает в одно сообщение), иначе обычным путём с разбиением.
                 fits_one_message = len(_split_text_chunks(ans, bot.TG_MAX_LEN)) == 1
@@ -1110,6 +1119,12 @@ async def _run_route(
         except asyncio.CancelledError:
             # Отмена посреди ответа: плейсхолдер чистим, отмену пробрасываем —
             # иначе в чате навсегда висело "…".
+            if status is not None:
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
+                status = None
             if reusable_placeholder is not None:
                 try:
                     await bot._delete_message_quietly(reusable_placeholder)
@@ -1128,9 +1143,13 @@ async def _run_route(
             # Суточный счётчик /stats: дальше по маршруту есть кому ответить.
             if any(ids for _, ids in runs[run_index + 1:]):
                 bot._record_stats_event("fallbacks")
+                if status is not None:
+                    await status.set_phase("progress_retry")
 
-    if reusable_placeholder is not None:
-        # Невостребованный плейсхолдер убираем перед raise — иначе "…" повиснет в чате навсегда.
+    if status is not None:
+        # Невостребованный статус убираем перед raise — иначе «Думаю…» повиснет в чате навсегда.
+        await status.delete()
+    elif reusable_placeholder is not None:
         await bot._delete_message_quietly(reusable_placeholder)
 
     # Суточный счётчик /stats: маршрут исчерпан, ответа не будет.

@@ -11,6 +11,7 @@ test_bot_search.py — сквозные тесты внешнего поиска
 """
 import asyncio
 from datetime import datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import bot
@@ -108,6 +109,82 @@ def test_fresh_query_with_live_gemini_still_gets_external_snippets(rate_guard_se
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
     assert "https://example.com/grounded" in captured["prompt"]
+    bot.chat_state.pop(123, None)
+
+
+class _FakeStatus:
+    def __init__(self):
+        self.message = object()
+        self.done = []
+        self.phases = []
+        self.stopped = False
+        self.deleted = False
+
+    def add_done(self, key, **kwargs):
+        self.done.append((key, kwargs))
+
+    async def set_phase(self, key, *, timed=False):
+        self.phases.append((key, timed))
+
+    async def stop(self):
+        self.stopped = True
+
+    async def delete(self):
+        self.deleted = True
+
+
+def test_fresh_query_status_shows_search_then_thinking(rate_guard_setup, monkeypatch):
+    # Живой статус: до поиска «Ищу в интернете», после — счётчик источников и
+    # «Думаю…» с таймером; тот же пузырь уходит в маршрут под ответ.
+    message = rate_guard_setup()
+    message.text = "погугли что происходит с ДЦ Яндекса"
+    fake_status = _FakeStatus()
+    captured: dict = {}
+
+    async def fake_start(reply_to, lang, key, *, timed=False):
+        captured["initial"] = (key, timed)
+        return fake_status
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        return [{"title": "T", "url": "https://example.com/1", "snippet": "S"},
+                {"title": "T2", "url": "https://example.com/2", "snippet": "S2"}]
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["status"] = kwargs.get("status")
+        return "ok", False
+
+    monkeypatch.setattr("lumen_message_core.StatusMessage", SimpleNamespace(start=fake_start))
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert captured["initial"] == ("progress_searching", False)
+    assert fake_status.done == [("progress_search_done", {"count": 2})]
+    assert fake_status.phases == [("progress_thinking", True)]
+    assert captured["status"] is fake_status
+    assert fake_status.stopped is True
+    bot.chat_state.pop(123, None)
+
+
+def test_empty_external_search_with_grounded_answer_has_no_note(rate_guard_setup, monkeypatch):
+    # Прод 28.10.2026: внешний поиск пуст, но ответила Gemini со встроенным
+    # поиском — пометка «без поиска» была бы ложью.
+    message = rate_guard_setup()
+    message.text = "погугли что происходит с ДЦ Яндекса"
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        return []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        provenance = kwargs.get("provenance")
+        if isinstance(provenance, dict):
+            provenance.update(provider="gemini", model="gemini-2.5-flash")
+        return "свежий ответ", False
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    sent_text = bot._safe_reply.await_args[0][1]
+    assert sent_text == "свежий ответ"
     bot.chat_state.pop(123, None)
 
 

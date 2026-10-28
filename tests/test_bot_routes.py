@@ -637,7 +637,7 @@ def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
 def test_run_route_streams_openrouter_when_route_head_is_openrouter():
     chat_id = 999305
 
-    async def fake_or_stream(cid, prompt, message, model_id, deadline=None):
+    async def fake_or_stream(cid, prompt, message, model_id, deadline=None, status=None):
         return "Стримленный ответ от OpenRouter", None
 
     async def must_not_be_called(*args, **kwargs):
@@ -660,7 +660,7 @@ def test_run_route_streams_openrouter_when_route_head_is_openrouter():
 def test_run_route_falls_back_from_failed_openrouter_stream_to_non_streaming():
     chat_id = 999306
 
-    async def fake_or_stream_fail(cid, prompt, message, model_id, deadline=None):
+    async def fake_or_stream_fail(cid, prompt, message, model_id, deadline=None, status=None):
         return None, None  # ранний сбой без плейсхолдера (например, message.reply сам не удался)
 
     calls = []
@@ -690,7 +690,7 @@ def test_run_route_tries_groq_head_with_stream_fallback_to_text():
     # Groq-подключение 21.09.2026: голова-groq стримится через _try_groq_streaming, при раннем сбое — обычный ask_groq_text без пере-пробы упавшей модели.
     chat_id = 999703
 
-    async def fake_groq_stream_fail(cid, prompt, message, model_id, deadline=None):
+    async def fake_groq_stream_fail(cid, prompt, message, model_id, deadline=None, status=None):
         return None, None
 
     calls = []
@@ -723,7 +723,7 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
     chat_id = 999307
     placeholder = _FakeSentMessage()
 
-    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None):
+    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None):
         return None, placeholder
 
     async def fake_or_text(cid, prompt, model_chain, deadline=None):
@@ -751,7 +751,7 @@ def test_run_route_deletes_orphaned_placeholder_when_whole_route_fails():
     chat_id = 999308
     placeholder = _FakeSentMessage()
 
-    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None):
+    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None):
         return None, placeholder
 
     async def failing_or_text(*args, **kwargs):

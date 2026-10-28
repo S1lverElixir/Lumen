@@ -588,7 +588,7 @@ def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
     import lumen_streaming
     seen = {}
 
-    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit, first_task=None):
+    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit, first_task=None, status=None):
         seen["limit"] = first_chunk_limit
         if first_task is not None:
             yield await first_task
@@ -711,7 +711,8 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     asyncio.run(run())
     assert calls[0] == bot._DOTS_START_AFTER_SEC
     assert calls[1:] == [bot._DOTS_TICK_SEC] * 3
-    assert [text for text, _ in placeholder.edits] == list(bot._DOTS_FRAMES[:3])
+    assert len(placeholder.edits) == 3
+    assert all(text.startswith("Thinking") for text, _ in placeholder.edits)
 
 
 def test_streaming_fast_path_shows_no_dots_frames():
@@ -731,6 +732,36 @@ def test_streaming_fast_path_shows_no_dots_frames():
         assert answer == "Привет"
         for text, _ in incoming.sent[0].edits:
             assert text not in bot._DOTS_FRAMES
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
+    # Живой статус уже в чате: стрим пишет ответ в него, второго «…» нет.
+    chat_id = 999320
+
+    class _FakeStatus:
+        def __init__(self):
+            self.message = _FakeSentMessage()
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+
+    async def pieces():
+        yield "Привет"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    status = _FakeStatus()
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
+            piece_agen=pieces(), status=status,
+        ))
+        assert answer == "Привет"
+        assert incoming.sent == []  # второй пузырь не отправлялся
+        assert status.stopped is True
+        assert status.message.edits[-1][0] == "Привет"
     finally:
         bot.chat_state.pop(chat_id, None)
 

@@ -52,6 +52,7 @@ from lumen_search import (
     web_search_timeout_sec,
 )
 from lumen_security import _looks_like_injection_probe
+from lumen_status import StatusMessage
 import lumen_devtrace
 
 log = logging.getLogger("bot")
@@ -66,6 +67,22 @@ def _fresh_date_context() -> str:
     """Однострочный контекст текущей даты для промптов свежих вопросов."""
     now = datetime.now(_MOSCOW_TZ)
     return f"[Context: today is {now.strftime('%d %B %Y')}, {now.strftime('%A')} (Europe/Moscow).]"
+
+
+def _initial_status(needs_youtube: bool, needs_website: bool, media_mime: str | None,
+                    search_will_run: bool) -> tuple[str, bool]:
+    """Первая фраза статус-пузыря: показываем тот этап, который реально идёт первым."""
+    if needs_youtube:
+        return "progress_watching_video", False
+    if needs_website:
+        return "progress_reading_link", False
+    if search_will_run:
+        return "progress_searching", False
+    if media_mime:
+        if media_mime.startswith("image/"):
+            return "progress_viewing_image", False
+        return "progress_watching_video", False
+    return "progress_thinking", True
 
 # Суммарный кап extra-файлов альбома: 9 файлов по 20МБ + base64 давали ~250МБ
 # в RAM (аудит D1, 30.09.2026). Обычный альбом — десятки МБ.
@@ -706,13 +723,6 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # Дошло до обработки: фон, инъекции и отказы выше уже отсеяны.
     bot._record_stats_event("messages_received")
 
-    # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
-    ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
-    # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
-    # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Инъекция
-    # до промпта — попадает и в пост-хок ретрай, он переиспользует этот ai_prompt.
-    if needs_freshness:
-        ai_prompt += "\n\n" + _fresh_date_context()
     # Внешний поиск — для любого свежего запроса: сниппеты едут всем моделям маршрута,
     # а не только резерву, когда grounding-моделей не осталось (задумка поиска: искать
     # умеет не только Gemini). Ссылки/YouTube читает только Gemini — им сниппеты не замена.
@@ -722,11 +732,32 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         and not needs_youtube
         and not needs_website
     )
+    search_will_run = need_external_search and web_search_is_enabled()
+    # Живой статус (как в Claude): этапы в одном сообщении, которое потом становится
+    # ответом. Только личка и только запросы с реальным ранним этапом (поиск/медиа/
+    # ссылка): для обычного текста пузырь создаст сам стрим, не тормозя старт модели.
+    status: StatusMessage | None = None
+    status_task: asyncio.Task | None = None
+    early_status = search_will_run or bool(media_mime) or needs_website or needs_youtube
+    if is_private and not is_guest and early_status:
+        status_key, status_timed = _initial_status(needs_youtube, needs_website, media_mime, search_will_run)
+        status_task = asyncio.create_task(
+            StatusMessage.start(message, bot._chat_lang(message.chat.id), status_key, timed=status_timed)
+        )
+
+    # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
+    ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
+    # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
+    # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Инъекция
+    # до промпта — попадает и в пост-хок ретрай, он переиспользует этот ai_prompt.
+    if needs_freshness:
+        ai_prompt += "\n\n" + _fresh_date_context()
     web_search_failed = False
     snippets_injected = False
-    if need_external_search and web_search_is_enabled():
+    if search_will_run:
         # Сниппеты DuckDuckGo едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
         # Поиск идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный вопрос получит "занято").
+        # Статус-пузырь отправляется параллельно поиску, чтобы не добавлять круг к задержке.
         search_budget = web_search_timeout_sec()
         if route_deadline is not None:
             search_budget = min(search_budget, max(0.0, route_deadline - time.monotonic()))
@@ -747,8 +778,17 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             snippets_injected = True
         else:
             web_search_failed = True
+        status = await status_task if status_task is not None else None
+        if status is not None:
+            if snippets:
+                status.add_done("progress_search_done", count=len(snippets))
+            else:
+                status.add_done("progress_search_empty")
+            await status.set_phase("progress_thinking", timed=True)
     elif need_external_search:
         web_search_failed = True
+    if status is None and status_task is not None:
+        status = await status_task
     # Пометка «без поиска» — только если поиск реально не дал результатов: при
     # исчерпанном лимите Gemini сниппеты едут дешёвым моделям, а не отключаются.
     no_search_note = user_gemini_limited and needs_freshness and not snippets_injected
@@ -788,7 +828,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             message.chat.id, ai_prompt, route, message,
             media=gemini_media_list, media_filename=med_name,
             youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
-            deadline=route_deadline, provenance=provenance,
+            deadline=route_deadline, provenance=provenance, status=status,
         )
         answered_grounded = answered_with_live_search(provenance)
         if needs_freshness and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:
@@ -824,10 +864,19 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
                 web_search_failed = True
         elif needs_freshness and not snippets_injected and not answered_grounded:
             log.warning("[web-search] Answer already streamed without live search; cannot retry cleanly.")
+        # Пометка «без поиска» — только если поиск реально не дал результата и
+        # ответила модель без граундинга: при живом Gemini-поиске она была бы ложью.
+        note_text = ""
         if no_search_note:
-            ans = bot._t(message.chat.id, "fallback_no_search") + "\n\n" + ans
-        if web_search_failed:
-            ans = bot._t(message.chat.id, "fallback_no_live_search") + "\n\n" + ans
+            note_text = bot._t(message.chat.id, "fallback_no_search")
+        elif web_search_failed and not answered_grounded:
+            note_text = bot._t(message.chat.id, "fallback_no_live_search")
+        if note_text:
+            ans = note_text + "\n\n" + ans
+            if reply_already_sent and status is not None:
+                # Ответ уже в статус-пузыре (стрим или переиспользование) —
+                # пометку дописываем туда же, иначе она потеряется.
+                await bot._edit_message_quietly(status.message, ans)
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
         # Частичный стрим тоже «успешен» для вызывающего, но его пометка
@@ -859,7 +908,13 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         head_model = route[0][1] if route else bot.DEFAULT_GEMINI_MODEL
         if isinstance(exc, bot.GeminiAllModelsExhaustedError):
             await bot._maybe_alert_gemini_exhausted()
+        if status is not None:
+            # Статус-пузырь не должен остаться висеть с «Думаю…» после ошибки.
+            await status.delete()
         await bot._safe_reply(message, bot._route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze, lang=bot._chat_lang(message.chat.id)))
+    finally:
+        if status is not None:
+            await status.stop()
 
 
 async def _process_raw_update(raw_update: dict) -> None:
