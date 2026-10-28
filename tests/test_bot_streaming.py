@@ -713,6 +713,8 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     assert calls[1:] == [bot._DOTS_TICK_SEC] * 3
     assert len(placeholder.edits) == 3
     assert all(text.startswith("Thinking") for text, _ in placeholder.edits)
+    # Код языка не должен утечь в chat_state строковым ключом (прод 28.10.2026).
+    assert "en" not in bot.chat_state
 
 
 def test_streaming_fast_path_shows_no_dots_frames():

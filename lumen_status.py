@@ -8,6 +8,8 @@ import time
 
 from aiogram.types import Message
 
+from lumen_lang import t as _lang_t
+
 log = logging.getLogger("bot")
 
 _PROGRESS_FRAMES = (".", "..", "…")
@@ -49,8 +51,7 @@ class StatusMessage:
 
     def add_done(self, key: str, **kwargs: object) -> None:
         """Завершённый этап отдельной строкой над текущей фразой."""
-        import bot
-        self._done.append(bot._t(self.lang, key, **kwargs))
+        self._done.append(_lang_t(self.lang, key, **kwargs))
 
     async def set_phase(self, key: str, *, timed: bool = False) -> None:
         """Смена текущей фразы с немедленной правкой, не дожидаясь тика."""
@@ -65,13 +66,12 @@ class StatusMessage:
         self._phase_started = time.monotonic()
 
     def _render(self, frame_idx: int) -> str:
-        import bot
         lines = list(self._done)
         if self._timed:
             elapsed = max(0, int(time.monotonic() - self._phase_started))
-            lines.append(bot._t(self.lang, self._phrase_key, sec=elapsed))
+            lines.append(_lang_t(self.lang, self._phrase_key, sec=elapsed))
         else:
-            lines.append(bot._t(self.lang, self._phrase_key) + _PROGRESS_FRAMES[frame_idx % len(_PROGRESS_FRAMES)])
+            lines.append(_lang_t(self.lang, self._phrase_key) + _PROGRESS_FRAMES[frame_idx % len(_PROGRESS_FRAMES)])
         return "\n".join(lines)
 
     async def _tick(self) -> None:

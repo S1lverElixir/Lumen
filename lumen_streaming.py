@@ -14,6 +14,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import Message
 
 from lumen_formatting import _md_to_html, _split_text_chunks
+from lumen_lang import t as _lang_t
 from lumen_message_parse import _history_user_text
 from lumen_model_speed import (
     speed_key as _model_speed_key,
@@ -53,7 +54,7 @@ async def _tick_waiting_dots(placeholder: Message) -> None:
             elapsed = max(0, int(time.monotonic() - started))
             with contextlib.suppress(Exception):
                 await bot._tg_call(
-                    placeholder.edit_text, bot._t(lang, "progress_thinking", sec=elapsed),
+                    placeholder.edit_text, _lang_t(lang, "progress_thinking", sec=elapsed),
                     parse_mode=None, call_timeout=15.0,
                 )
             await bot._dots_sleep(bot._DOTS_TICK_SEC)
