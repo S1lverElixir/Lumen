@@ -127,6 +127,8 @@ def _run_core_capturing_prompt(message, monkeypatch):
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         captured["prompt"] = ai_prompt
+        # Даём шанс фоновым задачам (typing-индикатор) выполниться до конца прогона.
+        await asyncio.sleep(0)
         return "ok", False
 
     monkeypatch.setattr(bot, "_run_route", fake_run_route)

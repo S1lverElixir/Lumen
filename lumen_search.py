@@ -167,6 +167,22 @@ async def _fetch_ddg_page(session: aiohttp.ClientSession, query: str, timeout: f
         return await resp.text()
 
 
+async def _fetch_ddg_page_shared(query: str, timeout: float) -> str:
+    """Страница через общую сессию бота: новый ClientSession на каждый поиск
+    платил полный DNS/TCP/TLS до DuckDuckGo (0.1-0.3с)."""
+    import bot
+    session = None
+    if getattr(bot, "bot", None) is not None:
+        try:
+            session = await bot._get_http_session()
+        except Exception as exc:
+            log.warning("[web-search] Shared HTTP session unavailable, using a one-off session: %s", exc.__class__.__name__)
+    if session is None:
+        async with aiohttp.ClientSession() as own:
+            return await _fetch_ddg_page(own, query, timeout)
+    return await _fetch_ddg_page(session, query, timeout)
+
+
 async def fetch_web_snippets(query: str, *, timeout_sec: float | None = None, max_results: int | None = None) -> list[dict]:
     """Сниппеты DuckDuckGo lite одним POST (резерв — GET): любая ошибка молча даёт [] — честную пометку ставит вызывающий код."""
     query = (query or "").strip()[:500]
@@ -175,8 +191,7 @@ async def fetch_web_snippets(query: str, *, timeout_sec: float | None = None, ma
     timeout = timeout_sec if timeout_sec else web_search_timeout_sec()
     limit = max_results if max_results else web_search_max_results()
     try:
-        async with aiohttp.ClientSession() as session:
-            page = await _fetch_ddg_page(session, query, timeout)
+        page = await _fetch_ddg_page_shared(query, timeout)
     except Exception as exc:
         # Внешний поиск — довесок, а не опора: сеть легла — отвечаем с пометкой, а не падением.
         log.warning("[web-search] DuckDuckGo fetch failed (query_len=%d): %s", len(query), exc.__class__.__name__)

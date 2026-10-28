@@ -56,12 +56,16 @@ async def _tick_waiting_dots(placeholder: Message) -> None:
         raise
 
 
-async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, first_chunk_limit: float):
-    """Генератор + ожидание первого куска: адаптивный предел (зависшая попытка — TimeoutError, плейсхолдер уйдёт следующей модели) и анимация точек строго до первого yield. Пустой стрим — просто конец."""
+async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, first_chunk_limit: float, first_task=None):
+    """Генератор + ожидание первого куска: адаптивный предел (зависшая попытка — TimeoutError, плейсхолдер уйдёт следующей модели) и анимация точек строго до первого yield. Пустой стрим — просто конец.
+
+    first_task — уже запущенный запрос первого куска (см. _run_streaming_reply):
+    он стартует параллельно с отправкой плейсхолдера."""
     dots_task = asyncio.create_task(_tick_waiting_dots(placeholder))
     try:
         try:
-            first = await asyncio.wait_for(piece_agen.__anext__(), timeout=first_chunk_limit)
+            pending = first_task if first_task is not None else piece_agen.__anext__()
+            first = await asyncio.wait_for(pending, timeout=first_chunk_limit)
         except StopAsyncIteration:
             return
         finally:
@@ -241,6 +245,9 @@ async def _run_streaming_reply(
     last_piece_ts: float | None = None
     arrival_ewma: float | None = None
 
+    # Первый кусок запрашиваем ДО плейсхолдера: отправка "…" — отдельный круг
+    # к Telegram через прокси, и запрос к модели простаивал бы весь этот круг.
+    first_task = asyncio.ensure_future(piece_agen.__anext__())
     try:
         placeholder = await bot._tg_call(message.reply, "…", call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
         if placeholder is None:
@@ -259,6 +266,7 @@ async def _run_streaming_reply(
         piece_agen = _pieces_with_waiting_feedback(
             piece_agen, placeholder,
             first_chunk_limit=first_chunk_limit,
+            first_task=first_task,
         )
         async for piece in piece_agen:
             if not piece:
@@ -444,6 +452,12 @@ async def _run_streaming_reply(
             state["stream_interrupted"] = True
             bot.mark_state_dirty(chat_id)
     finally:
+        # Ранний выход (плейсхолдер не отправился) оставляет запрос первого куска
+        # висеть: гасим, иначе он живёт до таймаута провайдера.
+        if not first_task.done():
+            first_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await first_task
         aclose = getattr(piece_agen, "aclose", None)
         if aclose is not None:
             with contextlib.suppress(Exception):

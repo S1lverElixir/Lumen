@@ -4,12 +4,8 @@ lumen_media_flow.py — скачивание вложений из Telegram и �
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-import os
-import tempfile
 from collections import deque
-from pathlib import Path
 from typing import Any
 
 from lumen_chat_state import MAX_MEDIA_BUCKETS_PER_CHAT, MAX_MEDIA_RECENT_IDS
@@ -108,28 +104,20 @@ def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | No
     if not recent or recent[-1][0] != file_id:
         recent.append((file_id, mime or "application/octet-stream"))
 
-async def _download_message_attachment_to_tmp(source: Any) -> tuple[str, str, str] | None:
+async def _download_message_attachment(source: Any) -> tuple[bytes, str, str] | None:
+    """Байты вложения сразу в память: временный файл на диске (запись и обратное
+    чтение до 20МБ) был лишним кругом на каждое вложение."""
     import bot
     file_id, mime, filename = _media_file_id_and_mime(source)
     if not file_id:
         return None
-    suffix = _mime_suffix(mime, filename)
-    fd, tmp_path = tempfile.mkstemp(prefix="tg_media_", suffix=suffix)
-    os.close(fd)
-    try:
-        data, real_mime = await bot._download_telegram_file_bytes(file_id)
-        final_mime = _sanitize_mime_type(filename or "", mime)
-        if final_mime == "application/octet-stream" or not final_mime:
-             final_mime = _sanitize_mime_type(None, real_mime)
-        if final_mime == "application/octet-stream" or not final_mime:
-             final_mime = mime or "application/octet-stream"
-        # Запись до 20МБ — в потоке, loop не стопорим.
-        await asyncio.to_thread(Path(tmp_path).write_bytes, data)
-        return tmp_path, final_mime, filename or Path(tmp_path).name
-    except Exception:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp_path)
-        raise
+    data, real_mime = await bot._download_telegram_file_bytes(file_id)
+    final_mime = _sanitize_mime_type(filename or "", mime)
+    if final_mime == "application/octet-stream" or not final_mime:
+        final_mime = _sanitize_mime_type(None, real_mime)
+    if final_mime == "application/octet-stream" or not final_mime:
+        final_mime = mime or "application/octet-stream"
+    return data, final_mime, filename or f"attachment{_mime_suffix(mime, filename)}"
 
 async def _fetch_media(file_id: str, mime: str) -> tuple[bytes, str] | None:
     import bot

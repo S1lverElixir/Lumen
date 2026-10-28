@@ -630,7 +630,7 @@ from lumen_media_flow import (
     _MediaTooLargeError,
     _download_telegram_file_bytes,
     _save_media_to_history,
-    _download_message_attachment_to_tmp,
+    _download_message_attachment,
     _fetch_media,
 )
 
@@ -982,7 +982,7 @@ __all__ = [
     "_download_telegram_file_bytes",
     "_MediaTooLargeError",
     "_save_media_to_history",
-    "_download_message_attachment_to_tmp",
+    "_download_message_attachment",
     "_fetch_media",
     "_sanitize_mime_type",
     "_mime_suffix",

@@ -2041,7 +2041,7 @@ def test_daily_limit_denial_counted_and_refused(rate_guard_setup, monkeypatch):
     # проверяют только тексты отказов и фолбэк на резерв, но не счётчик.
     message = rate_guard_setup()
     message.text = "привет, как дела?"
-    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=(None, "", "", None)))
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
     uid = 456
     entry = bot._user_daily_entry(uid)
     entry["total"] = bot._user_daily_limit(uid, "total")

@@ -588,8 +588,10 @@ def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
     import lumen_streaming
     seen = {}
 
-    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit):
+    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit, first_task=None):
         seen["limit"] = first_chunk_limit
+        if first_task is not None:
+            yield await first_task
         async for piece in piece_agen:
             yield piece
 
@@ -607,6 +609,36 @@ def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
         ))
         assert answer == "готово"
         assert seen["limit"] <= 1.1
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_starts_model_request_before_placeholder():
+    # Что защищает: запрос к модели стартует до отправки "…", а не после неё.
+    # Регрессия: плейсхолдер первым — модель простаивает лишний круг к Telegram
+    # (0.1-0.3с на каждый стриминговый ответ).
+    chat_id = 999319
+    order = []
+
+    async def pieces():
+        order.append("model")
+        yield "готово"
+
+    class _Msg(_FakeIncomingMessage):
+        async def reply(self, text, **kwargs):
+            # Настоящий reply — сетевой вызов: даёт задаче первого куска стартовать.
+            await asyncio.sleep(0)
+            order.append("placeholder")
+            return await super().reply(text, **kwargs)
+
+    incoming = _Msg(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="w:free",
+            piece_agen=pieces(),
+        ))
+        assert answer == "готово"
+        assert order[:2] == ["model", "placeholder"]
     finally:
         bot.chat_state.pop(chat_id, None)
 
