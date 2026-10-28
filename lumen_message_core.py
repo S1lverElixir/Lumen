@@ -35,6 +35,7 @@ from lumen_media import (
     _ensure_prompt_text,
     _media_file_id_and_mime,
     _msg_media_source,
+    _youtube_summary_prompt,
 )
 from lumen_router_config import (
     _GEMMA_TEXT_CHAIN,
@@ -68,6 +69,22 @@ def _fresh_date_context() -> str:
     """Однострочный контекст текущей даты для промптов свежих вопросов."""
     now = datetime.now(_MOSCOW_TZ)
     return f"[Context: today is {now.strftime('%d %B %Y')}, {now.strftime('%A')} (Europe/Moscow).]"
+
+
+def _media_prompt_lang(message: Any, state: dict | None) -> str | None:
+    """Язык ответа на вложение без подписи: выбор /lang, иначе язык клиента
+    Telegram. Неподдерживаемый код не навязываем — решает системный промпт."""
+    saved = (state or {}).get("lang")
+    if saved:
+        return saved
+    code = getattr(getattr(message, "from_user", None), "language_code", None)
+    if not code:
+        return None
+    # normalize_lang вернул бы en и для неподдерживаемого sv-SE, навязав
+    # английский; проверяем именно базу кода.
+    from lumen_lang import LANG_NAMES
+    base = str(code).strip().lower().replace("_", "-").split("-")[0]
+    return base if base in LANG_NAMES else None
 
 
 def _initial_status(needs_youtube: bool, needs_website: bool, media_mime: str | None,
@@ -678,9 +695,11 @@ async def _handle_message_core(
                 return
 
     if media_tuple and not clean_prompt:
-         clean_prompt = _ensure_prompt_text(None, media_tuple[1])
+         clean_prompt = _ensure_prompt_text(
+             None, media_tuple[1], _media_prompt_lang(message, state),
+         )
     if youtube_url_to_analyze and not clean_prompt:
-         clean_prompt = "Подробно перескажи и опиши содержание этого YouTube-видео."
+         clean_prompt = _youtube_summary_prompt(_media_prompt_lang(message, state))
 
     if not clean_prompt and not media_tuple and not youtube_url_to_analyze:
          src = _msg_media_source(message)

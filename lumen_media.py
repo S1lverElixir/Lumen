@@ -166,17 +166,36 @@ def _msg_media_source(message: Any) -> Any | None:
         return val
     return None
 
-def _ensure_prompt_text(text: str | None, mime: str) -> str:
+def _media_prompt_language_suffix(lang: str | None) -> str:
+    """Инструкция ответить на языке чата: внутренние промпты английские,
+    иначе модель без подписи отвечала по-русски всем 24 прочим языкам.
+    Без явного языка суффикса нет — решает системный промпт."""
+    if not lang:
+        return ""
+    try:
+        from lumen_lang import LANG_NAMES, normalize_lang
+        name = LANG_NAMES.get(normalize_lang(lang))
+    except Exception:
+        name = None
+    return f" Answer in {name}." if name else ""
+
+def _ensure_prompt_text(text: str | None, mime: str, lang: str | None = None) -> str:
     s = (text or "").strip()
     if s:
         return s
     m = mime.lower()
+    suffix = _media_prompt_language_suffix(lang)
     if m == "image/gif" or "animation" in m:
-        return "Подробно опиши происходящее на этой анимации."
-    if m.startswith("image/"):
-        return "Подробно опиши, что изображено на картинке."
-    if m.startswith("video/") or m == "video/quicktime":
-         return "Подробно опиши происходящее на этом видео."
-    if m.startswith("audio/") or m == "audio/ogg" or m == "audio/mpeg" or m == "audio/mp3" or "voice" in m:
-         return "Прослушай и подробно опиши, что на этой аудиозаписи, или кратко перескажи ее содержание."
-    return "Проанализируй и подробно опиши содержимое этого вложения."
+        prompt = "Describe in detail what happens in this animation."
+    elif m.startswith("image/"):
+        prompt = "Describe in detail what is shown in this image."
+    elif m.startswith("video/") or m == "video/quicktime":
+        prompt = "Describe in detail what happens in this video."
+    elif m.startswith("audio/") or m == "audio/ogg" or m == "audio/mpeg" or m == "audio/mp3" or "voice" in m:
+        prompt = "Listen to this audio and describe in detail what is on it, or briefly summarise its content."
+    else:
+        prompt = "Analyse and describe in detail the contents of this attachment."
+    return prompt + suffix
+
+def _youtube_summary_prompt(lang: str | None = None) -> str:
+    return "Retell in detail and describe the content of this YouTube video." + _media_prompt_language_suffix(lang)

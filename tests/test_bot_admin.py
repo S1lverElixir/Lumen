@@ -915,6 +915,31 @@ def test_probe_url_marks_http_errors_unhealthy_and_sends_headers():
     assert session.kwargs["headers"] == {"X-Lumen-Proxy-Secret": "s"}
 
 
+def test_probe_url_treats_telegram_401_as_reachable_proxy():
+    # 401 с JSON Telegram доказывает, что прокси и API живы (токен в зонде
+    # обрезан); 401 самого прокси с телом Unauthorized остаётся красным.
+    class _FakeContent:
+        async def read(self, n):
+            return b'{"ok":false,"error_code":401,"description":"Unauthorized"}'
+
+    class _FakeResp:
+        status = 401
+        content = _FakeContent()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _FakeSession:
+        def get(self, url, **kwargs):
+            return _FakeResp()
+
+    res = asyncio.run(bot.probe_url(_FakeSession(), "http://x"))
+    assert res["ok"] is True and res["status"] == 401
+
+
 def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():
     # Общий зонд /diag и /selftest: успех — статус, неуспех — текст без секрета.
     class _FakeResp:

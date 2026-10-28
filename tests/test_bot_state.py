@@ -81,10 +81,29 @@ def test_mime_suffix_maps_audio_video_subtypes_honestly():
     assert bot._mime_suffix("image/jpeg", "") == ".jpg"
 
 
-def test_ensure_prompt_text_gif_gets_animation_prompt_not_generic_image():
-    assert "анимации" in bot._ensure_prompt_text(None, "image/gif")
-    assert "анимации" in bot._ensure_prompt_text("  ", "image/GIF")
-    assert "картинке" in bot._ensure_prompt_text(None, "image/jpeg")
+def test_ensure_prompt_text_matches_media_kind_and_chat_language():
+    # Аудит 28.10.2026: русские промпты без подписи уводили ответы не-RU чатов
+    # в русский. Внутренний промпт английский + явный язык ответа.
+    gif = bot._ensure_prompt_text(None, "image/gif", "de")
+    assert "animation" in gif
+    assert "Answer in Deutsch." in gif
+    assert "animation" in bot._ensure_prompt_text("  ", "image/GIF")
+    assert "image" in bot._ensure_prompt_text(None, "image/jpeg")
+    # Без явного языка суффикса нет: решение остаётся системному промпту.
+    assert "Answer in" not in bot._ensure_prompt_text(None, "image/jpeg")
+    assert "Answer in Русский." in bot._ensure_prompt_text(None, "video/mp4", "ru")
+
+
+def test_media_prompt_lang_prefers_saved_language_then_telegram_client():
+    # Аудит 28.10.2026: без /lang язык брался только из клиента Telegram —
+    # выбор пользователя должен быть важнее языка интерфейса.
+    from lumen_message_core import _media_prompt_lang
+    msg = SimpleNamespace(from_user=SimpleNamespace(language_code="uk-UA"))
+    assert _media_prompt_lang(msg, {"lang": "be"}) == "be"
+    assert _media_prompt_lang(msg, {}) == "uk"
+    unsupported = SimpleNamespace(from_user=SimpleNamespace(language_code="sv-SE"))
+    assert _media_prompt_lang(unsupported, {}) is None
+    assert _media_prompt_lang(SimpleNamespace(from_user=None), {}) is None
 
 
 @pytest.mark.parametrize(("url", "is_tiktok", "is_youtube"), [

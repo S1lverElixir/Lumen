@@ -215,7 +215,15 @@ async def probe_url(
         async with session.get(
             url, timeout=aiohttp.ClientTimeout(total=timeout_sec), headers=headers or None,
         ) as resp:
-            ok = 200 <= int(resp.status) < 400
+            status = int(resp.status)
+            ok = 200 <= status < 400
+            if not ok and status == 401:
+                # 401 с JSON Telegram — прокси и API живы, просто тестовый токен
+                # обрезан; 401 самого прокси — тело "Unauthorized" и остаётся красным.
+                with contextlib.suppress(Exception):
+                    body = await resp.content.read(512)
+                    if b'"error_code"' in body:
+                        ok = True
             return {"status": resp.status, "elapsed_sec": round(time.time() - start, 2), "ok": ok}
     except Exception as exc:
         elapsed = round(time.time() - start, 2)
