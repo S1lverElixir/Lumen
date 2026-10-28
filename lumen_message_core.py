@@ -692,7 +692,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     _late_entry = bot._user_daily_peek(uid)
     if await _refuse_daily_total(message, uid, _late_entry):
         return
-    no_search_note = False
+    user_gemini_limited = False
     if bot._user_daily_gemini_exhausted(uid, _late_entry):
         # Gemma не тратит дефицитную квоту, поэтому остаётся и после лимита:
         # обычный текст должен работать, как и обещает отказ (аудит 27.10.2026).
@@ -702,8 +702,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             await _refuse_daily_gemini(message, uid, _late_entry)
             return
         route = allowed
-        # Свежесть без Gemini — честная пометка, что ответ без поиска.
-        no_search_note = needs_freshness and not route_has_live_search(route)
+        user_gemini_limited = True
     # Дошло до обработки: фон, инъекции и отказы выше уже отсеяны.
     bot._record_stats_event("messages_received")
 
@@ -714,16 +713,14 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # до промпта — попадает и в пост-хок ретрай, он переиспользует этот ai_prompt.
     if needs_freshness:
         ai_prompt += "\n\n" + _fresh_date_context()
-    # Внешний поиск нужен свежему запросу без живого поиска в маршруте (ссылки/YouTube
-    # читает только Gemini — им сниппеты не замена). Дневной лимит пользователя — не сюда:
-    # его квота потрачена, ответ идёт с честной пометкой без чужого поиска.
-    # Выключен свитчом или пуст — тоже отвечаем с пометкой.
+    # Внешний поиск — для любого свежего запроса: сниппеты едут всем моделям маршрута,
+    # а не только резерву, когда grounding-моделей не осталось (задумка поиска: искать
+    # умеет не только Gemini). Ссылки/YouTube читает только Gemini — им сниппеты не замена.
+    # Выключен свитчом или пуст — отвечаем с пометкой.
     need_external_search = (
         needs_freshness
         and not needs_youtube
         and not needs_website
-        and not no_search_note
-        and not route_has_live_search(route)
     )
     web_search_failed = False
     snippets_injected = False
@@ -752,6 +749,11 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             web_search_failed = True
     elif need_external_search:
         web_search_failed = True
+    # Пометка «без поиска» — только если поиск реально не дал результатов: при
+    # исчерпанном лимите Gemini сниппеты едут дешёвым моделям, а не отключаются.
+    no_search_note = user_gemini_limited and needs_freshness and not snippets_injected
+    if no_search_note:
+        web_search_failed = False
     if (
         media_tuple is None
         and not extra_media
@@ -765,14 +767,14 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
     # Стриминг ("живой" эффект печати) имеет смысл только для простого
     # текстового обмена без вложений/YouTube — см. _run_route. При пометке
     # "без поиска" стрим гасим: она дописывается к готовому ответу.
-    # Стрим головы без живого поиска при свежем запросе гасим: иначе ответ уйдёт
-    # без поиска до пост-проверки и ретрай уже невозможен (прод 12.10.2026).
+    # Свежий ответ без сниппетов и без grounding-головы не стримим: иначе он
+    # уйдёт до пост-проверки и ретрай уже невозможен (прод 12.10.2026).
     head_has_live_search = (not route) or route_has_live_search(route[:1])
     allow_stream = (
         not gemini_media_list
         and not youtube_url_to_analyze
         and not no_search_note
-        and (not needs_freshness or head_has_live_search)
+        and (not needs_freshness or head_has_live_search or snippets_injected)
     )
     if route_deadline is None:
         # Один дедлайн на первый проход и пост-хок ретрай: раньше ретрай
@@ -790,9 +792,9 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         )
         answered_grounded = answered_with_live_search(provenance)
         if needs_freshness and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:
-            # План маршрута содержал живой поиск, но ответила модель без него
-            # (граундинг-модели умерли на квоте по ходу). Догоняем DuckDuckGo
-            # и один ретрай со сниппетами; не вышло — честная пометка.
+            # Поиск до маршрута ничего не дал, а ответила модель без живого
+            # поиска: пробуем ещё раз и один ретрай со сниппетами; не вышло —
+            # честная пометка.
             retry_snippets: list = []
             try:
                 retry_budget = web_search_timeout_sec()

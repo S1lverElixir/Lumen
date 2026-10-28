@@ -84,18 +84,73 @@ def test_disabled_search_marks_reply_without_live_search(rate_guard_setup, monke
     bot.chat_state.pop(123, None)
 
 
-def test_daily_limit_keeps_note_and_skips_external_search(rate_guard_setup, monkeypatch):
-    # Граница: дневной лимит пользователя — честная пометка без чужого поиска
-    # (лимит именно его, обходить поиском нельзя) и без единого сетевого вызова в тестах.
+def test_fresh_query_with_live_gemini_still_gets_external_snippets(rate_guard_setup, monkeypatch):
+    # Раньше сниппеты подставлялись только когда в маршруте не оставалось
+    # grounding-моделей; теперь искать обязана любая ответившая модель, в том
+    # числе резервная после 429 у Gemini (прод 28.10.2026).
+    message = rate_guard_setup()
+    message.text = "погугли что происходит с ДЦ Яндекса"
+    captured: dict = {}
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        return [{"title": "Новость", "url": "https://example.com/grounded", "snippet": "Данные"}]
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        # Отвечает grounding-модель: пост-хок ретрай не должен маскировать
+        # отсутствие предварительной подстановки.
+        provenance = kwargs.get("provenance")
+        if isinstance(provenance, dict):
+            provenance.update(provider="gemini", model="gemini-2.5-flash")
+        return "ok", False
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert "https://example.com/grounded" in captured["prompt"]
+    bot.chat_state.pop(123, None)
+
+
+def test_daily_limit_still_gets_external_search_snippets(rate_guard_setup, monkeypatch):
+    # Дневной лимит Gemini не отключает внешний поиск: сниппеты едут дешёвым
+    # моделям маршрута, иначе они отвечают по памяти (задумка поиска — искать
+    # умеет не только Gemini).
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
     monkeypatch.setattr(bot, "_user_daily_gemini_exhausted", lambda uid, entry: True)
+    captured: dict = {}
 
     async def fake_fetch(query, *, timeout_sec=None, max_results=None):
-        raise AssertionError("fetch must not run on daily user limit")
+        return [{"title": "Новость", "url": "https://example.com/daily", "snippet": "Свежие данные"}]
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        captured["allow_stream"] = kwargs.get("allow_stream")
         assert all(p != "gemini" for p, _ in route)
+        return "ok", False
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert "https://example.com/daily" in captured["prompt"]
+    assert captured["allow_stream"] is True
+    sent_text = bot._safe_reply.await_args[0][1]
+    assert "without web search" not in sent_text
+    bot.chat_state.pop(123, None)
+
+
+def test_daily_limit_with_empty_search_keeps_no_search_note(rate_guard_setup, monkeypatch):
+    # Если и внешний поиск пуст — пометка «без поиска» обязана остаться.
+    message = rate_guard_setup()
+    message.text = "погугли что происходит с ДЦ Яндекса"
+    monkeypatch.setattr(bot, "_user_daily_gemini_exhausted", lambda uid, entry: True)
+    captured: dict = {}
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        return []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["allow_stream"] = kwargs.get("allow_stream")
         return "ok", False
 
     monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
@@ -103,6 +158,7 @@ def test_daily_limit_keeps_note_and_skips_external_search(rate_guard_setup, monk
     asyncio.run(bot._handle_message_core(message))
     sent_text = bot._safe_reply.await_args[0][1]
     assert sent_text.startswith("Answering without web search")
+    assert captured["allow_stream"] is False
     bot.chat_state.pop(123, None)
 
 
@@ -115,10 +171,14 @@ def test_freshness_prompt_carries_today_date(rate_guard_setup, monkeypatch):
     message.text = "какая сегодня погода в Москве"
     captured: dict = {}
 
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        return []
+
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         captured["prompt"] = ai_prompt
         return "ok", False
 
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
     prompt = captured["prompt"]

@@ -3044,14 +3044,18 @@ def test_core_refuses_when_user_daily_total_exhausted(rate_guard_setup, monkeypa
 
 
 def test_core_falls_back_without_gemini_and_marks_no_search(rate_guard_setup, monkeypatch):
-    # Новое: свежесть без ссылок при исчерпанном Gemini идёт через Groq/OpenRouter
-    # с пометкой "без поиска".
+    # Свежесть без ссылок при исчерпанном Gemini идёт через Groq/OpenRouter;
+    # внешний поиск пробует дать им сниппеты, и только пустой поиск оставляет
+    # пометку "без поиска".
     message = rate_guard_setup()
     message.text = "что нового сегодня"
     monkeypatch.setattr(bot, "DAILY_USER_GEMINI_LIMIT", 1)
     bot._record_user_daily(456, gemini=True)
     captured = {}
     replies = []
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        return []
 
     async def fake_route(chat_id, ai_prompt, route, msg, **kwargs):
         captured["route"] = route
@@ -3061,6 +3065,7 @@ def test_core_falls_back_without_gemini_and_marks_no_search(rate_guard_setup, mo
     async def fake_safe_reply(msg, text, **kwargs):
         replies.append(text)
 
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
     monkeypatch.setattr(bot, "_run_route", fake_route)
     monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
     try:
