@@ -657,6 +657,38 @@ def test_run_route_streams_openrouter_when_route_head_is_openrouter():
         bot.ask_openrouter_text = original_or_text
 
 
+def test_run_route_streams_fallback_model_after_head_stream_failure(monkeypatch):
+    # Прод 28.10.2026: стрим пропадал целиком, когда головная модель падала
+    # до первого куска, — резервные отвечали обычным вызовом. Теперь поток
+    # пробуется и на них, с переиспользованием того же пузырька.
+    chat_id = 999304
+    placeholder = _FakeSentMessage()
+    calls = []
+
+    async def fake_stream(cid, prompt, message, model_id, **kwargs):
+        calls.append((model_id, kwargs.get("reuse_placeholder")))
+        if model_id == "gemini-3.8-flash":
+            return None, placeholder
+        return "Ответ со стрима резерва", None
+
+    async def must_not_be_called(*args, **kwargs):
+        raise AssertionError("обычный вызов не нужен: резервный стрим сработал")
+
+    monkeypatch.setattr(bot, "_try_gemini_streaming", fake_stream)
+    monkeypatch.setattr(bot, "_try_openrouter_streaming", fake_stream)
+    monkeypatch.setattr(bot, "ask_gemini", must_not_be_called)
+    monkeypatch.setattr(bot, "ask_openrouter_text", must_not_be_called)
+    try:
+        route = [("gemini", "gemini-3.8-flash"), ("openrouter", "meta-llama/llama-3.3-70b-instruct:free")]
+        ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
+        assert ans == "Ответ со стрима резерва"
+        assert sent is True
+        assert [model for model, _ in calls] == ["gemini-3.8-flash", "meta-llama/llama-3.3-70b-instruct:free"]
+        assert calls[1][1] is placeholder
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_run_route_falls_back_from_failed_openrouter_stream_to_non_streaming():
     chat_id = 999306
 
@@ -678,9 +710,10 @@ def test_run_route_falls_back_from_failed_openrouter_stream_to_non_streaming():
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert ans == "Ответ без стрима"
         assert sent is False
-        # Модель, для которой стрим не удался, не должна пере-пробоваться внутри
-        # обычного вызова — экономим время (см. философию "1 попытка на модель").
-        assert calls[0] == ["openai/gpt-oss-20b:free"]
+        # Обычный вызов идёт по всему блоку: модель, у которой стрим упал раньше
+        # показа, пробуется без потока — иначе сломанный SSE провайдера оставлял
+        # бы чат без ответа вовсе (аудит 28.10.2026).
+        assert calls[0] == ["meta-llama/llama-3.3-70b-instruct:free", "openai/gpt-oss-20b:free"]
     finally:
         bot._try_openrouter_streaming = original_stream
         bot.ask_openrouter_text = original_or_text
@@ -708,7 +741,8 @@ def test_run_route_tries_groq_head_with_stream_fallback_to_text():
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert ans == "Ответ Groq без стрима"
         assert sent is False
-        assert calls[0] == ["openai/gpt-oss-120b"]
+        # После раннего сбоя стрима модель пробуется обычным вызовом.
+        assert calls[0] == ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
     finally:
         bot._try_groq_streaming = original_stream
         bot.ask_groq_text = original_groq_text

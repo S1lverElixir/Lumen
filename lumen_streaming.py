@@ -238,6 +238,7 @@ async def _groq_stream_pieces(model_id: str, messages: list[dict], *, deadline: 
 async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
     deadline: float | None = None, status=None, history_text=None,
+    reuse_placeholder: Message | None = None,
 ) -> tuple[str | None, Message | None]:
     """Стриминг: генератор кусков + плейсхолдер, чанкинг, троттлинг, обрыв при утечке/инъекции, HTML-финал, запись в историю. Возвращает (ответ, плейсхолдер): успех — (текст, None); сбой до показа — (None, плейсхолдер для следующей модели); сбой после — (показанное + пометка, None)."""
     import bot
@@ -268,7 +269,11 @@ async def _run_streaming_reply(
     # к Telegram через прокси, и запрос к модели простаивал бы весь этот круг.
     first_task = asyncio.ensure_future(piece_agen.__anext__())
     try:
-        if status is not None:
+        if reuse_placeholder is not None:
+            # Резервная модель после раннего сбоя стрима: тот же пузырёк,
+            # второй «Думаю…» в чате не нужен (аудит 28.10.2026).
+            placeholder = reuse_placeholder
+        elif status is not None:
             # Статус-пузырь уже в чате: переиспользуем его, второй не отправляем.
             placeholder = status.message
         else:
@@ -559,7 +564,7 @@ async def _run_streaming_reply(
     bot._record_quota_usage(provider, model_id)
     return final_answer, None
 
-async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None) -> tuple[str | None, Message | None]:
+async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Gemini (строит contents/config)."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
@@ -568,21 +573,21 @@ async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, 
     contents = await bot._build_gemini_turn_contents(chat_id, user_text)
     call_contents, gconfig = bot._build_gemini_call_config(model_id, contents)
     piece_agen = _gemini_stream_pieces(model_id, call_contents, gconfig, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder)
 
-async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None) -> tuple[str | None, Message | None]:
+async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для OpenRouter (SSE через chat/completions)."""
     import bot
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
     # Генератор — через bot.: тесты подменяют bot._openrouter_stream_pieces фейком.
     piece_agen = bot._openrouter_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder)
 
-async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None) -> tuple[str | None, Message | None]:
+async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Groq (SSE через chat/completions). Историю режем тем же _trim_messages_for_groq, что обычный путь, — иначе стрим-проба падает с 413 ещё до цепочки."""
     import bot
     from lumen_routes import _trim_messages_for_groq
     messages = _trim_messages_for_groq(bot._build_openrouter_turn_messages(chat_id, user_text, model_id))
     # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
     piece_agen = bot._groq_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder)

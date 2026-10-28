@@ -931,6 +931,35 @@ def test_try_openrouter_streaming_returns_none_on_early_failure():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_run_streaming_reply_reuses_given_placeholder():
+    # Резервная модель после раннего сбоя стрима пишет в тот же пузырёк:
+    # второй «Думаю…» в чате не появляется (прод 28.10.2026).
+    chat_id = 999105
+
+    async def pieces():
+        yield "Привет"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    reused = _FakeSentMessage()
+
+    async def must_not_send(*args, **kwargs):
+        raise AssertionError("новый пузырёк не нужен: передан готовый")
+
+    original_sender = bot._answer_sender
+    bot._answer_sender = must_not_send
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет", incoming, provider="openrouter", model_id="m:free",
+            piece_agen=pieces(), reuse_placeholder=reused,
+        ))
+        assert answer == "Привет" and placeholder is None
+        assert incoming.sent == []
+        assert reused.edits
+    finally:
+        bot._answer_sender = original_sender
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_run_streaming_reply_paces_reveal_for_burst_instead_of_dumping_full_text():
     import lumen_typing_pace
     chat_id = 999110

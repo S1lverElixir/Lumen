@@ -1026,7 +1026,6 @@ async def _run_route(
             runs[-1][1].append(model_id)
         else:
             runs.append((provider, [model_id]))
-    first_provider = route[0][0]
 
     # Учёт дневных лимитов пользователя — только дошедшие до модели ответы.
     # Gemma не в счёт: у неё отдельная большая квота, иначе 5 обычных сообщений
@@ -1041,59 +1040,58 @@ async def _run_route(
         if provenance is not None:
             provenance.update(provider=provider_name, model=model_id)
 
-    # Стримим только голову маршрута; статус-пузырь (или плейсхолдер "…" после
-    # раннего сбоя) переиспользуем под финальный текст следующей модели.
-    tried_stream_model: str | None = None
-    tried_stream_provider: str | None = None
+    # Стрим пробуем на каждой модели маршрута, а не только на голове: раньше
+    # сбой головной модели (квота/404/таймаут) навсегда лишал чат эффекта
+    # печати, хотя резервные модели отвечали (прод 28.10.2026).
+    # Ранний сбой стрима не отменяет обычный вызов: модель пробуется ещё раз
+    # без потока, иначе сломанный SSE у провайдера остался бы без ответа вовсе.
     reusable_placeholder: Message | None = status.message if status is not None else None
-    if allow_stream and route:
-        head_model = route[0][1]
-        if first_provider == "gemini" and GEMINI_MODELS.get(head_model, {}).get("stream", True):
-            streamed, placeholder = await bot._try_gemini_streaming(
-                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status, history_text=history_text)
-            if streamed is not None:
-                log.info('[router] chat=%s response received via streaming (gemini:%s)', chat_id, head_model)
-                _count_user_answer("gemini", head_model)
-                _note_answered("gemini", head_model)
-                return streamed, True
-            tried_stream_model, tried_stream_provider = head_model, "gemini"
-            reusable_placeholder = placeholder
-        elif first_provider == "openrouter":
-            streamed, placeholder = await bot._try_openrouter_streaming(
-                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status, history_text=history_text)
-            if streamed is not None:
-                log.info('[router] chat=%s response received via streaming (openrouter:%s)', chat_id, head_model)
-                _count_user_answer("openrouter")
-                _note_answered("openrouter", head_model)
-                return streamed, True
-            tried_stream_model, tried_stream_provider = head_model, "openrouter"
-            reusable_placeholder = placeholder
-        elif first_provider == "groq":
-            streamed, placeholder = await bot._try_groq_streaming(
-                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status, history_text=history_text)
-            if streamed is not None:
-                log.info('[router] chat=%s response received via streaming (groq:%s)', chat_id, head_model)
-                _count_user_answer("groq")
-                _note_answered("groq", head_model)
-                return streamed, True
-            tried_stream_model, tried_stream_provider = head_model, "groq"
-            reusable_placeholder = placeholder
+    if allow_stream and (media or youtube_url):
+        # Стрим-обёртки собирают контекст без вложений: с медиа только обычный путь.
+        allow_stream = False
+
+    def _streamable(provider_name: str, model_id: str) -> bool:
+        if provider_name == "gemini":
+            return bool(GEMINI_MODELS.get(model_id, {}).get("stream", True))
+        return provider_name in ("openrouter", "groq")
+
+    async def _try_stream(provider_name: str, model_id: str):
+        kwargs = dict(
+            deadline=deadline, status=status, history_text=history_text,
+            reuse_placeholder=reusable_placeholder,
+        )
+        if provider_name == "gemini":
+            return await bot._try_gemini_streaming(chat_id, ai_prompt, message, model_id, **kwargs)
+        if provider_name == "openrouter":
+            return await bot._try_openrouter_streaming(chat_id, ai_prompt, message, model_id, **kwargs)
+        return await bot._try_groq_streaming(chat_id, ai_prompt, message, model_id, **kwargs)
 
     is_video_or_audio = bool(media) and any(not (m[1] or "").startswith("image/") for m in media)
     last_exc: Exception | None = None
     media_note_added = False
     for run_index, (provider, run_ids) in enumerate(runs):
-        ids = list(run_ids)
-        if provider == tried_stream_provider and tried_stream_model in ids:
-            ids = [m for m in ids if m != tried_stream_model]
-        if not ids:
-            continue
         if provider == "openrouter" and is_video_or_audio:
             # OpenRouter не принимает видео/аудио — пропускаем без попытки.
             continue
+        ids = list(run_ids)
         if time.monotonic() > deadline:
             log.warning('[router] Route time budget exhausted before trying provider %s.', provider)
             break
+        if allow_stream:
+            for stream_model in ids:
+                if not _streamable(provider, stream_model):
+                    continue
+                if time.monotonic() > deadline:
+                    log.warning('[router] Route time budget exhausted before streaming %s/%s.', provider, stream_model)
+                    break
+                streamed, placeholder = await _try_stream(provider, stream_model)
+                if placeholder is not None:
+                    reusable_placeholder = placeholder
+                if streamed is not None:
+                    log.info('[router] chat=%s response received via streaming (%s:%s)', chat_id, provider, stream_model)
+                    _count_user_answer(provider, stream_model if provider == "gemini" else None)
+                    _note_answered(provider, stream_model)
+                    return streamed, True
         try:
             if provider == "gemini":
                 ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text)

@@ -32,13 +32,13 @@ Each model is tried exactly once per route, with no retries: a single failure (t
 
 ## Streaming & typing pace
 
-For the first candidate in a route (plain text, no attachments, no links), Lumen streams the reply by repeatedly editing one message, the same mechanism for Gemini (`generate_content_stream`), OpenRouter and Groq (SSE over `chat/completions`).
+For a plain-text route (no attachments, no links), Lumen streams the reply by repeatedly editing one message, the same mechanism for Gemini (`generate_content_stream`), OpenRouter and Groq (SSE over `chat/completions`). Streaming is attempted on every model in the route, not only on the first one: a failing head model no longer costs the chat its typing effect while a reserve model answers.
 
 Telegram won't let a bot edit one message more than about once a second, so true token-by-token output isn't possible regardless of how fast the model generates text. Instead, `lumen_typing_pace.py` tracks each `provider:model` pair's real observed characters-per-second and reveals a growing slice of the buffered text at that pace, capped by whatever has actually arrived. If a backend returns the whole answer in one large chunk (common for free OpenRouter models, since the same `:free` slug can be served by different backends depending on load), a short "catch-up" phase finishes revealing it smoothly instead of dumping it all at once, capped at `STREAM_TYPING_MAX_CATCHUP_TICKS × STREAM_TYPING_TICK_SEC` seconds.
 
 This speed estimate is measured, not hardcoded. There is no table of "model X does N tokens/sec" to maintain, because that number isn't a property of the model on OpenRouter's free tier in the first place. A new model just starts at a default speed and calibrates itself over its first few replies.
 
-If the streaming attempt for the head-of-route model fails before showing any text, the bot falls back to a normal (non-streaming) call further down the chain, reusing the same placeholder message rather than sending a new one. In private chats the answer is a plain message, without a Telegram reply quote; groups keep reply threading for context.
+If a streaming attempt fails before showing any text, the model is tried once more without streaming; the bot reuses the same placeholder message rather than sending a new one, and the next models in the route also get their own streaming attempt. In private chats the answer is a plain message, without a Telegram reply quote; groups keep reply threading for context.
 
 In private chats every request with a real early stage (web search, media, a link or YouTube) first gets a live status bubble (`lumen_status.py`) styled after Claude: an animated sparkle (Claude Code's spinner frames) plus "Searching the web", then a checkmarked "Searched the web · found N" and a "Thinking… Ns" timer while the model call runs. The same bubble is reused for the answer. At the final edit a collapsed `Thought for Ns` blockquote (with the completed steps and search source domains) is prepended above the answer, mirroring Claude's collapsible reasoning/activity block; Telegram collapses it by default. Plain text without an early stage skips the early bubble and gets a single italic `✻ Thought for Ns` line above the answer once streaming finishes (no quote frame). Long answers split across several Telegram messages skip the block: it would not fit the per-message limit. Status phrases are fixed pipeline facts (never model reasoning or model identity) and are localized in `lumen_lang.py`.
 
@@ -50,7 +50,7 @@ Streaming is covered only by mocked clients; no test exercises a real Gemini or 
 
 1. A short message (fits in one edit): once via Gemini, once via OpenRouter.
 2. A long message (past `TG_MAX_LEN`): confirm it splits into multiple messages and continues correctly.
-3. A request where the streaming model is deliberately unavailable: confirm the silent fallback to a non-streaming reserve model, with no visible glitch.
+3. A request where the first streaming model is unavailable: confirm the next model also streams (the typing effect must not disappear), and that a totally failed stream still falls back to a normal answer with no visible glitch.
 
 ## Prompt-injection and identity-leak defenses
 
