@@ -16,6 +16,7 @@ from datetime import date, datetime
 from typing import Any, Callable
 
 import aiohttp
+from aiogram.enums import ParseMode
 from aiogram.types import Message
 from google.genai import types
 
@@ -1101,13 +1102,29 @@ async def _run_route(
                 _note_answered("openrouter", None)
 
             if status is not None:
-                # Останавливаем анимацию статуса до записи ответа, иначе тикер
-                # перезапишет готовый текст.
-                await status.stop()
+                # Фиксируем длительность ожидания и останавливаем анимацию до
+                # записи ответа, иначе тикер перезапишет готовый текст.
+                await status.finish()
             if reusable_placeholder is not None:
                 # Готовый ответ — прямо в плейсхолдер (если влезает в одно сообщение), иначе обычным путём с разбиением.
                 fits_one_message = len(_split_text_chunks(ans, bot.TG_MAX_LEN)) == 1
-                reused = fits_one_message and await bot._edit_message_quietly(reusable_placeholder, ans)
+                reused = False
+                if fits_one_message:
+                    html_text, plain_text = status.compose_answer(ans) if status is not None else (None, ans)
+                    if html_text is not None:
+                        edited = await bot._tg_call(
+                            reusable_placeholder.edit_text, html_text,
+                            parse_mode=ParseMode.HTML, call_timeout=15.0,
+                        )
+                        reused = edited is not None
+                        if not reused:
+                            edited = await bot._tg_call(
+                                reusable_placeholder.edit_text, plain_text,
+                                parse_mode=None, call_timeout=15.0,
+                            )
+                            reused = edited is not None
+                    else:
+                        reused = await bot._edit_message_quietly(reusable_placeholder, ans)
                 if not reused:
                     await bot._delete_message_quietly(reusable_placeholder)
                 reusable_placeholder = None

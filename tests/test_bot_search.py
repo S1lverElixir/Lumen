@@ -117,11 +117,15 @@ class _FakeStatus:
         self.message = object()
         self.done = []
         self.phases = []
+        self.sources = []
         self.stopped = False
         self.deleted = False
 
     def add_done(self, key, **kwargs):
         self.done.append((key, kwargs))
+
+    def set_sources(self, hosts):
+        self.sources = list(hosts)
 
     async def set_phase(self, key, *, timed=False):
         self.phases.append((key, timed))

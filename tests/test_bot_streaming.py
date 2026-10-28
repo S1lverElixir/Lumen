@@ -712,7 +712,9 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     assert calls[0] == bot._DOTS_START_AFTER_SEC
     assert calls[1:] == [bot._DOTS_TICK_SEC] * 3
     assert len(placeholder.edits) == 3
-    assert all(text.startswith("Thinking") for text, _ in placeholder.edits)
+    import lumen_status
+    assert all(text[0] in lumen_status._SPINNER_FRAMES and "Thinking" in text
+               for text, _ in placeholder.edits)
     # Код языка не должен утечь в chat_state строковым ключом (прод 28.10.2026).
     assert "en" not in bot.chat_state
 
@@ -738,6 +740,30 @@ def test_streaming_fast_path_shows_no_dots_frames():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_streaming_plain_text_adds_collapsed_thought_block():
+    # Даже без раннего статуса обычный ответ получает свёрнутый «Thought for Ns»,
+    # как в Claude: вопрос не ждал bubble, но финальный вид — с трейсом.
+    chat_id = 999321
+
+    async def pieces():
+        yield "Привет"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
+            piece_agen=pieces(),
+        ))
+        assert answer == "Привет"
+        final_text, parse_mode = incoming.sent[0].edits[-1]
+        assert parse_mode == bot.ParseMode.HTML
+        assert final_text.startswith("<blockquote expandable>")
+        assert "Thought for" in final_text
+        assert "Привет" in final_text
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
     # Живой статус уже в чате: стрим пишет ответ в него, второго «…» нет.
     chat_id = 999320
@@ -745,10 +771,14 @@ def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
     class _FakeStatus:
         def __init__(self):
             self.message = _FakeSentMessage()
-            self.stopped = False
+            self.finished = False
 
-        async def stop(self):
-            self.stopped = True
+        async def finish(self):
+            self.finished = True
+
+        def compose_answer(self, answer_md):
+            return ("<blockquote expandable>✻ Thought for 1s</blockquote>\n\n" + answer_md,
+                    "✻ Thought for 1s\n\n" + answer_md)
 
     async def pieces():
         yield "Привет"
@@ -762,8 +792,10 @@ def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
         ))
         assert answer == "Привет"
         assert incoming.sent == []  # второй пузырь не отправлялся
-        assert status.stopped is True
-        assert status.message.edits[-1][0] == "Привет"
+        assert status.finished is True
+        final_edit = status.message.edits[-1][0]
+        assert "Привет" in final_edit
+        assert "Thought for" in final_edit
     finally:
         bot.chat_state.pop(chat_id, None)
 

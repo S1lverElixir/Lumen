@@ -14,8 +14,9 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from aiogram.enums import ChatType
+from aiogram.enums import ChatType, ParseMode
 from aiogram.types import Message, Update
+from urllib.parse import urlparse
 
 from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
@@ -782,6 +783,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
         if status is not None:
             if snippets:
                 status.add_done("progress_search_done", count=len(snippets))
+                status.set_sources([urlparse(item.get("url") or "").netloc for item in snippets])
             else:
                 status.add_done("progress_search_empty")
             await status.set_phase("progress_thinking", timed=True)
@@ -875,8 +877,17 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             ans = note_text + "\n\n" + ans
             if reply_already_sent and status is not None:
                 # Ответ уже в статус-пузыре (стрим или переиспользование) —
-                # пометку дописываем туда же, иначе она потеряется.
-                await bot._edit_message_quietly(status.message, ans)
+                # пометку дописываем туда же вместе со свёрнутым блоком активности.
+                html_text, plain_text = status.compose_answer(ans)
+                if html_text is not None:
+                    edited = await bot._tg_call(
+                        status.message.edit_text, html_text,
+                        parse_mode=ParseMode.HTML, call_timeout=15.0,
+                    )
+                    if edited is None:
+                        await bot._tg_call(status.message.edit_text, plain_text, parse_mode=None, call_timeout=15.0)
+                else:
+                    await bot._edit_message_quietly(status.message, ans)
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
         # Частичный стрим тоже «успешен» для вызывающего, но его пометка

@@ -10,11 +10,12 @@ import logging
 import time
 from typing import Any
 import aiohttp
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatType, ParseMode
 from aiogram.types import Message
 
 from lumen_formatting import _md_to_html, _split_text_chunks
 from lumen_lang import t as _lang_t
+from lumen_status import _SPINNER_FRAMES, thought_block
 from lumen_message_parse import _history_user_text
 from lumen_model_speed import (
     speed_key as _model_speed_key,
@@ -50,13 +51,16 @@ async def _tick_waiting_dots(placeholder: Message) -> None:
         await bot._dots_sleep(bot._DOTS_START_AFTER_SEC)
         chat = getattr(placeholder, "chat", None)
         lang = bot._chat_lang(getattr(chat, "id", None))
+        frame_idx = 0
         while True:
             elapsed = max(0, int(time.monotonic() - started))
+            spark = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
             with contextlib.suppress(Exception):
                 await bot._tg_call(
-                    placeholder.edit_text, _lang_t(lang, "progress_thinking", sec=elapsed),
+                    placeholder.edit_text, spark + " " + _lang_t(lang, "progress_thinking", sec=elapsed),
                     parse_mode=None, call_timeout=15.0,
                 )
+            frame_idx += 1
             await bot._dots_sleep(bot._DOTS_TICK_SEC)
     except asyncio.CancelledError:
         raise
@@ -84,8 +88,9 @@ async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, fir
                 with contextlib.suppress(asyncio.CancelledError):
                     await dots_task
         if status is not None:
-            # Первый кусок пришёл: текст сейчас заменит статус, анимацию гасим.
-            await status.stop()
+            # Первый кусок пришёл: фиксируем «Думал N с» и гасим анимацию —
+            # текст сейчас заменит статус.
+            await status.finish()
         yield first
         async for piece in piece_agen:
             yield piece
@@ -268,7 +273,7 @@ async def _run_streaming_reply(
             placeholder = status.message
         else:
             placeholder = await bot._tg_call(
-                message.reply, bot._t(message.chat.id, "progress_thinking", sec=0),
+                message.reply, _SPINNER_FRAMES[0] + " " + bot._t(message.chat.id, "progress_thinking", sec=0),
                 parse_mode=None, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
             )
         if placeholder is None:
@@ -417,6 +422,28 @@ async def _run_streaming_reply(
             # досылаем новым сообщением (_send_text внутри режет на части сам),
             # иначе пользователь его не увидит.
             await bot._safe_reply(message, full_text.strip())
+        elif len(final_chunks) == 1 and (
+            status is not None or getattr(getattr(message, "chat", None), "type", None) == ChatType.PRIVATE
+        ):
+            # Одно сообщение: сверху добавляем свёрнутый блок активности,
+            # как «Thought for Ns» в Claude. Длинный ответ не трогаем: заголовок
+            # не влез бы в лимит первого сообщения. Без раннего статуса (обычный
+            # текст) строим минимальный блок по времени до первого куска.
+            if status is not None:
+                html_text, plain_text = status.compose_answer(final_text)
+            else:
+                thought_sec = int(max(0.0, (first_piece_ts or overall_start_ts) - overall_start_ts))
+                html_text, plain_text = thought_block(bot._chat_lang(message.chat.id), thought_sec, final_text)
+            if html_text is None:
+                # Таблицы и прочий rich-контент: обычный путь без блока активности.
+                await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
+            else:
+                edited = await bot._tg_call(
+                    sent_messages[-1].edit_text, html_text,
+                    parse_mode=ParseMode.HTML, call_timeout=15.0,
+                )
+                if edited is None:
+                    await bot._tg_call(sent_messages[-1].edit_text, plain_text, parse_mode=None, call_timeout=15.0)
         else:
             # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
             await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
