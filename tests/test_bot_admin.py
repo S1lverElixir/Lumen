@@ -887,6 +887,34 @@ def test_main_flushes_on_graceful_server_exit(monkeypatch, caplog):
         lumen_chat_state._state_load_failed = orig_load_failed
 
 
+def test_probe_url_marks_http_errors_unhealthy_and_sends_headers():
+    # Аудит 28.10.2026: 401 защищённого прокси и 403 TikWM считались «ok»,
+    # /diag и /selftest показывали зелёное при мёртвом пути.
+    class _FakeResp:
+        status = 401
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _FakeSession:
+        def __init__(self):
+            self.kwargs = None
+
+        def get(self, url, **kwargs):
+            self.kwargs = kwargs
+            return _FakeResp()
+
+    session = _FakeSession()
+    res = asyncio.run(bot.probe_url(
+        session, "http://x", headers={"X-Lumen-Proxy-Secret": "s"},
+    ))
+    assert res["ok"] is False and res["status"] == 401
+    assert session.kwargs["headers"] == {"X-Lumen-Proxy-Secret": "s"}
+
+
 def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():
     # Общий зонд /diag и /selftest: успех — статус, неуспех — текст без секрета.
     class _FakeResp:

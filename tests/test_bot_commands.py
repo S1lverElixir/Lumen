@@ -1390,7 +1390,7 @@ def _setup_selftest_fakes(monkeypatch, fail_heads=()):
     async def fake_session():
         return SimpleNamespace()
 
-    async def fake_probe(session, url, *, timeout_sec=6.0, redact=""):
+    async def fake_probe(session, url, *, timeout_sec=6.0, redact="", headers=None):
         return {"status": 200, "elapsed_sec": 0.2, "ok": True}
 
     async def fake_tg_call(method, *args, **kwargs):

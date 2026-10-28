@@ -201,12 +201,22 @@ async def webhook_handler(request: Request) -> Any:
         return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     return {"ok": True}
 
-async def probe_url(session: Any, url: str, *, timeout_sec: float = 6.0, redact: str = "") -> dict[str, Any]:
-    """Один GET-зонд: та же логика и тот же формат результата для /diag и /selftest."""
+async def probe_url(
+    session: Any, url: str, *, timeout_sec: float = 6.0, redact: str = "",
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Один GET-зонд: та же логика и тот же формат результата для /diag и /selftest.
+
+    ok только для 2xx/3xx: раньше 401 от защищённого прокси и 403 от TikWM
+    считались здоровьем, и диагностика врала зелёным при мёртвом пути.
+    """
     start = time.time()
     try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout_sec)) as resp:
-            return {"status": resp.status, "elapsed_sec": round(time.time() - start, 2), "ok": True}
+        async with session.get(
+            url, timeout=aiohttp.ClientTimeout(total=timeout_sec), headers=headers or None,
+        ) as resp:
+            ok = 200 <= int(resp.status) < 400
+            return {"status": resp.status, "elapsed_sec": round(time.time() - start, 2), "ok": ok}
     except Exception as exc:
         elapsed = round(time.time() - start, 2)
         exc_str = str(exc) or repr(exc) or type(exc).__name__
@@ -245,7 +255,8 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         "huggingface": "https://huggingface.co",
         "openrouter": "https://openrouter.ai",
         "groq_api": "https://api.groq.com",
-        "tikwm": "https://www.tikwm.com",
+        # Прокси TikWM требует секрет: без него честный 401 вместо живого API.
+        "tikwm": bot.TIKWM_API_BASE_URL or "https://www.tikwm.com",
         "pollinations": "https://image.pollinations.ai",
         "upstash": bot.UPSTASH_REDIS_REST_URL if bot.USE_UPSTASH else "https://upstash.com",
     }
@@ -254,9 +265,21 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
     # Общий бюджет вместо последовательных 14×6с (~84с висящей диагностики):
     # зонды идут параллельно, хвост обрезается бюджетом (AUD-F-001).
     diag_budget = _diag_budget_sec()
+    proxy_headers = (
+        {"X-Lumen-Proxy-Secret": bot.LUMEN_PROXY_SECRET} if bot.LUMEN_PROXY_SECRET else {}
+    )
 
     async def _probe(name: str, url: str) -> tuple[str, dict[str, Any]]:
-        return name, await probe_url(session, url, timeout_sec=6.0, redact=bot_token or "")
+        # Секрет шлём только на реально настроенный прокси: прямой
+        # api.telegram.org не должен видеть заголовок (аудит 28.10.2026).
+        headers = None
+        if name == "configured_tg_proxy" and bot.TELEGRAM_API_BASE_URL != "https://api.telegram.org":
+            headers = proxy_headers
+        elif name == "tikwm" and bot.TIKWM_API_BASE_URL:
+            headers = proxy_headers
+        return name, await probe_url(
+            session, url, timeout_sec=6.0, redact=bot_token or "", headers=headers,
+        )
 
     tasks = {asyncio.create_task(_probe(name, url)): name for name, url in targets.items()}
     done, pending = await asyncio.wait(tasks, timeout=diag_budget)
