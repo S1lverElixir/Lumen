@@ -2925,6 +2925,23 @@ def test_user_daily_record_counts_by_provider(monkeypatch):
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
 
 
+def test_user_daily_reserve_is_atomic_and_refundable(monkeypatch):
+    # Аудит 28.10.2026: проверка-потом-списание позволяла параллельным /tts
+    # обойти дневной лимит. Резерв обязан отказывать второму вызову сразу.
+    monkeypatch.setattr(bot, "DAILY_USER_TTS_LIMIT", 5)
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 20)
+    uid = 999888773
+    try:
+        assert bot._reserve_user_daily(uid, total=5, tts=5) is True
+        assert bot._reserve_user_daily(uid, total=5, tts=5) is False
+        assert bot.GLOBAL_QUOTA["user_daily"][str(uid)]["tts"] == 5
+        bot._refund_user_daily(uid, total=5, tts=5)
+        assert bot.GLOBAL_QUOTA["user_daily"][str(uid)]["tts"] == 0
+        assert bot._reserve_user_daily(uid, total=5, tts=5) is True
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+
+
 def test_user_daily_owner_and_unknown_are_unlimited():
     # Новое: владелец не ограничен и не оставляет записей — регрессия
     # "владелец заблокирован собственными лимитами".
@@ -3153,6 +3170,28 @@ def test_combined_memory_caps_background_at_100():
         assert state["ctx"][0].endswith("фон 20")
     finally:
         bot._dirty_chat_ids.discard(9001)
+
+
+def test_passive_context_caps_line_and_total_chars():
+    # Аудит 28.10.2026: 100 сообщений по 4096 символов раздували промпт и
+    # позволяли одному участнику забить чужой контекст.
+    from collections import deque
+    from lumen_message_core import _PASSIVE_CTX_MAX_CHARS
+    state = {"history": [], "ctx": deque(), "recent_media_ids": {}, "user_names": {}}
+    try:
+        def _msg():
+            return SimpleNamespace(chat=SimpleNamespace(id=9002),
+                                   from_user=SimpleNamespace(id=8, username="u", first_name="U"),
+                                   text="x")
+
+        bot._record_passive_group_context(_msg(), state, "я" * 5000)
+        assert len(state["ctx"]) == 1
+        assert len(state["ctx"][0]) <= 600
+        for _ in range(50):
+            bot._record_passive_group_context(_msg(), state, "x" * 400)
+        assert sum(len(line) for line in state["ctx"]) <= _PASSIVE_CTX_MAX_CHARS + 600
+    finally:
+        bot._dirty_chat_ids.discard(9002)
 
 
 def test_sender_directory_resolves_nicknames():

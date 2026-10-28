@@ -38,6 +38,9 @@ concurrency:
 
 jobs:
   eval:
+    # Секреты провайдеров не должны достаться ветке с чужим eval-скриптом:
+    # ручной запуск разрешён только с main (аудит 28.10.2026).
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:

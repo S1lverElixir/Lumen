@@ -228,6 +228,10 @@ def _album_extra_sources(messages: list, main_msg: Any) -> list[tuple[str, str, 
     return sources
 
 
+_PASSIVE_LINE_MAX_CHARS = 500
+_PASSIVE_CTX_MAX_CHARS = 12000
+
+
 def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
     """Фон группы без упоминания: только контекст и медиа в state, без ответа."""
     import bot
@@ -239,9 +243,13 @@ def _record_passive_group_context(message: Message, state: dict[str, Any], t: st
             getattr(sender, "username", None) if sender is not None else None,
             getattr(sender, "first_name", None) if sender is not None else None,
         )
-        state["ctx"].append(f"{display}: {t.strip()}")
+        state["ctx"].append(f"{display}: {t.strip()[:_PASSIVE_LINE_MAX_CHARS]}")
         # Общий лимит 100 сообщений на чат, старые фоновые уходят первыми.
         bot._trim_combined(state)
+        # Кап по символам: 100 сообщений по 4096 символов раздували промпт
+        # и позволяли одному участнику забить чужой контекст (аудит 28.10.2026).
+        while len(state["ctx"]) > 1 and sum(len(line) for line in state["ctx"]) > _PASSIVE_CTX_MAX_CHARS:
+            state["ctx"].popleft()
     bot._save_media_to_history(_msg_media_source(message), state, message.from_user.id if message.from_user else None)
     bot.mark_state_dirty(message.chat.id)
 
@@ -831,6 +839,7 @@ async def _handle_message_core(message: Message, extra_media: list[tuple[bytes, 
             media=gemini_media_list, media_filename=med_name,
             youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
             deadline=route_deadline, provenance=provenance, status=status,
+            history_text=clean_prompt,
         )
         answered_grounded = answered_with_live_search(provenance)
         if needs_freshness and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:

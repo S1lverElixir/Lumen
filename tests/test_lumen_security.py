@@ -41,6 +41,35 @@ def test_detect_identity_leak_based_on_needs_first_person():
     assert lumen_security._detect_identity_leak("Меня создала Google") is True
 
 
+def test_detect_identity_leak_catches_articles_created_by_and_invisible_chars():
+    # Аудит 28.10.2026: узкий шаблон пропускал обычные формулировки с артиклем,
+    # built/trained by и fullwidth/zero-width символами.
+    for text in (
+        "I am a Gemini model.",
+        "I am created by Google.",
+        "I am built by Google.",
+        "I am an AI model made by Anthropic.",
+        "I am a language model trained by Google.",
+        "I am a language model from Google.",
+        "Я — языковая модель Google.",
+        "\uff29 am a Gemini model.",  # fullwidth I нормализуется NFKC
+        "I am a Gemini\u200b model.",  # zero-width внутри фразы
+    ):
+        assert lumen_security._detect_identity_leak(text) is True, ascii(text)
+
+
+def test_detect_identity_leak_does_not_flag_third_person_or_reports():
+    # Расширение шаблонов не должно ловить честные рассказы о чужих моделях.
+    for text in (
+        "I am a big fan of Google.",
+        "I am reading about Gemini.",
+        "I am reading a book created by Google.",
+        "This model was created by Google.",
+        "Я — фанат Google.",
+    ):
+        assert lumen_security._detect_identity_leak(text) is False, ascii(text)
+
+
 def test_detect_identity_leak_literal_matches_whole_token_only():
     # Полный ID отдельным токеном утечка, слаг внутри длинного слова нет.
     assert lumen_security._detect_identity_leak("Использую модель gemini-3.5-flash для ответа") is True

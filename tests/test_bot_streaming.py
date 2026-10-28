@@ -764,6 +764,29 @@ def test_streaming_plain_text_adds_collapsed_thought_block():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_streaming_stores_clean_history_text_not_full_prompt():
+    # Аудит 28.10.2026: в историю уходил ai_prompt со сниппетами и датой;
+    # сохраняем только чистый запрос пользователя.
+    chat_id = 999323
+
+    async def pieces():
+        yield "Ответ"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "полный промпт со сниппетами", incoming,
+            provider="openrouter", model_id="y:free", piece_agen=pieces(),
+            history_text="чистый вопрос",
+        ))
+        assert answer == "Ответ"
+        history = bot.chat_state[chat_id]["history"]
+        assert history[-2] == {"role": "user", "content": "чистый вопрос"}
+        assert history[-1] == {"role": "assistant", "content": "Ответ"}
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
     # Живой статус уже в чате: стрим пишет ответ в него, второго «…» нет.
     chat_id = 999320

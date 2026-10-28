@@ -44,6 +44,14 @@ def _leak_scan_window(full_text: str, latest_piece: str) -> str:
     window_size = max(_LEAK_SCAN_TAIL_CHARS, len(latest_piece) + 100)
     return full_text[-window_size:]
 
+_INVISIBLE_RE = re.compile(r"[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f]")
+
+def _normalize_leak_text(text: str) -> str:
+    """NFKC + удаление невидимых символов: fullwidth и zero-width обходили
+    выходной фильтр (аудит 28.10.2026). Гомоглифы (кириллическая «а» в Gemini)
+    этим не покрываются — остаточный риск отмечен в отчёте."""
+    return _INVISIBLE_RE.sub("", unicodedata.normalize("NFKC", text))
+
 
 # Слой Б — только точные фразы "я — бренд". Широкое окно рядом с "я" ложно ловило
 # рассказы про бренды: "я" — частый токен, а хеджирование вроде "я не могу
@@ -51,7 +59,7 @@ def _leak_scan_window(full_text: str, latest_piece: str) -> str:
 _LEAK_BRAND_TOKENS = (
     r"(gemini|gemma|gpt[\s\-]?(?:oss|\d)[\w\-]*|chatgpt|openai|claude|anthropic|deepmind|openrouter|"
     r"nemotron|qwen|llama|glm[\s\-]?4|hermes|mistral|dolphin[\s\-]?mistral|venice|laguna|"
-    r"deepseek|grok|meta(?:\s*ai)?|google|"
+    r"deepseek|grok|meta(?:\s*ai)?|google|groq|hugging\s*face|huggingface|"
     r"lfm[\s\-]?2\.5|нейросет\w*\s+google|модел\w*\s+google|google\s*ai|google\s+gemini)"
 )
 _IDENTITY_LEAK_RE = re.compile(
@@ -65,17 +73,26 @@ _IDENTITY_LEAK_RE = re.compile(
     # Google research" честные рассказы, не самоопределение (см. ниже проверку
     # по предложениям с _FIRST_PERSON_RE).
     rf"|\bэт[оауи]\s*(?:модел\w*|нейросет\w*)\s*(?:—|-|:)?\s*{_LEAK_BRAND_TOKENS}\b"
-    rf"|\bi\s*(?:am|'m)\s+{_LEAK_BRAND_TOKENS}\b"
+    # "I am a Gemini model": артикль перед брендом — обычная формулировка,
+    # которую старый узкий шаблон пропускал (аудит 28.10.2026). Слова между
+    # артиклем и брендом не разрешаем: "I am reading about Gemini" — не утечка.
+    rf"|\bi\s*(?:am|'m)\s+(?:an?\s+)?{_LEAK_BRAND_TOKENS}\b"
     # "built on / powered by / based on бренд" тоже только от первого лица,
     # иначе честный рассказ о чужом стеке блокировался целиком.
-    rf"|\bi\s+(?:was\s+)?(?:created|made)\s+by\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
-    rf"|\bi\s*(?:am|'m)\s+from\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
+    rf"|\bi\s*(?:am|'m|was|have\s+been|'ve\s+been)\s+(?:created|made|built|developed|trained|powered)\s+by\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
+    # То же с названием роли перед глаголом: "I am an AI model made by Google".
+    rf"|\bi\s*(?:am|'m)\s+(?:an?\s+)?(?:ai|language|large\s+language|llm|text|chat)\s+(?:model|assistant|chatbot|ai)\s+(?:created|made|built|developed|trained|powered)\s+by\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
+    # "I am a language model from Google" — роль обязательна, иначе ловился бы
+    # рассказ "I am reading a book by Google" (аудит 28.10.2026).
+    rf"|\bi\s*(?:am|'m)\s+(?:an?\s+)?(?:ai|language|large\s+language|llm|text|chat)\s+(?:model|assistant|chatbot|ai)\s+(?:from|by)\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
     rf"|\bmy\s+creators?\s+(?:is|are)\s+(?:the\s+|company\s+)?{_LEAK_BRAND_TOKENS}\b"
     # "я от Google" только как короткое самоопределение (дальше пунктуация/конец):
     # "я от Google узнал..." — честная фраза, а не утечка.
     rf"|\bя\s+от\s+(?:компании\s+)?{_LEAK_BRAND_TOKENS}(?=\s*[.!?…;:,]|$)"
     rf"|\bмо[йи]\s+создател\w*\s*(?:—|-|:)?\s*(?:компани\w*\s+)?{_LEAK_BRAND_TOKENS}\b"
     rf"|\bя\s*(?:—|-|:)?\s*(?:это\s+|являюсь\s+)?(?:модел\w*|нейросет\w*)\s+от\s+(?:компании\s+)?{_LEAK_BRAND_TOKENS}\b"
+    # "Я — языковая модель Google": модель/ассистент + бренд без "от".
+    rf"|\bя\s*(?:—|-|:)?\s*(?:это\s+|являюсь\s+)?(?:языков\w*\s+|ии[\s\-]?)?(?:модел\w*|нейросет\w*|ассистент\w*|бот\w*)\s+(?:компании\s+)?{_LEAK_BRAND_TOKENS}\b"
     rf"|{_LEAK_BRAND_TOKENS}\s*,?\s*а\s+не\s+lumen\b",
     re.IGNORECASE,
 )
@@ -131,12 +148,15 @@ _INJECTED_PAYLOAD_ECHO_FALLBACK = (
 )
 
 def _detect_injected_payload_echo(text: str) -> bool:
-    return bool(text) and bool(_INJECTED_PAYLOAD_ECHO_RE.search(text))
+    if not text:
+        return False
+    return bool(_INJECTED_PAYLOAD_ECHO_RE.search(_normalize_leak_text(text)))
 
 def _detect_identity_leak(text: str) -> bool:
     """Чистая проверка без лога: дёшево вызывать на каждый кусок стрима, лог только в _scrub_identity_leak."""
     if not text:
         return False
+    text = _normalize_leak_text(text)
     if _LEAK_LITERAL_RE is not None and _LEAK_LITERAL_RE.search(text):
         return True
     if _IDENTITY_LEAK_RE.search(text):

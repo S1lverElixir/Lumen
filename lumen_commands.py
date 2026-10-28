@@ -348,28 +348,33 @@ async def inline_tts(message: Message, text: str) -> None:
     # Считаем сразу все чанки: каждый — отдельный синтез, иначе длинный текст
     # уводил бы счётчик за лимит.
     uid = bot._user_key_for_message(message)
-    _tts_entry = bot._user_daily_peek(uid)
-    try:
-        _tts_over_total = int((_tts_entry or {}).get("total") or 0) + len(chunks) > bot._user_daily_limit(uid, "total", _tts_entry)
-        _tts_over_tts = int((_tts_entry or {}).get("tts") or 0) + len(chunks) > bot._user_daily_limit(uid, "tts", _tts_entry)
-    except (TypeError, ValueError):
-        _tts_over_total = _tts_over_tts = False
-    if bot._user_daily_total_exhausted(uid, _tts_entry) or _tts_over_total:
-        hours, mins = bot._user_daily_reset_in()
-        # Суточный счётчик /stats: отказ по лимиту, озвучки не будет.
-        bot._record_stats_event("daily_limit_denials")
-        await bot._safe_reply(message, bot._t(
-            message.chat.id, "user_daily_total",
-            used=(_tts_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _tts_entry),
-            hours=hours, mins=mins,
-        ))
-        return
-    if bot._user_daily_tts_exhausted(uid, _tts_entry) or _tts_over_tts:
-        bot._record_stats_event("daily_limit_denials")
-        await bot._safe_reply(message, bot._t(
-            message.chat.id, "user_daily_tts",
-            used=(_tts_entry or {}).get("tts", 0), limit=bot._user_daily_limit(uid, "tts", _tts_entry),
-        ))
+    # Атомарный резерв ДО первого await: параллельные /tts раньше читали 0
+    # и обходили дневной лимит (аудит 28.10.2026). Резерв списывает сразу все
+    # чанки, потому что каждый — отдельный синтез за квоту.
+    if not bot._reserve_user_daily(uid, total=len(chunks), tts=len(chunks)):
+        _tts_entry = bot._user_daily_peek(uid)
+        try:
+            _tts_over_total = int((_tts_entry or {}).get("total") or 0) + len(chunks) > bot._user_daily_limit(uid, "total", _tts_entry)
+            _tts_over_tts = int((_tts_entry or {}).get("tts") or 0) + len(chunks) > bot._user_daily_limit(uid, "tts", _tts_entry)
+        except (TypeError, ValueError):
+            _tts_over_total = _tts_over_tts = False
+        if bot._user_daily_total_exhausted(uid, _tts_entry) or _tts_over_total:
+            hours, mins = bot._user_daily_reset_in()
+            # Суточный счётчик /stats: отказ по лимиту, озвучки не будет.
+            bot._record_stats_event("daily_limit_denials")
+            await bot._safe_reply(message, bot._t(
+                message.chat.id, "user_daily_total",
+                used=(_tts_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _tts_entry),
+                hours=hours, mins=mins,
+            ))
+            return
+        if bot._user_daily_tts_exhausted(uid, _tts_entry) or _tts_over_tts:
+            bot._record_stats_event("daily_limit_denials")
+            await bot._safe_reply(message, bot._t(
+                message.chat.id, "user_daily_tts",
+                used=(_tts_entry or {}).get("tts", 0), limit=bot._user_daily_limit(uid, "tts", _tts_entry),
+            ))
+            return
         return
     status = await bot._tg_call(message.reply, bot._t(message.chat.id, "status_voicing"))
     # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
@@ -404,6 +409,7 @@ async def inline_tts(message: Message, text: str) -> None:
         # Статус уже снесён выше (перед send_voice): если правка не прошла — дублируем реплаем.
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
+        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         return
     await bot._delete_message_quietly(status)
     for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
@@ -418,9 +424,13 @@ async def inline_tts(message: Message, text: str) -> None:
             call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
         )
         if sent is None:
+            # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
+            bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
             raise RuntimeError("Telegram send_voice failed: connection timeout or proxy unavailable")
-        # Каждый чанк — отдельный синтез за квоту: списываем поштучно.
-        bot._record_user_daily(uid, tts=True)
+    unsent = len(chunks) - len(voices)
+    if unsent > 0:
+        # Обрезка по общему дедлайну: за несозданные чанки не списываем.
+        bot._refund_user_daily(uid, total=unsent, tts=unsent)
     bot._record_stats_event("answers_sent")
     if shortened:
         # Обрезка по общему дедлайну — говорим прямо, что озвучено начало.
@@ -454,6 +464,10 @@ async def cmd_reset(message: Message) -> None:
     state = bot.get_state(message.chat.id)
     state["history"] = []
     state["ctx"].clear()
+    # Сброс должен забывать и ссылки на медиа/имена: иначе старые файлы
+    # всплывали после /reset (аудит 28.10.2026).
+    state.get("recent_media_ids", {}).clear()
+    state.get("user_names", {}).clear()
     bot.mark_state_dirty(message.chat.id)
     await bot._tg_call(
         message.reply,

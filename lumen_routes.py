@@ -348,7 +348,7 @@ async def _or_chat_completion_with_fallback(
         stop_on=_account_wide, log_label="or", chat_id=chat_id, user_text=user_text,
     )
 
-async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
+async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None) -> str:
     import bot
     state = bot.get_state(chat_id)
     history = state.setdefault("history", [])
@@ -361,7 +361,7 @@ async def ask_openrouter_text(chat_id: int, user_text: str, model_chain: list[st
     answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id, user_text=user_text)
 
     # В историю пишем текст с автором — модель видит кто спрашивал.
-    history.append({"role": "user", "content": _history_user_text(user_text)})
+    history.append({"role": "user", "content": _history_user_text(history_text or user_text)})
     history.append({"role": "assistant", "content": answer})
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(history)
@@ -403,7 +403,7 @@ def _trim_messages_for_groq(messages: list[dict]) -> list[dict]:
     kept.reverse()
     return [head] + kept + ([tail] if len(messages) > 1 else [])
 
-async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None) -> str:
+async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None) -> str:
     """Обычный текстовый запрос через прямой Groq — по образцу ask_openrouter_text: одна попытка на модель, скраб утечек, расход в квоту "groq". Сообщения строит общий _build_openrouter_turn_messages (тот же OpenAI-формат). Историю под запрос режет _trim_messages_for_groq (иначе см. его комментарий)."""
     import bot
     from lumen_router_config import _GROQ_LIGHT_ORDER
@@ -427,7 +427,7 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
     )
 
     # В историю пишем текст пользователя с автором, как у остальных провайдеров.
-    history.append({"role": "user", "content": _history_user_text(user_text)})
+    history.append({"role": "user", "content": _history_user_text(history_text or user_text)})
     history.append({"role": "assistant", "content": answer})
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(history)
@@ -562,7 +562,7 @@ async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int, deadlin
 
 async def ask_openrouter_multimodal(
     chat_id: int, user_text: str, media_tuple: tuple[bytes, str] | list[tuple[bytes, str]], media_filename: str,
-    model_chain: list[str], *, deadline: float | None = None,
+    model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None,
 ) -> str:
     """Альбом для OpenRouter: все картинки одним сообщением (content-блоки image_url подряд) —
     раньше уходила только первая, остальные 2–9 молча терялись (найдено внешним аудитом)."""
@@ -604,7 +604,7 @@ async def ask_openrouter_multimodal(
 
     answer, model_trial = await bot._or_chat_completion_with_fallback(messages, trial_models, primary_model_id, deadline=deadline, chat_id=chat_id, user_text=user_text)
 
-    history.append({"role": "user", "content": _history_user_text(user_text)})
+    history.append({"role": "user", "content": _history_user_text(history_text or user_text)})
     history.append({"role": "assistant", "content": answer})
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(history)
@@ -800,6 +800,7 @@ async def ask_gemini(
     chat_id: int, user_text: str, media: list[tuple[bytes, str]] | None = None,
     youtube_url: str | None = None, model_chain: list[str] | None = None,
     deadline: float | None = None, provenance: dict | None = None,
+    history_text: str | None = None,
 ) -> str:
     import bot
     state = bot.get_state(chat_id)
@@ -926,7 +927,7 @@ async def ask_gemini(
     bot._record_model_outcome("gemini", curr_model_id,
                               bad=_detect_garbled_mix(ans) and not _is_garbled_echo(ans, user_text))
 
-    hist.append({"role": "user", "content": _history_user_text(user_text)})
+    hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
     hist.append({"role": "assistant", "content": ans})
     # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
     await bot._trim_history(hist)
@@ -1000,13 +1001,16 @@ async def _run_route(
     media: list[tuple[bytes, str]] | None = None, media_filename: str = "",
     youtube_url: str | None = None, allow_stream: bool = False,
     deadline: float | None = None, provenance: dict | None = None,
-    status: Any | None = None,
+    status: Any | None = None, history_text: str | None = None,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
     if not route:
         raise RuntimeError("Empty route — no model to choose from.")
     route_started = time.monotonic()
+    # В историю пишем чистый запрос пользователя, а не ai_prompt со сниппетами
+    # и датой: чужой текст не должен переживать ход (аудит 28.10.2026).
+    history_text = history_text or ai_prompt
     # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
     route = _reorder_route_by_speed(route)
     if deadline is None:
@@ -1046,7 +1050,7 @@ async def _run_route(
         head_model = route[0][1]
         if first_provider == "gemini" and GEMINI_MODELS.get(head_model, {}).get("stream", True):
             streamed, placeholder = await bot._try_gemini_streaming(
-                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status)
+                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status, history_text=history_text)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (gemini:%s)', chat_id, head_model)
                 _count_user_answer("gemini", head_model)
@@ -1056,7 +1060,7 @@ async def _run_route(
             reusable_placeholder = placeholder
         elif first_provider == "openrouter":
             streamed, placeholder = await bot._try_openrouter_streaming(
-                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status)
+                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status, history_text=history_text)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (openrouter:%s)', chat_id, head_model)
                 _count_user_answer("openrouter")
@@ -1066,7 +1070,7 @@ async def _run_route(
             reusable_placeholder = placeholder
         elif first_provider == "groq":
             streamed, placeholder = await bot._try_groq_streaming(
-                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status)
+                chat_id, ai_prompt, message, head_model, deadline=deadline, status=status, history_text=history_text)
             if streamed is not None:
                 log.info('[router] chat=%s response received via streaming (groq:%s)', chat_id, head_model)
                 _count_user_answer("groq")
@@ -1092,15 +1096,15 @@ async def _run_route(
             break
         try:
             if provider == "gemini":
-                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance)
+                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text)
             elif provider == "groq":
-                ans = await bot.ask_groq_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
+                ans = await bot.ask_groq_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text)
                 _note_answered("groq", None)
             elif media:
-                ans = await bot.ask_openrouter_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline)
+                ans = await bot.ask_openrouter_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline, history_text=history_text)
                 _note_answered("openrouter", None)
             else:
-                ans = await bot.ask_openrouter_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline)
+                ans = await bot.ask_openrouter_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text)
                 _note_answered("openrouter", None)
 
             if status is not None:

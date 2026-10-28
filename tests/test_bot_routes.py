@@ -233,7 +233,7 @@ def test_run_route_falls_back_to_second_provider_when_first_fully_fails():
     async def failing_or_text(*args, **kwargs):
         raise bot.OpenRouterAPIError("всё сломано", status_code=500)
 
-    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None):
+    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None, **kwargs):
         return "Ответ от Gemini (резерв)"
 
     original_or_text = bot.ask_openrouter_text
@@ -438,7 +438,7 @@ def test_run_route_reorders_slow_head_down(monkeypatch):
 
     seen = []
 
-    async def fake_ask(chat_id, prompt, model_chain, *, deadline=None):
+    async def fake_ask(chat_id, prompt, model_chain, *, deadline=None, **kwargs):
         seen.append(list(model_chain))
         return "ok"
 
@@ -462,7 +462,7 @@ def test_or_empty_response_falls_through_to_next_model(monkeypatch):
     # response" — пустой ответ обязан двигать цепочку дальше, а не идти в чат.
     calls = []
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         model = json_body["model"]
         calls.append(model)
         if model == "m1:free":
@@ -482,7 +482,7 @@ def test_or_empty_response_falls_through_to_next_model(monkeypatch):
 def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
     # Три пустых подряд в одну голову — карантин (реальная регрессия: мёртвая голова
     # жевала бы каждую попытку до конца суток вместо объезда после третьей).
-    async def fake_empty(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_empty(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": []}
 
     monkeypatch.setattr(bot, "_or_request", fake_empty)
@@ -502,7 +502,7 @@ def test_chain_garbled_response_delivered_but_feeds_quarantine(monkeypatch):
     mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
     assert len(mush) >= 100
 
-    async def fake_mush(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_mush(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": mush}}]}
 
     monkeypatch.setattr(bot, "_or_request", fake_mush)
@@ -522,7 +522,7 @@ def test_chain_echoed_mix_does_not_feed_quarantine(monkeypatch):
     mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
     user_text = "повтори за мной: dataданные fileфайл testтест и дальше своими словами"
 
-    async def fake_mush(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_mush(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": mush}}]}
 
     monkeypatch.setattr(bot, "_or_request", fake_mush)
@@ -597,7 +597,7 @@ def test_or_chain_stops_on_account_wide_limit(monkeypatch):
     # НЕ пробуются (иначе это минуты попыток впустую, как было в проде).
     calls = []
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         model = json_body["model"]
         calls.append(model)
         raise bot.OpenRouterAPIError(
@@ -618,7 +618,7 @@ def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
     chat_id = 999304
     extracts = ["", "хороший ответ"]
 
-    async def fake_extract(resp, *, model_id, call_contents, gconfig, deadline=None):
+    async def fake_extract(resp, *, model_id, call_contents, gconfig, deadline=None, **kwargs):
         return extracts.pop(0)
 
     fake_client = MagicMock()
@@ -637,7 +637,7 @@ def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
 def test_run_route_streams_openrouter_when_route_head_is_openrouter():
     chat_id = 999305
 
-    async def fake_or_stream(cid, prompt, message, model_id, deadline=None, status=None):
+    async def fake_or_stream(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return "Стримленный ответ от OpenRouter", None
 
     async def must_not_be_called(*args, **kwargs):
@@ -660,12 +660,12 @@ def test_run_route_streams_openrouter_when_route_head_is_openrouter():
 def test_run_route_falls_back_from_failed_openrouter_stream_to_non_streaming():
     chat_id = 999306
 
-    async def fake_or_stream_fail(cid, prompt, message, model_id, deadline=None, status=None):
+    async def fake_or_stream_fail(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, None  # ранний сбой без плейсхолдера (например, message.reply сам не удался)
 
     calls = []
 
-    async def fake_or_text(cid, prompt, model_chain, deadline=None):
+    async def fake_or_text(cid, prompt, model_chain, deadline=None, **kwargs):
         calls.append(model_chain)
         return "Ответ без стрима"
 
@@ -690,12 +690,12 @@ def test_run_route_tries_groq_head_with_stream_fallback_to_text():
     # Groq-подключение 21.09.2026: голова-groq стримится через _try_groq_streaming, при раннем сбое — обычный ask_groq_text без пере-пробы упавшей модели.
     chat_id = 999703
 
-    async def fake_groq_stream_fail(cid, prompt, message, model_id, deadline=None, status=None):
+    async def fake_groq_stream_fail(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, None
 
     calls = []
 
-    async def fake_groq_text(cid, prompt, model_chain, deadline=None):
+    async def fake_groq_text(cid, prompt, model_chain, deadline=None, **kwargs):
         calls.append(model_chain)
         return "Ответ Groq без стрима"
 
@@ -723,10 +723,10 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
     chat_id = 999307
     placeholder = _FakeSentMessage()
 
-    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None):
+    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, placeholder
 
-    async def fake_or_text(cid, prompt, model_chain, deadline=None):
+    async def fake_or_text(cid, prompt, model_chain, deadline=None, **kwargs):
         return "Ответ от резервной модели"
 
     original_stream = bot._try_openrouter_streaming
@@ -754,10 +754,10 @@ def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
     placeholder = _FakeSentMessage()
     incoming = _FakeIncomingMessage(chat_id)
 
-    async def fake_stream_fail(cid, prompt, message, model_id, deadline=None, status=None):
+    async def fake_stream_fail(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, placeholder
 
-    async def fake_text(cid, prompt, model_chain, deadline=None):
+    async def fake_text(cid, prompt, model_chain, deadline=None, **kwargs):
         return "Ответ от резервной модели"
 
     monkeypatch.setattr(bot, "_try_openrouter_streaming", fake_stream_fail)
@@ -778,7 +778,7 @@ def test_run_route_deletes_orphaned_placeholder_when_whole_route_fails():
     chat_id = 999308
     placeholder = _FakeSentMessage()
 
-    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None):
+    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, placeholder
 
     async def failing_or_text(*args, **kwargs):
@@ -1152,7 +1152,7 @@ def test_ask_gemini_raises_when_route_budget_exceeded():
 def test_or_chat_completion_with_fallback_switches_model(status_code, message):
     # И минутный 429, и "постоянная" на вид 403 не обрывают переход к следующей
     # модели: при attempts_per_model=1 переход происходит независимо от классификации.
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         model = json_body["model"]
         if model == "model-a":
             raise bot.OpenRouterAPIError(message, status_code=status_code)
@@ -1174,7 +1174,7 @@ def test_ask_openrouter_multimodal_sends_all_album_images_not_just_first():
     chat_id = 999411
     captured = {}
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         captured["messages"] = json_body["messages"]
         return {"choices": [{"message": {"content": "вижу три фото"}}]}
 
@@ -1200,7 +1200,7 @@ def test_ask_openrouter_multimodal_skips_video_slides_for_gemini():
     chat_id = 999412
     captured = {}
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         captured["messages"] = json_body["messages"]
         return {"choices": [{"message": {"content": "вижу фото"}}]}
 
@@ -1301,7 +1301,7 @@ def test_probe_or_model_liveness_warns_on_dead_model_pattern(caplog):
     from datetime import date
     expected_model = bot._OR_LIGHT_ORDER[date.today().timetuple().tm_yday % len(bot._OR_LIGHT_ORDER)]
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         model = json_body["model"]
         if model == expected_model:
             raise bot.OpenRouterAPIError("This model is unavailable for free. use another slug", status_code=404)
@@ -1328,7 +1328,7 @@ def test_probe_or_model_liveness_rotates_by_day_of_year():
     from datetime import date
     calls = []
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         calls.append(json_body["model"])
         return {"choices": [{"message": {"content": "pong"}}]}
 
@@ -1352,7 +1352,7 @@ def test_probe_or_model_liveness_rotates_by_day_of_year():
 def test_probe_or_model_liveness_silent_when_all_alive(caplog):
     import logging
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "pong"}}]}
 
     original_request = bot._or_request
@@ -1421,7 +1421,7 @@ def test_ask_groq_text_success_records_groq_quota(monkeypatch):
     chat_id = 999701
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         assert json_body["model"] == "qwen/qwen3.8-27b"
         return {"choices": [{"message": {"content": "Канберра."}}]}
 
@@ -1441,7 +1441,7 @@ def test_ask_groq_text_falls_back_to_next_model(monkeypatch):
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
     seen = []
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         seen.append(json_body["model"])
         if json_body["model"] == "qwen/qwen3.8-27b":
             raise bot.GroqAPIError("overloaded", status_code=503)
@@ -1462,7 +1462,7 @@ def test_ask_groq_text_raises_last_error_when_whole_chain_fails(monkeypatch):
     chat_id = 999703
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
 
-    async def failing_groq_request(path, method="GET", *, json_body=None, deadline=None):
+    async def failing_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         raise bot.GroqAPIError("overloaded", status_code=503)
 
     monkeypatch.setattr(bot, "_groq_request", failing_groq_request)
@@ -1485,7 +1485,7 @@ def test_ask_groq_text_trims_long_history_to_token_budget(monkeypatch):
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": history, "ctx": deque()})
     seen = {}
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         # Первый запрос — сам ответ; второй (если будет) — саммаризатор истории
         # _trim_history, его не трогаем.
         seen.setdefault("messages", json_body["messages"])
@@ -1514,7 +1514,7 @@ def test_model_attempt_counters_track_chain_success_and_failure(monkeypatch):
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
     calls = {"n": 0}
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             raise bot.GroqAPIError("boom", status_code=500)
@@ -1750,7 +1750,7 @@ def test_text_provider_trims_history_with_summary_not_silent_cut(monkeypatch, as
     async def fake_fallback(messages, trial_models, primary_model_id, **kwargs):
         return answer, trial_models[0]
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": answer}}]}
 
     stubs = {"_or_chat_completion_with_fallback": fake_fallback, "_groq_request": fake_groq_request}
@@ -1785,7 +1785,7 @@ def test_text_providers_keep_media_note_out_of_history(monkeypatch):
     async def fake_fallback(messages, trial_models, primary_model_id, **kwargs):
         return "ответ", trial_models[0]
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "ответ"}}]}
 
     monkeypatch.setattr(bot, "_or_chat_completion_with_fallback", fake_fallback)
@@ -1806,10 +1806,10 @@ def test_run_route_marks_unsupported_media_for_text_fallback(monkeypatch):
     chat_id = 999815
     captured = {}
 
-    async def failing_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None):
+    async def failing_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None, **kwargs):
         raise ValueError("Тип вложения 'application/x-foo' не поддерживается для анализа.")
 
-    async def fake_groq_text(cid, prompt, model_chain, deadline=None):
+    async def fake_groq_text(cid, prompt, model_chain, deadline=None, **kwargs):
         captured["prompt"] = prompt
         return "не вижу файла, пришлите его"
 
@@ -1860,7 +1860,7 @@ def test_run_route_records_user_daily_on_gemini_success():
     incoming = _FakeIncomingMessage(chat_id)
     incoming.from_user = SimpleNamespace(id=777011)
 
-    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None):
+    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None, **kwargs):
         return "Ответ от Gemini"
 
     original = bot.ask_gemini
@@ -1909,7 +1909,7 @@ def test_run_route_keeps_route_block_order(monkeypatch):
     calls = []
 
     async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None,
-                              deadline=None, provenance=None):
+                              deadline=None, provenance=None, **kwargs):
         calls.append(("gemini", list(model_chain)))
         if model_chain == ["gemini-3.8-flash"]:
             if provenance is not None:
@@ -1917,11 +1917,11 @@ def test_run_route_keeps_route_block_order(monkeypatch):
             return "резерв Gemini"
         raise RuntimeError("gemma недоступна")
 
-    async def failing_groq(cid, prompt, model_chain, deadline=None):
+    async def failing_groq(cid, prompt, model_chain, deadline=None, **kwargs):
         calls.append(("groq", list(model_chain)))
         raise bot.GroqAPIError("overloaded", status_code=503)
 
-    async def failing_or(cid, prompt, model_chain, deadline=None):
+    async def failing_or(cid, prompt, model_chain, deadline=None, **kwargs):
         calls.append(("openrouter", list(model_chain)))
         raise bot.OpenRouterAPIError("сломано", status_code=500)
 
@@ -1954,7 +1954,7 @@ def test_run_route_gemma_answer_does_not_spend_gemini_user_limit():
     incoming.from_user = SimpleNamespace(id=777013)
 
     async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None,
-                              deadline=None, provenance=None):
+                              deadline=None, provenance=None, **kwargs):
         if provenance is not None:
             provenance.update(provider="gemini", model="gemma-4-26b-a4b-it")
         return "Ответ Gemma"
@@ -1992,10 +1992,10 @@ def test_handled_message_grows_provider_quota_user_daily_and_stats(rate_guard_se
     monkeypatch.setattr(bot, "_try_openrouter_streaming", AsyncMock(return_value=(None, None)))
     monkeypatch.setattr(bot, "_try_groq_streaming", AsyncMock(return_value=(None, None)))
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "Привет! Как сам?"}}]}
 
-    async def failing_groq_request(path, method="GET", *, json_body=None, deadline=None):
+    async def failing_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         raise bot.GroqAPIError("overloaded", status_code=503)
 
     monkeypatch.setattr(bot, "_or_request", fake_or_request)
@@ -2130,7 +2130,7 @@ def test_openrouter_success_logs_token_usage_when_api_returns_it(caplog, monkeyp
     import logging
     chat_id = 999903
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "ответ"}}],
                 "usage": {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33}}
 

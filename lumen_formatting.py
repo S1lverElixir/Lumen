@@ -6,6 +6,24 @@ lumen_formatting.py — markdown Lumen в Telegram HTML.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
+
+_URL_LABEL_RE = re.compile(r"^(?:https?://|www\.)", re.IGNORECASE)
+
+
+def _safe_link_label(label: str, url: str) -> str:
+    """Метка-URL, ведущая на другой хост, — готовый фишинг: показываем реальный
+    адрес. Обычные текстовые метки ("Reuters") не трогаем (аудит 28.10.2026)."""
+    if not _URL_LABEL_RE.match(label.strip()):
+        return label
+    try:
+        label_host = urlparse(label if "://" in label else "https://" + label).netloc.lower()
+        url_host = urlparse(url).netloc.lower()
+    except ValueError:
+        return label
+    if label_host and url_host and label_host != url_host:
+        return url
+    return label
 
 _TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 # Регекс квадратичен на длинных пробельных хвостах: строку режем до match,
@@ -414,6 +432,7 @@ def _md_to_html(text: str) -> str:
             continue
         m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
         label, url = m.group(1), m.group(2)
+        label = _safe_link_label(label, url)
         label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         url = url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
         text = text.replace(key, f'<a href="{url}">{label}</a>')
@@ -597,6 +616,7 @@ def _md_to_rich_html(text: str) -> str:
     for key, orig in _links.items():
         m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
         label, url = m.group(1), m.group(2)
+        label = _safe_link_label(label, url)
         label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         url = url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
         text = text.replace(key, f'<a href="{url}">{label}</a>')

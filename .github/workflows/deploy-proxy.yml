@@ -31,9 +31,10 @@ concurrency:
 jobs:
   deploy:
     # Авто: только пуши в ЭТОТ репозиторий с зелёным CI (та же защита от форков, что в sync-to-hf.yml).
-    # Вручную: всегда (для ручного запуска и нужен отдельный пункт).
+    # Вручную: только main — иначе ветка с изменённым proxy.ts получала бы
+    # production OIDC и могла читать токен бота (аудит 28.10.2026).
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.event == 'push'
       && github.event.workflow_run.head_repository.full_name == github.repository)

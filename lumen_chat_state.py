@@ -1278,6 +1278,41 @@ def _record_user_daily(user_id: int | None, *, gemini: bool = False, tts: bool =
     bot.mark_quota_dirty()
 
 
+def _reserve_user_daily(user_id: int | None, *, total: int = 0, tts: int = 0) -> bool:
+    """Атомарно резервирует счётчики ДО первого await: параллельные /tts иначе
+    читали 0 и обходили дневной лимит (аудит 28.10.2026). Возвращает False,
+    если резерв не влезает; счётчики в этом случае не меняются."""
+    import bot
+    if user_id is None or bot._is_owner(user_id):
+        return True
+    entry = _user_daily_entry(user_id)
+    used_total = int(entry.get("total") or 0)
+    used_tts = int(entry.get("tts") or 0)
+    if used_total + total > _user_daily_limit(user_id, "total", entry):
+        return False
+    if used_tts + tts > _user_daily_limit(user_id, "tts", entry):
+        return False
+    entry["total"] = used_total + total
+    if tts:
+        entry["tts"] = used_tts + tts
+    bot.mark_quota_dirty()
+    return True
+
+
+def _refund_user_daily(user_id: int | None, *, total: int = 0, tts: int = 0) -> None:
+    """Возвращает неиспользованный резерв (синтез/отправка не удались)."""
+    import bot
+    if user_id is None or bot._is_owner(user_id):
+        return
+    if not total and not tts:
+        return
+    entry = _user_daily_entry(user_id)
+    entry["total"] = max(0, int(entry.get("total") or 0) - total)
+    if tts:
+        entry["tts"] = max(0, int(entry.get("tts") or 0) - tts)
+    bot.mark_quota_dirty()
+
+
 def _user_key_for_message(message: Any) -> int | None:
     """user_id автора или ближайший устойчивый идентификатор (как у rate limit)."""
     if message is None:

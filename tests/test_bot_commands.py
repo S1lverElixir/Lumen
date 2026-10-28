@@ -1660,6 +1660,34 @@ def test_pick_callback_ignores_banned_user(monkeypatch):
     assert answered == [True]
 
 
+def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
+    # Аудит 28.10.2026: /reset чистил историю, но старые ссылки на медиа
+    # и имена оставались в состоянии.
+    from collections import deque
+    from unittest.mock import AsyncMock
+    chat_id = 999806
+    bot.chat_state[chat_id] = {
+        "history": [{"role": "user", "content": "hi"}],
+        "ctx": deque(["фон"]),
+        "recent_media_ids": {"1": deque(["file-1"])},
+        "user_names": {"1": "User"},
+        "lang": "en",
+    }
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=42)
+    monkeypatch.setattr(bot, "_is_privileged_in_chat", AsyncMock(return_value=True))
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+    try:
+        asyncio.run(bot.cmd_reset(incoming))
+        state = bot.chat_state[chat_id]
+        assert state["history"] == []
+        assert len(state["ctx"]) == 0
+        assert state["recent_media_ids"] == {}
+        assert state["user_names"] == {}
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_banned_user_commands_send_nothing(monkeypatch):
     # Обход бана через прямые команды: catch-all с _is_banned не ловит
     # зарегистрированные раньше cmd_*, каждая проверяет первой строкой.

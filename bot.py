@@ -322,6 +322,11 @@ if SENTRY_DSN:
         # Только трекинг ошибок (трейсинг выключен — бережём квоту Sentry 5000 событий/мес).
         traces_sample_rate=0.0,
         send_default_pii=False,
+        # Локальные переменные и тела запросов содержат промпты и историю:
+        # before_send чистит только точные секреты, поэтому не отправляем их вовсе
+        # (аудит 28.10.2026).
+        include_local_variables=False,
+        max_request_body_size="never",
     )
     log.info('[setup] Sentry error tracking enabled.')
 
@@ -441,6 +446,11 @@ DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
 # озвучка — до конца синтеза. Это осознанно (один чат — одно дело за раз), но
 # второй вопрос во время длинной отрисовки честно получит «занято» через 45с.
 CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 45, min_value=1)
+# Сколько сообщений одного чата могут ЖДАТЬ лок одновременно. Раньше сотня
+# сообщений занимала все 100 in-flight слотов, и другие чаты получали 503
+# (аудит 28.10.2026). Четвёртый и следующие сразу получают «занято».
+_MAX_CHAT_LOCK_WAITERS = 3
+_chat_lock_waiters: dict[int, int] = {}
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
 # завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
 INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = _env_number("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", 10, min_value=0)
@@ -544,6 +554,8 @@ from lumen_chat_state import (
     _user_daily_gemini_exhausted,
     _user_daily_tts_exhausted,
     _record_user_daily,
+    _reserve_user_daily,
+    _refund_user_daily,
     _user_key_for_message,
     _user_daily_reset_in,
     _trim_history,
@@ -924,6 +936,8 @@ __all__ = [
     "_user_daily_gemini_exhausted",
     "_user_daily_tts_exhausted",
     "_record_user_daily",
+    "_reserve_user_daily",
+    "_refund_user_daily",
     "_user_key_for_message",
     "_user_daily_reset_in",
     # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
@@ -1364,15 +1378,29 @@ async def _handle_message(message: Message) -> None:
 
     remaining = _msg_remaining_sec()
     lock_timeout = CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(CHAT_LOCK_TIMEOUT_SEC, remaining))
-    try:
-        lock = await acquire_chat_lock(chat_id, lock_timeout)
-    except asyncio.TimeoutError:
-        log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
+    waiters = _chat_lock_waiters.get(chat_id, 0)
+    if waiters >= _MAX_CHAT_LOCK_WAITERS:
+        log.warning("[lock] Too many waiters for chat %s", chat_id)
         with contextlib.suppress(Exception):
-             # Ответ без создания чата: обычный _t через get_state завёл бы запись
-             # даже тому, кого отшили «занято» (та же причина, что у лимита).
-             await _tg_call(message.reply, _t_no_create(chat_id, "lock_busy"))
+            await _tg_call(message.reply, _t_no_create(chat_id, "lock_busy"))
         return
+    _chat_lock_waiters[chat_id] = waiters + 1
+    try:
+        try:
+            lock = await acquire_chat_lock(chat_id, lock_timeout)
+        except asyncio.TimeoutError:
+            log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
+            with contextlib.suppress(Exception):
+                 # Ответ без создания чата: обычный _t через get_state завёл бы запись
+                 # даже тому, кого отшили «занято» (та же причина, что у лимита).
+                 await _tg_call(message.reply, _t_no_create(chat_id, "lock_busy"))
+            return
+    finally:
+        left = _chat_lock_waiters.get(chat_id, 1) - 1
+        if left > 0:
+            _chat_lock_waiters[chat_id] = left
+        else:
+            _chat_lock_waiters.pop(chat_id, None)
 
     try:
          await _handle_message_core(message)

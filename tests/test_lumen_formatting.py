@@ -622,6 +622,15 @@ def test_md_to_html_converts_markdown_link():
     assert result == '<a href="https://example.com/page">почитать здесь</a>'
 
 
+def test_md_to_html_replaces_mismatched_url_label():
+    # Аудит 28.10.2026: метка-URL на чужой хост — готовый фишинг.
+    html = lumen_formatting._md_to_html("[https://bank.example](https://attacker.example/x)")
+    assert ">https://attacker.example/x<" in html
+    assert "bank.example" not in html
+    # Обычная текстовая метка не трогается.
+    assert ">Reuters<" in lumen_formatting._md_to_html("[Reuters](https://reuters.com/x)")
+
+
 def test_md_to_html_link_with_underscores_in_url_not_corrupted_by_italic():
     # Регрессия: URL с двумя "_" мог бы ошибочно засчитаться за пару italic-
     # маркеров, если бы конвертация ссылок шла раньше bold/italic в Phase 3.

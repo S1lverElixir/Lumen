@@ -47,7 +47,16 @@ jobs:
         run: |
           set -euo pipefail
           git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
-          # Lease вместо голого force: хотфикс, залитый напрямую на Space,
-          # честно уронит push вместо молчаливого отката.
           git fetch hf main || true
-          git push hf HEAD:main --force-with-lease
+          # Хотфикс, залитый напрямую на Space, нельзя молча перезаписать:
+          # сначала проверяем, что удалённая ветка — предок деплоимого коммита,
+          # и только потом пушим с lease на конкретный SHA (аудит 28.10.2026).
+          if git rev-parse --verify -q hf/main >/dev/null; then
+            if ! git merge-base --is-ancestor hf/main HEAD; then
+              echo "HF Space has commits not in this deploy branch (hotfix?) — refusing to overwrite." >&2
+              exit 1
+            fi
+            git push hf HEAD:main --force-with-lease=main:"$(git rev-parse hf/main)"
+          else
+            git push hf HEAD:main
+          fi

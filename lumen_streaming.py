@@ -237,7 +237,7 @@ async def _groq_stream_pieces(model_id: str, messages: list[dict], *, deadline: 
 
 async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
-    deadline: float | None = None, status=None,
+    deadline: float | None = None, status=None, history_text=None,
 ) -> tuple[str | None, Message | None]:
     """Стриминг: генератор кусков + плейсхолдер, чанкинг, троттлинг, обрыв при утечке/инъекции, HTML-финал, запись в историю. Возвращает (ответ, плейсхолдер): успех — (текст, None); сбой до показа — (None, плейсхолдер для следующей модели); сбой после — (показанное + пометка, None)."""
     import bot
@@ -330,7 +330,7 @@ async def _run_streaming_reply(
                         await aclose()
                 final_answer = _IDENTITY_LEAK_FALLBACK if leak_kind == "identity" else _INJECTED_PAYLOAD_ECHO_FALLBACK
                 await bot._tg_call(sent_messages[-1].edit_text, final_answer, parse_mode=None, call_timeout=15.0)
-                hist.append({"role": "user", "content": _history_user_text(user_text)})
+                hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
                 hist.append({"role": "assistant", "content": final_answer})
                 # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
                 await bot._trim_history(hist)
@@ -353,7 +353,7 @@ async def _run_streaming_reply(
                     with contextlib.suppress(Exception):
                         await bot._tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]) + note, parse_mode=ParseMode.HTML, call_timeout=15.0)
                     final_answer = full_text.strip()
-                    hist.append({"role": "user", "content": _history_user_text(user_text)})
+                    hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
                     hist.append({"role": "assistant", "content": final_answer})
                     # Обрезка с саммари (см. _trim_history): молчаливый срез оставлял
                     # саммаризацию только нестриминговым путям (аудит 26.09.2026).
@@ -397,6 +397,9 @@ async def _run_streaming_reply(
             ttf_sec=(first_piece_ts - overall_start_ts) if first_piece_ts is not None else None,
         )
 
+        # Финальный скраб ДО последней правки: иначе пользователь видел ответ,
+        # который в историю уже попал очищенным (аудит 28.10.2026).
+        full_text = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
         # "Довывод" остатка: бэкенды одним куском в конце показывали бы "…" до самого финала. Ограничено catchup-лимитом сверху.
         final_chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
         target_full = final_chunks[-1]
@@ -513,10 +516,11 @@ async def _run_streaming_reply(
                 await aclose()
 
     # Пустой full_text сюда не доходит — ветки "Empty response" нет.
-    final_answer = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
+    # Скраб уже применён до финальной правки (см. выше).
+    final_answer = full_text
     bot._record_model_outcome(provider, model_id,
                               bad=_detect_garbled_mix(full_text.strip()) and not _is_garbled_echo(full_text.strip(), user_text))
-    hist.append({"role": "user", "content": _history_user_text(user_text)})
+    hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
     hist.append({"role": "assistant", "content": final_answer})
     # Тот же _trim_history, что в нестриминговых путях (см. комментарий выше).
     await bot._trim_history(hist)
@@ -524,7 +528,7 @@ async def _run_streaming_reply(
     bot._record_quota_usage(provider, model_id)
     return final_answer, None
 
-async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None) -> tuple[str | None, Message | None]:
+async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Gemini (строит contents/config)."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
@@ -533,21 +537,21 @@ async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, 
     contents = await bot._build_gemini_turn_contents(chat_id, user_text)
     call_contents, gconfig = bot._build_gemini_call_config(model_id, contents)
     piece_agen = _gemini_stream_pieces(model_id, call_contents, gconfig, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text)
 
-async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None) -> tuple[str | None, Message | None]:
+async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для OpenRouter (SSE через chat/completions)."""
     import bot
     messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
     # Генератор — через bot.: тесты подменяют bot._openrouter_stream_pieces фейком.
     piece_agen = bot._openrouter_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text)
 
-async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None) -> tuple[str | None, Message | None]:
+async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Groq (SSE через chat/completions). Историю режем тем же _trim_messages_for_groq, что обычный путь, — иначе стрим-проба падает с 413 ещё до цепочки."""
     import bot
     from lumen_routes import _trim_messages_for_groq
     messages = _trim_messages_for_groq(bot._build_openrouter_turn_messages(chat_id, user_text, model_id))
     # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
     piece_agen = bot._groq_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text)

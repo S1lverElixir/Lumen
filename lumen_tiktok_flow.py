@@ -483,6 +483,13 @@ async def _send_tiktok_single_video(
 
     raise TikTokUserFacingError(bot._t(message.chat.id, "tiktok_no_media"))
 
+def _record_tiktok_quota(message: Message) -> None:
+    """Успешная выдача TikTok — один ответ в дневной счётчик пользователя.
+    Раньше ветка возвращалась до _run_route и вообще не тратила лимит (аудит 28.10.2026)."""
+    import bot
+    bot._record_user_daily(bot._user_key_for_message(message))
+
+
 async def handle_tiktok(message: Message, url: str) -> None:
     import bot
     if bot.is_guest_message(message):
@@ -526,8 +533,10 @@ async def handle_tiktok(message: Message, url: str) -> None:
          author = (media_data.get("author") or {}).get("nickname") or bot._t(message.chat.id, "tiktok_author")
 
          if await _try_send_tiktok_slideshow(session, media_data, message, status, author, headers):
+              _record_tiktok_quota(message)
               return
          await _send_tiktok_single_video(session, media_data, message, status, author, headers)
+         _record_tiktok_quota(message)
     except Exception as exc:
           if isinstance(exc, (TelegramEntityTooLarge, TikTokUserFacingError)):
               # Известные исходы — warning без Sentry, неожиданные — exception с трейсбеком (LUMEN-1).
