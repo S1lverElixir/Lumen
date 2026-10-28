@@ -288,6 +288,7 @@ async def fetch_web_snippets(query: str, *, timeout_sec: float | None = None, ma
             ddg_items = parse_ddg_lite_html(page, limit) if page else []
             diagnostics["ddg"] = len(ddg_items)
             if ddg_items:
+                log.info("[web-search] Snippets: duckduckgo=%d (query_len=%d)", len(ddg_items), len(query))
                 return ddg_items
             diagnostics["ddg_page_chars"] = len(page)
 
@@ -309,6 +310,10 @@ async def fetch_web_snippets(query: str, *, timeout_sec: float | None = None, ma
                 groups = [result for result in fetched if isinstance(result, list)]
                 merged = _merge_snippets(groups, limit)
                 if merged:
+                    log.info(
+                        "[web-search] Snippets: bing=%d google_news=%d (query_len=%d)",
+                        diagnostics.get("bing", 0), diagnostics.get("google_news", 0), len(query),
+                    )
                     return merged
     except Exception as exc:
         # Внешний поиск — довесок: сеть легла — отвечаем с пометкой, а не падением.

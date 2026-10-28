@@ -11,6 +11,7 @@ fetch на [] без сети.
     pytest tests/test_lumen_search.py -v
 """
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import aiohttp
@@ -179,7 +180,7 @@ def test_parse_rss_snippets_reads_items_and_drops_duplicates():
     assert lumen_search.parse_rss_snippets("<rss><broken") == []
 
 
-def test_fetch_web_snippets_falls_back_to_rss_when_ddg_returns_empty(monkeypatch):
+def test_fetch_web_snippets_falls_back_to_rss_when_ddg_returns_empty(monkeypatch, caplog):
     # Прод 28.10.2026: DuckDuckGo с адресов Space отдавал страницу без выдачи,
     # и бот отвечал «поиск ничего не дал» — RSS-фолбэк обязан дать сниппеты.
     session = _RoutedSession({
@@ -191,15 +192,20 @@ def test_fetch_web_snippets_falls_back_to_rss_when_ddg_returns_empty(monkeypatch
         SimpleNamespace(ClientSession=lambda *args, **kwargs: session,
                         ClientTimeout=aiohttp.ClientTimeout),
     )
-    out = asyncio.run(lumen_search.fetch_web_snippets("свежие новости"))
+    with caplog.at_level(logging.INFO, logger="bot"):
+        out = asyncio.run(lumen_search.fetch_web_snippets("свежие новости"))
     assert [item["url"] for item in out] == ["https://example.com/fresh"]
     assert lumen_search._BING_SEARCH_URL in session.requested
+    # Успешная выдача логируется источником и числом сниппетов.
+    assert "bing=1 google_news=0" in caplog.text
 
 
-def test_fetch_web_snippets_parses_stubbed_page(monkeypatch):
+def test_fetch_web_snippets_parses_stubbed_page(monkeypatch, caplog):
     monkeypatch.setattr(lumen_search, "aiohttp", _stub_aiohttp(_StubResp(200, _DDG_FIXTURE)))
-    out = asyncio.run(lumen_search.fetch_web_snippets("что с ДЦ Яндекса"))
+    with caplog.at_level(logging.INFO, logger="bot"):
+        out = asyncio.run(lumen_search.fetch_web_snippets("что с ДЦ Яндекса"))
     assert [item["url"] for item in out] == ["https://example.com/news", "https://direct.example.org/page"]
+    assert "duckduckgo=2" in caplog.text
 
 
 def test_fetch_web_snippets_fails_open_on_network_error(monkeypatch):
