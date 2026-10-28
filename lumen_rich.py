@@ -4,11 +4,13 @@ lumen_rich.py — отправка сообщений: гости, Rich Messages
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import logging
 from typing import Any
 
-from aiogram.enums import ParseMode
+from aiogram import Bot
+from aiogram.enums import ChatType, ParseMode
 from aiogram.types import (
     InlineQueryResultArticle,
     InputRichMessage,
@@ -56,6 +58,18 @@ def _is_real_telegram_message(res: Any) -> bool:
     return isinstance(res, Message)
 
 
+def _answer_sender(message: Message):
+    """Куда отправлять ответ: в личке — обычное сообщение без цитаты-реплая,
+    как в Claude; в группе — reply для контекста. Тестовые фейки без реального
+    aiogram Bot получают reply (прежнее поведение)."""
+    import bot
+    chat = getattr(message, "chat", None)
+    if (getattr(chat, "type", None) == ChatType.PRIVATE
+            and isinstance(getattr(bot, "bot", None), Bot)):
+        return functools.partial(bot.bot.send_message, chat_id=chat.id)
+    return message.reply
+
+
 async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bool, **kwargs: Any) -> Any:
     """Рич-отправка; при неуспехе — None и legacy. Трединг только первого чанка, иначе каждый кусок пиликает отдельно."""
     import bot
@@ -66,7 +80,9 @@ async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bo
         return None
     kwargs.pop("parse_mode", None)
     reply_parameters = kwargs.pop("reply_parameters", None)
-    if reply_parameters is None and is_first_chunk and isinstance(getattr(message, "message_id", None), int):
+    is_private = getattr(getattr(message, "chat", None), "type", None) == ChatType.PRIVATE
+    if (reply_parameters is None and is_first_chunk and not is_private
+            and isinstance(getattr(message, "message_id", None), int)):
         reply_parameters = ReplyParameters(message_id=message.message_id)
     call_timeout = kwargs.pop("call_timeout", bot.TELEGRAM_REQUEST_TIMEOUT)
     res = await bot._tg_call(
@@ -103,6 +119,7 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
         return
 
     chunks = _split_text_chunks(text, bot.TG_MAX_LEN)
+    sender = _answer_sender(message)
     for i, chunk in enumerate(chunks):
         chunk_kwargs = kwargs if i == len(chunks) - 1 else {k: v for k, v in kwargs.items() if k != "reply_markup"}
         if i > 0:
@@ -116,14 +133,14 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
                 continue
         if i == 0:
             res = await bot._tg_call(
-                message.reply, _md_to_html(chunk) if parse_html else chunk,
+                sender, _md_to_html(chunk) if parse_html else chunk,
                 call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
                 parse_mode=ParseMode.HTML if parse_html else None,
                 **chunk_kwargs,
             )
             if res is None and parse_html:
                 res = await bot._tg_call(
-                    message.reply, _strip_markdown(chunk),
+                    sender, _strip_markdown(chunk),
                     call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
                     parse_mode=None,
                     **chunk_kwargs,

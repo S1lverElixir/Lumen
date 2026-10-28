@@ -1660,6 +1660,24 @@ def test_pick_callback_ignores_banned_user(monkeypatch):
     assert answered == [True]
 
 
+def test_answer_sender_skips_reply_quote_in_private(monkeypatch):
+    # В личке ответ не должен быть Telegram-реплаем: цитата над ответом — не как
+    # у Claude. В группах reply остаётся для контекста.
+    from unittest.mock import AsyncMock
+    from aiogram import Bot
+    real_bot = Bot(token="123456:" + "x" * 35)
+    real_bot.send_message = AsyncMock(return_value=None)
+    monkeypatch.setattr(bot, "bot", real_bot)
+    incoming = _FakeIncomingMessage(999807)
+    sender = bot._answer_sender(incoming)
+    asyncio.run(sender(text="x", parse_mode=None))
+    real_bot.send_message.assert_awaited_once()
+    assert real_bot.send_message.await_args.kwargs["chat_id"] == 999807
+    group = _FakeIncomingMessage(999808)
+    group.chat.type = bot.ChatType.GROUP
+    assert bot._answer_sender(group) == group.reply
+
+
 def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
     # Аудит 28.10.2026: /reset чистил историю, но старые ссылки на медиа
     # и имена оставались в состоянии.

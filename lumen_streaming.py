@@ -273,7 +273,7 @@ async def _run_streaming_reply(
             placeholder = status.message
         else:
             placeholder = await bot._tg_call(
-                message.reply, _SPINNER_FRAMES[0] + " " + bot._t(message.chat.id, "progress_thinking", sec=0),
+                bot._answer_sender(message), _SPINNER_FRAMES[0] + " " + bot._t(message.chat.id, "progress_thinking", sec=0),
                 parse_mode=None, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
             )
         if placeholder is None:

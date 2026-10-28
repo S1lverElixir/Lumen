@@ -56,7 +56,7 @@ class StatusMessage:
         status = cls(message=reply_to, lang=lang)
         status._set_phrase(key, timed=timed)
         sent = await bot._tg_call(
-            reply_to.reply, status._render(0), parse_mode=None,
+            bot._answer_sender(reply_to), status._render(0), parse_mode=None,
             call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
         )
         if sent is None:
