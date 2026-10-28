@@ -1688,9 +1688,13 @@ def test_answer_sender_skips_reply_quote_in_private(monkeypatch):
     monkeypatch.setattr(bot, "bot", real_bot)
     incoming = _FakeIncomingMessage(999807)
     sender = bot._answer_sender(incoming)
-    asyncio.run(sender(text="x", parse_mode=None))
+    # Позиционный текст — как в реальных вызовах _tg_call(sender, text, ...):
+    # partial(chat_id=...) + позиционный аргумент падал с "multiple values for
+    # chat_id" и отключал стрим (прод 28.10.2026).
+    asyncio.run(sender("x", parse_mode=None))
     real_bot.send_message.assert_awaited_once()
     assert real_bot.send_message.await_args.kwargs["chat_id"] == 999807
+    assert real_bot.send_message.await_args.kwargs["text"] == "x"
     group = _FakeIncomingMessage(999808)
     group.chat.type = bot.ChatType.GROUP
     assert bot._answer_sender(group) == group.reply

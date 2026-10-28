@@ -4,7 +4,6 @@ lumen_rich.py — отправка сообщений: гости, Rich Messages
 from __future__ import annotations
 
 import contextlib
-import functools
 import hashlib
 import logging
 from typing import Any
@@ -66,7 +65,12 @@ def _answer_sender(message: Message):
     chat = getattr(message, "chat", None)
     if (getattr(chat, "type", None) == ChatType.PRIVATE
             and isinstance(getattr(bot, "bot", None), Bot)):
-        return functools.partial(bot.bot.send_message, chat_id=chat.id)
+        async def _send(text: str, **kwargs: Any):
+            # Текст — отдельным kwarg: partial(chat_id=...) + позиционный текст
+            # давал "multiple values for argument 'chat_id'" и убивал стрим
+            # с ответами в личке (прод 28.10.2026).
+            return await bot.bot.send_message(chat_id=chat.id, text=text, **kwargs)
+        return _send
     return message.reply
 
 
