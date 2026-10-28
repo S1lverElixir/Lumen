@@ -795,11 +795,14 @@ def test_streaming_final_split_sends_missing_continuation(monkeypatch):
         assert answer and answer.startswith("а" * 1000) and answer.endswith("б" * 200)
         assert len(fake_bot.sent) == 1
         first_edit = incoming.sent[0].edits[-1][0]
-        tail_edit = fake_bot.sent[0][1].edits[-1][0]
+        tail_text = fake_bot.sent[0][0]["text"]
         assert first_edit.startswith("а")
-        assert tail_edit.endswith("б")
+        assert tail_text.endswith("б")
         # Оба сообщения вместе покрывают весь ответ, а не только хвост.
-        assert len(first_edit) + len(tail_edit) == len(answer)
+        assert len(first_edit) + len(tail_text) == len(answer)
+        # Досланный хвост уже финальный: повторная правка получила бы
+        # "not modified" и заменила HTML на голый текст (аудит 28.10.2026).
+        assert fake_bot.sent[0][1].edits == []
     finally:
         bot.chat_state.pop(chat_id, None)
 

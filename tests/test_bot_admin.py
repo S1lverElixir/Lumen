@@ -875,6 +875,14 @@ def test_main_flushes_on_graceful_server_exit(monkeypatch, caplog):
             asyncio.run(bot.main())
         assert "[serve] HTTP server stopped gracefully" in caplog.text
         assert "chats" in emitted and "quota" in emitted
+        # Частичный сбой стартовой загрузки не отменяет сохранение чатов:
+        # иначе последние сообщения терялись при редеплое (ревью 28.10.2026).
+        emitted.clear()
+        bot._dirty_chat_ids.add(999001)
+        lumen_chat_state._quota_dirty = True
+        lumen_chat_state._state_load_failed = True
+        asyncio.run(bot.main())
+        assert "chats" in emitted
     finally:
         bot.bot, bot.client = orig_bot, orig_client
         bot._state_ready = orig_ready

@@ -1778,21 +1778,19 @@ async def main() -> None:
         # Флаги — канонически в lumen_chat_state (P2): множества общие объектом,
         # bool-флаги читаем из модуля, т.к. bot-привязки после выноса stale.
         # Синхронная запись в потоке: loop уже дренирует задачи, висеть нельзя.
-        if lumen_chat_state._state_load_failed:
-            # Стартовая загрузка не удалась: не затираем удалённые данные
-            # (аудит 28.10.2026).
-            log.warning('[state] Startup load failed: skipping the final flush to keep remote data intact.')
-        else:
-            if _dirty_chat_ids or lumen_chat_state._index_dirty or _pending_chat_deletions:
-                try:
-                    await asyncio.wait_for(asyncio.to_thread(_flush_state_now), timeout=15.0)
-                except asyncio.TimeoutError:
-                    log.warning('[state] Final flush exceeded 15s; abandoning the remainder.')
-            if lumen_chat_state._quota_dirty:
-                try:
-                    await asyncio.wait_for(asyncio.to_thread(save_global_quota), timeout=10.0)
-                except asyncio.TimeoutError:
-                    log.warning('[state] Final quota save exceeded 10s; abandoning the remainder.')
+        # Стартовая загрузка могла не удаться частично: чаты сохраняем (это
+        # единственная копия новых сообщений), а индекс и квота внутри сами
+        # пропускаются, чтобы не затереть удалённые данные (аудит A5-2).
+        if _dirty_chat_ids or lumen_chat_state._index_dirty or _pending_chat_deletions:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(_flush_state_now), timeout=15.0)
+            except asyncio.TimeoutError:
+                log.warning('[state] Final flush exceeded 15s; abandoning the remainder.')
+        if lumen_chat_state._quota_dirty:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(save_global_quota), timeout=10.0)
+            except asyncio.TimeoutError:
+                log.warning('[state] Final quota save exceeded 10s; abandoning the remainder.')
         await _close_sessions()
 
 if __name__ == "__main__":

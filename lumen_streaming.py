@@ -402,6 +402,7 @@ async def _run_streaming_reply(
         full_text = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
         # "Довывод" остатка: бэкенды одним куском в конце показывали бы "…" до самого финала. Ограничено catchup-лимитом сверху.
         final_chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
+        tail_already_final = False
         if not edits_dead and len(final_chunks) > len(sent_messages):
             # Инкрементальное разбиение отстаёт на 1000 символов: к финалу
             # мог появиться новый кусок, и последняя правка затирала ответ
@@ -428,6 +429,7 @@ async def _run_streaming_reply(
                 # Новое сообщение уже содержит полный кусок: catch-up для него не нужен.
                 last_edited_plain = next_chunk
                 reveal_base_ts = time.monotonic()
+            tail_already_final = not edits_dead and last_edited_plain == final_chunks[-1]
         target_full = final_chunks[-1]
         already_shown_len = len(last_edited_plain) if last_edited_plain and target_full.startswith(last_edited_plain) else 0
         remaining_len = len(target_full) - already_shown_len
@@ -474,8 +476,11 @@ async def _run_streaming_reply(
                 if edited is None:
                     await bot._tg_call(sent_messages[-1].edit_text, plain_text, parse_mode=None, call_timeout=15.0)
         else:
-            # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
-            await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
+            if not tail_already_final:
+                # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
+                # Досланный хвост уже содержит финальный HTML: повторная правка
+                # получила бы "not modified" и срезала ссылки/разметку (аудит 28.10.2026).
+                await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
 
     except Exception as exc:
         if not full_text.strip():

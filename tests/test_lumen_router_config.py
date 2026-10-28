@@ -157,6 +157,15 @@ def test_looks_like_freshness_query_multilingual_ignores_common_words():
     assert lumen_router_config._looks_like_freshness_query("son derece güzel") is False
     assert lumen_router_config._looks_like_freshness_query("Sa panahong ito") is False
     assert lumen_router_config._looks_like_freshness_query("Guten Morgen") is False
+    # Ревью 28.10.2026: без границ «завтра» ловил «завтрак», а «हाल/कल»
+    # срабатывали внутри हालांकि/कल्पना (матры не входят в \w).
+    assert lumen_router_config._looks_like_freshness_query("что приготовить на завтрак") is False
+    assert lumen_router_config._looks_like_freshness_query("позавтракать вместе") is False
+    assert lumen_router_config._looks_like_freshness_query("the actual reason is simple") is False
+    assert lumen_router_config._looks_like_freshness_query("हालांकि यह ठीक है") is False
+    assert lumen_router_config._looks_like_freshness_query("कल्पना कीजिए") is False
+    assert lumen_router_config._looks_like_freshness_query("আজাদি") is False
+    assert lumen_router_config._looks_like_freshness_query("что будет завтра") is True
 
 
 def test_looks_like_search_request_detects_explicit_tool_asks():

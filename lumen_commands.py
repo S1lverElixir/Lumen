@@ -764,13 +764,16 @@ async def cmd_selftest(message: Message) -> None:
         proxy_url = bot.TELEGRAM_API_BASE_URL + "/bot" + (token[:6] if token else "x") + "/getMe"
         proxy_headers = {"X-Lumen-Proxy-Secret": bot.LUMEN_PROXY_SECRET} if bot.LUMEN_PROXY_SECRET else None
         tg_headers = proxy_headers if bot.TELEGRAM_API_BASE_URL != "https://api.telegram.org" else None
-        # TikWM из HF доступен только через прокси: проверяем настроенный адрес,
-        # а не прямой хост, который там всегда 403 (аудит 28.10.2026).
-        tikwm_headers = proxy_headers if bot.TIKWM_API_BASE_URL else None
+        # TikWM из HF доступен только через прокси: проверяем настроенный адрес
+        # и путь /api/, как у реальных запросов, а не прямой хост (аудит 28.10.2026).
+        from urllib.parse import urlsplit
+        tikwm_base = bot.TIKWM_API_BASE_URL
+        tikwm_via_proxy = bool(tikwm_base) and urlsplit(tikwm_base).hostname not in {"www.tikwm.com", "tikwm.com"}
+        tikwm_headers = proxy_headers if tikwm_via_proxy else None
         net = await asyncio.gather(
             bot.probe_url(session, proxy_url, timeout_sec=6.0, redact=token, headers=tg_headers),
             bot.probe_url(
-                session, bot.TIKWM_API_BASE_URL or "https://www.tikwm.com",
+                session, (tikwm_base + "/api/") if tikwm_via_proxy else "https://www.tikwm.com",
                 timeout_sec=6.0, headers=tikwm_headers,
             ),
         )

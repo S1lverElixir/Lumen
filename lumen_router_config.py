@@ -560,7 +560,8 @@ _FRESHNESS_QUERY_RE = re.compile(
     # не-RU/EN свежие вопросы уходили в обычный текст без даты (аудит 28.10.2026).
     # Без tiempo/tempo/weer/son/panahon/morgen: они значат ещё «время», «снова»,
     # «конец», «утро» — ложные срабатывания на обычной болтовне дороже пропуска.
-    r"|\b(hoy|ahora|actual|reciente|noticias|precio|clima|mañana|ayer)\b"
+    # actual убран: в испанском «текущий», но в английском это обычное «фактический».
+    r"|\b(hoy|ahora|reciente|noticias|precio|clima|mañana|ayer)\b"
     r"|\b(heute|jetzt|aktuell|neueste|nachrichten|preis|wetter|vorhersage|gestern)\b"
     r"|\b(aujourd'hui|maintenant|actuel|récent|actualités|prix|météo|prévisions|demain|hier)\b"
     r"|\b(oggi|adesso|attuale|recente|notizie|prezzo|meteo|previsioni|domani|ieri)\b"
@@ -570,7 +571,9 @@ _FRESHNESS_QUERY_RE = re.compile(
     r"|\b(dziś|teraz|aktualn\w*|ostatni\w*|wiadomości|cena|pogoda|prognoza|jutro|wczoraj)\b"
     r"|\b(bugün|şimdi|güncel|haberler|fiyat|hava|tahmini|yarın|dün)\b"
     r"|\b(اليوم|الآن|الحالي|الأخير|أخبار|سعر|الطقس|توقعات|غدا|أمس)\b"
-    r"|(आज|अभी|वर्तमान|हाल|समाचार|खबर|कीमत|मौसम|पूर्वानुमान|कल)"
+    # Границы по диапазону письменности, а не \b: матры не входят в \w, и
+    # \bहाल\b ловил «हालांकि», \bकल\b — «कल्पना» (аудит 28.10.2026).
+    r"|(?<![\u0900-\u097F])(?:आज|अभी|वर्तमान|हाल|समाचार|खबर|कीमत|मौसम|पूर्वानुमान|कल)(?![\u0900-\u097F])"
     r"|\b(hari ini|sekarang|terbaru|berita|harga|cuaca|prakiraan|besok|kemarin)\b"
     r"|\b(hari ini|sekarang|terkini|berita|harga|cuaca|ramalan|esok|semalam)\b"
     r"|\b(hôm nay|bây giờ|hiện tại|mới nhất|tin tức|giá|thời tiết|dự báo|ngày mai|hôm qua)\b"
@@ -578,13 +581,13 @@ _FRESHNESS_QUERY_RE = re.compile(
     r"|\b(امروز|اکنون|فعلی|اخیر|اخبار|قیمت|هوا|پیش‌بینی|فردا|دیروز)\b"
     r"|\b(آج|ابھی|موجودہ|حالیہ|خبریں|قیمت|موسم|پیش گوئی|کل)\b"
     r"|\b(bugun|hozir|joriy|so'nggi|yangiliklar|narx|ob-havo|prognoz|ertaga|kecha)\b"
-    r"|(আজ|এখন|বর্তমান|সাম্প্রতিক|সংবাদ|খবর|দাম|আবহাওয়া|পূর্বাভাস|আগামীকাল|গতকাল)"
+    r"|(?<![\u0980-\u09FF])(?:আজ|এখন|বর্তমান|সাম্প্রতিক|সংবাদ|খবর|দাম|আবহাওয়া|পূর্বাভাস|আগামীকাল|গতকাল)(?![\u0980-\u09FF])"
     r"|\b(ngayon|kasalukuyan|pinakabago|balita|presyo|bukas|kahapon)\b"
     r"|\b(namuhla|manje|okwamanje|kwakamuva|izindaba|intengo|isimo sezulu|isibikezelo|kusasa|izolo)\b"
     r"|\b(сёння|зараз|актуальн\w*|апошн\w*|навіны|кошт|цана|надвор'е|прагноз|заўтра|учора)\b"
     r"|\b(сьогодні|зараз|актуальн\w*|останн\w*|новини|ціна|погода|прогноз|завтра|вчора)\b"
     r"|\b(бүгін|қазір|ағымдағы|соңғы|жаңалықтар|баға|ауа райы|болжам|ертең|кеше)\b"
-    r"|завтра|вчера",
+    r"|\bзавтра\b|\bвчера\b",
     re.IGNORECASE,
 )
 

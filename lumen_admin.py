@@ -222,7 +222,7 @@ async def probe_url(
                 # обрезан; 401 самого прокси — тело "Unauthorized" и остаётся красным.
                 with contextlib.suppress(Exception):
                     body = await resp.content.read(512)
-                    if b'"error_code"' in body:
+                    if b'"error_code"' in body and b'"description"' in body:
                         ok = True
             return {"status": resp.status, "elapsed_sec": round(time.time() - start, 2), "ok": ok}
     except Exception as exc:
@@ -247,7 +247,11 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         _log_denied(request, "GET /diag")
         return _forbidden()
     import bot
+    from urllib.parse import urlsplit
     bot_token = bot.BOT_TOKEN
+    tikwm_base = bot.TIKWM_API_BASE_URL
+    # Прямой хост TikWM секрет не получает: он нужен только прокси.
+    tikwm_via_proxy = bool(tikwm_base) and urlsplit(tikwm_base).hostname not in {"www.tikwm.com", "tikwm.com"}
     targets = {
         "telegram_api": "https://api.telegram.org",
         "telegram_file_api": "https://api.telegram.org/bot" + (bot_token[:6] if bot_token else "x") + "/getMe",
@@ -263,8 +267,9 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         "huggingface": "https://huggingface.co",
         "openrouter": "https://openrouter.ai",
         "groq_api": "https://api.groq.com",
-        # Прокси TikWM требует секрет: без него честный 401 вместо живого API.
-        "tikwm": bot.TIKWM_API_BASE_URL or "https://www.tikwm.com",
+        # /api/ — тот же путь, что у реальных запросов: корень прокси мог
+        # отвечать 200, пока сам API-путь сломан (ревью 28.10.2026).
+        "tikwm": (tikwm_base + "/api/") if tikwm_via_proxy else "https://www.tikwm.com",
         "pollinations": "https://image.pollinations.ai",
         "upstash": bot.UPSTASH_REDIS_REST_URL if bot.USE_UPSTASH else "https://upstash.com",
     }
@@ -283,7 +288,7 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         headers = None
         if name == "configured_tg_proxy" and bot.TELEGRAM_API_BASE_URL != "https://api.telegram.org":
             headers = proxy_headers
-        elif name == "tikwm" and bot.TIKWM_API_BASE_URL:
+        elif name == "tikwm" and tikwm_via_proxy:
             headers = proxy_headers
         return name, await probe_url(
             session, url, timeout_sec=6.0, redact=bot_token or "", headers=headers,
