@@ -715,7 +715,7 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     import lumen_status
     assert all(text[0] in lumen_status._TRIO_FRAMES and "Thinking" in text
                for text, _ in placeholder.edits)
-    # Плейсхолдер уже показывает кадр 0 (✻): тикер обязан начать со второго,
+    # Плейсхолдер уже показывает кадр 0 (треугольник): тикер обязан начать со второго,
     # иначе первая же правка повторяет тот же символ (ревью 28.10.2026).
     assert placeholder.edits[0][0].startswith(lumen_status._TRIO_FRAMES[1])
     assert len({text[0] for text, _ in placeholder.edits}) == 3
