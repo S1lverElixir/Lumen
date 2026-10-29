@@ -404,7 +404,7 @@ FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 12, min_value=1
 # Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
 # дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).
 _DOTS_START_AFTER_SEC = 0.5
-_DOTS_TICK_SEC = 1.2
+_DOTS_TICK_SEC = 0.4
 _DOTS_FRAMES = (".", "..", "…")
 # RICH_MESSAGES_ENABLED — отправка финальных ответов через sendRichMessage /
 # editMessageText+rich_message (Bot API 10.1+: таблицы, заголовки, математика).

@@ -718,7 +718,7 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     # Плейсхолдер уже показывает кадр 0 (треугольник): тикер обязан начать со второго,
     # иначе первая же правка повторяет тот же символ (ревью 28.10.2026).
     assert placeholder.edits[0][0].startswith(lumen_status._TRIO_FRAMES[1])
-    assert len({text[0] for text, _ in placeholder.edits}) == 3
+    assert [text[0] for text, _ in placeholder.edits] == list(lumen_status._TRIO_FRAMES[1:4])
     # Код языка не должен утечь в chat_state строковым ключом (прод 28.10.2026).
     assert "en" not in bot.chat_state
 
