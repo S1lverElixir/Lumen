@@ -119,7 +119,7 @@ def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
     assert "Taking a little longer" in live
     assert "0s" in live
     import lumen_status
-    assert live[0] in lumen_status._TRIO_FRAMES
+    assert any(live.startswith(frame) for frame in lumen_status._TRIO_FRAMES)
     bot.chat_state.pop(999904, None)
 
 
