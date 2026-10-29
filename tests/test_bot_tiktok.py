@@ -360,6 +360,20 @@ def test_send_tiktok_music_generic_original_sound_with_only_video_author_suffix(
     assert artist == "videoposter"
 
 
+def test_send_tiktok_music_does_not_take_handle_tail_for_a_title():
+    # Прод 28.10.2026: "original sound - hhh31721" + ник "Hhh" давали хвост
+    # "31721" как название, а исполнителем — "Hhh". Полный хендл обязан
+    # вычитаться до ника, иначе безымянный звук выдаёт себя за трек.
+    media_data = {
+        "music": "https://example.com/sound.mp3",
+        "music_info": {"title": "original sound - hhh31721", "author": "Hhh", "cover": ""},
+        "author": {"nickname": "Hhh", "unique_id": "hhh31721"},
+    }
+    title, artist = _run_send_tiktok_music(media_data, language_code="ru")
+    assert title == "Оригинальный звук"
+    assert artist == "Hhh"
+
+
 def test_send_tiktok_music_named_original_sound_preserves_real_title_and_author():
     # РЕГРЕССИЯ (реальный найденный случай): "original sound - Night, Blooming
     # Jasmine." — TikTok позволяет назвать оригинальный звук, и TikWM всё равно

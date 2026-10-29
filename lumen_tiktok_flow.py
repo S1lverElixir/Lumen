@@ -76,6 +76,34 @@ def _read_file_sync(path: str) -> bytes:
     with open(path, "rb") as f:
         return f.read()
 
+
+async def _fit_audio_thumbnail(cover_bytes: bytes) -> bytes | None:
+    """Обложка для send_audio: Telegram принимает JPEG до 320×320 и 200 КБ.
+    TikTok отдаёт 720–1080 px, и такую обложку Telegram молча игнорирует —
+    сжимаем ffmpeg. Нет ffmpeg/ошибка — возвращаем исходник (прежнее поведение)."""
+    if not cover_bytes:
+        return None
+    try:
+        with tempfile.TemporaryDirectory() as tdir:
+            src = os.path.join(tdir, "cover.jpg")
+            dst = os.path.join(tdir, "thumb.jpg")
+            await asyncio.to_thread(_write_file_sync, src, cover_bytes)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", src,
+                "-vf", "scale=320:320:force_original_aspect_ratio=increase,crop=320:320",
+                "-frames:v", "1", "-q:v", "5", dst,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=15)
+            if proc.returncode == 0 and os.path.exists(dst):
+                out = await asyncio.to_thread(_read_file_sync, dst)
+                if out and len(out) <= 200 * 1024:
+                    return out
+    except Exception as exc:
+        log.warning("[tiktok] cover resize failed, using original: %s", exc)
+    return cover_bytes
+
 async def _send_tiktok_music(session, media_data: dict, message: Message, author: str, headers: dict) -> None:
     import bot
     music_url = media_data.get("music")
@@ -105,10 +133,16 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          for _phrase in _GENERIC_ORIGINAL_SOUND_PHRASES:
               residual_title = re.sub(re.escape(_phrase), "", residual_title, flags=re.IGNORECASE)
          residual_title = residual_title.strip(" \t-–—:")
-         if author_nick:
-              residual_title = re.sub(re.escape(author_nick), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
+         # Полный хендл вычитаем ДО ника: ник — его префикс, и после удаления
+         # "Hhh" из "hhh31721" оставался хвост "31721", который принимался за
+         # название трека (прод 28.10.2026: аудио называлось "31721 — Hhh").
          if author_uniq_clean:
               residual_title = re.sub(re.escape(author_uniq_clean), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
+         if author_nick:
+              residual_title = re.sub(re.escape(author_nick), "", residual_title, flags=re.IGNORECASE).strip(" \t-–—:")
+         # Числовой хвост хендла — не название трека.
+         if residual_title.isdigit():
+              residual_title = ""
          # Хендл автора звука тоже вырезаем: TikTok подставляет его в заголовок
          # безымянного звука (прод 22.09.2026), иначе остаток считался названием.
          if raw_music_author:
@@ -162,10 +196,11 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
               except Exception as e:
                    log.warning("[tiktok] failed to download cover image: %s", e)
 
-         # готовим превью
+         # готовим превью: Telegram принимает только 320×320/≤200 КБ
+         thumb_bytes = await _fit_audio_thumbnail(cover_bytes) if cover_bytes else None
          thumbnail_file = None
-         if cover_bytes:
-              thumbnail_file = BufferedInputFile(cover_bytes, filename="cover.jpg")
+         if thumb_bytes:
+              thumbnail_file = BufferedInputFile(thumb_bytes, filename="cover.jpg")
 
          # вшиваем метаданные и обложку в MP3 перед отправкой — чтобы теги видели и другие плееры
          tagged_music_bytes = music_bytes
@@ -174,7 +209,7 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
               with tempfile.TemporaryDirectory() as tmp_dir:
                    tmp_mp3_path = os.path.join(tmp_dir, "music.mp3")
                    # Запись и теги — синхронные и тяжёлые (до 50МБ): в поток, loop не стопорим.
-                   await asyncio.to_thread(_write_and_tag_mp3_sync, tmp_mp3_path, music_bytes, cleaned_title, performer_name, cover_bytes)
+                   await asyncio.to_thread(_write_and_tag_mp3_sync, tmp_mp3_path, music_bytes, cleaned_title, performer_name, thumb_bytes)
                    if os.path.exists(tmp_mp3_path) and os.path.getsize(tmp_mp3_path) > 0:
                         tagged_music_bytes = await asyncio.to_thread(_read_file_sync, tmp_mp3_path)
                         # Длительность — явно: без неё Telegram показывает 0:00 (та же история, что была с видео).
