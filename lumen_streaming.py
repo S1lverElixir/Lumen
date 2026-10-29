@@ -53,7 +53,7 @@ async def _tick_waiting_dots(placeholder: Message, *, started: float | None = No
         await bot._dots_sleep(bot._DOTS_START_AFTER_SEC)
         chat = getattr(placeholder, "chat", None)
         lang = bot._chat_lang(getattr(chat, "id", None))
-        # Первый кадр (верхняя точка) уже стоит в отправленном плейсхолдере: начинаем со
+        # Первый кадр (∴) уже стоит в отправленном плейсхолдере: начинаем со
         # второго, иначе 0.5с спустя индикатор «замирает» на том же символе.
         frame_idx = 1
         while True:
@@ -61,7 +61,7 @@ async def _tick_waiting_dots(placeholder: Message, *, started: float | None = No
             glyph = _spinner_glyph(frame_idx)
             with contextlib.suppress(Exception):
                 await bot._tg_call(
-                    placeholder.edit_text, glyph + "\n" + _lang_t(lang, "progress_thinking", sec=elapsed),
+                    placeholder.edit_text, glyph + " " + _lang_t(lang, "progress_thinking", sec=elapsed),
                     parse_mode=None, call_timeout=15.0,
                 )
             frame_idx += 1
@@ -284,7 +284,7 @@ async def _run_streaming_reply(
             placeholder = status.message
         else:
             placeholder = await bot._tg_call(
-                bot._answer_sender(message), _spinner_glyph(0) + "\n" + bot._t(message.chat.id, "progress_thinking", sec=0),
+                bot._answer_sender(message), _spinner_glyph(0) + " " + bot._t(message.chat.id, "progress_thinking", sec=0),
                 parse_mode=None, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
             )
         if placeholder is None:

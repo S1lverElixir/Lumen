@@ -11,19 +11,10 @@ from aiogram.types import Message
 from lumen_formatting import _is_table_separator, _md_to_html
 from lumen_lang import t as _lang_t
 
-# Индикатор Claude: три точки в почти горизонтальном треугольнике, которые
-# проворачиваются. Берём только базовые глифы из Geometric Shapes и ASCII:
-# математические ∴/⋰/∵ в системных шрифтах Telegram на части клиентов
-# рисуются квадратами. Позиции точек фиксированы, меняется только активная —
-# переходы без скачков раскладки. Последний кадр — горизонтальное положение.
-_NBSP = "\u00a0"
-_TRIO_FRAMES = (
-    f"{_NBSP}{_NBSP}●\n·{_NBSP}{_NBSP}{_NBSP}·",
-    f"{_NBSP}{_NBSP}·\n●{_NBSP}{_NBSP}{_NBSP}·",
-    f"{_NBSP}{_NBSP}·\n·{_NBSP}{_NBSP}{_NBSP}●",
-    # Горизонтальное положение: верхняя точка опускается в ряд, база не сдвигается.
-    f"\n·{_NBSP}·{_NBSP}·",
-)
+# Индикатор Claude: три точки в треугольнике, вращающиеся вокруг центра.
+# Одиночные глифы вместо ASCII-рисунка — не разъезжаются на пропорциональном
+# шрифте Telegram. ∴ — вершина вверху, ⋰/⋱ — наклонное положение, ∵ — внизу.
+_TRIO_FRAMES = ("∴", "⋰", "∵", "⋱")
 
 
 def _spinner_glyph(frame_idx: int) -> str:
@@ -199,16 +190,16 @@ class StatusMessage:
         glyph = _spinner_glyph(frame_idx)
         lines = list(self._done)
         if self._literal:
-            line = glyph + "\n" + self._literal
+            line = glyph + " " + self._literal
             if self._literal_timed:
                 elapsed = max(0, int(time.monotonic() - self._created))
                 line += " · " + _lang_t(self.lang, "progress_seconds", sec=elapsed)
             lines.append(line)
         elif self._timed:
             elapsed = max(0, int(time.monotonic() - self._phase_started))
-            lines.append(glyph + "\n" + _lang_t(self.lang, self._phrase_key, sec=elapsed))
+            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key, sec=elapsed))
         else:
-            lines.append(glyph + "\n" + _lang_t(self.lang, self._phrase_key))
+            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key))
         return "\n".join(lines)
 
     async def _tick(self) -> None:
