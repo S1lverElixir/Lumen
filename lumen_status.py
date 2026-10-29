@@ -1,4 +1,4 @@
-"""lumen_status.py — живой статус-плейсхолдер в духе Claude: анимированная искра, этапы, «Думал N с» и свёрнутый блок активности."""
+"""lumen_status.py — живой статус-плейсхолдер в духе Claude: анимированный индикатор, этапы, «Думал N с» и свёрнутый блок активности."""
 from __future__ import annotations
 
 import asyncio
@@ -11,9 +11,14 @@ from aiogram.types import Message
 from lumen_formatting import _is_table_separator, _md_to_html
 from lumen_lang import t as _lang_t
 
-# Искры как в Claude Code: кадры спиннера, а не точки. Первый кадр — яркая
-# искра, а не точка: статус должен сразу читаться как иконка, а не как буллет.
-_SPINNER_FRAMES = ("✻", "✽", "·", "✢", "✳", "✶")
+# Индикатор Claude: три точки в треугольнике, вращающиеся вокруг центра.
+# Одиночные глифы вместо ASCII-рисунка — не разъезжаются на пропорциональном
+# шрифте Telegram. ∴ — вершина вверху, ⋰/⋱ — наклонное положение, ∵ — внизу.
+_TRIO_FRAMES = ("∴", "⋰", "∵", "⋱")
+
+
+def _spinner_glyph(frame_idx: int) -> str:
+    return _TRIO_FRAMES[frame_idx % len(_TRIO_FRAMES)]
 # Страховка от утечки тикера, если обработчик упал между созданием статуса и
 # маршрутом: дольше этого статус сам себя останавливает.
 _STATUS_MAX_LIFETIME_SEC = 300.0
@@ -32,7 +37,7 @@ def thought_block(lang: str, sec: int, answer_md: str) -> tuple[str | None, str]
 
 
 class StatusMessage:
-    """Сообщение-статус: завершённые этапы + текущая фраза с искрой и таймером.
+    """Сообщение-статус: завершённые этапы + текущая фраза с анимированным индикатором и таймером.
     Все правки глотают ошибки: удалённое сообщение не должно ломать ответ."""
 
     def __init__(self, message: Message, lang: str):
@@ -94,7 +99,7 @@ class StatusMessage:
 
     @classmethod
     async def start_action(cls, reply_to: Message, lang: str, text: str) -> "StatusMessage | None":
-        """Статус действия (скачивание/генерация/озвучка): искра, фраза и живой
+        """Статус действия (скачивание/генерация/озвучка): индикатор, фраза и живой
         счётчик секунд, как у инструментов в Claude."""
         import bot
         status = cls(message=reply_to, lang=lang)
@@ -182,19 +187,19 @@ class StatusMessage:
         self._phase_started = time.monotonic()
 
     def _render(self, frame_idx: int) -> str:
-        spark = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
+        glyph = _spinner_glyph(frame_idx)
         lines = list(self._done)
         if self._literal:
-            line = spark + " " + self._literal
+            line = glyph + " " + self._literal
             if self._literal_timed:
                 elapsed = max(0, int(time.monotonic() - self._created))
                 line += " · " + _lang_t(self.lang, "progress_seconds", sec=elapsed)
             lines.append(line)
         elif self._timed:
             elapsed = max(0, int(time.monotonic() - self._phase_started))
-            lines.append(spark + " " + _lang_t(self.lang, self._phrase_key, sec=elapsed))
+            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key, sec=elapsed))
         else:
-            lines.append(spark + " " + _lang_t(self.lang, self._phrase_key))
+            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key))
         return "\n".join(lines)
 
     async def _tick(self) -> None:

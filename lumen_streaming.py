@@ -15,7 +15,7 @@ from aiogram.types import Message
 
 from lumen_formatting import _md_to_html, _split_text_chunks
 from lumen_lang import t as _lang_t
-from lumen_status import _SPINNER_FRAMES, thought_block
+from lumen_status import _spinner_glyph, thought_block
 from lumen_message_parse import _history_user_text
 from lumen_model_speed import (
     speed_key as _model_speed_key,
@@ -53,15 +53,15 @@ async def _tick_waiting_dots(placeholder: Message, *, started: float | None = No
         await bot._dots_sleep(bot._DOTS_START_AFTER_SEC)
         chat = getattr(placeholder, "chat", None)
         lang = bot._chat_lang(getattr(chat, "id", None))
-        # Первый кадр (✻) уже стоит в отправленном плейсхолдере: начинаем со
-        # второго, иначе 0.5с спустя искра «замирает» на том же символе.
+        # Первый кадр (∴) уже стоит в отправленном плейсхолдере: начинаем со
+        # второго, иначе 0.5с спустя индикатор «замирает» на том же символе.
         frame_idx = 1
         while True:
             elapsed = max(0, int(time.monotonic() - started))
-            spark = _SPINNER_FRAMES[frame_idx % len(_SPINNER_FRAMES)]
+            glyph = _spinner_glyph(frame_idx)
             with contextlib.suppress(Exception):
                 await bot._tg_call(
-                    placeholder.edit_text, spark + " " + _lang_t(lang, "progress_thinking", sec=elapsed),
+                    placeholder.edit_text, glyph + " " + _lang_t(lang, "progress_thinking", sec=elapsed),
                     parse_mode=None, call_timeout=15.0,
                 )
             frame_idx += 1
@@ -284,7 +284,7 @@ async def _run_streaming_reply(
             placeholder = status.message
         else:
             placeholder = await bot._tg_call(
-                bot._answer_sender(message), _SPINNER_FRAMES[0] + " " + bot._t(message.chat.id, "progress_thinking", sec=0),
+                bot._answer_sender(message), _spinner_glyph(0) + " " + bot._t(message.chat.id, "progress_thinking", sec=0),
                 parse_mode=None, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
             )
         if placeholder is None:
