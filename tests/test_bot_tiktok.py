@@ -360,6 +360,112 @@ def test_send_tiktok_music_generic_original_sound_with_only_video_author_suffix(
     assert artist == "videoposter"
 
 
+def test_tiktok_dsp_song_id_extracts_from_hydration_json():
+    # TikTok прячет tt2dsp.SongId в JSON страницы; по нему iTunes отдаёт трек.
+    from lumen_tiktok import _extract_tt2dsp_song_id
+    html = (
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+        '{"__DEFAULT_SCOPE__":{"music":{"tt2dsp":{"tt_to_dsp_song_infos":[{"SongId":"1651938613"}]}}}}'
+        '</script>'
+    )
+    assert _extract_tt2dsp_song_id(html) == "1651938613"
+    assert _extract_tt2dsp_song_id("<html></html>") is None
+
+
+def test_fetch_dsp_track_metadata_resolves_real_title_artist_cover():
+    # Прод 28.10.2026: коммерческий звук TikWM называл "original sound - хендл".
+    # Цепочка TikTok tt2dsp → iTunes Lookup даёт "Dont Sleep (Interlude)" / Philos.
+    import lumen_tiktok
+
+    class _Resp:
+        def __init__(self, status, body):
+            self.status = status
+            self._body = body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def text(self, errors=None):
+            return self._body
+
+    class _Session:
+        def __init__(self):
+            self.page = (
+                '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+                '{"music":{"tt2dsp":{"tt_to_dsp_song_infos":[{"SongId":"1651938613"}]}}}'
+                '</script>'
+            )
+            self.lookup = (
+                '{"resultCount":1,"results":[{"trackName":"Dont Sleep (Interlude)",'
+                '"artistName":"Philos","artworkUrl100":'
+                '"https://is1-ssl.mzstatic.com/image/thumb/x/100x100bb.jpg"}]}'
+            )
+
+        def get(self, url, **kwargs):
+            if "itunes.apple.com" in url:
+                return _Resp(200, self.lookup)
+            return _Resp(200, self.page)
+
+    original_cache = dict(lumen_tiktok._DSP_TRACK_CACHE)
+    original_disabled = lumen_tiktok._DSP_DISABLED_UNTIL
+    lumen_tiktok._DSP_TRACK_CACHE.clear()
+    lumen_tiktok._DSP_DISABLED_UNTIL = 0.0
+    try:
+        media_data = {
+            "id": "7701400021572308244",
+            "author": {"unique_id": "hhh31721"},
+            "music_info": {"id": "7701400070780586759"},
+        }
+        track = asyncio.run(lumen_tiktok._fetch_dsp_track_metadata(_Session(), media_data))
+        assert track["title"] == "Dont Sleep (Interlude)"
+        assert track["artist"] == "Philos"
+        assert "600x600bb" in track["cover"]
+    finally:
+        lumen_tiktok._DSP_TRACK_CACHE.clear()
+        lumen_tiktok._DSP_TRACK_CACHE.update(original_cache)
+        lumen_tiktok._DSP_DISABLED_UNTIL = original_disabled
+
+
+def test_send_tiktok_music_prefers_dsp_track_metadata(monkeypatch):
+    # Если DSP-метаданные найдены, они важнее полей TikWM.
+    import lumen_tiktok_flow
+
+    incoming = _FakeIncomingMessage(999601)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(language_code="ru")
+    sent = {}
+
+    class _AudioBot:
+        async def send_audio(self, **kwargs):
+            sent.update(kwargs)
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return b"fake-bytes"
+
+    async def fake_dsp(session, media_data):
+        return {"title": "Dont Sleep (Interlude)", "artist": "Philos", "cover": ""}
+
+    monkeypatch.setattr(lumen_tiktok_flow, "_fetch_dsp_track_metadata", fake_dsp)
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_write_mp3_tags", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "bot", _AudioBot())
+    media_data = {
+        "music": "https://example.com/sound.mp3",
+        "music_info": {"title": "original sound - hhh31721", "author": "Hhh"},
+        "author": {"nickname": "Hhh", "unique_id": "hhh31721"},
+    }
+    try:
+        asyncio.run(lumen_tiktok_flow._send_tiktok_music(None, media_data, incoming, "Hhh", {}))
+        assert sent.get("title") == "Dont Sleep (Interlude)"
+        assert sent.get("performer") == "Philos"
+    finally:
+        bot.chat_state.pop(999601, None)
+
+
 def test_send_tiktok_music_does_not_take_handle_tail_for_a_title():
     # Прод 28.10.2026: "original sound - hhh31721" + ник "Hhh" давали хвост
     # "31721" как название, а исполнителем — "Hhh". Полный хендл обязан

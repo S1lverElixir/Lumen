@@ -678,3 +678,130 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
         log.warning("[tiktok] GET resolution failed: %s", e)
 
     return url
+
+
+# ─────────────────── точные метаданные трека через DSP-идентификатор TikTok ───────────────────
+# TikTok кладёт в страницу видео tt2dsp.SongId — ID трека в Apple Music. По нему
+# бесплатный iTunes Lookup отдаёт настоящее название, исполнителя и обложку.
+# Это единственный доступный способ узнать трек для лицензированной музыки:
+# music_info у TikWM для таких звуков содержит только "original sound - хендл".
+_DSP_TRACK_CACHE: dict[str, dict[str, str] | None] = {}
+_DSP_DISABLED_UNTIL = 0.0
+_DSP_PAGE_TIMEOUT_SEC = 6.0
+_DSP_PAGE_UAS = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+)
+
+
+def _find_tt2dsp_song_id(obj: Any) -> str | None:
+    """Ищет SongId в tt2dsp любого уровня вложенности страницы TikTok."""
+    if isinstance(obj, dict):
+        infos = obj.get("tt_to_dsp_song_infos")
+        if isinstance(infos, list):
+            for info in infos:
+                if isinstance(info, dict) and info.get("SongId"):
+                    return str(info["SongId"])
+        for value in obj.values():
+            found = _find_tt2dsp_song_id(value)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for value in obj:
+            found = _find_tt2dsp_song_id(value)
+            if found:
+                return found
+    return None
+
+
+def _extract_tt2dsp_song_id(html: str) -> str | None:
+    match = re.search(
+        r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">(.*?)</script>',
+        html, re.S,
+    )
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(1))
+    except Exception:
+        return None
+    return _find_tt2dsp_song_id(data)
+
+
+async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, unique_id: str) -> str | None:
+    global _DSP_DISABLED_UNTIL
+    if not video_id or not unique_id or time.monotonic() < _DSP_DISABLED_UNTIL:
+        return None
+    url = f"https://www.tiktok.com/@{urllib.parse.quote(unique_id.lstrip('@'))}/video/{video_id}?lang=en"
+    for ua in _DSP_PAGE_UAS:
+        try:
+            async with session.get(
+                url,
+                headers={"User-Agent": ua, "Accept-Language": "en-US,en;q=0.9", "Referer": "https://www.google.com/"},
+                timeout=aiohttp.ClientTimeout(total=_DSP_PAGE_TIMEOUT_SEC),
+            ) as resp:
+                if resp.status != 200:
+                    continue
+                html = await resp.text(errors="ignore")
+            song_id = _extract_tt2dsp_song_id(html)
+            if song_id:
+                return song_id
+        except Exception as exc:
+            log.info("[tiktok-music] DSP page fetch failed (%s), trying next UA/fallback: %s", type(exc).__name__, exc)
+    # TikTok не отдал разметку (антибот/сеть): не долбим его на каждой загрузке.
+    _DSP_DISABLED_UNTIL = time.monotonic() + 300.0
+    log.warning("[tiktok-music] DSP metadata unavailable for 5 minutes (TikTok page unreachable), using TikWM fields.")
+    return None
+
+
+async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> dict[str, str] | None:
+    try:
+        async with session.get(
+            "https://itunes.apple.com/lookup",
+            params={"id": song_id, "entity": "song"},
+            timeout=aiohttp.ClientTimeout(total=6.0),
+        ) as resp:
+            if resp.status != 200:
+                return None
+            payload = json.loads(await resp.text(errors="ignore"))
+    except Exception as exc:
+        log.info("[tiktok-music] iTunes lookup failed: %s", exc)
+        return None
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or not results:
+        return None
+    track = results[0]
+    title = (track.get("trackName") or "").strip()
+    artist = (track.get("artistName") or "").strip()
+    if not title or not artist:
+        return None
+    artwork = track.get("artworkUrl600") or track.get("artworkUrl100") or ""
+    if artwork:
+        artwork = re.sub(r"/\d+x\d+bb\.", "/600x600bb.", artwork)
+    return {"title": title, "artist": artist, "cover": artwork}
+
+
+async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: dict) -> dict[str, str] | None:
+    """Точные метаданные лицензированного трека; None — оставляем поля TikWM."""
+    music_info = media_data.get("music_info") or {}
+    sound_id = str(music_info.get("id") or "")
+    if sound_id and sound_id in _DSP_TRACK_CACHE:
+        return _DSP_TRACK_CACHE[sound_id]
+    video_id = str(media_data.get("id") or "")
+    unique_id = (media_data.get("author") or {}).get("unique_id") or ""
+    if not video_id or not unique_id:
+        return None
+    song_id = await _tiktok_dsp_song_id(session, video_id, unique_id)
+    if not song_id:
+        if sound_id:
+            _DSP_TRACK_CACHE[sound_id] = None
+        return None
+    track = await _itunes_track(session, song_id)
+    if sound_id:
+        _DSP_TRACK_CACHE[sound_id] = track
+    if track:
+        log.info(
+            "[tiktok-music] DSP metadata: sound_id=%s song_id=%s title=%r artist=%r has_cover=%s",
+            sound_id, song_id, track["title"], track["artist"], bool(track.get("cover")),
+        )
+    return track

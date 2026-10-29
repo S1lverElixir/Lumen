@@ -31,6 +31,7 @@ from lumen_tiktok import (
     _write_file_sync,
     TikTokUserFacingError,
     _tiktok_music_page_id,
+    _fetch_dsp_track_metadata,
 )
 from lumen_status import StatusMessage
 
@@ -185,9 +186,23 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
                    )
                    cleaned_title, performer_name = performer_name, author_uniq_clean or author_nick or performer_name
 
+         # Точные метаданные лицензированного трека: TikTok → tt2dsp → iTunes.
+         # Без них для коммерческой музыки TikWM отдаёт "original sound - хендл"
+         # и аватарку вместо настоящего названия/исполнителя/обложки.
+         dsp_track = None
+         try:
+              dsp_track = await _fetch_dsp_track_metadata(session, media_data)
+         except Exception as dsp_exc:
+              log.info("[tiktok-music] DSP metadata lookup skipped: %s", dsp_exc)
+         if dsp_track:
+              cleaned_title = dsp_track["title"]
+              performer_name = dsp_track.get("artist") or performer_name
+
          # достаём обложку трека: только для превью, поэтому малый кап вместо
          # дефолтных 75МБ (аудит M6, 10.2026).
          cover_url = music_info.get("cover") or music_info.get("avatar") or media_data.get("author", {}).get("avatar")
+         if dsp_track and dsp_track.get("cover"):
+              cover_url = dsp_track["cover"]
          cover_bytes = None
          if cover_url:
               try:
