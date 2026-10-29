@@ -68,7 +68,7 @@ None of this is airtight except the input pre-filter. The goal is raising the ba
 
 ## TikTok downloader
 
-Downloads go through the public TikWM API (`tikwm.com`), no account or API key needed. The bot never re-encodes video or photos; bytes go to Telegram exactly as TikWM served them. Music tracks are the exception: MP3 tags are rewritten with mutagen before sending.
+Downloads go through the public TikWM API (`tikwm.com`), no account or API key needed. The bot never re-encodes video or photos; bytes go to Telegram exactly as TikWM served them. Music tracks are the exception: MP3 tags are rewritten with mutagen before sending. For licensed music, TikWM only exposes "original sound - handle" and the video author's avatar; the bot reads TikTok's DSP song id (`tt2dsp.SongId`) from the video page and resolves the real track title, artist and artwork through the free iTunes Lookup API. Artwork is downscaled to Telegram's 320×320 thumbnail limit with ffmpeg. If the TikTok page is unreachable, the bot falls back to the TikWM fields with a corrected original-sound label instead of inventing a title from the handle.
 
 - **Video quality**: requested with `&hd=1`; among the variants TikWM returns (`hdplay`/`play`/`wmplay`, each with a known byte size), the best one that fits Telegram's 50 MB upload limit is picked. If Telegram still rejects it as too large, the next lighter variant is tried automatically.
 - **Slideshows**: TikTok allows up to 35 slides per post; Telegram's `sendMediaGroup` caps out at 10 items per call. The bot downloads the whole post in parallel and sends it as several media groups in sequence, never with a trailing group of exactly one item (Telegram requires 2–10 per group).
