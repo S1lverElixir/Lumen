@@ -466,6 +466,50 @@ def test_send_tiktok_music_prefers_dsp_track_metadata(monkeypatch):
         bot.chat_state.pop(999601, None)
 
 
+def test_tiktok_dsp_no_song_id_does_not_disable_future_lookups():
+    # Прод 29.10.2026: валидная страница без tt2dsp (оригинальный звук) ставила
+    # общий пятиминутный кулдаун и лишала следующие лицензированные треки
+    # метаданных. Кулдаун — только когда страницу вообще не отдали.
+    import lumen_tiktok as lt
+
+    class _Resp:
+        status = 200
+
+        def __init__(self, body):
+            self._body = body
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def text(self, errors=None):
+            return self._body
+
+    class _Session:
+        def __init__(self, body):
+            self._body = body
+
+        def get(self, url, **kwargs):
+            return _Resp(self._body)
+
+    valid_no_song = (
+        '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+        '{"music":{}}</script>'
+    )
+    old_disabled = lt._DSP_DISABLED_UNTIL
+    lt._DSP_DISABLED_UNTIL = 0.0
+    try:
+        assert asyncio.run(lt._tiktok_dsp_song_id(_Session(valid_no_song), "1", "user")) is None
+        assert lt._DSP_DISABLED_UNTIL == 0.0
+        # Антибот-заглушка без hydration — вот это настоящий сбой, кулдаун уместен.
+        assert asyncio.run(lt._tiktok_dsp_song_id(_Session("<html>challenge</html>"), "2", "user")) is None
+        assert lt._DSP_DISABLED_UNTIL > 0.0
+    finally:
+        lt._DSP_DISABLED_UNTIL = old_disabled
+
+
 def test_send_tiktok_music_does_not_take_handle_tail_for_a_title():
     # Прод 28.10.2026: "original sound - hhh31721" + ник "Hhh" давали хвост
     # "31721" как название, а исполнителем — "Hhh". Полный хендл обязан

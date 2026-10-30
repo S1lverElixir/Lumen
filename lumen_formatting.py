@@ -33,6 +33,8 @@ _TABLE_SEP_MAX_LEN = 500
 
 def _is_table_separator(line: str) -> bool:
     """Строка-разделитель markdown-таблицы с bounded match."""
+    if "-" not in line:
+        return False
     return _TABLE_SEP_RE.match(line[:_TABLE_SEP_MAX_LEN]) is not None
 
 def _split_table_cells(line: str) -> list[str]:

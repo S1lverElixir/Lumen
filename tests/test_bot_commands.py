@@ -636,6 +636,32 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_inline_draw_caps_single_attempt_timeout(monkeypatch):
+    # Аудит 29.10.2026: одна зависшая модель получала все 120 с бюджета и
+    # лишала шанса резервные. Таймаут одной попытки ограничен 40 с.
+    captured = {}
+
+    async def fake_image(session, model_id, prompt, timeout_sec=None):
+        captured["timeout"] = timeout_sec
+        return b"\x89PNG fake bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_image)
+    monkeypatch.setattr(bot, "DRAW_TOTAL_BUDGET_SEC", 120)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(999431)
+    incoming.message_id = 1
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        assert captured["timeout"] is not None
+        assert captured["timeout"] <= 40
+    finally:
+        bot.chat_state.pop(999431, None)
+
+
 def test_inline_draw_refuses_when_user_total_limit_exhausted(monkeypatch):
     # /draw без дневного лимита обходился: исчерпанный total — отказ до генерации.
     from types import SimpleNamespace

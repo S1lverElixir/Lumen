@@ -129,9 +129,10 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
         if i > 0:
             # Пауза между кусками — против флуд-контроля за серию подряд.
             await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
-        if parse_html:
+        if parse_html and bot.RICH_MESSAGES_ENABLED:
             # Сначала рич (таблицы/заголовки/математика), при любом неуспехе —
             # обычный HTML-путь ниже. Reply threading — только у первого чанка.
+            # При выключенном риче не тратим время на конвертацию (0.3-0.7 мс/чанк).
             rich_res = await bot._try_send_rich(message, _md_to_rich_html(chunk), is_first_chunk=(i == 0), **chunk_kwargs)
             if rich_res is not None:
                 continue
@@ -182,7 +183,7 @@ async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -
         return False
     try:
         # Порядок: рич → HTML → голый текст; таблицы видны только через рич.
-        if await bot._try_edit_rich(msg, _md_to_rich_html(text), **kwargs):
+        if bot.RICH_MESSAGES_ENABLED and await bot._try_edit_rich(msg, _md_to_rich_html(text), **kwargs):
             return True
         kwargs.setdefault("parse_mode", ParseMode.HTML)
         res = await bot._tg_call(msg.edit_text, _md_to_html(text), **kwargs)

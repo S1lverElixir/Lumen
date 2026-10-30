@@ -112,9 +112,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
                         await status_obj.set_action_key("status_taking_longer")
                     else:
                         await bot._edit_message_quietly(status, bot._t(message.chat.id, "status_taking_longer"))
-                # Таймаут попытки — остаток общего бюджета: зависшая модель не
-                # переживает дедлайн цепочки.
-                attempt_timeout = max(1.0, deadline - time.monotonic())
+                # Таймаут попытки — не больше остатка бюджета и не больше 40 с:
+                # одна зависшая модель не должна съедать все 120 с и лишать
+                # шанса резервные (аудит 29.10.2026).
+                attempt_timeout = max(1.0, min(40.0, deadline - time.monotonic()))
                 image_bytes = await bot._pollinations_text_to_image(session, attempt_model, prompt, timeout_sec=attempt_timeout)
                 break
             except Exception as exc:

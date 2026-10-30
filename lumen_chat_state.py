@@ -663,10 +663,16 @@ async def _flush_dirty_state_once() -> None:
         if _pending_chat_deletions:
             to_delete = list(_pending_chat_deletions)
             _pending_chat_deletions.clear()
-            del_results = await asyncio.gather(
-                *(bot._delete_chat_storage_limited(cid) for cid in to_delete),
-                return_exceptions=True,
-            )
+            try:
+                del_results = await asyncio.gather(
+                    *(bot._delete_chat_storage_limited(cid) for cid in to_delete),
+                    return_exceptions=True,
+                )
+            except asyncio.CancelledError:
+                # Отмена флаша не должна терять очередь удалений: id уже сняты
+                # с набора, вернуть их до выхода (аудит 29.10.2026).
+                _pending_chat_deletions.update(to_delete)
+                raise
             # Неудавшиеся id возвращаются в очередь для повтора, а не теряются при 5xx/429 Upstash.
             failed_deletes = {cid for cid, res in zip(to_delete, del_results) if res is not True}
             if failed_deletes:
@@ -686,10 +692,16 @@ async def _flush_dirty_state_once() -> None:
             # Каждый чат — свой независимый write; если один упадёт, это не
             # заденет сохранение остальных чатов из этой же пачки.
             attempted_ids = [cid for cid in to_save if cid in chat_state]
-            save_results = await asyncio.gather(
-                *(bot._save_chat_to_storage_limited(cid, chat_state[cid]) for cid in attempted_ids),
-                return_exceptions=True,
-            )
+            try:
+                save_results = await asyncio.gather(
+                    *(bot._save_chat_to_storage_limited(cid, chat_state[cid]) for cid in attempted_ids),
+                    return_exceptions=True,
+                )
+            except asyncio.CancelledError:
+                # Отмена (shutdown/рестарт) не должна терять грязные чаты:
+                # id уже сняты с набора — возвращаем до выхода (аудит 29.10.2026).
+                _dirty_chat_ids.update(attempted_ids)
+                raise
             # Неудавшиеся id возвращаются в грязные для повтора, а не теряются при 5xx/429 Upstash.
             failed_ids = {cid for cid, res in zip(attempted_ids, save_results) if res is not True}
             if failed_ids:

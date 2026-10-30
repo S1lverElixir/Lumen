@@ -4,6 +4,7 @@ lumen_tiktok_flow.py — оркестрация TikTok-загрузок (муз�
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -111,6 +112,9 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
     if not music_url:
          return
 
+    # DSP-метаданные (TikTok → iTunes) не зависят от mp3: запускаем параллельно
+    # со скачиванием, чтобы не добавлять 1-6 с после него (аудит 29.10.2026).
+    dsp_task = asyncio.create_task(_fetch_dsp_track_metadata(session, media_data))
     try:
          async with bot._media_download_slot():
               music_bytes = await bot._download_url_bin(session, music_url, headers=headers)
@@ -191,7 +195,7 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          # и аватарку вместо настоящего названия/исполнителя/обложки.
          dsp_track = None
          try:
-              dsp_track = await _fetch_dsp_track_metadata(session, media_data)
+              dsp_track = await dsp_task
          except Exception as dsp_exc:
               log.info("[tiktok-music] DSP metadata lookup skipped: %s", dsp_exc)
          if dsp_track:
@@ -271,6 +275,12 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
                    raise RuntimeError("Telegram send_audio failed: connection timeout or proxy unavailable")
     except Exception as e:
          log.warning("[tiktok] failed to send music: %s", e)
+    finally:
+         # Ранний выход/исключение не должны оставлять DSP-запрос в фоне.
+         with contextlib.suppress(asyncio.CancelledError, Exception):
+              if not dsp_task.done():
+                   dsp_task.cancel()
+              await dsp_task
 
 async def handle_tiktok_sound(message: Message, status: Message | None) -> None:
     """Ссылка на страницу звука TikTok (не видео) — см. комментарий выше по файлу:

@@ -16,6 +16,10 @@ import tempfile
 os.environ.setdefault("BOT_LOG_PATH", os.path.join(tempfile.gettempdir(), "lumen_test_bot.log"))
 os.environ.setdefault("BOT_TOKEN", "test-token-not-real")
 os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
+# Провайдерские ключи — только пустые: иначе bot.py ниже подхватит .env
+# разработчика и тест сходит в живой API (сеть, чужая квота, нестабильность).
+for _provider_key in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY", "SENTRY_DSN"):
+    os.environ[_provider_key] = ""
 
 import copy
 import pytest

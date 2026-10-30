@@ -733,6 +733,7 @@ async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, uni
     if not video_id or not unique_id or time.monotonic() < _DSP_DISABLED_UNTIL:
         return None
     url = f"https://www.tiktok.com/@{urllib.parse.quote(unique_id.lstrip('@'))}/video/{video_id}?lang=en"
+    hydration_seen = False
     for ua in _DSP_PAGE_UAS:
         try:
             async with session.get(
@@ -743,11 +744,18 @@ async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, uni
                 if resp.status != 200:
                     continue
                 html = await resp.text(errors="ignore")
+            if '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"' in html:
+                hydration_seen = True
             song_id = _extract_tt2dsp_song_id(html)
             if song_id:
                 return song_id
         except Exception as exc:
             log.info("[tiktok-music] DSP page fetch failed (%s), trying next UA/fallback: %s", type(exc).__name__, exc)
+    if hydration_seen:
+        # Страница TikTok валидна, но DSP-трека в ней нет: это оригинальный
+        # звук. Не выключаем DSP на 5 минут для следующих лицензированных
+        # треков (аудит 29.10.2026); этот sound_id уже закэширован как None.
+        return None
     # TikTok не отдал разметку (антибот/сеть): не долбим его на каждой загрузке.
     _DSP_DISABLED_UNTIL = time.monotonic() + 300.0
     log.warning("[tiktok-music] DSP metadata unavailable for 5 minutes (TikTok page unreachable), using TikWM fields.")

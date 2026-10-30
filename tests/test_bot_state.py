@@ -459,6 +459,39 @@ def test_flush_keeps_dirty_flag_when_mutated_during_write():
     _run_with_blocking_save("_quota_dirty", "_save_quota_payload", lumen_chat_state.mark_quota_dirty)
 
 
+def test_flush_cancel_requeues_dirty_chats():
+    # Аудит 29.10.2026: флаш снимал чаты с очереди до await; отмена (shutdown)
+    # теряла их без записи. Теперь id возвращаются в очередь.
+    import lumen_chat_state as lcs
+    cid = 999712
+    bot._dirty_chat_ids.clear()
+    bot._pending_chat_deletions.clear()
+    lcs._state_load_failed = False
+    bot.get_state(cid)
+    lcs._dirty_chat_ids.add(cid)
+    gate = asyncio.Event()
+
+    async def hanging_save(_cid, _state):
+        await gate.wait()
+        return True
+
+    async def scenario():
+        task = asyncio.create_task(lcs._flush_dirty_state_once())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cid in lcs._dirty_chat_ids
+
+    try:
+        with patch("bot._save_chat_to_storage_limited", hanging_save):
+            asyncio.run(scenario())
+    finally:
+        gate.set()
+        bot.chat_state.pop(cid, None)
+        lcs._dirty_chat_ids.discard(cid)
+
+
 def test_load_state_falls_back_to_legacy_blob_on_corrupt_index():
     # Внешний аудит: битый индекс обнулял восстановление, хотя per-chat файлы целы.
     import json
