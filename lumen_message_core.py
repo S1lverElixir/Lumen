@@ -658,6 +658,16 @@ async def _handle_message_core(
             await bot._send_pick_question(message, pick_scenario, clean_prompt)
             return
 
+    # «Печатает…» показываем сразу, ДО скачивания вложения и транскрибации:
+    # иначе видео на 20 МБ несколько секунд выглядело как молчание (аудит 29.10.2026).
+    # Не ждём ответа: круг к Telegram не должен задерживать модель.
+    if not is_guest:
+        async def _send_typing() -> None:
+            with contextlib.suppress(Exception):
+                await bot.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+
+        bot._track_inflight_task(asyncio.create_task(_send_typing()))
+
     media_too_big_mb = 0
     try:
         med_name, media_tuple = await bot._resolve_incoming_media(
@@ -717,16 +727,6 @@ async def _handle_message_core(
          if mentioned:
               await bot._tg_call(message.reply, bot._t(message.chat.id, "status_listening"))
          return
-
-    # Отправка typing экшена (bot.bot — инстанс aiogram Bot, не модуль).
-    # Не ждём ответа: это отдельный круг к Telegram через прокси, и вызов
-    # модели стартовал бы на 0.1-0.3с позже. Индикатор косметический.
-    if not is_guest:
-        async def _send_typing() -> None:
-            with contextlib.suppress(Exception):
-                await bot.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-
-        bot._track_inflight_task(asyncio.create_task(_send_typing()))
 
     media_mime = media_tuple[1] if media_tuple else None
     # Смешанный альбом (фото + видео-слайды): достаточно одного видео — весь набор едет

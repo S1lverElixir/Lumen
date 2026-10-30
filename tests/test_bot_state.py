@@ -1680,6 +1680,26 @@ def test_message_core_sends_typing_indicator(rate_guard_setup, monkeypatch):
     fake_bot.send_chat_action.assert_awaited_once_with(chat_id=123, action="typing")
 
 
+def test_typing_starts_before_media_download(rate_guard_setup, monkeypatch):
+    # Аудит 29.10.2026: "печатает" уходил только после скачивания вложения —
+    # большое видео несколько секунд выглядело как молчание.
+    message = rate_guard_setup()
+    message.text = "что на фото?"
+    fake_bot = SimpleNamespace(send_chat_action=AsyncMock())
+    monkeypatch.setattr(bot, "bot", fake_bot)
+    seen = {}
+
+    async def resolve(*args, **kwargs):
+        for _ in range(3):
+            await asyncio.sleep(0)
+        seen["typing_before_download"] = fake_bot.send_chat_action.await_count
+        return "", None
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", resolve)
+    _run_core_capturing_prompt(message, monkeypatch)
+    assert seen.get("typing_before_download") == 1
+
+
 def test_message_core_does_not_wait_for_typing_before_model(rate_guard_setup, monkeypatch):
     # Что защищает: вызов модели не ждёт сетевого ответа на "печатает".
     # Регрессия: вернуть await перед send_chat_action — модель стартует на один

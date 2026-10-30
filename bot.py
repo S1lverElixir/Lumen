@@ -1611,17 +1611,28 @@ async def _webhook_startup() -> None:
             }
             for code, cmds in localized_commands
         ]
-        commands_ok = False
-        for cmd_payload in cmd_payloads:
-            try:
+        # 24 локали последовательно — это 5-12 с холодного старта через прокси.
+        # Регистрируем с ограниченной параллельностью: меню не влияет на ответы,
+        # но не хочется упираться в flood-контроль Telegram.
+        _commands_sem = asyncio.Semaphore(4)
+
+        async def _register_commands(cmd_payload: dict) -> None:
+            async with _commands_sem:
                 await asyncio.wait_for(
                     telegram_api_call("setMyCommands", cmd_payload, request_timeout=15.0),
-                    timeout=18.0
+                    timeout=18.0,
                 )
+
+        results = await asyncio.gather(
+            *(_register_commands(payload) for payload in cmd_payloads),
+            return_exceptions=True,
+        )
+        commands_ok = False
+        for cmd_payload, result in zip(cmd_payloads, results):
+            if isinstance(result, BaseException):
+                log.warning("[webhook] setMyCommands failed (%s): %s", cmd_payload.get("language_code", "default"), result)
+            else:
                 commands_ok = True
-            except Exception as exc:
-                log.warning("[webhook] setMyCommands failed (%s): %s", cmd_payload.get("language_code", "default"), exc)
-        # for-else без break врал бы об успехе при провале всех языков.
         if commands_ok:
             log.info("[webhook] Bot commands set successfully.")
         else:
