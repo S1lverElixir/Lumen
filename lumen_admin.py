@@ -185,15 +185,17 @@ async def webhook_handler(request: Request) -> Any:
                 return {"ok": False}
             chunks.append(chunk)
         body = _json.loads(b"".join(chunks))
+        if bot.bot is None:
+            # 503 вместо 200: пусть Telegram повторит апдейт, а не считает дроп
+            # успехом. Проверяем ДО дедупликации: иначе update_id помечается
+            # обработанным, а повтор приходит как duplicate и теряется
+            # (аудит 29.10.2026).
+            log.warning("[webhook] Bot not initialized yet, asking Telegram to retry")
+            return JSONResponse(status_code=503, content={"ok": False, "retry": True})
         if isinstance(body, dict) and _is_duplicate_update(body.get("update_id")):
             log.info("[webhook] Duplicate update_id %s ignored", body.get("update_id"))
             return {"ok": True}
-        if bot.bot is not None:
-            bot._track_inflight_task(asyncio.create_task(bot._process_raw_update(body)))
-        else:
-            # 503 вместо 200: пусть Telegram повторит апдейт, а не считает дроп успехом (AUD-E-003).
-            log.warning("[webhook] Bot not initialized yet, asking Telegram to retry")
-            return JSONResponse(status_code=503, content={"ok": False, "retry": True})
+        bot._track_inflight_task(asyncio.create_task(bot._process_raw_update(body)))
     except Exception as exc:
         log.warning("[webhook] Failed to process incoming update: %s", exc, exc_info=True)
         # Битое тело — не успех: пусть Telegram повторит, а не считает дроп

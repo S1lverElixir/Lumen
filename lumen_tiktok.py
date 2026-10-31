@@ -169,6 +169,12 @@ async def _tikwm_throttle() -> None:
 TIKWM_JSON_MAX_BYTES = 1 * 1024 * 1024
 
 
+def _log_safe_url(url: str) -> str:
+    """URL без query/fragment: в ?url= лежит ссылка пользователя, её нельзя писать в общий лог."""
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
 async def _read_capped_body(resp: aiohttp.ClientResponse, url: str, *, cap_bytes: int | None = None) -> bytes | None:
     # JSON TikWM обязан быть маленьким: читаем с тем же капом, что бинарные
     # скачивания, иначе скомпрометированный прокси льёт в память без края.
@@ -177,7 +183,7 @@ async def _read_capped_body(resp: aiohttp.ClientResponse, url: str, *, cap_bytes
     if content_length is not None:
         try:
             if int(content_length) > cap:
-                log.warning("[tikwm] Refusing %s: Content-Length %s exceeds the %d byte cap.", url, content_length, cap)
+                log.warning("[tikwm] Refusing %s: Content-Length %s exceeds the %d byte cap.", _log_safe_url(url), content_length, cap)
                 return None
         except ValueError:
             pass
@@ -186,7 +192,7 @@ async def _read_capped_body(resp: aiohttp.ClientResponse, url: str, *, cap_bytes
     async for chunk in resp.content.iter_chunked(65536):
         total += len(chunk)
         if total > cap:
-            log.warning("[tikwm] Aborting %s: exceeded the %d byte cap mid-stream.", url, cap)
+            log.warning("[tikwm] Aborting %s: exceeded the %d byte cap mid-stream.", _log_safe_url(url), cap)
             return None
         chunks.append(chunk)
     return b"".join(chunks)
@@ -230,12 +236,12 @@ async def _fetch_tikwm_media_data(
                         try:
                             res = json.loads(raw_body.decode("utf-8"))
                         except Exception as e:
-                            log.warning("[tikwm] Endpoint %s returned undecodable JSON: %s", api_url, e)
+                            log.warning("[tikwm] Endpoint %s returned undecodable JSON: %s", _log_safe_url(api_url), e)
                             continue
                         if res.get("code") == 0 and isinstance(res.get("data"), dict):
-                            log.info("[tikwm] Successfully fetched media data from %s", api_url)
+                            log.info("[tikwm] Successfully fetched media data from %s", _log_safe_url(api_url))
                             return res.get("data")
-                        log.warning("[tikwm] Endpoint %s returned code %s: %s", api_url, res.get("code"), res.get("msg"))
+                        log.warning("[tikwm] Endpoint %s returned code %s: %s", _log_safe_url(api_url), res.get("code"), res.get("msg"))
                     else:
                         raw_error = await _read_capped_body(r, api_url, cap_bytes=TIKWM_JSON_MAX_BYTES)
                         body = raw_error if raw_error is not None else b""
@@ -243,10 +249,10 @@ async def _fetch_tikwm_media_data(
                             saw_403 = True
                         if r.status != 403 or body:
                             all_attempts_403_empty = False
-                        log.warning("[tikwm] Endpoint %s returned status %s: %r", api_url, r.status, body[:300])
+                        log.warning("[tikwm] Endpoint %s returned status %s: %r", _log_safe_url(api_url), r.status, body[:300])
             except Exception as e:
                 all_attempts_403_empty = False
-                log.warning("[tikwm] Request failed for endpoint %s: %s", api_url, e)
+                log.warning("[tikwm] Request failed for endpoint %s: %s", _log_safe_url(api_url), e)
         if not saw_403 or retry_round == 1:
             break
         log.warning(

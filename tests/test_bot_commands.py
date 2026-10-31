@@ -1184,6 +1184,17 @@ def test_start_text_examples_cover_every_language():
         assert lumen_lang.t(lang, "start_text").endswith(examples)
 
 
+def test_pick_templates_have_no_foreign_cyrillic_letters():
+    # Аудит 29.10.2026: в персидском шаблоне жанра затесалась кириллическая «р».
+    # Проверяем RTL-языки, где кириллицы быть не должно.
+    import re
+    import lumen_lang
+    for lang in ("ar", "fa", "ur"):
+        for scenario, rec in lumen_lang.PICK_TABLE[lang].items():
+            text = " ".join([str(rec.get("q") or ""), str(rec.get("tpl") or ""), *map(str, rec.get("opts") or [])])
+            assert not re.search(r"[Ѐ-ӿ]", text), f"{lang}/{scenario}: {text}"
+
+
 def test_lang_table_covers_all_keys_in_all_languages():
     import lumen_lang
     assert tuple(lumen_lang.SUPPORTED_LANGS) == tuple(sorted(lumen_lang.SUPPORTED_LANGS))

@@ -466,6 +466,9 @@ def test_webhook_handler_returns_503_when_inflight_full(monkeypatch):
         result = asyncio.run(_run_webhook_handler(req))
         assert result.status_code == 503
         assert calls == []
+        # 503 не должен помечать update_id обработанным, иначе повтор потеряется.
+        import lumen_admin
+        assert 1 not in lumen_admin._seen_update_id_set
     finally:
         bot.WEBHOOK_SECRET = original_secret
         bot.bot = original_bot_obj

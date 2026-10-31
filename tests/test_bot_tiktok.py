@@ -466,6 +466,12 @@ def test_send_tiktok_music_prefers_dsp_track_metadata(monkeypatch):
         bot.chat_state.pop(999601, None)
 
 
+def test_log_safe_url_strips_user_query():
+    # Прод 29.10.2026: в INFO-логи попадала полная ссылка пользователя через ?url=.
+    from lumen_tiktok import _log_safe_url
+    assert _log_safe_url("https://www.tikwm.com/api/?url=https%3A//vt.tiktok.com/secret&hd=1") == "https://www.tikwm.com/api/"
+
+
 def test_tiktok_dsp_no_song_id_does_not_disable_future_lookups():
     # Прод 29.10.2026: валидная страница без tt2dsp (оригинальный звук) ставила
     # общий пятиминутный кулдаун и лишала следующие лицензированные треки

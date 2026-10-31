@@ -1827,6 +1827,12 @@ def test_looks_like_media_reference_no_false_positive_on_common_words():
     assert bot._looks_like_media_reference("раньше было по-другому") is False
     assert bot._looks_like_media_reference("покажи пример кода") is False
     assert bot._looks_like_media_reference("до этого мы говорили про политику") is False
+    # Аудит 29.10.2026: составные слова с медиа-корнем — не запрос вложения.
+    assert bot._looks_like_media_reference("объясни фотосинтез") is False
+    assert bot._looks_like_media_reference("как работает видеокарта") is False
+    assert bot._looks_like_media_reference("посоветуй аудиокнигу") is False
+    assert bot._looks_like_media_reference("что такое документация") is False
+    assert bot._looks_like_media_reference("как устроена файловая система") is False
 
 
 def test_media_reference_category_detects_each_type():
