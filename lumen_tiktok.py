@@ -131,7 +131,14 @@ def _tiktok_video_candidates(media_data: dict) -> list[dict[str, Any]]:
             # Склейка давала userinfo-путаницу ("@evil.com/x" ехал хостом):
             # только относительный путь к базовому хосту.
             raw_url = urllib.parse.urljoin("https://www.tikwm.com/", raw_url)
-        if urllib.parse.urlsplit(raw_url).scheme.lower() not in ("http", "https"):
+        try:
+            scheme = urllib.parse.urlsplit(raw_url).scheme.lower()
+        except ValueError:
+            # urlsplit падает на "]" в хосте: ссылка из чужого JSON — пропускаем один
+            # вариант качества, а не весь пост (аудит 01.11.2026).
+            log.warning("[tiktok] Skipping unparsable URL for %s.", url_key)
+            continue
+        if scheme not in ("http", "https"):
             log.warning("[tiktok] Skipping non-HTTP(S) URL for %s: %r.", url_key, raw_url)
             continue
         try:
@@ -412,12 +419,20 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
         log.warning("[download] Refusing non-string URL %r.", url)
         return None
     cap = cap_bytes if cap_bytes is not None else TIKTOK_DOWNLOAD_MAX_BYTES
-    scheme = urllib.parse.urlsplit(url).scheme.lower()
-    if scheme not in ("http", "https"):
-        log.warning("[download] Refusing non-HTTP(S) URL (scheme=%r).", scheme)
+    # Разбор — ВНУТРИ защиты: urlsplit бросает ValueError на адресе с "]" в хосте
+    # ("https://p16]x.com/v.mp4"), а такие ссылки приходят из чужого JSON. Без этого
+    # один битый URL ронял весь пост (тот же класс, что и не-строка выше — аудит 01.11.2026).
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError as parse_exc:
+        log.warning("[download] Refusing unparsable URL: %s", parse_exc)
         return None
-    if not await asyncio.to_thread(_host_resolves_to_public, urllib.parse.urlsplit(url).hostname):
-        log.warning("[download] Refusing non-public host for URL %r.", url)
+    if parts.scheme.lower() not in ("http", "https"):
+        log.warning("[download] Refusing non-HTTP(S) URL (scheme=%r).", parts.scheme)
+        return None
+    if not await asyncio.to_thread(_host_resolves_to_public, parts.hostname):
+        # Подписанные ссылки (сигнатура в query) в общий лог не пишем — см. _log_safe_url.
+        log.warning("[download] Refusing non-public host for URL %s.", _log_safe_url(url))
         return None
     if headers is None:
         headers = {
@@ -451,7 +466,7 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
                 if content_length is not None:
                     try:
                         if int(content_length) > cap:
-                            log.warning("[download] Refusing to download %s: Content-Length %s exceeds the %d byte cap.", current_url, content_length, cap)
+                            log.warning("[download] Refusing to download %s: Content-Length %s exceeds the %d byte cap.", _log_safe_url(current_url), content_length, cap)
                             return None
                     except ValueError:
                         pass
@@ -460,14 +475,16 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
                 async for chunk in resp.content.iter_chunked(65536):
                     total += len(chunk)
                     if total > cap:
-                        log.warning("[download] Aborting download of %s: exceeded the %d byte cap mid-stream.", current_url, cap)
+                        log.warning("[download] Aborting download of %s: exceeded the %d byte cap mid-stream.", _log_safe_url(current_url), cap)
                         return None
                     chunks.append(chunk)
                 return b"".join(chunks)
-        log.warning("[download] Too many redirects for %r.", url)
+        log.warning("[download] Too many redirects for %s.", _log_safe_url(url))
         return None
     except Exception as e:
-        log.warning("[download] Failed to download URL: %s", e)
+        # Ссылку — без подписи (см. _log_safe_url): текст исключения aiohttp иногда
+        # содержит URL целиком.
+        log.warning("[download] Failed to download %s: %s", _log_safe_url(url), e)
     return None
 
 

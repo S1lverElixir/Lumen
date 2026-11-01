@@ -497,7 +497,10 @@ TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 # источник правды; дубль здесь был мёртвым — аудит 26.09.2026).
 TIKTOK_SLIDESHOW_MAX_ITEMS = 35
 # Лимит ffprobe/ffmpeg-процессов: без него слайдшоу кладёт CPU контейнера (ревью 28.08.2026).
-TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = _env_number("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", 4, cast=int, min_value=1)
+# 2 слота, а не 4: живой слайд держит в слоте ДВА процесса параллельно
+# (ffprobe + ffmpeg в _probe_and_thumbnail_from_path), иначе потолок = 8 процессов
+# на двух ядрах Space плюс временный файл до 50 МБ на каждый (аудит 01.11.2026).
+TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = _env_number("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", 2, cast=int, min_value=1)
 _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
 # Лимит скачивания слайдов 8: 35 слайдов иначе занимают весь пул сессии (limit=40) и стопорят другие чаты (аудит 04.09.2026).
 TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = _env_number("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", 8, cast=int, min_value=1)

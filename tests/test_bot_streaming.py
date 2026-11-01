@@ -811,6 +811,48 @@ def test_streaming_final_split_sends_missing_continuation(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
+def test_streaming_resplit_shifted_boundary_re_edits_shown_message(monkeypatch):
+    # Границы _split_text_chunks зависят от всего текста (соседние куски склеиваются
+    # по итоговому HTML), поэтому рост ответа сдвигает границу УЖЕ показанного куска.
+    # Старый код финализированные сообщения не трогал, и символы между старой и новой
+    # границей не попадали в чат вовсе (аудит 01.11.2026).
+    from lumen_formatting import _md_to_html, _split_text_chunks
+
+    chat_id = 999326
+    base = "Линия **bold** текст. " * 150 + "\n\n" + "y" * 300 + "\n\n" + "z" * 300
+    tail = "И ещё немного текста, который дописала модель. "
+
+    class _RecordingBot:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, **kwargs):
+            message = _FakeSentMessage()
+            self.sent.append((kwargs, message))
+            return message
+
+    monkeypatch.setattr(bot, "bot", _RecordingBot())
+
+    async def pieces():
+        yield base
+        yield tail * 5
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "длинный", incoming, provider="openrouter", model_id="y:free",
+            piece_agen=pieces(),
+        ))
+        final = _split_text_chunks(answer, bot.TG_MAX_LEN)
+        assert len(final) > 1
+        # На первой итерации разбиения границ был левее — иначе тест ничего не проверяет.
+        assert len(_split_text_chunks(base, bot.TG_MAX_LEN)[0]) < len(final[0])
+        shown_first = incoming.sent[0].edits[-1][0]
+        assert shown_first == _md_to_html(final[0])
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_streaming_stores_clean_history_text_not_full_prompt():
     # Аудит 28.10.2026: в историю уходил ai_prompt со сниппетами и датой;
     # сохраняем только чистый запрос пользователя.

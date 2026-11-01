@@ -313,7 +313,7 @@ def test_send_tiktok_music_filename_sanitizes_slashes_and_control_chars():
         "author": {"nickname": "N", "unique_id": "n"},
     }
 
-    async def fake_download(session, url, headers=None):
+    async def fake_download(session, url, headers=None, cap_bytes=None):
         return b"fake-bytes"
 
     fake_bot = _FakeAudioBot()
@@ -344,6 +344,20 @@ def test_send_tiktok_music_truly_generic_original_sound_uses_localized_label():
     # Исполнитель — автор ЗВУКА из music_info (прод 22.09.2026: звук переиспользуют чужие
     # посты, автор видео тут ни при чём).
     assert artist == "SomeArtist"
+
+
+def test_send_tiktok_music_survives_null_author_from_tikwm():
+    # "author": null в JSON TikWM (автор удалён/забанен): .get("author", {})
+    # возвращает None, а AttributeError от .get("nickname") глотался широким except —
+    # трек не приходил вообще, без единой подсказки (аудит 01.11.2026).
+    media_data = {
+        "music": "https://example.com/sound.mp3",
+        "music_info": {"title": "Night Drive", "author": "The Rings", "cover": ""},
+        "author": None,
+    }
+    title, artist = _run_send_tiktok_music(media_data, language_code="ru")
+    assert title == "Night Drive"
+    assert artist == "The Rings"
 
 
 def test_send_tiktok_music_generic_original_sound_with_only_video_author_suffix():
@@ -1412,7 +1426,7 @@ def test_send_tiktok_music_passes_audio_duration():
             sent.update(kwargs)
             return SimpleNamespace()
 
-    async def fake_download(session, url, headers=None):
+    async def fake_download(session, url, headers=None, cap_bytes=None):
         return b"fake-bytes"
 
     async def fake_probe(path):
@@ -1458,7 +1472,7 @@ def _run_music_capturing_audio(media_data, chat_id=999454):
             sent.update(kwargs)
             return SimpleNamespace()
 
-    async def fake_download(session, url, headers=None):
+    async def fake_download(session, url, headers=None, cap_bytes=None):
         return b"fake-bytes"
 
     def fake_write_tags(path, title, artist, cover):
@@ -2007,6 +2021,8 @@ def test_tiktok_video_candidates_rejects_userinfo_and_non_string():
     assert bot._tiktok_video_candidates({"play": "javascript:alert(1)", "size": 1}) == []
     assert bot._tiktok_video_candidates({"play": 12345, "size": 1}) == []
     assert bot._tiktok_video_candidates({"play": {"u": 1}, "size": 1}) == []
+    # Неразбираемый хост — пропускаем вариант качества, а не роняем пост (аудит 01.11.2026).
+    assert bot._tiktok_video_candidates({"play": "//a]b.com/v.mp4", "size": 1}) == []
 
 
 def test_download_url_bin_honors_caller_cap():
@@ -2021,6 +2037,9 @@ def test_download_url_bin_honors_caller_cap():
 def test_download_url_bin_rejects_non_string_url():
     # TikWM — чужой JSON: число или объект вместо ссылки раньше роняли urlsplit.
     assert asyncio.run(lumen_tiktok._download_url_bin(None, 123)) is None
+    # Строка тоже может быть неразбираемой: urlsplit бросает ValueError на "]" в
+    # хосте, и раньше одна такая ссылка роняла весь слайдшоу-пост (аудит 01.11.2026).
+    assert asyncio.run(lumen_tiktok._download_url_bin(None, "https://p16]x.com/v.mp4")) is None
 
 
 def test_slideshow_stops_at_post_budget(monkeypatch):

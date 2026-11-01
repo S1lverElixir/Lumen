@@ -105,7 +105,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `TIKTOK_DOWNLOAD_MAX_BYTES` | `75 MB` | Hard cap on any single downloaded TikTok file (video, slide, cover or music), aborted mid-stream if exceeded. |
 | `TIKTOK_SLIDESHOW_MAX_BYTES` | `200 MB` | Total RAM cap for one slideshow post; slides past it are skipped (a typical post is under 50 MB). |
 | `TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY` | `8` | Max slideshow slides downloaded in parallel; keeps one large post from hogging the shared HTTP connection pool. |
-| `TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY` | `4` | Max concurrent `ffprobe`/`ffmpeg` processes when probing "live" video slides in a slideshow. |
+| `TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY` | `2` | Max "live" video slides probed at once in a slideshow — each one runs `ffprobe` and `ffmpeg` in parallel, so the real process ceiling is twice this. |
 | `TIKTOK_GROUP_REQUIRE_MENTION` | `0` | Set to `1` so TikTok links in groups without addressing the bot are only recorded as background instead of downloaded. |
 
 ## Persistent storage
