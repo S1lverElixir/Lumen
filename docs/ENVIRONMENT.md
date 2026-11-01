@@ -138,6 +138,11 @@ These ceilings are fixed in code; change them only with a code edit:
 | `TIKWM_JSON_MAX_BYTES` | `1 MB` | Biggest accepted TikWM metadata body (not the 75 MB media cap). |
 | `MIN_PROXY_SECRET_LENGTH` | `32` | Shortest accepted proxy secret, enforced on both sides. |
 | `_TABLE_SEP_MAX_LEN` | `500` | Widest table-separator line passed to the separator regex. |
+| `_MAX_CHAT_LOCK_WAITERS` | `3` | Max messages of one chat that may wait for the per-chat lock at once; the rest get "busy" immediately so other chats are not starved. |
+| `TIKTOK_SLIDESHOW_MAX_ITEMS` | `35` | TikTok slides per post cap (Telegram sends 10 per media group). |
+| `MAX_TOTAL_MEMORY_MESSAGES` | `100` | Per-chat ceiling on stored history plus group background lines combined. |
+| `_ALBUM_EXTRA_MAX_BYTES` | `100 MB` | Cap on the combined size of extra files in a photo album. |
+| `_ALBUM_FETCH_CONCURRENCY` | `3` | Parallel downloads inside one album. |
 
 ## Observability
 
