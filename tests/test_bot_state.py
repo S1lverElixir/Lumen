@@ -861,6 +861,37 @@ def test_process_media_group_buffers_skips_download_when_rate_limited(monkeypatc
         bot.chat_state.pop(chat_id, None)
 
 
+def test_process_media_group_buffers_refused_when_chat_has_too_many_waiters(monkeypatch):
+    # Аудит 01.11.2026: альбомы шли в обход капа одновременно ждущих лок — пачка
+    # альбомов из одного чата занимала все in-flight слоты, и остальным чатам
+    # отвечали 503. Тот же кап, что у обычного сообщения, обязан действовать и здесь.
+    chat_id = 999967
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE),
+        from_user=SimpleNamespace(id=782),
+        media_group_id="mgcap", text=None, caption=None,
+    )
+    acquired = AsyncMock()
+    refused = AsyncMock()
+    monkeypatch.setattr(bot, "acquire_chat_lock", acquired)
+    monkeypatch.setattr(bot, "_answer_sender", lambda message: None)
+    monkeypatch.setattr(bot, "_tg_call", refused)
+    monkeypatch.setattr(bot, "_handle_message_core", AsyncMock())
+    bot._mg_buffers["mgcap"] = [msg]
+    bot._chat_lock_waiters[chat_id] = bot._MAX_CHAT_LOCK_WAITERS
+    try:
+        asyncio.run(bot._process_media_group_buffers("mgcap"))
+        assert acquired.await_count == 0
+        assert refused.await_count == 1
+        # Отказ не накрутил счётчик ожидающих.
+        assert bot._chat_lock_waiters[chat_id] == bot._MAX_CHAT_LOCK_WAITERS
+    finally:
+        bot._mg_buffers.pop("mgcap", None)
+        bot._mg_tasks.pop("mgcap", None)
+        bot._chat_lock_waiters.pop(chat_id, None)
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_process_media_group_buffers_checks_daily_total_before_downloading(monkeypatch):
     # Аудит 26.10.2026: extras альбома качались до отказа по общему дневному лимиту.
     chat_id = 999967

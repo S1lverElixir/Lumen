@@ -185,12 +185,17 @@ def format_snippets_for_prompt(snippets: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def _fetch_ddg_page(session: aiohttp.ClientSession, query: str, timeout: float) -> str:
-    budget = aiohttp.ClientTimeout(total=max(1.0, timeout))
-    async with session.post(_DDG_LITE_URL, data={"q": query}, headers=_SEARCH_HEADERS, timeout=budget) as resp:
+async def _fetch_ddg_page(session: aiohttp.ClientSession, query: str, deadline: float) -> str:
+    """POST, при не-200 GET — ОДИН бюджет на обе попытки, отсчитываемый от deadline.
+    Раньше каждая попытка получала полный timeout: DDG с висящим ответом съедал 2×
+    бюджета, и проверке остатка не оставалось времени на Bing/Google News
+    (аудит 01.11.2026)."""
+    post_timeout = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
+    async with session.post(_DDG_LITE_URL, data={"q": query}, headers=_SEARCH_HEADERS, timeout=post_timeout) as resp:
         if resp.status == 200:
             return await resp.text()
-    async with session.get(_DDG_LITE_URL, params={"q": query}, headers=_SEARCH_HEADERS, timeout=budget) as resp:
+    get_timeout = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
+    async with session.get(_DDG_LITE_URL, params={"q": query}, headers=_SEARCH_HEADERS, timeout=get_timeout) as resp:
         resp.raise_for_status()
         return await resp.text()
 
@@ -305,13 +310,14 @@ async def fetch_web_snippets(query: str, *, timeout_sec: float | None = None, ma
     diagnostics: dict[str, int] = {}
     try:
         async with _search_session() as session:
-            ddg_budget = max(1.0, min(4.0, deadline - time.monotonic()))
+            # DDG — не больше 4с и одна метка времени на обе попытки (см. _fetch_ddg_page).
+            ddg_deadline = time.monotonic() + max(1.0, min(4.0, deadline - time.monotonic()))
             if _looks_like_news_query(query):
                 # Новости: DDG и Google News параллельно. Google — первым в выдаче,
                 # потому что его сниппеты содержат дату публикации (прод 28.10.2026).
                 google_budget = max(1.0, deadline - time.monotonic())
                 page, google_result = await asyncio.gather(
-                    _fetch_ddg_page(session, query, ddg_budget),
+                    _fetch_ddg_page(session, query, ddg_deadline),
                     _google_news_snippets(session, query, google_budget, limit),
                     return_exceptions=True,
                 )
@@ -337,7 +343,7 @@ async def fetch_web_snippets(query: str, *, timeout_sec: float | None = None, ma
                 return []
             page = ""
             try:
-                page = await _fetch_ddg_page(session, query, ddg_budget)
+                page = await _fetch_ddg_page(session, query, ddg_deadline)
             except Exception as exc:
                 log.warning("[web-search] DuckDuckGo fetch failed (query_len=%d): %s", len(query), exc.__class__.__name__)
             ddg_items = parse_ddg_lite_html(page, limit) if page else []

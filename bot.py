@@ -1424,37 +1424,9 @@ async def _handle_message(message: Message) -> None:
         await _handle_message_core(message)
         return
 
-    remaining = _msg_remaining_sec()
-    lock_timeout = CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(CHAT_LOCK_TIMEOUT_SEC, remaining))
-    waiters = _chat_lock_waiters.get(chat_id, 0)
-    if waiters >= _MAX_CHAT_LOCK_WAITERS:
-        log.warning("[lock] Too many waiters for chat %s", chat_id)
-        with contextlib.suppress(Exception):
-            await _tg_call(_answer_sender(message), _t_no_create(chat_id, "lock_busy"))
-        return
-    _chat_lock_waiters[chat_id] = waiters + 1
-    try:
-        try:
-            lock = await acquire_chat_lock(chat_id, lock_timeout)
-        except asyncio.TimeoutError:
-            log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
-            with contextlib.suppress(Exception):
-                 # Ответ без создания чата: обычный _t через get_state завёл бы запись
-                 # даже тому, кого отшили «занято» (та же причина, что у лимита).
-                 await _tg_call(_answer_sender(message), _t_no_create(chat_id, "lock_busy"))
-            return
-    finally:
-        left = _chat_lock_waiters.get(chat_id, 1) - 1
-        if left > 0:
-            _chat_lock_waiters[chat_id] = left
-        else:
-            _chat_lock_waiters.pop(chat_id, None)
-
-    try:
-         await _handle_message_core(message)
-    finally:
-         with contextlib.suppress(Exception):
-              lock.release()
+    # Лок, кап ожидающих и потолок сообщения — в общем помощнике, чтобы этот путь,
+    # альбом и гость не расходились в защитх (аудит 28.10.2026 + 01.11.2026).
+    await _run_under_chat_lock(message, lambda: _handle_message_core(message))
 
 # вебхук и запуск
 from lumen_message_core import (
@@ -1466,6 +1438,7 @@ from lumen_message_core import (
     _resolve_incoming_media,
     _reply_target_block,
     _tagged_prompt,
+    _run_under_chat_lock,
     _handle_message_core,
     _process_raw_update,
 )
