@@ -482,7 +482,6 @@ async def _run_streaming_reply(
                     edits_dead = True
                     break
                 sent_messages.append(new_msg)
-                # Новое сообщение уже содержит полный кусок целиком.
                 committed.append(next_chunk)
                 # Новое сообщение уже содержит полный кусок: catch-up для него не нужен.
                 last_edited_plain = next_chunk
