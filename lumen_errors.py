@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from lumen_lang import DEFAULT_LANG, t as _lang_t
 from system_prompt import SYSTEM_PROMPT
@@ -102,8 +103,12 @@ def _gemini_error_msg(e: Exception, model_id: str, lang: str = DEFAULT_LANG) -> 
 
 def get_system_prompt(model_id: str | None = None) -> str:
     # model_id не читается осознанно: промпт един для всех, иначе расхождение identity (ревью 28.08.2026).
-    now_str = datetime.now().strftime("%d %B %Y (current time: %H:%M)")
-    now_year = datetime.now().year
+    # Зона — та же, что у пометки свежих вопросов (lumen_message_core._fresh_date_context):
+    # голый datetime.now() даёт UTC контейнера и «который час» отвечался на 3 часа
+    # раньше Москвы, а шапка требует верить только ей (аудит 01.11.2026).
+    now = datetime.now(ZoneInfo("Europe/Moscow"))
+    now_str = now.strftime("%d %B %Y (current time: %H:%M Europe/Moscow)")
+    now_year = now.year
     dynamic_header = (
         f"CURRENT TIME INFORMATION:\n"
         f"• Today's date: {now_str}. Current year: {now_year}.\n"

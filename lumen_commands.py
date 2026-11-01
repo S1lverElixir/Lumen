@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import logging
 import os
 import re
@@ -65,10 +66,12 @@ async def cmd_start(message: Message) -> None:
 
 async def inline_draw(message: Message, prompt: str) -> None:
     import bot
-    # Дневной лимит пользователя, как у озвучки: проба без создания.
+    # Дневной лимит пользователя: атомарный резерв ДО первого await, как в озвучке.
+    # Проверка в начале, а списание после генерации, позволяли пяти параллельным
+    # /draw пробить лимит (аудит 01.11.2026).
     uid = bot._user_key_for_message(message)
-    _draw_entry = bot._user_daily_peek(uid)
-    if bot._user_daily_total_exhausted(uid, _draw_entry):
+    if not bot._reserve_user_daily(uid, total=1):
+        _draw_entry = bot._user_daily_peek(uid)
         hours, mins = bot._user_daily_reset_in()
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(
@@ -78,11 +81,15 @@ async def inline_draw(message: Message, prompt: str) -> None:
         ))
         return
     from lumen_status import StatusMessage
-    status_obj = await StatusMessage.start_action(
-        message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_generating_image"),
-    )
-    status = status_obj.message if status_obj is not None else None
+    # Инициализируем ДО try: сбой самого пузыря иначе уводил бы обработчик ошибки
+    # на несвязанное имя (аудит 01.11.2026).
+    status_obj = None
+    status = None
     try:
+        status_obj = await StatusMessage.start_action(
+            message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_generating_image"),
+        )
+        status = status_obj.message if status_obj is not None else None
         session = await bot._get_http_session()
         # Модель — автовыбором по промпту (/imgmodel убран 19.08.2026), без состояния чата.
         primary_model = _pick_image_model(prompt)
@@ -151,8 +158,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
             )
             if sent is None:
                 raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
-            # Суточный счётчик /stats: картинка ушла пользователю.
-            bot._record_user_daily(uid)
+            # Суточный счётчик уже списан резервом выше; в /stats картинка — и
+            # полученное сообщение, и отправленный ответ (иначе «ответов» было
+            # больше, чем «сообщений» — аудит 01.11.2026).
+            bot._record_stats_event("messages_received")
             bot._record_stats_event("answers_sent")
         else:
             if rate_limited:
@@ -164,6 +173,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
     except asyncio.CancelledError:
         if status_obj is not None:
             await status_obj.stop()
+        bot._refund_user_daily(uid, total=1)
         raise
     except Exception as exc:
         log.exception("Pollinations image generation failed:")
@@ -186,6 +196,8 @@ async def inline_draw(message: Message, prompt: str) -> None:
             await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
+        # Картинки нет — дневной слот возвращаем (резерв списан заранее).
+        bot._refund_user_daily(uid, total=1)
 
 
 async def cmd_draw(message: Message) -> None:
@@ -463,6 +475,9 @@ async def inline_tts(message: Message, text: str) -> None:
     if unsent > 0:
         # Обрезка по общему дедлайну: за несозданные чанки не списываем.
         bot._refund_user_daily(uid, total=unsent, tts=unsent)
+    # Оба счётчика пары: без messages_received «ответов» было больше, чем
+    # «сообщений» (слэш-команды и триггеры выходят из ядра раньше — аудит 01.11.2026).
+    bot._record_stats_event("messages_received")
     bot._record_stats_event("answers_sent")
     if shortened:
         # Обрезка по общему дедлайну — говорим прямо, что озвучено начало.
@@ -485,6 +500,10 @@ async def cmd_reset(message: Message) -> None:
     """Сброс истории чата. В меню. Личка — всем, группа — админам/владельцу."""
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
+    # Слэш-команды регистрируются раньше catch-all и к общему лимиту не доходили
+    # (тот же пропуск, что закрыли для /start — аудит 01.11.2026).
+    if await bot._reject_rate_limited_message(message):
         return
     requester_id = message.from_user.id if message.from_user else None
     if not await bot._is_privileged_in_chat(message.chat.type, message.chat.id, requester_id):
@@ -510,6 +529,10 @@ async def cmd_reset(message: Message) -> None:
 async def cmd_lang(message: Message) -> None:
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
+    # Меню из 26 кнопок на каждое сообщение спамера = круг к Telegram + новая запись
+    # чата (см. лимит в cmd_start, аудит 01.11.2026).
+    if await bot._reject_rate_limited_message(message):
         return
     lang = bot._chat_lang(message.chat.id)
     rows = []
@@ -951,7 +974,10 @@ async def _webhook_info_text() -> str:
         if len(err_msg) > 120:
             err_msg = err_msg[:117] + "..."
         if err_msg:
-            return f"pending={pending}, ошибка: {err_msg}"
+            # last_error_message — текст Telegram (часто обрывок HTML-страницы): без
+            # экранирования /stats ловил 400 и молчал ровно при сломанном вебхуке
+            # (аудит 01.11.2026).
+            return f"pending={pending}, ошибка: {html.escape(err_msg)}"
         return f"pending={pending}, ошибок нет"
     except Exception:
         return "н/д"
