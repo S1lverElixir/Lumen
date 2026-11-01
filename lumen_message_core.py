@@ -120,8 +120,13 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
     (аудит 01.11.2026)."""
     import bot
     chat_id = message.chat.id if message.chat else 0
-    dtoken = bot._MSG_DEADLINE.set(time.monotonic() + bot.MESSAGE_TOTAL_BUDGET_SEC)
-    ltoken = bot._LOG_CHAT.set(f"chat={chat_id}")
+    # Дедлайн и метку чата НЕ переставляем, если они уже стоят (обычный путь и
+    # альбомная задача наследуют их от handle_message): иначе потолок сообщения
+    # сдвигался бы на время ожидания блокировки.
+    dtoken = None if bot._msg_remaining_sec() is not None else bot._MSG_DEADLINE.set(
+        time.monotonic() + bot.MESSAGE_TOTAL_BUDGET_SEC
+    )
+    ltoken = None if bot._LOG_CHAT.get() else bot._LOG_CHAT.set(f"chat={chat_id}")
     try:
         remaining = bot._msg_remaining_sec()
         lock_timeout = bot.CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(bot.CHAT_LOCK_TIMEOUT_SEC, remaining))
@@ -153,8 +158,10 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
             with contextlib.suppress(Exception):
                 lock.release()
     finally:
-        bot._MSG_DEADLINE.reset(dtoken)
-        bot._LOG_CHAT.reset(ltoken)
+        if dtoken is not None:
+            bot._MSG_DEADLINE.reset(dtoken)
+        if ltoken is not None:
+            bot._LOG_CHAT.reset(ltoken)
 
 
 async def _process_media_group_buffers(mgid: str) -> None:
