@@ -826,14 +826,17 @@ def _truncate_html_to_fit(md_text: str, limit: int) -> str:
     префикс исходника, чей HTML влезает в лимит. Вынесено из bot.py (гостевые
     ответы — одиночный InlineQueryResultArticle без фолбэка на plain-текст)."""
     full = _md_to_html(md_text)
-    if len(full) <= limit:
+    if _tg_len(full) <= limit:
         return full
     lo, hi = 0, len(md_text)
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if len(_md_to_html(md_text[:mid])) <= limit - 1:
+        if _tg_len(_md_to_html(md_text[:mid])) <= limit - 1:
             lo = mid
         else:
             hi = mid - 1
-    return _md_to_html(md_text[:lo])[:limit - 1] + "…"
+    # Telegram считает лимит в единицах UTF-16, а не в символах: эмодзи занимает
+    # два. Срез по len() давал HTML длиннее лимита и 400 на гостевом ответе,
+    # где фолбэка на plain-текст нет (проверка на корпусе 05.11.2026).
+    return _take_prefix_by_units(_md_to_html(md_text[:lo]), limit - 1) + "…"
 

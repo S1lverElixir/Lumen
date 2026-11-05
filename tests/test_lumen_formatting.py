@@ -32,6 +32,12 @@ def test_truncate_html_to_fit_keeps_short_text_and_cuts_at_source_boundary():
     assert len(cut) <= 4096
     assert cut.endswith("…")
     assert cut.count("<b>") == cut.count("</b>")
+    # Лимит Telegram считается в единицах UTF-16 (эмодзи = 2): срез по len()
+    # выдавал HTML длиннее лимита и 400 на гостевом ответе, где нет фолбэка
+    # на plain-текст (проверка на корпусе 05.11.2026).
+    emoji_md = " ".join(["😀 текст"] * 200)
+    cut_units = lumen_formatting._truncate_html_to_fit(emoji_md, 50)
+    assert sum(2 if ord(ch) > 0xFFFF else 1 for ch in cut_units) <= 50
 
 
 # ─────────────────────────── _md_to_html ───────────────────────────
