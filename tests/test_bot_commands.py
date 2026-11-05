@@ -146,14 +146,15 @@ def test_cmd_stats_counts_only_recently_active_chats():
         bot.GLOBAL_QUOTA.update(real_quota)
         bot.chat_state.clear()
         bot.chat_state.update(real_states)
-    # Проф-вид /stats: нули по мёртвым моделям не мусорят, у каждого провайдера итог и остаток лимита.
-@pytest.mark.parametrize("or_limit,groq_limit", [(50, 1000), (100, 10)])
-def test_cmd_stats_hides_idle_models_and_shows_totals(monkeypatch, or_limit, groq_limit):
-    # Проф-вид /stats: нули по мёртвым моделям не мусорят, у каждого провайдера итог и остаток лимита.
-    # Параметризация по лимитам: лимиты 50/1000 живут в env, а не в команде —
-    # смена тарифа без правки кода обязана менять и вывод.
-    monkeypatch.setattr(bot, "OPENROUTER_DAILY_LIMIT", or_limit)
-    monkeypatch.setattr(bot, "GROQ_DAILY_LIMIT", groq_limit)
+
+
+@pytest.mark.parametrize("munito_limit", [250, 20])
+def test_cmd_stats_hides_idle_models_and_shows_totals(monkeypatch, munito_limit):
+    # Проф-вид /stats: нули по мёртвым моделям не мусорят, у провайдера — итог и
+    # остаток лимита. Лимит Munito живёт в env, а не в команде: смена тарифа без
+    # правки кода обязана менять и вывод.
+    monkeypatch.setattr(bot, "MUNITO_DAILY_LIMIT", munito_limit)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     # Лимит Gemini — только где задан в env: одна модель с лимитом, вторая без.
     monkeypatch.setattr(bot, "GEMINI_DAILY_LIMITS", {"gemini-3.6-flash": 20})
     chat_id = 999811
@@ -177,8 +178,10 @@ def test_cmd_stats_hides_idle_models_and_shows_totals(monkeypatch, or_limit, gro
             "gemini-other": {"used": 1, "exhausted_at": None},
             "gemini-dead-model": {"used": 0, "exhausted_at": None},
         },
-        "openrouter": {"nvidia/x:free": {"used": 5, "exhausted_at": None}},
-        "groq": {},
+        "munito": {
+            "deepseek-ai/deepseek-v4.1-flash-1017": {"used": 5, "exhausted_at": None},
+            "zai-org/glm-5.3-flash": {"used": 0, "exhausted_at": None},
+        },
         "quota_day": bot._current_quota_day(),
     })
     try:
@@ -189,12 +192,48 @@ def test_cmd_stats_hides_idle_models_and_shows_totals(monkeypatch, or_limit, gro
         assert "gemini-dead-model" not in text
         assert "без обращений" in text
         assert "Σ: 4" in text
-        assert f"Σ: 5 / {or_limit} (осталось {max(0, or_limit - 5)})" in text
-        assert f"Σ: 0 / {groq_limit} (осталось {groq_limit})" in text
+        assert "<b>Munito — запросов по моделям" in text
+        assert "deepseek-ai/deepseek-v4.1-flash-1017: 5" in text
+        assert "zai-org/glm-5.3-flash" not in text
+        assert f"Σ: 5 / {munito_limit} (осталось {max(0, munito_limit - 5)})" in text
         assert len(text) <= bot.TG_MAX_LEN
     finally:
         bot.OWNER_ID = original_owner
         bot._tg_call = original_tg_call
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.chat_state.pop(chat_id, None)
+        lumen_chat_state.chat_state.pop(chat_id, None)
+
+
+def test_cmd_stats_hides_munito_section_without_key(monkeypatch):
+    # Что защищает: секция Munito рисуется только при активном провайдере.
+    # Регрессия: секция без ключа — пустой блок в /stats, владелец видит
+    # «провайдера нет», хотя маршрут честно работает на Gemini.
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
+    chat_id = 999812
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777001)
+    sent = {}
+
+    async def fake_tg_call(method, *args, **kwargs):
+        sent["text"] = args[0] if args else kwargs.get("text", "")
+        return SimpleNamespace()
+
+    real_quota = dict(bot.GLOBAL_QUOTA)
+    monkeypatch.setattr(bot, "OWNER_ID", 777001)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    bot.GLOBAL_QUOTA.clear()
+    bot.GLOBAL_QUOTA.update({
+        "gemini": {"gemini-3.6-flash": {"used": 3, "exhausted_at": None}},
+        "munito": {},
+        "quota_day": bot._current_quota_day(),
+    })
+    try:
+        asyncio.run(bot.cmd_stats(incoming))
+        assert "Munito" not in sent["text"]
+        assert "gemini-3.6-flash: 3" in sent["text"]
+    finally:
         bot.GLOBAL_QUOTA.clear()
         bot.GLOBAL_QUOTA.update(real_quota)
         bot.chat_state.pop(chat_id, None)
@@ -322,8 +361,7 @@ def test_cmd_stats_truncation_keeps_html_valid(monkeypatch):
     bot.GLOBAL_QUOTA.update({
         "quota_day": bot._current_quota_day(),
         "gemini": dict(many),
-        "openrouter": dict(many),
-        "groq": dict(many),
+        "munito": dict(many),
     })
     try:
         asyncio.run(bot.cmd_stats(incoming))
@@ -1437,6 +1475,8 @@ def _setup_selftest_fakes(monkeypatch, fail_heads=()):
         fake_tg_call.text = args[0] if args else kwargs.get("text", "")
         return SimpleNamespace()
 
+    # Голова текста — Munito, и проба отправляется только при активном провайдере.
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "selftest_llm_head", fake_head)
     monkeypatch.setattr(bot, "_get_http_session", fake_session)
     monkeypatch.setattr(bot, "probe_url", fake_probe)
@@ -1457,14 +1497,14 @@ def test_cmd_selftest_denies_non_owner_without_probing(monkeypatch):
 
 def test_cmd_selftest_group_only_for_owner(monkeypatch):
     # ID моделей в группы не отдаём: команда в группах только отказывает, проб нет.
-    from lumen_router_config import _GROQ_LIGHT_ORDER, _OR_LIGHT_ORDER, GEMINI_DEFAULT_CHAIN
+    from lumen_router_config import GEMINI_DEFAULT_CHAIN, _MUNITO_ORDER
     monkeypatch.setattr(bot, "OWNER_ID", 333001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     incoming = _make_selftest_message(999702, 333001, group=True)
     asyncio.run(bot.cmd_selftest(incoming))
     assert fake_tg_call.text == bot._t(999702, "selftest_group_only")
     assert calls == []
-    for mid in list(_GROQ_LIGHT_ORDER) + list(_OR_LIGHT_ORDER) + list(GEMINI_DEFAULT_CHAIN):
+    for mid in list(_MUNITO_ORDER) + list(GEMINI_DEFAULT_CHAIN):
         assert mid not in fake_tg_call.text
 
 
@@ -1473,9 +1513,9 @@ def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
     monkeypatch.setattr(bot, "OWNER_ID", 444001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999703, 444001)))
-    assert calls == ["groq", "openrouter"]
+    assert calls == ["munito"]
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999703, 444001)))
-    assert calls == ["groq", "openrouter"]
+    assert calls == ["munito"]
     assert fake_tg_call.text == bot._t(999703, "selftest_cooldown", sec=60)
 
 
@@ -1486,7 +1526,7 @@ def test_cmd_selftest_first_run_after_boot_not_throttled(monkeypatch):
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     monkeypatch.setattr(time, "monotonic", lambda: 42.0)
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999809, 109001)))
-    assert calls == ["groq", "openrouter"]
+    assert calls == ["munito"]
 
 
 def test_selftest_short_error_redacts_org_id():
@@ -1500,14 +1540,25 @@ def test_selftest_short_error_redacts_org_id():
 
 def test_cmd_selftest_default_skips_gemini_and_hides_model_ids(monkeypatch):
     # Дефолт без gemini бережёт самую дефицитную квоту; ID моделей в ответе нет.
-    from lumen_router_config import _GROQ_LIGHT_ORDER, _OR_LIGHT_ORDER, GEMINI_DEFAULT_CHAIN
+    from lumen_router_config import GEMINI_DEFAULT_CHAIN, _MUNITO_ORDER
     monkeypatch.setattr(bot, "OWNER_ID", 555001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999704, 555001)))
-    assert calls == ["groq", "openrouter"]
+    assert calls == ["munito"]
     assert bot._t(999704, "selftest_gemini_skipped") in fake_tg_call.text
-    for mid in list(_GROQ_LIGHT_ORDER) + list(_OR_LIGHT_ORDER) + list(GEMINI_DEFAULT_CHAIN):
+    for mid in list(_MUNITO_ORDER) + list(GEMINI_DEFAULT_CHAIN):
         assert mid not in fake_tg_call.text
+
+
+def test_cmd_selftest_without_key_skips_munito_probe(monkeypatch):
+    # Что защищает: провайдера нет — пробы нет. Регрессия: /selftest тратил бы
+    # пробу и время владельца на провайдер, который маршрут не использует.
+    monkeypatch.setattr(bot, "OWNER_ID", 555002)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999708, 555002)))
+    assert calls == []
+    assert "Munito" not in fake_tg_call.text
 
 
 def test_cmd_selftest_with_gemini_arg_probes_gemini(monkeypatch):
@@ -1515,62 +1566,63 @@ def test_cmd_selftest_with_gemini_arg_probes_gemini(monkeypatch):
     monkeypatch.setattr(bot, "OWNER_ID", 666001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999705, 666001, "/selftest gemini")))
-    assert calls == ["groq", "openrouter", "gemini"]
+    assert calls == ["munito", "gemini"]
     assert bot._t(999705, "selftest_gemini_skipped") not in fake_tg_call.text
 
 
 def test_cmd_selftest_reports_failed_head(monkeypatch):
-    # Упавшая голова — строка FAIL с причиной, а не молчание или падение команды.
+    # Упавшая голова — строка FAIL с причиной, а не молчание или падение команды;
+    # остальные строки отчёта при этом остаются живыми.
     monkeypatch.setattr(bot, "OWNER_ID", 777001)
-    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch, fail_heads=("groq",))
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch, fail_heads=("munito",))
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999706, 777001)))
-    assert "Groq: FAIL" in fake_tg_call.text
+    assert "Munito: FAIL" in fake_tg_call.text
     assert "boom-500" in fake_tg_call.text
-    assert "OpenRouter: OK" in fake_tg_call.text
+    assert "TG-proxy: OK" in fake_tg_call.text
 
 
-def test_selftest_llm_head_openrouter_success_targets_head_and_counts_quota(monkeypatch):
-    # Честный учёт: успешная проба идёт ровно в голову лёгкого маршрута и +1 в квоту.
+def test_selftest_llm_head_munito_success_targets_head_and_counts_quota(monkeypatch):
+    # Честный учёт: успешная проба идёт ровно в голову текстового маршрута и +1 в квоту.
     import lumen_model_speed
     import lumen_routes
-    from lumen_router_config import _OR_LIGHT_ORDER
-    head = _OR_LIGHT_ORDER[0]
+    from lumen_router_config import _MUNITO_ORDER
+    head = _MUNITO_ORDER[0]
     seen = {}
 
-    async def fake_or(path, method="GET", *, json_body=None, deadline=None):
+    async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
         seen["model"] = (json_body or {}).get("model")
         return {"choices": [{"message": {"content": "ok"}}],
                 "usage": {"prompt_tokens": 4001, "completion_tokens": 2, "total_tokens": 4003}}
 
-    monkeypatch.setattr(bot, "_or_request", fake_or)
-    before = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    before = ((bot.GLOBAL_QUOTA.get("munito") or {}).get(head) or {}).get("used") or 0
     ema_before = dict(lumen_model_speed._latency_ema)
     try:
-        ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("openrouter", chat_id=1))
+        ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("munito", chat_id=1))
     finally:
         lumen_model_speed._latency_ema.clear()
         lumen_model_speed._latency_ema.update(ema_before)
     assert ok is True and detail == "" and elapsed >= 0
     assert seen["model"] == head
-    after = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    after = ((bot.GLOBAL_QUOTA.get("munito") or {}).get(head) or {}).get("used") or 0
     assert after == before + 1
-    bot.GLOBAL_QUOTA["openrouter"][head]["used"] = before
+    bot.GLOBAL_QUOTA["munito"][head]["used"] = before
 
 
-def test_selftest_llm_head_openrouter_error_returns_false_without_quota(monkeypatch):
+def test_selftest_llm_head_munito_error_returns_false_without_quota(monkeypatch):
     # Неуспех квоту не трогает (как в ask_*): иначе ошибка стоила бы как ответ.
     import lumen_routes
-    from lumen_router_config import _OR_LIGHT_ORDER
-    head = _OR_LIGHT_ORDER[0]
+    from lumen_router_config import _MUNITO_ORDER
+    head = _MUNITO_ORDER[0]
 
     async def boom(path, method="GET", *, json_body=None, deadline=None):
         raise RuntimeError("boom-429")
 
-    monkeypatch.setattr(bot, "_or_request", boom)
-    before = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
-    ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("openrouter", chat_id=1))
+    monkeypatch.setattr(bot, "_munito_request", boom)
+    before = ((bot.GLOBAL_QUOTA.get("munito") or {}).get(head) or {}).get("used") or 0
+    ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("munito", chat_id=1))
     assert ok is False and "boom-429" in detail and elapsed >= 0
-    after = ((bot.GLOBAL_QUOTA.get("openrouter") or {}).get(head) or {}).get("used") or 0
+    after = ((bot.GLOBAL_QUOTA.get("munito") or {}).get(head) or {}).get("used") or 0
     assert after == before
 
 
@@ -1578,7 +1630,7 @@ def test_cmd_stats_shows_quarantine(monkeypatch):
     # Карантин виден владельцу в /stats: иначе объезд модели выглядел бы магией.
     monkeypatch.setattr(bot, "OWNER_ID", 888001)
     for _ in range(3):
-        bot._record_model_outcome("openrouter", "qs-model:free", bad=True)
+        bot._record_model_outcome("munito", "qs-model", bad=True)
     incoming = _FakeIncomingMessage(999707)
     incoming.from_user = SimpleNamespace(id=888001)
     sent = {}
@@ -1590,7 +1642,7 @@ def test_cmd_stats_shows_quarantine(monkeypatch):
     monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
     asyncio.run(bot.cmd_stats(incoming))
     assert "Карантин моделей" in sent["text"]
-    assert "qs-model:free" in sent["text"]
+    assert "qs-model" in sent["text"]
 
 
 def _make_ban_message(chat_id, user_id, text, group=False, reply_to=None):

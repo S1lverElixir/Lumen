@@ -1,18 +1,15 @@
 """
-test_bot_tts.py — TTS: Fish Audio SSE и inline_tts (квоты, фолбэк на Gemini).
+test_bot_tts.py — TTS: Gemini TTS и inline_tts (квоты, бюджеты, лимиты пользователя).
 
 Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
 """
 from unittest.mock import MagicMock, AsyncMock
 import asyncio
-import base64
 from types import SimpleNamespace
 import bot
 import pytest
 from tests.bot_test_helpers import (
     _FakeIncomingMessage,
-    _FakeSSEResponse,
-    _FakeSessionForSSE,
     _FakeVoiceBot,
     _fake_tts_response,
 )
@@ -138,93 +135,6 @@ def test_inline_tts_burst_rate_limit_only_cools_down():
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash-preview-tts", None)
 
 
-def test_inline_tts_skips_fish_audio_when_disabled(monkeypatch):
-    # FISH_AUDIO_ENABLED=False (аудит моделей, 17.09.2026 — зеркало снято с
-    # бесплатного каталога): inline_tts не должен вообще трогать _fish_audio_tts_bytes.
-    async def _fail_if_called(text):
-        raise AssertionError("fish attempt must be skipped while disabled")
-
-    monkeypatch.setattr(bot, "_fish_audio_tts_bytes", _fail_if_called)
-
-    fake_wav_bytes = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 64
-
-    def fake_generate_content(*, model, contents, config=None):
-        return _fake_tts_response(fake_wav_bytes)
-
-    fake_client = MagicMock()
-    # Асинхронный путь (lumen_tts): синхронный вызов в потоке убран — зависший
-    # Google держал лок чата бесконечно (аудит 26.09.2026).
-    fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
-
-    incoming = _FakeIncomingMessage(999803)
-    incoming.message_id = 12347
-
-    original_client = bot.client
-    original_bot = bot.bot
-    bot.client = fake_client
-    bot.bot = _FakeVoiceBot()
-    try:
-        asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
-        assert bot.bot.sent_voice is not None
-    finally:
-        bot.client = original_client
-        bot.bot = original_bot
-
-
-def test_fish_audio_tts_bytes_parses_sse_audio_chunks():
-    raw_audio = b"fake-mp3-bytes"
-    b64_whole = base64.b64encode(raw_audio).decode("ascii")
-    half = len(b64_whole) // 2
-    lines = [
-        ('data: {"choices":[{"delta":{"audio":{"data":"' + b64_whole[:half] + '"}}}]}\n').encode("utf-8"),
-        ('data: {"choices":[{"delta":{"audio":{"data":"' + b64_whole[half:] + '"}}}]}\n').encode("utf-8"),
-        b"data: [DONE]\n",
-    ]
-    fake_resp = _FakeSSEResponse(lines)
-    fake_session = _FakeSessionForSSE(fake_resp)
-
-    async def fake_get_http_session():
-        return fake_session
-
-    original_get_session = bot._get_http_session
-    original_key = bot.OPENROUTER_API_KEY
-    bot._get_http_session = fake_get_http_session
-    bot.OPENROUTER_API_KEY = "fake-key"
-    try:
-        result = asyncio.run(bot._fish_audio_tts_bytes("Привет, мир"))
-        assert result == raw_audio
-    finally:
-        bot._get_http_session = original_get_session
-        bot.OPENROUTER_API_KEY = original_key
-
-
-def test_fish_audio_tts_bytes_returns_none_on_http_error():
-    fake_resp = _FakeSSEResponse([], status=500)
-    fake_session = _FakeSessionForSSE(fake_resp)
-
-    async def fake_get_http_session():
-        return fake_session
-
-    original_get_session = bot._get_http_session
-    original_key = bot.OPENROUTER_API_KEY
-    bot._get_http_session = fake_get_http_session
-    bot.OPENROUTER_API_KEY = "fake-key"
-    try:
-        assert asyncio.run(bot._fish_audio_tts_bytes("Привет")) is None
-    finally:
-        bot._get_http_session = original_get_session
-        bot.OPENROUTER_API_KEY = original_key
-
-
-def test_fish_audio_tts_bytes_returns_none_without_api_key():
-    original_key = bot.OPENROUTER_API_KEY
-    bot.OPENROUTER_API_KEY = ""
-    try:
-        assert asyncio.run(bot._fish_audio_tts_bytes("Привет")) is None
-    finally:
-        bot.OPENROUTER_API_KEY = original_key
-
-
 def test_gemini_tts_synthesis_has_timeout_and_does_not_use_threads():
     # Регрессия (аудит 26.09.2026): синхронный вызов в asyncio.to_thread без
     # таймаута — зависший Google держал лок чата бесконечно и терял поток.
@@ -284,28 +194,6 @@ def test_gemini_tts_passes_http_timeout_to_sdk():
     ))
     http_options = getattr(seen["config"], "http_options", None)
     assert http_options is not None and http_options.timeout == 7000
-
-
-def test_fish_audio_tts_bytes_returns_none_on_empty_stream():
-    # Поток отдал валидный SSE, но ни одного audio-чанка (например, если формат
-    # ответа модели когда-нибудь изменится) — должны тихо откатиться на Gemini,
-    # а не упасть с исключением или вернуть пустые байты как будто это успех.
-    lines = [b"data: [DONE]\n"]
-    fake_resp = _FakeSSEResponse(lines)
-    fake_session = _FakeSessionForSSE(fake_resp)
-
-    async def fake_get_http_session():
-        return fake_session
-
-    original_get_session = bot._get_http_session
-    original_key = bot.OPENROUTER_API_KEY
-    bot._get_http_session = fake_get_http_session
-    bot.OPENROUTER_API_KEY = "fake-key"
-    try:
-        assert asyncio.run(bot._fish_audio_tts_bytes("Привет")) is None
-    finally:
-        bot._get_http_session = original_get_session
-        bot.OPENROUTER_API_KEY = original_key
 
 
 class _CountingVoiceBot(_FakeVoiceBot):

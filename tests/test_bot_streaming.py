@@ -216,7 +216,7 @@ def test_try_gemini_streaming_failed_continuation_does_not_corrupt_first_message
         bot.chat_state.pop(chat_id, None)
 
 
-def test_openrouter_stream_pieces_parses_sse_chunks():
+def test_munito_stream_pieces_parses_sse_chunks():
     lines = [
         'data: {"choices":[{"delta":{"content":"Привет"}}]}\n'.encode("utf-8"),
         'data: {"choices":[{"delta":{"content":", мир"}}]}\n'.encode("utf-8"),
@@ -229,53 +229,23 @@ def test_openrouter_stream_pieces_parses_sse_chunks():
         return fake_session
 
     original_get_session = bot._get_http_session
-    original_key = bot.OPENROUTER_API_KEY
+    original_key = bot.MUNITO_API_KEY
     bot._get_http_session = fake_get_http_session
-    bot.OPENROUTER_API_KEY = "fake-key"
+    bot.MUNITO_API_KEY = "fake-key"
     try:
         async def collect():
             pieces = []
-            async for piece in bot._openrouter_stream_pieces("meta-llama/llama-3.3-70b-instruct:free", [{"role": "user", "content": "hi"}]):
+            async for piece in bot._munito_stream_pieces("deepseek-ai/deepseek-v4.1-flash-1017", [{"role": "user", "content": "hi"}]):
                 pieces.append(piece)
             return pieces
         pieces = asyncio.run(collect())
         assert pieces == ["Привет", ", мир"]
     finally:
         bot._get_http_session = original_get_session
-        bot.OPENROUTER_API_KEY = original_key
+        bot.MUNITO_API_KEY = original_key
 
 
-def test_groq_stream_pieces_parses_sse_chunks():
-    # Groq-подключение 21.09.2026: тот же OpenAI-SSE, что у OpenRouter — куски собираются, [DONE] завершает.
-    lines = [
-        'data: {"choices":[{"delta":{"content":"Кан"}}]}\n'.encode("utf-8"),
-        'data: {"choices":[{"delta":{"content":"берра"}}]}\n'.encode("utf-8"),
-        b"data: [DONE]\n",
-    ]
-    fake_resp = _FakeSSEResponse(lines)
-    fake_session = _FakeSessionForSSE(fake_resp)
-
-    async def fake_get_http_session():
-        return fake_session
-
-    original_get_session = bot._get_http_session
-    original_key = bot.GROQ_API_KEY
-    bot._get_http_session = fake_get_http_session
-    bot.GROQ_API_KEY = "fake-key"
-    try:
-        async def collect():
-            pieces = []
-            async for piece in bot._groq_stream_pieces("qwen/qwen3.8-27b", [{"role": "user", "content": "hi"}]):
-                pieces.append(piece)
-            return pieces
-        pieces = asyncio.run(collect())
-        assert pieces == ["Кан", "берра"]
-    finally:
-        bot._get_http_session = original_get_session
-        bot.GROQ_API_KEY = original_key
-
-
-def test_openrouter_stream_pieces_raises_on_http_error_status():
+def test_munito_stream_pieces_raises_on_http_error_status():
     fake_resp = _FakeSSEResponse([], status=500)
     fake_session = _FakeSessionForSSE(fake_resp)
 
@@ -283,29 +253,28 @@ def test_openrouter_stream_pieces_raises_on_http_error_status():
         return fake_session
 
     original_get_session = bot._get_http_session
-    original_key = bot.OPENROUTER_API_KEY
+    original_key = bot.MUNITO_API_KEY
     bot._get_http_session = fake_get_http_session
-    bot.OPENROUTER_API_KEY = "fake-key"
+    bot.MUNITO_API_KEY = "fake-key"
     try:
         async def collect():
-            async for _ in bot._openrouter_stream_pieces("meta-llama/llama-3.3-70b-instruct:free", []):
+            async for _ in bot._munito_stream_pieces("deepseek-ai/deepseek-v4.1-flash-1017", []):
                 pass
-        with pytest.raises(bot.OpenRouterAPIError):
+        with pytest.raises(bot.MunitoAPIError):
             asyncio.run(collect())
     finally:
         bot._get_http_session = original_get_session
-        bot.OPENROUTER_API_KEY = original_key
+        bot.MUNITO_API_KEY = original_key
 
 
-def test_openrouter_stream_pieces_raises_on_midstream_error_chunk():
-    # РЕГРЕССИЯ (аудит стриминга): провайдер за OpenRouter может упасть УЖЕ ПОСЛЕ
-    # старта генерации — HTTP-статус к этому моменту давно 200 (стрим открыт), и
-    # ошибка приходит не кодом ответа, а прямо внутри SSE-чанка:
-    # {"error": {...}} вместо {"choices": [...]}. Раньше это тихо пропускалось
-    # как "пустой чанк" (choices нет -> continue) — пользователь получал молча
-    # укороченный ответ без единого намёка на причину. Первый кусок ("Начало")
-    # должен успеть уйти до ошибки — проверяем, что она поднимается уже ПОСЛЕ
-    # частичного контента, а не глушится.
+def test_munito_stream_pieces_raises_on_midstream_error_chunk():
+    # РЕГРЕССИЯ (аудит стриминга): бэкенд может упасть УЖЕ ПОСЛЕ старта генерации —
+    # HTTP-статус к этому моменту давно 200 (стрим открыт), и ошибка приходит не
+    # кодом ответа, а прямо внутри SSE-чанка: {"error": {...}} вместо {"choices":
+    # [...]}. Раньше это тихо пропускалось как "пустой чанк" (choices нет ->
+    # continue) — пользователь получал молча укороченный ответ без единого намёка
+    # на причину. Первый кусок ("Начало") должен успеть уйти до ошибки — проверяем,
+    # что она поднимается уже ПОСЛЕ частичного контента, а не глушится.
     lines = [
         'data: {"choices":[{"delta":{"content":"Начало"}}]}\n'.encode("utf-8"),
         'data: {"error":{"message":"Provider returned error","code":502}}\n'.encode("utf-8"),
@@ -317,61 +286,41 @@ def test_openrouter_stream_pieces_raises_on_midstream_error_chunk():
         return fake_session
 
     original_get_session = bot._get_http_session
-    original_key = bot.OPENROUTER_API_KEY
+    original_key = bot.MUNITO_API_KEY
     bot._get_http_session = fake_get_http_session
-    bot.OPENROUTER_API_KEY = "fake-key"
+    bot.MUNITO_API_KEY = "fake-key"
     try:
         collected = []
 
         async def collect_partial():
-            agen = bot._openrouter_stream_pieces("meta-llama/llama-3.3-70b-instruct:free", [{"role": "user", "content": "hi"}])
+            agen = bot._munito_stream_pieces("deepseek-ai/deepseek-v4.1-flash-1017", [{"role": "user", "content": "hi"}])
             async for piece in agen:
                 collected.append(piece)
 
-        with pytest.raises(bot.OpenRouterAPIError) as exc_info:
+        with pytest.raises(bot.MunitoAPIError) as exc_info:
             asyncio.run(collect_partial())
         assert collected == ["Начало"]
         assert exc_info.value.status_code == 502
     finally:
         bot._get_http_session = original_get_session
-        bot.OPENROUTER_API_KEY = original_key
+        bot.MUNITO_API_KEY = original_key
 
 
-def test_sse_parsers_share_one_implementation(monkeypatch):
-    # Было grep-тестом по исходникам (запрещённый класс): теперь проверяем
-    # поведение — все обёртки разбирают SSE через общий _sse_pieces.
-    real_sse = lumen_streaming._sse_pieces
-    calls = []
+def test_munito_stream_pieces_without_key_fails_fast(monkeypatch):
+    # Ключа нет — провайдер обязан отказаться до единого сетевого вызова: без этого
+    # каждая попытка маршрута висела бы до таймаута соединения.
+    async def must_not_be_called():
+        raise AssertionError("no session without an API key")
 
-    async def _counting_sse(*args, **kwargs):
-        calls.append(1)
-        async for piece in real_sse(*args, **kwargs):
-            yield piece
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
+    monkeypatch.setattr(bot, "_get_http_session", must_not_be_called)
 
-    monkeypatch.setattr(lumen_streaming, "_sse_pieces", _counting_sse)
-    lines = [
-        'data: {"choices":[{"delta":{"content":"Раз"}}]}\n'.encode("utf-8"),
-        'data: {"choices":[{"delta":{"content":" два"}}]}\n'.encode("utf-8"),
-        b"data: [DONE]\n",
-    ]
+    async def collect():
+        async for _ in bot._munito_stream_pieces("m", []):
+            pass
 
-    async def _fake_session():
-        return _FakeSessionForSSE(_FakeSSEResponse(lines))
-
-    async def collect(gen):
-        return [piece async for piece in gen]
-
-    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "_get_http_session", _fake_session)
-    or_pieces = asyncio.run(collect(bot._openrouter_stream_pieces("m:free", [])))
-    groq_pieces = asyncio.run(collect(bot._groq_stream_pieces("m", [])))
-    munito_pieces = asyncio.run(collect(bot._munito_stream_pieces("m", [])))
-    assert or_pieces == ["Раз", " два"]
-    assert groq_pieces == ["Раз", " два"]
-    assert munito_pieces == ["Раз", " два"]
-    assert len(calls) == 3
+    with pytest.raises(bot.MunitoAPIError):
+        asyncio.run(collect())
 
 
 def test_munito_stream_pieces_sends_reasoning_effort(monkeypatch):
@@ -426,7 +375,7 @@ def test_streaming_history_goes_through_summarizing_trim(monkeypatch):
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "вопрос", incoming, provider="openrouter", model_id="trim:free",
+            chat_id, "вопрос", incoming, provider="munito", model_id="probe-trim",
             piece_agen=fake_pieces(),
         ))
         assert answer == "готово"
@@ -467,7 +416,7 @@ def test_sse_pieces_hanging_post_entry_times_out(deadline_mode, monkeypatch):
     async def collect():
         async for _ in lumen_streaming._sse_pieces(
             session, "http://example.test/chat", {}, {},
-            err_cls=bot.OpenRouterAPIError, provider_label="OpenRouter", deadline=deadline,
+            err_cls=bot.MunitoAPIError, provider_label="Munito", deadline=deadline,
         ):
             pass
 
@@ -480,63 +429,7 @@ def test_sse_pieces_hanging_post_entry_times_out(deadline_mode, monkeypatch):
     assert cm.exited
 
 
-def test_groq_stream_pieces_raises_on_http_error_status():
-    # У Groq раньше не было теста на HTTP>=400 (ветка-копия без покрытия, аудит 26.09.2026).
-    fake_resp = _FakeSSEResponse([], status=500)
-    fake_session = _FakeSessionForSSE(fake_resp)
-
-    async def fake_get_http_session():
-        return fake_session
-
-    original_get_session = bot._get_http_session
-    original_key = bot.GROQ_API_KEY
-    bot._get_http_session = fake_get_http_session
-    bot.GROQ_API_KEY = "fake-key"
-    try:
-        async def collect():
-            async for _ in bot._groq_stream_pieces("qwen/qwen3.8-27b", []):
-                pass
-        with pytest.raises(bot.GroqAPIError):
-            asyncio.run(collect())
-    finally:
-        bot._get_http_session = original_get_session
-        bot.GROQ_API_KEY = original_key
-
-
-def test_groq_stream_pieces_raises_on_midstream_error_chunk():
-    # Та же midstream-ошибка, что у OpenRouter, но в копии Groq её не ловили.
-    lines = [
-        'data: {"choices":[{"delta":{"content":"Начало"}}]}\n'.encode("utf-8"),
-        'data: {"error":{"message":"Provider returned error","code":503}}\n'.encode("utf-8"),
-    ]
-    fake_resp = _FakeSSEResponse(lines)
-    fake_session = _FakeSessionForSSE(fake_resp)
-
-    async def fake_get_http_session():
-        return fake_session
-
-    original_get_session = bot._get_http_session
-    original_key = bot.GROQ_API_KEY
-    bot._get_http_session = fake_get_http_session
-    bot.GROQ_API_KEY = "fake-key"
-    try:
-        collected = []
-
-        async def collect_partial():
-            agen = bot._groq_stream_pieces("qwen/qwen3.8-27b", [{"role": "user", "content": "hi"}])
-            async for piece in agen:
-                collected.append(piece)
-
-        with pytest.raises(bot.GroqAPIError) as exc_info:
-            asyncio.run(collect_partial())
-        assert collected == ["Начало"]
-        assert exc_info.value.status_code == 503
-    finally:
-        bot._get_http_session = original_get_session
-        bot.GROQ_API_KEY = original_key
-
-
-def test_try_openrouter_streaming_happy_path_accumulates_and_finalizes():
+def test_try_munito_streaming_happy_path_accumulates_and_finalizes(monkeypatch):
     chat_id = 999105
 
     async def fake_stream_pieces(model_id, messages, *, deadline=None):
@@ -544,19 +437,14 @@ def test_try_openrouter_streaming_happy_path_accumulates_and_finalizes():
             yield piece
 
     incoming = _FakeIncomingMessage(chat_id)
-    original_gen = bot._openrouter_stream_pieces
-    bot._openrouter_stream_pieces = fake_stream_pieces
-    try:
-        answer, placeholder = asyncio.run(bot._try_openrouter_streaming(chat_id, "Привет!", incoming, "meta-llama/llama-3.3-70b-instruct:free"))
-        assert answer == "Привет, как дела?"
-        assert placeholder is None
-        assert incoming.sent[0].edits[-1][1] == bot.ParseMode.HTML
-        history = bot.chat_state[chat_id]["history"]
-        assert history[-1] == {"role": "assistant", "content": "Привет, как дела?"}
-        assert bot.GLOBAL_QUOTA["openrouter"]["meta-llama/llama-3.3-70b-instruct:free"]["used"] >= 1
-    finally:
-        bot._openrouter_stream_pieces = original_gen
-        bot.chat_state.pop(chat_id, None)
+    monkeypatch.setattr(bot, "_munito_stream_pieces", fake_stream_pieces)
+    answer, placeholder = asyncio.run(bot._try_munito_streaming(chat_id, "Привет!", incoming, "deepseek-ai/deepseek-v4.1-flash-1017"))
+    assert answer == "Привет, как дела?"
+    assert placeholder is None
+    assert incoming.sent[0].edits[-1][1] == bot.ParseMode.HTML
+    history = bot.chat_state[chat_id]["history"]
+    assert history[-1] == {"role": "assistant", "content": "Привет, как дела?"}
+    assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["used"] >= 1
 
 
 def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
@@ -577,7 +465,7 @@ def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
     try:
         started = time.monotonic()
         answer, placeholder = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="x:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-x",
             piece_agen=hanging_pieces(),
         ))
         elapsed = time.monotonic() - started
@@ -603,7 +491,7 @@ def test_streaming_respects_route_deadline():
     try:
         started = time.monotonic()
         answer, placeholder = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-y",
             piece_agen=slow_drip_pieces(), deadline=time.monotonic() - 1.0,
         ))
         elapsed = time.monotonic() - started
@@ -638,7 +526,7 @@ def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="w:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-w",
             piece_agen=one_piece(), deadline=time.monotonic() + 1,
         ))
         assert answer == "готово"
@@ -668,7 +556,7 @@ def test_streaming_starts_model_request_before_placeholder():
     incoming = _Msg(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="w:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-w",
             piece_agen=pieces(),
         ))
         assert answer == "готово"
@@ -679,50 +567,44 @@ def test_streaming_starts_model_request_before_placeholder():
 
 def _streaming_rate_limit_quotas(chat_id, model_id, error_text):
     async def pieces_429():
-        raise bot.OpenRouterAPIError(error_text, status_code=429)
+        raise bot.MunitoAPIError(error_text, status_code=429)
         yield ""
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id=model_id,
+            chat_id, "Привет!", incoming, provider="munito", model_id=model_id,
             piece_agen=pieces_429(),
         ))
         assert answer is None
-        return dict(bot.GLOBAL_QUOTA["openrouter"][model_id])
+        return dict(bot.GLOBAL_QUOTA["munito"][model_id])
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
-def test_streaming_daily_rate_limit_marks_model_exhausted():
-    # Суточный лимит аккаунта помечает модель до утра — как и раньше.
+# «Суточный» текст тут тоже munito-429: провайдер отдаёт оконные лимиты
+# (200 запросов за 30 секунд), и держать модель заблокированной до утра нечем —
+# суточную метку ставит только ветка Gemini (см. gemini-тест ниже по файлу).
+@pytest.mark.parametrize("error_text", ["Rate limit reached", "free-models-per-day limit reached"])
+def test_streaming_rate_limit_only_cools_down(error_text):
+    # Регрессия (враждебное ревью 27.09.2026): всплеск 429 ставил суточную метку, и
+    # модель выпадала из роута до полуночи — снять метку было нечем, потому что
+    # заведомо мёртвую модель не зовут. Теперь это короткая остывка.
+    provider = bot.GLOBAL_QUOTA.setdefault("munito", {})
+    had_model = "probe-y" in provider
+    old_model = dict(provider.get("probe-y", {}))
     try:
-        entry = _streaming_rate_limit_quotas(999310, "z:free", "free-models-per-day limit reached")
-        assert entry["exhausted_at"] is not None
-        assert not entry.get("cooldown_until")
-    finally:
-        bot.GLOBAL_QUOTA.get("openrouter", {}).pop("z:free", None)
-
-
-def test_streaming_burst_rate_limit_only_cools_down():
-    # Регрессия (враждебное ревью 27.09.2026): минутный всплеск 429 ставил суточную
-    # метку, и модель выпадала из роута до полуночи — снять метку было нечем, потому
-    # что заведомо мёртвую модель не зовут. Теперь это короткая остывка.
-    provider = bot.GLOBAL_QUOTA.setdefault("openrouter", {})
-    had_model = "y:free" in provider
-    old_model = dict(provider.get("y:free", {}))
-    try:
-        entry = _streaming_rate_limit_quotas(999311, "y:free", "Rate limit reached")
+        entry = _streaming_rate_limit_quotas(999311, "probe-y", error_text)
         assert entry["exhausted_at"] is None
         assert entry["cooldown_until"] > time.time()
-        assert lumen_router_config._is_quota_exhausted("openrouter", "y:free") is True
+        assert lumen_router_config._is_quota_exhausted("munito", "probe-y") is True
         # По истечении остывки модель возвращается в роут сама, без смены суток.
-        provider["y:free"]["cooldown_until"] = time.time() - 1.0
-        assert lumen_router_config._is_quota_exhausted("openrouter", "y:free") is False
+        provider["probe-y"]["cooldown_until"] = time.time() - 1.0
+        assert lumen_router_config._is_quota_exhausted("munito", "probe-y") is False
     finally:
         if had_model:
-            provider["y:free"] = old_model
+            provider["probe-y"] = old_model
         else:
-            provider.pop("y:free", None)
+            provider.pop("probe-y", None)
 
 
 def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
@@ -768,7 +650,7 @@ def test_streaming_fast_path_shows_no_dots_frames():
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-y",
             piece_agen=instant_pieces(),
         ))
         assert answer == "Привет"
@@ -789,7 +671,7 @@ def test_streaming_plain_text_adds_subtle_thought_line():
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-y",
             piece_agen=pieces(),
         ))
         assert answer == "Привет"
@@ -827,7 +709,7 @@ def test_streaming_final_split_sends_missing_continuation(monkeypatch):
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "длинный", incoming, provider="openrouter", model_id="y:free",
+            chat_id, "длинный", incoming, provider="munito", model_id="probe-y",
             piece_agen=pieces(),
         ))
         assert answer and answer.startswith("а" * 1000) and answer.endswith("б" * 200)
@@ -874,7 +756,7 @@ def test_streaming_resplit_shifted_boundary_re_edits_shown_message(monkeypatch):
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "длинный", incoming, provider="openrouter", model_id="y:free",
+            chat_id, "длинный", incoming, provider="munito", model_id="probe-y",
             piece_agen=pieces(),
         ))
         final = _split_text_chunks(answer, bot.TG_MAX_LEN)
@@ -899,7 +781,7 @@ def test_streaming_stores_clean_history_text_not_full_prompt():
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
             chat_id, "полный промпт со сниппетами", incoming,
-            provider="openrouter", model_id="y:free", piece_agen=pieces(),
+            provider="munito", model_id="probe-y", piece_agen=pieces(),
             history_text="чистый вопрос",
         ))
         assert answer == "Ответ"
@@ -933,7 +815,7 @@ def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
     status = _FakeStatus()
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="y:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-y",
             piece_agen=pieces(), status=status,
         ))
         assert answer == "Привет"
@@ -957,7 +839,7 @@ def test_streaming_whitespace_only_returns_none_not_empty_response():
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, placeholder = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="z:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-z",
             piece_agen=whitespace_pieces(),
         ))
         assert answer is None
@@ -980,7 +862,7 @@ def test_streaming_reveal_follows_arrival_pace_not_full_dump():
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="pace:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-pace",
             piece_agen=paced_pieces(),
         ))
         assert answer == full
@@ -990,7 +872,7 @@ def test_streaming_reveal_follows_arrival_pace_not_full_dump():
         bot.chat_state.pop(chat_id, None)
 
 
-def test_try_openrouter_streaming_returns_none_on_early_failure():
+def test_try_munito_streaming_returns_none_on_early_failure(monkeypatch):
     chat_id = 999106
 
     async def fake_stream_pieces_raises(model_id, messages, *, deadline=None):
@@ -998,17 +880,12 @@ def test_try_openrouter_streaming_returns_none_on_early_failure():
         yield ""  # делает функцию async-генератором (недостижимо)
 
     incoming = _FakeIncomingMessage(chat_id)
-    original_gen = bot._openrouter_stream_pieces
-    bot._openrouter_stream_pieces = fake_stream_pieces_raises
-    try:
-        answer, placeholder = asyncio.run(bot._try_openrouter_streaming(chat_id, "Привет!", incoming, "meta-llama/llama-3.3-70b-instruct:free"))
-        assert answer is None
-        assert placeholder is incoming.sent[0]
-        assert incoming.sent[0].deleted is False
-        assert chat_id not in bot.chat_state or not bot.chat_state[chat_id].get("history")
-    finally:
-        bot._openrouter_stream_pieces = original_gen
-        bot.chat_state.pop(chat_id, None)
+    monkeypatch.setattr(bot, "_munito_stream_pieces", fake_stream_pieces_raises)
+    answer, placeholder = asyncio.run(bot._try_munito_streaming(chat_id, "Привет!", incoming, "deepseek-ai/deepseek-v4.1-flash-1017"))
+    assert answer is None
+    assert placeholder is incoming.sent[0]
+    assert incoming.sent[0].deleted is False
+    assert chat_id not in bot.chat_state or not bot.chat_state[chat_id].get("history")
 
 
 def test_run_streaming_reply_reuses_given_placeholder():
@@ -1029,7 +906,7 @@ def test_run_streaming_reply_reuses_given_placeholder():
     bot._answer_sender = must_not_send
     try:
         answer, placeholder = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет", incoming, provider="openrouter", model_id="m:free",
+            chat_id, "Привет", incoming, provider="munito", model_id="probe-m",
             piece_agen=pieces(), reuse_placeholder=reused,
         ))
         assert answer == "Привет" and placeholder is None
@@ -1048,7 +925,7 @@ def test_run_streaming_reply_paces_reveal_for_burst_instead_of_dumping_full_text
 
     # Реалистичная имитация бэкенда, который не стримит токен-в-токен, а отдаёт
     # весь ответ ОДНИМ куском (см. докстринг lumen_typing_pace.py про то, почему
-    # это обычное дело для бесплатных моделей OpenRouter).
+    # это обычное дело для бесплатных моделей с общим слагом).
     long_text = "Слово " * 80  # ~480 символов одним SSE-куском
 
     fake_stream = _fake_gemini_stream([long_text])
@@ -1334,7 +1211,7 @@ def test_streaming_limits_chunk_resplits(monkeypatch):
     incoming = _FakeIncomingMessage(chat_id)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="split:free",
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-split",
             piece_agen=many_pieces(),
         ))
         assert answer is not None and "кусок29" in answer
@@ -1371,7 +1248,7 @@ def test_streaming_falls_back_to_reply_when_edits_die(monkeypatch):
     monkeypatch.setattr(bot, "_safe_reply", _recorder_fallback)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
-            chat_id, "Привет!", incoming, provider="openrouter", model_id="dead:edit",
+            chat_id, "Привет!", incoming, provider="munito", model_id="dead:edit",
             piece_agen=many_big_pieces(),
         ))
         assert answer is not None and "часть4" in answer

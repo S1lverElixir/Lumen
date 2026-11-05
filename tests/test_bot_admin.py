@@ -286,15 +286,15 @@ def test_export_state_returns_detached_snapshot():
     chat_id = 999980
     state = bot.get_state(chat_id)
     state["history"].append({"role": "user", "content": "hi"})
-    bot.GLOBAL_QUOTA.setdefault("groq", {})["snaptest"] = {"used": 1}
+    bot.GLOBAL_QUOTA.setdefault("munito", {})["snaptest"] = {"used": 1}
     try:
         result = asyncio.run(bot.export_state(_FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
-        bot.GLOBAL_QUOTA["groq"]["snaptest"]["used"] = 999
+        bot.GLOBAL_QUOTA["munito"]["snaptest"]["used"] = 999
         state["history"].append({"role": "user", "content": "after"})
-        assert result["global_quota"]["groq"]["snaptest"]["used"] == 1
+        assert result["global_quota"]["munito"]["snaptest"]["used"] == 1
         assert all(m["content"] != "after" for m in result["chats"][str(chat_id)]["history"])
     finally:
-        bot.GLOBAL_QUOTA.get("groq", {}).pop("snaptest", None)
+        bot.GLOBAL_QUOTA.get("munito", {}).pop("snaptest", None)
         bot.chat_state.pop(chat_id, None)
         bot.ADMIN_PANEL_KEY = original
 
@@ -651,16 +651,13 @@ def _sleep_then_cancel(loop_sleeps):
 
 def _patch_startup(monkeypatch, tg_impl, loader=None):
     monkeypatch.setattr(bot, "load_state_from_disk", loader or Mock())
-    monkeypatch.setattr(bot, "_check_temporary_free_models_expiry", Mock())
     monkeypatch.setattr(bot, "_check_unconfirmed_model_quotas", Mock())
-    monkeypatch.setattr(bot, "_check_scheduled_removals_due", Mock())
     monkeypatch.setattr(bot, "telegram_api_call", tg_impl)
     monkeypatch.setattr(bot, "_cleanup_rate_limit_dict", Mock())
     monkeypatch.setattr(bot, "_evict_orphan_chat_locks", Mock())
     monkeypatch.setattr(bot, "_reset_quota_if_new_day", Mock())
     # getMe в try_setup переписывает globals — снапшот для отката.
     monkeypatch.setattr(bot, "BOT_USERNAME", bot.BOT_USERNAME)
-    monkeypatch.setattr(bot, "OPENROUTER_HTTP_REFERER", bot.OPENROUTER_HTTP_REFERER)
 
 
 async def _fake_tg_ok(method, *args, **kwargs):

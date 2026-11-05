@@ -564,15 +564,23 @@ def test_flush_concurrency_falls_back_on_garbage(monkeypatch, env_value, expecte
         lumen_chat_state._state_flush_semaphore = orig_sem
 
 
-def test_load_global_quota_restores_groq():
-    # Внешний аудит: groq-счётчики сохранялись, но при загрузке терялись.
+def test_load_global_quota_restores_groq_and_munito():
+    # Внешний аудит: groq-счётчики сохранялись, но при загрузке терялись. Тот же
+    # разбор для munito — головы текстового маршрута с 05.11.2026: её счётчик
+    # обязан переживать рестарт. Groq в снимке только Whisper (чат-модели убраны).
     import json
-    payload = json.dumps({"gemini": {}, "openrouter": {}, "groq": {"qwen/qwen3.8-27b": {"used": 4, "exhausted_at": None}}, "quota_day": bot._current_quota_day()})
+    payload = json.dumps({
+        "gemini": {},
+        "munito": {"deepseek-ai/deepseek-v4.1-flash-1017": {"used": 6, "exhausted_at": None}},
+        "groq": {"whisper-large-v3-turbo": {"used": 4, "exhausted_at": None}},
+        "quota_day": bot._current_quota_day(),
+    })
     real = dict(bot.GLOBAL_QUOTA)
     with patch("bot._storage_read_text", return_value=payload):
         try:
             bot.load_global_quota()
-            assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["used"] == 4
+            assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["used"] == 4
+            assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["used"] == 6
         finally:
             bot.GLOBAL_QUOTA.clear()
             bot.GLOBAL_QUOTA.update(real)
@@ -664,7 +672,7 @@ def test_successful_startup_load_keeps_index_and_quota_writes():
     orig_throttle = lcs._last_quota_check_monotonic
     lcs._state_load_failed = False
     try:
-        payload = json.dumps({"gemini": {}, "openrouter": {}, "quota_day": bot._current_quota_day()})
+        payload = json.dumps({"gemini": {}, "munito": {}, "quota_day": bot._current_quota_day()})
 
         def fake_read(key, path):
             if key == "lumen:global_quota":
@@ -730,29 +738,30 @@ def test_save_chat_to_storage_limited_snapshots_before_thread():
 
 
 def test_sentry_scrub_secrets_redacts_known_tokens():
-    original_bot_token, original_gemini_key, original_or_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY
+    original_bot_token, original_gemini_key, original_munito_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.MUNITO_API_KEY
     bot.BOT_TOKEN = "secret-bot-token-123"
     bot.GEMINI_API_KEY = "secret-gemini-key-456"
-    bot.OPENROUTER_API_KEY = "secret-or-key-789"
+    bot.MUNITO_API_KEY = "secret-munito-key-789"
     try:
         event = {
             "message": "failed calling token secret-bot-token-123",
-            "extra": {"note": "gemini key was secret-gemini-key-456, or key was secret-or-key-789"},
+            "extra": {"note": "gemini key was secret-gemini-key-456, munito key was secret-munito-key-789"},
         }
         scrubbed = bot._sentry_scrub_secrets(event, {})
         payload = json.dumps(scrubbed)
         assert "secret-bot-token-123" not in payload
         assert "secret-gemini-key-456" not in payload
-        assert "secret-or-key-789" not in payload
+        assert "secret-munito-key-789" not in payload
         assert payload.count("<REDACTED>") == 3
     finally:
-        bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY = original_bot_token, original_gemini_key, original_or_key
+        bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.MUNITO_API_KEY = original_bot_token, original_gemini_key, original_munito_key
 
 
 def test_sentry_scrub_secrets_redacts_webhook_admin_and_upstash_tokens():
     # РЕГРЕССИЯ: раньше _redactable_secrets (тогда — инлайн-кортеж) вычищал
-    # только BOT_TOKEN/GEMINI_API_KEY/OPENROUTER_API_KEY — WEBHOOK_SECRET/
-    # ADMIN_PANEL_KEY/UPSTASH_REDIS_REST_TOKEN утекли бы в Sentry как есть.
+    # только BOT_TOKEN/GEMINI_API_KEY и ключ текстового провайдера (тогда ещё
+    # OpenRouter) — WEBHOOK_SECRET/ADMIN_PANEL_KEY/UPSTASH_REDIS_REST_TOKEN
+    # утекли бы в Sentry как есть.
     original_upstash = bot.UPSTASH_REDIS_REST_TOKEN
     bot.UPSTASH_REDIS_REST_TOKEN = "secret-upstash-token-xyz"
     try:
@@ -766,13 +775,13 @@ def test_sentry_scrub_secrets_redacts_webhook_admin_and_upstash_tokens():
 
 
 def test_sentry_scrub_secrets_passthrough_when_no_secrets_configured():
-    original_bot_token, original_gemini_key, original_or_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY
-    bot.BOT_TOKEN = bot.GEMINI_API_KEY = bot.OPENROUTER_API_KEY = ""
+    original_bot_token, original_gemini_key, original_munito_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.MUNITO_API_KEY
+    bot.BOT_TOKEN = bot.GEMINI_API_KEY = bot.MUNITO_API_KEY = ""
     try:
         event = {"message": "ordinary error, nothing secret here"}
         assert bot._sentry_scrub_secrets(event, {}) == event
     finally:
-        bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY = original_bot_token, original_gemini_key, original_or_key
+        bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.MUNITO_API_KEY = original_bot_token, original_gemini_key, original_munito_key
 
 
 def test_sentry_not_initialized_without_dsn_in_test_env():
@@ -1484,7 +1493,7 @@ def test_output_cap_answer_marked_incomplete(rate_guard_setup, monkeypatch):
     sent: list[str] = []
 
     async def fake_run_route(*args, **kwargs):
-        kwargs["provenance"].update(provider="openrouter", model="m1:free", finish_reason="length")
+        kwargs["provenance"].update(provider="munito", model="m1", finish_reason="length")
         return "Фотосинтез — это", False
 
     async def fake_reply(msg, text, **kwargs):
@@ -1826,8 +1835,8 @@ def test_trim_history_short_is_untouched(monkeypatch):
     async def must_not_be_called(*args, **kwargs):
         raise AssertionError("no LLM call for short history")
 
-    monkeypatch.setattr(bot, "_groq_request", must_not_be_called)
-    monkeypatch.setattr(bot, "_or_request", must_not_be_called)
+    monkeypatch.setattr(bot, "_munito_request", must_not_be_called)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     history = _make_long_history(50)
     asyncio.run(bot._trim_history(history))
     assert len(history) == 50
@@ -1836,12 +1845,14 @@ def test_trim_history_short_is_untouched(monkeypatch):
 
 def test_trim_history_summarizes_old_keeps_recent(monkeypatch):
     # Переполнение: старое сжимается в первую запись с пометкой, свежие 80 — как были.
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
-        assert json_body["model"] == "qwen/qwen3.8-27b"
+    from lumen_router_config import _MUNITO_ORDER
+
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None):
+        assert json_body["model"] == _MUNITO_ORDER[0]
         return {"choices": [{"message": {"content": "Обсуждали погоду и котов."}}]}
 
-    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
     history = _make_long_history(105)
     asyncio.run(bot._trim_history(history))
@@ -1855,12 +1866,10 @@ def test_trim_history_summarizes_old_keeps_recent(monkeypatch):
 def test_trim_history_falls_back_to_plain_cut_on_failure(monkeypatch):
     # Саммаризатор упал — режем по-старому, ответ не ломается.
     async def failing_request(*args, **kwargs):
-        raise bot.GroqAPIError("overloaded", status_code=503)
+        raise bot.MunitoAPIError("overloaded", status_code=503)
 
-    monkeypatch.setattr(bot, "_groq_request", failing_request)
-    monkeypatch.setattr(bot, "_or_request", failing_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", failing_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     history = _make_long_history(105)
     asyncio.run(bot._trim_history(history))
     assert len(history) == 100
@@ -1868,14 +1877,12 @@ def test_trim_history_falls_back_to_plain_cut_on_failure(monkeypatch):
 
 
 def test_trim_history_without_keys_cuts_plainly(monkeypatch):
-    # Нет ключей — даже не пробуем сеть, сразу старая обрезка.
+    # Нет ключа Munito (единственный саммаризатор) — даже не пробуем сеть, сразу старая обрезка.
     async def must_not_be_called(*args, **kwargs):
         raise AssertionError("no LLM call without keys")
 
-    monkeypatch.setattr(bot, "_groq_request", must_not_be_called)
-    monkeypatch.setattr(bot, "_or_request", must_not_be_called)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "")
-    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "")
+    monkeypatch.setattr(bot, "_munito_request", must_not_be_called)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
     history = _make_long_history(105)
     asyncio.run(bot._trim_history(history))
     assert len(history) == 100
@@ -1985,14 +1992,15 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
     # подменой monotonic на 12.0).
     original_quota = {
         "gemini": dict(bot.GLOBAL_QUOTA.get("gemini", {})),
-        "openrouter": dict(bot.GLOBAL_QUOTA.get("openrouter", {})),
+        "munito": dict(bot.GLOBAL_QUOTA.get("munito", {})),
         "quota_day": bot.GLOBAL_QUOTA.get("quota_day"),
     }
     original_throttle = lumen_chat_state._last_quota_check_monotonic
     try:
         bot.GLOBAL_QUOTA["gemini"] = {"gemini-2.5-flash": {"used": 106, "remaining": 0, "limit": 1500, "exhausted_at": 12345.0, "cooldown_until": time.time() + 600.0}}
-        bot.GLOBAL_QUOTA["openrouter"] = {"some-model:free": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None, "cooldown_until": None}}
-        bot.GLOBAL_QUOTA["groq"] = {"qwen/qwen3.8-27b": {"used": 9, "exhausted_at": 12345.0}}
+        bot.GLOBAL_QUOTA["munito"] = {"deepseek-ai/deepseek-v4.1-flash-1017": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None, "cooldown_until": None}}
+        # groq остаётся только там, где он реально нужен — Whisper в транскрибации.
+        bot.GLOBAL_QUOTA["groq"] = {"whisper-large-v3-turbo": {"used": 9, "exhausted_at": 12345.0}}
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"  # заведомо "вчерашний" день
         lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
 
@@ -2001,14 +2009,15 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["used"] == 0
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["exhausted_at"] is None
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["cooldown_until"] is None
-        assert bot.GLOBAL_QUOTA["openrouter"]["some-model:free"]["used"] == 0
+        assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["used"] == 0
+        assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["cooldown_until"] is None
         # Groq сбрасывается вместе с остальными (внешний аудит: провайдер забыли в цикле сброса/загрузки).
-        assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["used"] == 0
-        assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["exhausted_at"] is None
+        assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["used"] == 0
+        assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["exhausted_at"] is None
         assert bot.GLOBAL_QUOTA["quota_day"] == bot._current_quota_day()
     finally:
         bot.GLOBAL_QUOTA["gemini"] = original_quota["gemini"]
-        bot.GLOBAL_QUOTA["openrouter"] = original_quota["openrouter"]
+        bot.GLOBAL_QUOTA["munito"] = original_quota["munito"]
         bot.GLOBAL_QUOTA.pop("groq", None)
         bot.GLOBAL_QUOTA["quota_day"] = original_quota["quota_day"]
         lumen_chat_state._last_quota_check_monotonic = original_throttle
@@ -2115,8 +2124,9 @@ def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
     orig_throttle = lcs._last_quota_check_monotonic
     real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
     try:
-        bot.GLOBAL_QUOTA["openrouter"] = {"m1": {"used": 5, "exhausted_at": None, "cooldown_until": None}}
-        bot.GLOBAL_QUOTA["groq"] = {"m2": {"used": 7, "exhausted_at": None, "cooldown_until": None}}
+        bot.GLOBAL_QUOTA["munito"] = {"m1": {"used": 5, "exhausted_at": None, "cooldown_until": None}}
+        # groq в снимке только про Whisper: чат-модели Groq из маршрута убраны 05.11.2026.
+        bot.GLOBAL_QUOTA["groq"] = {"whisper-large-v3-turbo": {"used": 7, "exhausted_at": None, "cooldown_until": None}}
         bot.GLOBAL_QUOTA["gemini"] = {"m3": {"used": 2, "exhausted_at": None, "cooldown_until": None}}
         bot.GLOBAL_QUOTA["user_daily"] = {"42": {"total": 3, "gemini": 1, "tts": 0, "bonus": 0}}
         bot.GLOBAL_QUOTA["stats"] = {"messages_received": 9, "answers_sent": 8, "all_failed": 1, "fallbacks": 2, "daily_limit_denials": 3}
@@ -2131,8 +2141,8 @@ def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
         lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: captured["quota"])
         bot.load_global_quota()
-        assert bot.GLOBAL_QUOTA["openrouter"]["m1"]["used"] == 5
-        assert bot.GLOBAL_QUOTA["groq"]["m2"]["used"] == 7
+        assert bot.GLOBAL_QUOTA["munito"]["m1"]["used"] == 5
+        assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["used"] == 7
         assert bot.GLOBAL_QUOTA["gemini"]["m3"]["used"] == 2
         assert bot.GLOBAL_QUOTA["user_daily"]["42"]["total"] == 3
         stats = bot.GLOBAL_QUOTA["stats"]
@@ -3194,7 +3204,7 @@ def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
 ])
 def test_load_global_quota_restores_user_daily(incoming, expected):
     # Новое: счётчики переживают рестарт; битые записи отбрасываются, а не роняют загрузку.
-    full = {"gemini": {}, "openrouter": {}, "groq": {}, "quota_day": bot._current_quota_day()}
+    full = {"gemini": {}, "munito": {}, "groq": {}, "quota_day": bot._current_quota_day()}
     full.update(incoming)
     real = json.loads(json.dumps(bot.GLOBAL_QUOTA))
     try:
@@ -3239,11 +3249,12 @@ def test_core_refuses_when_user_daily_total_exhausted(rate_guard_setup, monkeypa
 
 
 def test_core_falls_back_without_gemini_and_marks_no_search(rate_guard_setup, monkeypatch):
-    # Свежесть без ссылок при исчерпанном Gemini идёт через Groq/OpenRouter;
-    # внешний поиск пробует дать им сниппеты, и только пустой поиск оставляет
+    # Свежесть без ссылок при исчерпанном лимите Gemini идёт через Munito;
+    # внешний поиск пробует дать ему сниппеты, и только пустой поиск оставляет
     # пометку "без поиска".
     message = rate_guard_setup()
     message.text = "что нового сегодня"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "DAILY_USER_GEMINI_LIMIT", 1)
     bot._record_user_daily(456, gemini=True)
     captured = {}
