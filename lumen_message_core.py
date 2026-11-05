@@ -214,7 +214,7 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     # выкачивал девять файлов (аудит 26.10.2026).
     uid = bot._user_key_for_message(main_msg)
     entry = bot._user_daily_peek(uid)
-    if not wants_tiktok and await _refuse_daily_total(main_msg, uid, entry):
+    if await _refuse_daily_total(main_msg, uid, entry):
         return
     # Видео-слайд делает весь альбом Gemini-only: без этой проверки extras
     # качались бы до отказа по квоте Gemini.
