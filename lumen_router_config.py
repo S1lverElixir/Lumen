@@ -446,6 +446,19 @@ def _munito_route() -> list[tuple[str, str]]:
     return [("munito", m) for m in _skip_exhausted("munito", _MUNITO_ORDER)]
 
 
+def _munito_payload_extras() -> dict[str, Any]:
+    """reasoning_effort для запросов Munito (MUNITO_REASONING_EFFORT, по умолчанию low).
+    Замер 05.11.2026: у glm-5.3-flash reasoning падает с ~60 токенов до 0-20 (первый
+    токен 0.13-0.26s вместо 0.5-1.0s), у deepseek-1017 почти не меняется, а
+    qwen3.8-27b без поля съедал весь лимит вывода размышлением и отдавал пустой
+    content. Цена: на двухшаговой задаче про дистанцию GLM ответил неверно (180 при
+    low, 240 при minimal, верно 210) и исправился на повторе — риск есть, но
+    плавающий, головой остаётся DeepSeek. Пустое значение = поле не отправляем:
+    провайдер отвечает 400 на незнакомые параметры."""
+    effort = (os.getenv("MUNITO_REASONING_EFFORT", "low") or "").strip()
+    return {"reasoning_effort": effort} if effort else {}
+
+
 # ── Gemma в голове обычного текста (22.10.2026).
 # Офлайн-замер 25 вопросов (eval/persona_models.py, Actions): обе Gemma 47/50,
 # gemini-3.5-flash-lite 45/50, OR-lightning 39/50; Groq из Actions недоступен

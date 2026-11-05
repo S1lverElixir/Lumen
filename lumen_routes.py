@@ -283,9 +283,13 @@ async def _chat_completion_chain(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
     request_fn, provider: str, deadline: float | None = None, stop_on: Callable[[Exception], bool] | None = None,
     log_label: str | None = None, chat_id: Any = None, user_text: str | None = None,
-    out: dict | None = None,
+    out: dict | None = None, extra_payload: dict | None = None,
 ) -> tuple[str, str]:
-    """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (OpenRouter и Groq).
+    """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (OpenRouter, Groq, Munito).
+
+    extra_payload — провайдерские поля поверх стандартного тела (у Munito это
+    reasoning_effort): один цикл на всех, поэтому копия payload в одной ветке не
+    должна расходиться с остальными (аудит 26.09.2026).
 
     Ровно одна попытка на модель — ретраи одной модели при массовой нестабильности
     замедляли весь маршрут. Раньше этот цикл жил в двух копиях (_or_chat_completion_
@@ -316,7 +320,7 @@ async def _chat_completion_chain(
         messages[0]["content"] = bot.get_system_prompt(model_trial)
         attempt_start = time.monotonic()
         try:
-            payload = {"model": model_trial, "messages": messages, "stream": False}
+            payload = {"model": model_trial, "messages": messages, "stream": False, **(extra_payload or {})}
             resp = await request_fn(payload, deadline)
             choices = resp.get("choices") or []
             answer = ""
@@ -498,7 +502,7 @@ async def ask_groq_text(chat_id: int, user_text: str, model_chain: list[str], *,
 async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None, provenance: dict | None = None) -> str:
     """Текст через Munito AI — копия ask_groq_text без резки истории: у головы Munito 400K входных токенов на окно (замер 05.11.2026), общий лимит истории в 100 сообщений туда влезает."""
     import bot
-    from lumen_router_config import _MUNITO_ORDER
+    from lumen_router_config import _MUNITO_ORDER, _munito_payload_extras
     state = bot.get_state(chat_id)
     history = state.setdefault("history", [])
     trial_models = list(dict.fromkeys(model_chain)) or [_MUNITO_ORDER[0]]
@@ -512,7 +516,7 @@ async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], 
     answer, model_trial = await _chat_completion_chain(
         messages, trial_models, primary_model_id,
         request_fn=_request, provider="munito", deadline=deadline, chat_id=chat_id, user_text=user_text,
-        out=_out,
+        out=_out, extra_payload=_munito_payload_extras(),
     )
     _note_provenance(provenance, "munito", _out)
 
@@ -541,7 +545,7 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
     проба не должна оседать в контексте владельца. Никогда не кидает: неуспех
     возвращается кортежем (False, причина, секунды)."""
     import bot
-    from lumen_router_config import _GROQ_LIGHT_ORDER, _MUNITO_ORDER
+    from lumen_router_config import _GROQ_LIGHT_ORDER, _MUNITO_ORDER, _munito_payload_extras
     start = time.monotonic()
     try:
         # Один стол вместо трёх копий одного блока: ask_* уже расходились с оригиналом (аудит 26.09.2026).
@@ -563,6 +567,7 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
                 messages, [model], model, request_fn=_probe_request,
                 provider=provider, deadline=start + bot.ROUTE_MODEL_TIMEOUT_SEC,
                 log_label=label, chat_id=chat_id, user_text=_SELFTEST_PING_TEXT,
+                extra_payload=(_munito_payload_extras() if provider == "munito" else None),
             )
             bot._record_quota_usage(provider, used)
             return True, "", round(time.monotonic() - start, 2)

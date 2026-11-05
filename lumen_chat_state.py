@@ -1404,7 +1404,7 @@ async def _summarize_text(text: str) -> str:
         {"role": "user", "content": text},
     ]
     payload = {"messages": messages, "temperature": 0.2, "max_tokens": 400, "stream": False}
-    from lumen_router_config import _GROQ_LIGHT_ORDER, _MUNITO_ORDER, _OR_LIGHT_ORDER, _munito_active
+    from lumen_router_config import _GROQ_LIGHT_ORDER, _MUNITO_ORDER, _OR_LIGHT_ORDER, _munito_active, _munito_payload_extras
     # Порядок = самый дешёвый живой: Munito во время эксперимента, иначе Groq, иначе OpenRouter.
     candidates: list[tuple[str, str]] = []
     if _munito_active():
@@ -1417,8 +1417,12 @@ async def _summarize_text(text: str) -> str:
     request_fns = {"munito": bot._munito_request, "groq": bot._groq_request, "openrouter": bot._or_request}
     for provider, model in candidates:
         try:
-            payload["model"] = model
-            resp = await request_fns[provider]("chat/completions", "POST", json_body=payload)
+            # Поле reasoning_effort знает только Munito: на чужих эндпоинтах неизвестный
+            # параметр — это 400, поэтому тело собирается на каждого провайдера.
+            body = {**payload, "model": model}
+            if provider == "munito":
+                body.update(_munito_payload_extras())
+            resp = await request_fns[provider]("chat/completions", "POST", json_body=body)
             choices = resp.get("choices") or []
             answer = ""
             if choices:

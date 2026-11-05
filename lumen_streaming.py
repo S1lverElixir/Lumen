@@ -159,7 +159,7 @@ async def _sse_pieces(
     session, url: str, headers: dict[str, str], payload: dict, *, err_cls, provider_label: str,
     deadline: float | None = None,
 ):
-    """Общий разбор OpenAI-совместимого SSE для OpenRouter и Groq (оба дают
+    """Общий разбор OpenAI-совместимого SSE для OpenRouter, Groq и Munito (все дают
     `data: {"choices":[{"delta":{"content":...}}]}` и финальный `data: [DONE]`).
 
     Раньше это были две копии по 45 строк, расходившиеся деталями: у Groq не было
@@ -260,9 +260,10 @@ async def _munito_stream_pieces(model_id: str, messages: list[dict], *, deadline
         "Content-Type": "application/json",
     }
     session = await bot._get_http_session()
+    from lumen_router_config import _munito_payload_extras
     async for piece in _sse_pieces(
         session, f"{bot.MUNITO_BASE_URL}/chat/completions", headers,
-        {"model": model_id, "messages": messages, "stream": True},
+        {"model": model_id, "messages": messages, "stream": True, **_munito_payload_extras()},
         err_cls=bot.MunitoAPIError, provider_label="Munito", deadline=deadline,
     ):
         yield piece

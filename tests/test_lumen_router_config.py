@@ -314,6 +314,23 @@ def test_build_route_munito_without_key_changes_nothing(monkeypatch):
     assert route[0] == ("gemini", "gemma-4-26b-a4b-it")
 
 
+@pytest.mark.parametrize(("value", "expected"), [
+    (None, {"reasoning_effort": "low"}),
+    ("", {}),
+    ("minimal", {"reasoning_effort": "minimal"}),
+])
+def test_munito_payload_extras_default_low_and_absent_when_unset(monkeypatch, value, expected):
+    # protected поведение: по умолчанию запросы уходят с минимальным размышлением
+    # (замер 05.11.2026: ~0.2s вместо ~1s) и поле НЕ отправляется, когда переменная
+    # пустая — Munito отвечает 400 на незнакомый параметр, так что глушить эксперимент
+    # должно можно без правки кода.
+    if value is None:
+        monkeypatch.delenv("MUNITO_REASONING_EFFORT", raising=False)
+    else:
+        monkeypatch.setenv("MUNITO_REASONING_EFFORT", value)
+    assert lumen_router_config._munito_payload_extras() == expected
+
+
 def test_build_route_munito_keep_fallbacks_appends_previous_chain(monkeypatch):
     # Второй режим: Munito головой, прежние цепочки резервом — иначе 429/503
     # провайдера означает молчание бота для всех.

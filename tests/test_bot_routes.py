@@ -1559,6 +1559,30 @@ def test_ask_munito_text_falls_back_to_next_model_and_is_dispatched(monkeypatch)
     assert seen == ["m1", "m2"], "обычный путь должен дойти до второй модели после 503"
 
 
+def test_ask_munito_text_sends_reasoning_effort_and_omits_it_when_unset(monkeypatch):
+    # protected поведение: low-effort доезжает до тела запроса на текстовом пути.
+    # Регрессия: поле заведут в одном месте (стрим) и потеряют в другом — тогда
+    # обычные ответы по-прежнему сжигают reasoning-токены, а пустой answer от Qwen
+    # возвращается.
+    from collections import deque
+    bodies = []
+
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+        bodies.append(json_body)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda *args, **kwargs: None)
+    monkeypatch.setenv("MUNITO_REASONING_EFFORT", "low")
+    asyncio.run(bot.ask_munito_text(999704, "привет", model_chain=["m1"]))
+    assert bodies[0]["reasoning_effort"] == "low"
+    monkeypatch.setenv("MUNITO_REASONING_EFFORT", "")
+    asyncio.run(bot.ask_munito_text(999705, "привет", model_chain=["m1"]))
+    assert "reasoning_effort" not in bodies[1]
+
+
 def test_munito_request_requires_key_and_maps_provider_error(monkeypatch):
     # Тот же контракт, что у Groq: без ключа — понятная ошибка вместо сетевого вызова,
     # а ответ API не показывается пользователю сырым (внутри может быть что угодно).
