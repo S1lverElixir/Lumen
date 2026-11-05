@@ -39,6 +39,8 @@ from lumen_router_config import _looks_like_heavy_query  # noqa: E402
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_REFERER = "https://t.me/SilverElixirBot"
+# Munito: тот же дефолт, что в bot.MUNITO_BASE_URL (значение берём из окружения/.env).
+MUNITO_BASE_URL = "https://api.munito.ai/inference/v1"
 
 # Пауза между вызовами: free-тайер Groq — 30 RPM, у Gemini — 5 RPM.
 CALL_GAP_SEC = float(os.environ.get("EVAL_CALL_GAP_SEC", "2.0"))
@@ -61,6 +63,11 @@ FREE_TIER_LIMITS: dict[str, dict[str, int]] = {
     # OpenRouter free: 50 запросов в сутки на модель (комментарий в
     # lumen_router_config.py) — замер на 25 вопросов в этот лимит укладывается.
     "or:inclusionai/ling-3.0-flash-sante:free": {"rpm": 20, "tpm": 100_000, "rpd": 50},
+    # Munito (замер eval/munito_probe.py 05.11.2026): у головы 200 запросов на
+    # 30-секундное окно, у GLM-5.3-Flash — 10. Ставим консервативно: пусть замер
+    # тормозит, чем ловит 429 и теряет модель.
+    "munito:deepseek-ai/deepseek-v4.1-flash-1017": {"rpm": 60, "tpm": 400_000, "rpd": 250},
+    "munito:zai-org/glm-5.3-flash": {"rpm": 15, "tpm": 150_000, "rpd": 100},
 }
 # Прикидка токенов на один вызов: системный промпт ~6k + чеклист ~1k + ответ.
 TOKENS_PER_CALL = 7_500
@@ -119,7 +126,7 @@ def parse_targets(raw: str) -> list[Target]:
         provider, _, model_id = chunk.partition(":")
         provider = provider.strip().lower()
         model_id = model_id.strip()
-        if provider not in ("gemini", "gemma", "groq", "or") or not model_id:
+        if provider not in ("gemini", "gemma", "groq", "or", "munito") or not model_id:
             raise SystemExit(f"не понял модель: {chunk} (ожидается provider:model_id)")
         targets.append(Target(provider, model_id))
     return targets
@@ -304,6 +311,13 @@ def call_chat_completions(target: Target, history: list[dict], user_text: str, *
             raise RuntimeError("нет GROQ_API_KEY (переменная или .env)")
         url = f"{GROQ_BASE_URL}/chat/completions"
         headers = {"Authorization": f"Bearer {key}"}
+    elif target.provider == "munito":
+        key = os.environ.get("MUNITO_API_KEY", "")
+        if not key:
+            raise RuntimeError("нет MUNITO_API_KEY (переменная или .env)")
+        base = os.environ.get("MUNITO_BASE_URL", "").strip().rstrip("/") or MUNITO_BASE_URL
+        url = f"{base}/chat/completions"
+        headers = {"Authorization": f"Bearer {key}"}
     else:
         key = os.environ.get("OPENROUTER_API_KEY", "")
         if not key:
@@ -318,6 +332,12 @@ def call_chat_completions(target: Target, history: list[dict], user_text: str, *
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     payload = {"model": target.model_id, "messages": messages, "stream": False}
+    if target.provider == "munito" and system_text is None:
+        # Те же поля, что шлёт бот (reasoning_effort из lumen_router_config), чтобы
+        # замер мерил боевой маршрут. Судья вызывается со своей системкой и остаётся
+        # с размышлением включённым: low-effort судья сама снижает качество оценки.
+        from lumen_router_config import _munito_payload_extras
+        payload.update(_munito_payload_extras())
     return _openai_chat_stream(url, headers, payload)
 
 
