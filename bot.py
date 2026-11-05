@@ -497,7 +497,10 @@ TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 # источник правды; дубль здесь был мёртвым — аудит 26.09.2026).
 TIKTOK_SLIDESHOW_MAX_ITEMS = 35
 # Лимит ffprobe/ffmpeg-процессов: без него слайдшоу кладёт CPU контейнера (ревью 28.08.2026).
-TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = _env_number("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", 4, cast=int, min_value=1)
+# 2 слота, а не 4: живой слайд держит в слоте ДВА процесса параллельно
+# (ffprobe + ffmpeg в _probe_and_thumbnail_from_path), иначе потолок = 8 процессов
+# на двух ядрах Space плюс временный файл до 50 МБ на каждый (аудит 01.11.2026).
+TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = _env_number("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", 2, cast=int, min_value=1)
 _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
 # Лимит скачивания слайдов 8: 35 слайдов иначе занимают весь пул сессии (limit=40) и стопорят другие чаты (аудит 04.09.2026).
 TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = _env_number("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", 8, cast=int, min_value=1)
@@ -510,18 +513,10 @@ TIKTOK_SLIDESHOW_MAX_BYTES = _env_number("TIKTOK_SLIDESHOW_MAX_BYTES", 200 * 102
 # имён (те же объекты — тесты мутируют bot.chat_state/bot.GLOBAL_QUOTA как раньше).
 import lumen_chat_state
 from lumen_chat_state import (
-    ChatState,
     chat_state,
-    MAX_CHAT_LIMIT,
-    PRUNED_CHAT_TARGET,
-    MAX_CHAT_HISTORY_LEN,
     MAX_TOTAL_MEMORY_MESSAGES,
     _STATE_DIR,
-    STATE_FILE_PATH,
-    GLOBAL_QUOTA_FILE,
     _CHATS_DIR,
-    CHAT_INDEX_KEY,
-    CHAT_INDEX_FILE,
     _storage_config,
     _upstash_set,
     _upstash_get,
@@ -533,7 +528,6 @@ from lumen_chat_state import (
     _save_chat_to_storage,
     _delete_chat_storage,
     _save_chat_payload,
-    QuotaEntry,
     GLOBAL_QUOTA,
     _QUOTA_CHECK_THROTTLE_SEC,
     _maybe_alert_gemini_exhausted,
@@ -576,12 +570,10 @@ from lumen_chat_state import (
     _quota_entry,
     _mark_quota_exhausted,
     _record_quota_usage,
-    STATS_KEY,
     _stats_entry,
     _record_stats_event,
     _last_storage_write_ts,
     USER_DAILY_KEY,
-    MAX_USER_DAILY_KEYS,
     _user_daily_entry,
     _user_daily_peek,
     _user_daily_limit,
@@ -607,7 +599,6 @@ from lumen_limits import (
     _cleanup_rate_limit_dict,
     _check_and_register_rate_limit,
     _pending_picks,
-    _purge_expired_picks,
     _enforce_pending_picks_cap,
 )
 
@@ -699,9 +690,6 @@ from lumen_router_config import (
     GEMINI_TTS_MODELS,
     FISH_AUDIO_TTS_MODEL,
     FISH_AUDIO_ENABLED,
-    _looks_like_heavy_query,
-    _looks_like_freshness_query,
-    _build_route,
     _record_model_outcome,
     _is_quarantined,
     _quarantine_status,
@@ -721,7 +709,7 @@ from lumen_errors import (
     _MODEL_ERROR_FALLBACK_MSG,
 )
 
-# Форма chat_state[chat_id] — TypedDict ChatState (только аннотация для типов/читаемости, рантайм не меняет).
+# Форма chat_state[chat_id] — TypedDict ChatState в lumen_chat_state.py.
 
 # Буферы альбомов/медиа-групп
 _mg_buffers: dict[str, list[Message]] = {}
@@ -762,10 +750,7 @@ from lumen_admin import (
     _redact_secret,
     _check_bot_token_auth,
     healthcheck,
-    get_admin_keys,
-    get_webhook_url,
     webhook_handler,
-    network_diagnostics,
     probe_url,
     export_state,
     devtrace,
@@ -838,10 +823,7 @@ __all__ = [
     "_redact_secret",
     "_check_bot_token_auth",
     "healthcheck",
-    "get_admin_keys",
-    "get_webhook_url",
     "webhook_handler",
-    "network_diagnostics",
     "probe_url",
     "export_state",
     "devtrace",
@@ -849,7 +831,6 @@ __all__ = [
     # существующим тестам и `_run_route` ниже.
     "_tick_waiting_dots",
     "_pieces_with_waiting_feedback",
-    "_gemini_stream_pieces",
     "_openrouter_stream_pieces",
     "_groq_stream_pieces",
     "_run_streaming_reply",
@@ -861,18 +842,15 @@ __all__ = [
     "_model_first_chunk_limit",
     # Константы-фолбэки тестов (читаются как bot._IDENTITY_LEAK_FALLBACK).
     "_IDENTITY_LEAK_FALLBACK",
-    "_INJECTED_PAYLOAD_ECHO_FALLBACK",
     # Имена из lumen_tiktok_flow.py код bot.py сам не читает — они нужны как
     # `bot.X` существующим тестам и `_handle_message_core` ниже.
     "_send_tiktok_music",
     "handle_tiktok_sound",
     "_fetch_tikwm_media_data_with_proxy_fallback",
     "_try_send_tiktok_slideshow",
-    "_send_tiktok_single_video",
     "handle_tiktok",
     # Механика lumen_tiktok.py как `bot.X` для существующих тестов.
     "_original_sound_label",
-    "_GENERIC_ORIGINAL_SOUND_PHRASES",
     "_chunk_tiktok_media_items",
     "_looks_like_video_bytes",
     "_slideshow_slide_urls",
@@ -914,26 +892,19 @@ __all__ = [
     "_route_error_reply_text",
     "RouteBudgetExceededError",
     "_run_route",
-    # Порядки моделей и _history_user_text читаются тестами как bot.X.
+    # Порядки моделей и чистка истории читаются тестами как bot.X.
     "_OR_LIGHT_ORDER",
     "_OR_HEAVY_ORDER",
     "_OR_VISION_ORDER",
     "_GROQ_LIGHT_ORDER",
     "_history_user_text",
+    "_clean_history_entry",
     # Пространство имён genai-типов для тестов (bot.types.Content/...).
     "types",
     # Имена из lumen_chat_state.py код bot.py сам не читает — они нужны как
     # `bot.X` существующим тестам.
-    "ChatState",
-    "MAX_CHAT_LIMIT",
-    "PRUNED_CHAT_TARGET",
-    "MAX_CHAT_HISTORY_LEN",
     "MAX_TOTAL_MEMORY_MESSAGES",
-    "STATE_FILE_PATH",
-    "GLOBAL_QUOTA_FILE",
     "_CHATS_DIR",
-    "CHAT_INDEX_KEY",
-    "CHAT_INDEX_FILE",
     "_storage_config",
     "_upstash_set",
     "_upstash_get",
@@ -945,7 +916,6 @@ __all__ = [
     "_save_chat_to_storage",
     "_delete_chat_storage",
     "_save_chat_payload",
-    "QuotaEntry",
     "_QUOTA_CHECK_THROTTLE_SEC",
     "load_global_quota",
     "_restore_single_chat",
@@ -959,7 +929,6 @@ __all__ = [
     "_flush_dirty_state_once",
     "_prune_old_chats",
     "_quota_entry",
-    "STATS_KEY",
     "_stats_entry",
     "_record_stats_event",
     "_last_storage_write_ts",
@@ -972,7 +941,6 @@ __all__ = [
     "_current_quota_day",
     "_quota_day_reset_in_sec",
     "USER_DAILY_KEY",
-    "MAX_USER_DAILY_KEYS",
     "_user_daily_entry",
     "_user_daily_peek",
     "_user_daily_limit",
@@ -988,10 +956,8 @@ __all__ = [
     "GEMINI_TTS_MODELS",
     "FISH_AUDIO_TTS_MODEL",
     "FISH_AUDIO_ENABLED",
-    "POLLINATIONS_IMAGE_MODELS",
     "_pick_image_model",
     "_pollinations_text_to_image",
-    "_communicate_process",
     "_fish_audio_tts_bytes",
     "_gemini_tts_bytes",
     "chat_state",
@@ -1011,7 +977,6 @@ __all__ = [
     "_note_sender",
     "_resolve_nick",
     "_pending_picks",
-    "_purge_expired_picks",
     "_enforce_pending_picks_cap",
     # Имена из lumen_errors.py код bot.py сам не читает — только `bot.X` в тестах.
     "_error_text",
@@ -1046,9 +1011,7 @@ __all__ = [
     "_sanitize_mime_type",
     "_mime_suffix",
     "_msg_media_source",
-    "_media_file_id_and_mime",
     "_ensure_prompt_text",
-    "_looks_like_injection_probe",
     "DRAW_TRIGGER_PREFIXES",
     "TTS_TRIGGER_PREFIXES",
     "_NO_MEDIA_NOTE",
@@ -1063,15 +1026,8 @@ __all__ = [
     "clean_mention",
     "inline_draw",
     "inline_tts",
-    "_build_version",
-    "_webhook_info_text",
-    "_process_memory_text",
-    "_storage_backend_text",
     "_send_pick_question",
     "DEFAULT_GEMINI_MODEL",
-    "_looks_like_heavy_query",
-    "_looks_like_freshness_query",
-    "_build_route",
     "_record_model_outcome",
     "_is_quarantined",
     "_quarantine_status",
@@ -1114,7 +1070,6 @@ GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC = 3600.0
 # Генерация картинок — в lumen_images.py (чистые функции, сессию передаёт вызывающий код).
 from lumen_images import (
     DEFAULT_POLLINATIONS_IMAGE_MODEL,
-    POLLINATIONS_IMAGE_MODELS,
     _pick_image_model,
     _pollinations_text_to_image,
 )
@@ -1127,7 +1082,6 @@ __all__ += ["DEFAULT_POLLINATIONS_IMAGE_MODEL"]
 # (ей нужны сессия, BOT_TOKEN и bot.get_file).
 from lumen_media import (
     _sanitize_mime_type,
-    _media_file_id_and_mime,
     _mime_suffix,
     _msg_media_source,
     _ensure_prompt_text,
@@ -1148,8 +1102,6 @@ from lumen_media import (
 # Детекторы утечек/инъекций — чистые функции в lumen_security.py (импортируем только используемое).
 from lumen_security import (
     _IDENTITY_LEAK_FALLBACK,
-    _INJECTED_PAYLOAD_ECHO_FALLBACK,
-    _looks_like_injection_probe,
 )
 # (_INJECTION_PROBE_REPLY здесь больше не импортируется: ответ на провокации
 # теперь берётся из lumen_lang.py по языку чата — см. ключ injection_probe_reply)
@@ -1191,7 +1143,6 @@ from lumen_routes import (
 # Имена ниже нужны как `bot.X` существующим тестам, поэтому тоже здесь.
 from lumen_tiktok import (
     _original_sound_label,
-    _GENERIC_ORIGINAL_SOUND_PHRASES,
     _chunk_tiktok_media_items,
     _looks_like_video_bytes,
     _slideshow_slide_urls,
@@ -1204,7 +1155,6 @@ from lumen_tiktok import (
     _probe_audio_duration,
     _probe_video_dimensions,
     _generate_video_thumbnail,
-    _communicate_process,
     _probe_and_thumbnail_from_bytes,
     _resolve_tiktok_short,
     _fetch_tikwm_media_data,
@@ -1222,7 +1172,6 @@ from lumen_tiktok_flow import (
     handle_tiktok_sound,
     _fetch_tikwm_media_data_with_proxy_fallback,
     _try_send_tiktok_slideshow,
-    _send_tiktok_single_video,
     handle_tiktok,
 )
 
@@ -1250,7 +1199,6 @@ _dots_sleep = asyncio.sleep
 from lumen_streaming import (
     _tick_waiting_dots,
     _pieces_with_waiting_feedback,
-    _gemini_stream_pieces,
     _openrouter_stream_pieces,
     _groq_stream_pieces,
     _run_streaming_reply,
@@ -1265,6 +1213,7 @@ from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
     _NO_MEDIA_NOTE,
+    _clean_history_entry,
     _history_user_text,
     _match_trigger_prefix,
     _media_reference_category,
@@ -1327,10 +1276,6 @@ from lumen_commands import (
     cmd_ban,
     cmd_unban,
     cmd_banlist,
-    _build_version,
-    _webhook_info_text,
-    _process_memory_text,
-    _storage_backend_text,
     _send_pick_question,
     handle_pick_callback,
 )
@@ -1421,37 +1366,9 @@ async def _handle_message(message: Message) -> None:
         await _handle_message_core(message)
         return
 
-    remaining = _msg_remaining_sec()
-    lock_timeout = CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(CHAT_LOCK_TIMEOUT_SEC, remaining))
-    waiters = _chat_lock_waiters.get(chat_id, 0)
-    if waiters >= _MAX_CHAT_LOCK_WAITERS:
-        log.warning("[lock] Too many waiters for chat %s", chat_id)
-        with contextlib.suppress(Exception):
-            await _tg_call(_answer_sender(message), _t_no_create(chat_id, "lock_busy"))
-        return
-    _chat_lock_waiters[chat_id] = waiters + 1
-    try:
-        try:
-            lock = await acquire_chat_lock(chat_id, lock_timeout)
-        except asyncio.TimeoutError:
-            log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
-            with contextlib.suppress(Exception):
-                 # Ответ без создания чата: обычный _t через get_state завёл бы запись
-                 # даже тому, кого отшили «занято» (та же причина, что у лимита).
-                 await _tg_call(_answer_sender(message), _t_no_create(chat_id, "lock_busy"))
-            return
-    finally:
-        left = _chat_lock_waiters.get(chat_id, 1) - 1
-        if left > 0:
-            _chat_lock_waiters[chat_id] = left
-        else:
-            _chat_lock_waiters.pop(chat_id, None)
-
-    try:
-         await _handle_message_core(message)
-    finally:
-         with contextlib.suppress(Exception):
-              lock.release()
+    # Лок, кап ожидающих и потолок сообщения — в общем помощнике, чтобы этот путь,
+    # альбом и гость не расходились в защитх (аудит 28.10.2026 + 01.11.2026).
+    await _run_under_chat_lock(message, lambda: _handle_message_core(message))
 
 # вебхук и запуск
 from lumen_message_core import (
@@ -1463,6 +1380,7 @@ from lumen_message_core import (
     _resolve_incoming_media,
     _reply_target_block,
     _tagged_prompt,
+    _run_under_chat_lock,
     _handle_message_core,
     _process_raw_update,
 )

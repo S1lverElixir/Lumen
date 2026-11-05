@@ -32,6 +32,7 @@ from lumen_tiktok import (
     _write_file_sync,
     TikTokUserFacingError,
     _tiktok_music_page_id,
+    _communicate_process,
     _fetch_dsp_track_metadata,
 )
 from lumen_status import StatusMessage
@@ -97,7 +98,10 @@ async def _fit_audio_thumbnail(cover_bytes: bytes) -> bytes | None:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await asyncio.wait_for(proc.wait(), timeout=15)
+            # Не wait_for(proc.wait()): тот leaveал ffmpeg жить на двух ядрах и держать
+            # уже удалённый временный файл (proc.kill по таймауту/отмене умеет только
+            # _communicate_process — аудит 01.11.2026).
+            await _communicate_process(proc, timeout=15)
             if proc.returncode == 0 and os.path.exists(dst):
                 out = await asyncio.to_thread(_read_file_sync, dst)
                 if out and len(out) <= 200 * 1024:
@@ -117,7 +121,13 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
     dsp_task = asyncio.create_task(_fetch_dsp_track_metadata(session, media_data))
     try:
          async with bot._media_download_slot():
-              music_bytes = await bot._download_url_bin(session, music_url, headers=headers)
+              # Кап — лимит отправки Telegram, а не дефолтные 75 МБ: трек больше
+              # send_audio не примет в принципе, а качание, ffprobe и временный файл
+              # уже сгорели бы молча (тот же фикс, что для видео — аудит 01.11.2026).
+              music_bytes = await bot._download_url_bin(
+                  session, music_url, headers=headers,
+                  cap_bytes=bot.TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES,
+              )
          if not music_bytes:
               return
 
@@ -126,8 +136,8 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          raw_music_author = music_info.get("author") or author
 
         # Ник/юзернейм автора видео без @ — для performer и очистки заголовка (TikTok подставляет их в безымянный звук).
-         author_nick = media_data.get("author", {}).get("nickname") or ""
-         author_uniq = media_data.get("author", {}).get("unique_id") or ""
+         author_nick = (media_data.get("author") or {}).get("nickname") or ""
+         author_uniq = (media_data.get("author") or {}).get("unique_id") or ""
          author_uniq_clean = author_uniq.lstrip("@")
 
         # Проверяем по всем языкам словаря (11.08.2026: раньше только ru/en — заголовок генерится на языке автора видео, is_original_sound ложно падал).
@@ -162,7 +172,7 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
               "[tiktok-music][diag] raw_title=%r raw_author=%r has_cover=%s has_avatar=%s "
               "residual_title=%r sender_language_code=%r -> is_original_sound=%s",
               raw_music_title, raw_music_author, bool(music_info.get("cover")),
-              bool(media_data.get("author", {}).get("avatar")), residual_title, sender_language_code, is_original_sound,
+              bool((media_data.get("author") or {}).get("avatar")), residual_title, sender_language_code, is_original_sound,
          )
 
          if is_original_sound:
@@ -204,7 +214,7 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
 
          # достаём обложку трека: только для превью, поэтому малый кап вместо
          # дефолтных 75МБ (аудит M6, 10.2026).
-         cover_url = music_info.get("cover") or music_info.get("avatar") or media_data.get("author", {}).get("avatar")
+         cover_url = music_info.get("cover") or music_info.get("avatar") or (media_data.get("author") or {}).get("avatar")
          if dsp_track and dsp_track.get("cover"):
               cover_url = dsp_track["cover"]
          cover_bytes = None
@@ -386,8 +396,16 @@ async def _try_send_tiktok_slideshow(
               return data or None
 
          downloaded = list(await asyncio.gather(
-              *(_download_slide_bounded(u) for u in fetch_urls)
+              *(_download_slide_bounded(u) for u in fetch_urls),
+              return_exceptions=True,
          ))
+         # Без return_exceptions одна упавшая ссылка роняла весь пост, а остальные
+         # задачи gather не отменяла — они держали общие слоты и память
+         # (аудит 01.11.2026).
+         for _slide_res in downloaded:
+             if isinstance(_slide_res, BaseException):
+                 log.warning("[tiktok] Slide download raised %s: %s", type(_slide_res).__name__, _slide_res)
+         downloaded = [r if isinstance(r, (bytes, type(None))) else None for r in downloaded]
          download_elapsed = time.perf_counter() - started_at
          downloaded_bytes = sum(len(b) for b in downloaded if b)
          skipped_slides = sum(1 for b in downloaded if not b)
@@ -477,6 +495,14 @@ async def _try_send_tiktok_slideshow(
               )
               await _send_tiktok_music(session, media_data, message, author, headers)
               await _status_delete(status)
+              if skipped_slides:
+                   # Кадров пришло меньше, чем обещал статус. Тот же локализованный
+                   # шаблон счётчика, уже без анимации: молча показать 5 из 12 —
+                   # выглядит как «бот съел половину поста» (аудит 01.11.2026).
+                   await bot._safe_reply(message, bot._t(
+                       message.chat.id, "tiktok_dl_slideshow",
+                       shown=len(media_items), total=len(images),
+                   ))
               return True
     return False
 

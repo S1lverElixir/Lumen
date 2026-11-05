@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from aiogram.enums import ChatType, ParseMode
@@ -112,6 +112,58 @@ _ALBUM_EXTRA_MAX_BYTES = 100 * 1024 * 1024
 # Параллельных скачиваний альбома: ограничивает in-flight память (3×20МБ).
 _ALBUM_FETCH_CONCURRENCY = 3
 
+async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None:
+    """Единый вход в обработку под per-chat lock: потолок сообщения, метка чата в
+    логе, кап одновременно ждущих и честный отказ «занято». Обычное сообщение,
+    альбом и гостевой апдейт иначе расходятся именно в этих защитах: фон и альбомы
+    не считались ожиданиями, а у гостя не было потолка сообщения вовсе
+    (аудит 01.11.2026)."""
+    import bot
+    chat_id = message.chat.id if message.chat else 0
+    # Дедлайн и метку чата НЕ переставляем, если они уже стоят (обычный путь и
+    # альбомная задача наследуют их от handle_message): иначе потолок сообщения
+    # сдвигался бы на время ожидания блокировки.
+    dtoken = None if bot._msg_remaining_sec() is not None else bot._MSG_DEADLINE.set(
+        time.monotonic() + bot.MESSAGE_TOTAL_BUDGET_SEC
+    )
+    ltoken = None if bot._LOG_CHAT.get() else bot._LOG_CHAT.set(f"chat={chat_id}")
+    try:
+        remaining = bot._msg_remaining_sec()
+        lock_timeout = bot.CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(bot.CHAT_LOCK_TIMEOUT_SEC, remaining))
+        waiters = bot._chat_lock_waiters.get(chat_id, 0)
+        if waiters >= bot._MAX_CHAT_LOCK_WAITERS:
+            log.warning("[lock] Too many waiters for chat %s", chat_id)
+            with contextlib.suppress(Exception):
+                await bot._tg_call(bot._answer_sender(message), bot._t_no_create(chat_id, "lock_busy"))
+            return
+        # Ответ без создания чата: обычный _t через get_state завёл бы запись даже
+        # тому, кого отшили «занято» (та же причина, что у лимита).
+        bot._chat_lock_waiters[chat_id] = waiters + 1
+        try:
+            lock = await bot.acquire_chat_lock(chat_id, lock_timeout)
+        except asyncio.TimeoutError:
+            log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
+            with contextlib.suppress(Exception):
+                await bot._tg_call(bot._answer_sender(message), bot._t_no_create(chat_id, "lock_busy"))
+            return
+        finally:
+            left = bot._chat_lock_waiters.get(chat_id, 1) - 1
+            if left > 0:
+                bot._chat_lock_waiters[chat_id] = left
+            else:
+                bot._chat_lock_waiters.pop(chat_id, None)
+        try:
+            await run()
+        finally:
+            with contextlib.suppress(Exception):
+                lock.release()
+    finally:
+        if dtoken is not None:
+            bot._MSG_DEADLINE.reset(dtoken)
+        if ltoken is not None:
+            bot._LOG_CHAT.reset(ltoken)
+
+
 async def _process_media_group_buffers(mgid: str) -> None:
     import bot
     messages: list = []
@@ -125,22 +177,10 @@ async def _process_media_group_buffers(mgid: str) -> None:
             bot._mg_tasks.pop(mgid, None)
     if not messages:
          return
-    # Альбом — под тем же per-chat lock: иначе фоновый таск и свежий вопрос
-    # гоняются за history/ctx (аудит). Ожидание ограничено: вечное висело в фоне
-    # дольше любого бюджета (аудит 26.09.2026).
+    # Альбом — под тем же per-chat lock и с теми же защитами, что у обычного
+    # сообщения (см. _run_under_chat_lock).
     main_msg = messages[0]
-    try:
-        lock = await bot.acquire_chat_lock(main_msg.chat.id if main_msg.chat else 0, bot.CHAT_LOCK_TIMEOUT_SEC)
-    except asyncio.TimeoutError:
-        log.warning("[album] Timeout waiting for lock on chat %s", main_msg.chat.id if main_msg.chat else None)
-        with contextlib.suppress(Exception):
-            await bot._safe_reply(main_msg, bot._t(main_msg.chat.id if main_msg.chat else None, "lock_busy"))
-        return
-    try:
-        await _process_media_group_buffers_locked(messages)
-    finally:
-        with contextlib.suppress(Exception):
-            lock.release()
+    await _run_under_chat_lock(main_msg, lambda: _process_media_group_buffers_locked(messages))
 
 async def _process_media_group_buffers_locked(messages: list) -> None:
     """Тело обработки альбома под per-chat lock (см. выше)."""
@@ -381,7 +421,8 @@ def _should_only_record_passively(message: Message, t: str, *, is_private: bool,
         # Групповой TikTok без обращения по умолчанию качается (удобство шаринга);
         # TIKTOK_GROUP_REQUIRE_MENTION=1 оставляет только запись в фон (аудит H2, 10.2026).
         return bool(bot.TIKTOK_GROUP_REQUIRE_MENTION)
-    return not url or not is_tiktok(url)
+    # Сюда доходим только когда TikTok-ссылки нет — значит это фон.
+    return True
 
 
 def _rate_limit_key_for_message(message: Message) -> int:
@@ -951,22 +992,31 @@ async def _handle_message_core(
                         await bot._tg_call(status.message.edit_text, plain_text, parse_mode=None, call_timeout=15.0)
                 else:
                     await bot._edit_message_quietly(status.message, ans)
+        # Ответ упёрся в потолок вывода провайдера: без пометки обрезка приходила
+        # как готовый ответ (корпус бэкапа 05.11.2026), и «продолжи» не предлагалось.
+        _cut_by_cap = provenance.get("finish_reason") == "length"
+        if _cut_by_cap and not reply_already_sent:
+            ans = ans + bot._t(message.chat.id, "stream_note_interrupted")
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
         # Частичный стрим тоже «успешен» для вызывающего, но его пометка
         # «продолжи» должна пережить этот блок (аудит 27.10.2026).
-        if state.pop("stream_interrupted", False):
+        if state.pop("stream_interrupted", False) or _cut_by_cap:
             state["interrupted"] = True
         else:
             state.pop("interrupted", None)
         bot.mark_state_dirty(message.chat.id)
+        # truncated — потолок вывода провайдера, partial — оборванный стрим: без этого
+        # усечённый ответ в следе неотличим от полного (выборка бэкапа 05.11.2026).
+        _truncated = provenance.get("finish_reason") == "length"
         lumen_devtrace.record_answer(
             message.chat.id, user_text=clean_prompt, route=route,
             provider=provenance.get("provider", ""), model=provenance.get("model") or "",
             latency_ms=int((time.monotonic() - _trace_start) * 1000), reply=ans,
             ctx_tail=list(state.get("ctx") or [])[-3:],
             flags={"fresh": bool(needs_freshness), "snippets": bool(snippets_injected),
-                   "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent)},
+                   "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent),
+                   "truncated": _truncated, "partial": bool(state.get("interrupted"))},
         )
     except Exception as exc:
         lumen_devtrace.record_failure(
@@ -1008,20 +1058,9 @@ async def _process_raw_update(raw_update: dict) -> None:
                  if gq_id is not None and not getattr(msg_obj, "guest_query_id", None):
                      with contextlib.suppress(Exception):
                          object.__setattr__(msg_obj, "guest_query_id", gq_id)
-                 # Тот же per-chat lock, что у обычного пути: параллельные апдейты иначе гоняются за history/ctx.
-                 guest_chat_id = msg_obj.chat.id if msg_obj.chat else 0
-                 try:
-                     guest_lock = await bot.acquire_chat_lock(guest_chat_id, bot.CHAT_LOCK_TIMEOUT_SEC)
-                 except asyncio.TimeoutError:
-                     log.warning("[guest] Timeout waiting for lock on chat %s", guest_chat_id)
-                     with contextlib.suppress(Exception):
-                         await bot._tg_call(msg_obj.reply, bot._t_no_create(guest_chat_id, "lock_busy"))
-                     return
-                 try:
-                     await bot._handle_message_core(msg_obj)
-                 finally:
-                     with contextlib.suppress(Exception):
-                         guest_lock.release()
+                 # Тот же per-chat lock и те же защиты, что у обычного пути
+                 # (см. _run_under_chat_lock).
+                 await _run_under_chat_lock(msg_obj, lambda: bot._handle_message_core(msg_obj))
             except Exception as exc:
                  log.warning("[guest] Guest processing failed: %s", exc)
             return

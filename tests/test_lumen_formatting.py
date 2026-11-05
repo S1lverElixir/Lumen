@@ -32,6 +32,23 @@ def test_truncate_html_to_fit_keeps_short_text_and_cuts_at_source_boundary():
     assert len(cut) <= 4096
     assert cut.endswith("…")
     assert cut.count("<b>") == cut.count("</b>")
+    # Лимит Telegram считается в единицах UTF-16 (эмодзи = 2): срез по len()
+    # выдавал HTML длиннее лимита и 400 на гостевом ответе, где нет фолбэка
+    # на plain-текст (проверка на корпусе 05.11.2026).
+    emoji_md = " ".join(["😀 текст"] * 200)
+    cut_units = lumen_formatting._truncate_html_to_fit(emoji_md, 50)
+    assert sum(2 if ord(ch) > 0xFFFF else 1 for ch in cut_units) <= 50
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("User Safety: safe\nResponse Safety: safe", ""),
+    ("<|tool_call_start|>[google(query='x')]<|tool_call_end|>", ""),
+    ("Привет\nUser Safety: safe", "Привет"),
+])
+def test_strip_provider_artifacts_removes_service_markers(source, expected):
+    # Прод 05.11.2026 (выборка бэкапа): метки классификатора безопасности и
+    # разметка вызова инструмента уходили в чат как целый ответ.
+    assert lumen_formatting._strip_provider_artifacts(source) == expected
 
 
 # ─────────────────────────── _md_to_html ───────────────────────────

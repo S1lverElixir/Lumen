@@ -10,6 +10,8 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+from lumen_errors import _is_empty_like
+
 _TIKTOK_RE = re.compile(r"(?:^|\.)tiktok\.com$")
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
 
@@ -106,6 +108,26 @@ def _history_user_text(user_text: str) -> str:
     if user_text.endswith(_NO_MEDIA_NOTE):
         return user_text[:-len(_NO_MEDIA_NOTE)]
     return user_text
+
+
+# Чаты, записанные до 30.10.2026, хранят внутри реплик одноразовую службу: блок
+# текущей даты и выдачу поиска (выборка бэкапа: 19 реплик из 210, до 68% объёма
+# user-контекста). Плейсхолдер вместо ответа тоже осел в истории.
+_HISTORY_SERVICE_RE = re.compile(
+    r"\s*\[Context: today[^\]]*\]|\s*\[Web search snippets[\s\S]*$", re.IGNORECASE)
+
+
+def _clean_history_entry(item: dict) -> dict | None:
+    """Реплика истории без служебных блоков; None — выбросить целиком."""
+    text = item.get("content")
+    if not isinstance(text, str):
+        return item
+    cleaned = _HISTORY_SERVICE_RE.sub("", text).strip()
+    if not cleaned or _is_empty_like(cleaned):
+        return None
+    if cleaned == text:
+        return item
+    return {**item, "content": cleaned}
 
 # Только явные существительные медиа: общие "это/покажи" тянули чужое фото и давали галлюцинации.
 # Именованные группы — чтобы понять КАКОЙ тип спросили (регрессия 18.08.2026: "покажи стикер" описывал чужое фото).

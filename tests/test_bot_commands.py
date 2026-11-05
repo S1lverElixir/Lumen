@@ -1256,6 +1256,9 @@ def test_lang_menu_lists_languages_alphabetically(monkeypatch):
     )
     monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=None))
     monkeypatch.setattr(bot, "get_state", lambda chat_id: {"lang": "ru"})
+    # /lang теперь под общим лимитом (спамер в группе гонял меню без ограничения) —
+    # здесь важен порядок языков, а не лимит (тот же приём, что в тесте /start).
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
     asyncio.run(bot.cmd_lang(message))
     kwargs = bot._tg_call.await_args[1]
     markup = kwargs.get("reply_markup")

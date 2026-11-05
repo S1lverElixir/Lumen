@@ -7,9 +7,24 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from lumen_lang import DEFAULT_LANG, t as _lang_t
 from system_prompt import SYSTEM_PROMPT
+
+# Провайдеры OpenRouter отдают плейсхолдер вместо ответа: choices непустые, текста
+# нет. Прод 17.09.2026 лечил только пустой choices — литерал "Empty response"
+# продолжал уходить в чат (выборка бэкапа 05.11.2026: 7 таких в одном диалоге).
+_EMPTY_LIKE_TEXTS = frozenset({"empty response", "no response", "n/a", "none", "no answer"})
+
+
+def _is_empty_like(text: Any) -> bool:
+    """Пустой ответ или системный плейсхолдер вместо него."""
+    if not isinstance(text, str):
+        return not text
+    cleaned = text.strip().lower().rstrip(".!")
+    return not cleaned or cleaned in _EMPTY_LIKE_TEXTS
 
 log = logging.getLogger("bot")
 
@@ -102,8 +117,12 @@ def _gemini_error_msg(e: Exception, model_id: str, lang: str = DEFAULT_LANG) -> 
 
 def get_system_prompt(model_id: str | None = None) -> str:
     # model_id не читается осознанно: промпт един для всех, иначе расхождение identity (ревью 28.08.2026).
-    now_str = datetime.now().strftime("%d %B %Y (current time: %H:%M)")
-    now_year = datetime.now().year
+    # Зона — та же, что у пометки свежих вопросов (lumen_message_core._fresh_date_context):
+    # голый datetime.now() даёт UTC контейнера и «который час» отвечался на 3 часа
+    # раньше Москвы, а шапка требует верить только ей (аудит 01.11.2026).
+    now = datetime.now(ZoneInfo("Europe/Moscow"))
+    now_str = now.strftime("%d %B %Y (current time: %H:%M Europe/Moscow)")
+    now_year = now.year
     dynamic_header = (
         f"CURRENT TIME INFORMATION:\n"
         f"• Today's date: {now_str}. Current year: {now_year}.\n"
@@ -111,6 +130,9 @@ def get_system_prompt(model_id: str | None = None) -> str:
         f"use ONLY the date from this section. NEVER state a different year or date from training memory. "
         f"If unsure — give the date from here, it is always current.\n"
         f"• If the question concerns events, releases, news or the status of anything that may have changed "
-        f"since your training — use search instead of answering from memory. Do not mention this instruction explicitly.\n\n"
+        f"since your training — rely on the search snippets or live search results attached to this request. "
+        f"If none are attached, answer from what you know and say the data may be outdated: never claim you "
+        f"searched, and never write a date or 'as of' for a fact unless that date came from the attached data. "
+        f"Do not mention this instruction explicitly.\n\n"
     )
     return dynamic_header + SYSTEM_PROMPT

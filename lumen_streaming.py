@@ -13,7 +13,8 @@ import aiohttp
 from aiogram.enums import ChatType, ParseMode
 from aiogram.types import Message
 
-from lumen_formatting import _md_to_html, _split_text_chunks
+from lumen_errors import _is_empty_like
+from lumen_formatting import _md_to_html, _split_text_chunks, _strip_provider_artifacts, _truncate_html_to_fit
 from lumen_lang import t as _lang_t
 from lumen_status import _spinner_glyph, thought_block
 from lumen_message_parse import _history_user_text
@@ -42,6 +43,14 @@ from lumen_typing_pace import (
 )
 
 log = logging.getLogger("bot")
+
+
+def _append_note_fit(md_text: str, note: str, limit: int) -> str:
+    """HTML куска, уже обрезанного под лимит Telegram, + пометка: резать надо ТЕЛО,
+    а не конкат — иначе строка вылезает за 4096, Telegram отвечает 400, и сама
+    пометка («обрвалось» / «без живого поиска») теряется (аудит 01.11.2026)."""
+    note_html = _md_to_html(note)
+    return _truncate_html_to_fit(md_text, limit - len(note_html) - 1) + "\n" + note_html
 
 async def _tick_waiting_dots(placeholder: Message, *, started: float | None = None) -> None:
     """Фраза ожидания до первого куска (как в Claude): «Думаю…» с анимацией, не голые точки. Первый кадр после паузы (быстрые модели анимации не видят), дальше кадр по тику. Правки через _tg_call с глотанием ошибок, отмена — штатная остановка."""
@@ -253,11 +262,16 @@ async def _run_streaming_reply(
 
     sent_messages: list[Message] = []
     full_text = ""
-    # Базис последнего разбиения: чанки кроме последнего стабильны, поэтому
-    # _split_text_chunks пересчитываем только при заметном приросте, а не на
-    # каждый кусок (иначе O(n²) в loop при посимвольном стриме).
+    # Базис последнего разбиения: _split_text_chunks пересчитываем только при
+    # заметном приросте, а не на каждый кусок (иначе O(n²) в loop при посимвольном
+    # стриме). Границы кусков при пересчёте СДВИГАЮТСЯ — склейка соседей зависит от
+    # всего текста, поэтому показанное в уже финализированных сообщениях сверяется
+    # с новым разбиением в _resync_finalized.
     split_basis = ""
     chunks: list[str] = []
+    # Что реально лежит в каждом сообщении sent_messages (у последнего — пустая
+    # строка: он растёт). Синхронно с sent_messages по индексам.
+    committed: list[str] = []
     edit_fail_streak = 0
     edits_dead = False
     last_edit_ts = 0.0
@@ -270,6 +284,22 @@ async def _run_streaming_reply(
     reveal_base_ts: float | None = None
     last_piece_ts: float | None = None
     arrival_ewma: float | None = None
+
+    async def _resync_finalized(new_chunks: list[str]) -> None:
+        """Сдвиг границ после пересчёта разбиения: правим только те уже
+        финализированные сообщения, чей кусок изменился. Иначе текст между старым
+        и новым границей не показывается вовсе (аудит 01.11.2026)."""
+        nonlocal edit_fail_streak, edits_dead
+        for idx in range(len(committed) - 1):
+            if edits_dead or idx >= len(new_chunks) or new_chunks[idx] == committed[idx]:
+                continue
+            edit_ok = await bot._tg_call(
+                sent_messages[idx].edit_text, _md_to_html(new_chunks[idx]),
+                parse_mode=ParseMode.HTML, call_timeout=15.0,
+            )
+            edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
+            edits_dead = edit_fail_streak >= 3
+            committed[idx] = new_chunks[idx]
 
     # Первый кусок запрашиваем ДО плейсхолдера: отправка "…" — отдельный круг
     # к Telegram через прокси, и запрос к модели простаивал бы весь этот круг.
@@ -290,6 +320,7 @@ async def _run_streaming_reply(
         if placeholder is None:
             return None, None
         sent_messages.append(placeholder)
+        committed.append("")
         # Попытка к модели состоялась (запрос уже ушёл в генератор кусков);
         # пустой считают только ранний обрыв до показа — частичный ответ показан.
         bot._record_stats_event("model_attempts")
@@ -353,6 +384,7 @@ async def _run_streaming_reply(
             if not chunks or len(full_text) - len(split_basis) >= 1000:
                 chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
                 split_basis = full_text
+                await _resync_finalized(chunks)
             # Чанки кроме последнего (растущего) финализируем тем же разбиением, что у нестримленных ответов.
             while len(chunks) > len(sent_messages):
                 idx = len(sent_messages) - 1
@@ -363,7 +395,8 @@ async def _run_streaming_reply(
                     # idx ещё НЕ финализирован — не даём общему except перезаписать показанный текст чужим (там инвариант "sent[-1] == chunks[-1]" уже неверен).
                     note = bot._t(message.chat.id, "stream_note_send_fail")
                     with contextlib.suppress(Exception):
-                        await bot._tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]) + note, parse_mode=ParseMode.HTML, call_timeout=15.0)
+                        # Пометка важнее хвоста куска (см. _append_note_fit).
+                        await bot._tg_call(sent_messages[idx].edit_text, _append_note_fit(chunks[idx], note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0)
                     final_answer = full_text.strip()
                     hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
                     hist.append({"role": "assistant", "content": final_answer})
@@ -379,7 +412,9 @@ async def _run_streaming_reply(
                     # дальше не правим, в финале досылаем ответ новым сообщением.
                     edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
                     edits_dead = edit_fail_streak >= 3
+                committed[idx] = chunks[idx]
                 sent_messages.append(new_msg)
+                committed.append("")
                 last_edited_plain = ""
                 # Новое сообщение — новый "лист", показ в нём начинается с нуля (темп прихода бэкенда тот же).
                 reveal_base_ts = time.monotonic()
@@ -397,7 +432,10 @@ async def _run_streaming_reply(
                 last_edited_plain = current_chunk_text
                 last_edit_ts = now
 
-        if not full_text.strip():
+        # Метки классификатора и разметка инструмента — не ответ: чат должен
+        # видеть следующую модель, а не 39 символов «User Safety: safe».
+        full_text = _strip_provider_artifacts(full_text)
+        if _is_empty_like(full_text):
             # Пустой стрим — неудача, но плейсхолдер отдаём вызывающему коду (см. докстринг).
             return None, sent_messages[-1]
 
@@ -414,6 +452,7 @@ async def _run_streaming_reply(
         full_text = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
         # "Довывод" остатка: бэкенды одним куском в конце показывали бы "…" до самого финала. Ограничено catchup-лимитом сверху.
         final_chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
+        await _resync_finalized(final_chunks)
         tail_already_final = False
         if not edits_dead and len(final_chunks) > len(sent_messages):
             # Инкрементальное разбиение отстаёт на 1000 символов: к финалу
@@ -425,8 +464,17 @@ async def _run_streaming_reply(
                     sent_messages[idx].edit_text, _md_to_html(final_chunks[idx]),
                     parse_mode=ParseMode.HTML, call_timeout=15.0,
                 )
-                if edit_ok is None or bot.bot is None:
+                committed[idx] = final_chunks[idx]
+                if bot.bot is None:
                     edits_dead = True
+                    break
+                # Голая None — это и флуд-429, и «message is not modified»
+                # (семантическое не-действо, см. _tg_call): по одной правке считать
+                # сообщение мёртвым нельзя, иначе весь ответ уезжал бы дублём
+                # (аудит 01.11.2026). Порог серии — как в основном цикле.
+                edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
+                edits_dead = edit_fail_streak >= 3
+                if edits_dead:
                     break
                 next_chunk = final_chunks[idx + 1]
                 new_msg = await bot._tg_call(
@@ -438,6 +486,7 @@ async def _run_streaming_reply(
                     edits_dead = True
                     break
                 sent_messages.append(new_msg)
+                committed.append(next_chunk)
                 # Новое сообщение уже содержит полный кусок: catch-up для него не нужен.
                 last_edited_plain = next_chunk
                 reveal_base_ts = time.monotonic()
@@ -495,7 +544,7 @@ async def _run_streaming_reply(
                 await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
 
     except Exception as exc:
-        if not full_text.strip():
+        if _is_empty_like(full_text):
             # 429 до первого куска — в /stats и ненадолго из роута. Суточный лимит
             # держим до утра, минутный всплеск — короткая остывка (иначе один 429
             # запирал модель до полуночи — враждебное ревью 27.09.2026).
@@ -538,7 +587,7 @@ async def _run_streaming_reply(
                 chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
                 final_text = chunks[-1] if chunks else full_text
                 note = bot._t(message.chat.id, "stream_note_interrupted")
-                await bot._tg_call(sent_messages[-1].edit_text, _md_to_html(final_text + note), parse_mode=ParseMode.HTML, call_timeout=15.0)
+                await bot._tg_call(sent_messages[-1].edit_text, _append_note_fit(final_text, note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0)
             # Частичный ответ уже показан и ляжет в историю ниже — запоминаем, что
             # его оборвало: слово «продолжи» добьёт с места обрыва (_continue_after_interrupt).
             # stream_interrupted переживает успешный возврат: иначе _handle_message_core

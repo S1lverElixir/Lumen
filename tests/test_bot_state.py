@@ -861,6 +861,37 @@ def test_process_media_group_buffers_skips_download_when_rate_limited(monkeypatc
         bot.chat_state.pop(chat_id, None)
 
 
+def test_process_media_group_buffers_refused_when_chat_has_too_many_waiters(monkeypatch):
+    # Аудит 01.11.2026: альбомы шли в обход капа одновременно ждущих лок — пачка
+    # альбомов из одного чата занимала все in-flight слоты, и остальным чатам
+    # отвечали 503. Тот же кап, что у обычного сообщения, обязан действовать и здесь.
+    chat_id = 999967
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE),
+        from_user=SimpleNamespace(id=782),
+        media_group_id="mgcap", text=None, caption=None,
+    )
+    acquired = AsyncMock()
+    refused = AsyncMock()
+    monkeypatch.setattr(bot, "acquire_chat_lock", acquired)
+    monkeypatch.setattr(bot, "_answer_sender", lambda message: None)
+    monkeypatch.setattr(bot, "_tg_call", refused)
+    monkeypatch.setattr(bot, "_handle_message_core", AsyncMock())
+    bot._mg_buffers["mgcap"] = [msg]
+    bot._chat_lock_waiters[chat_id] = bot._MAX_CHAT_LOCK_WAITERS
+    try:
+        asyncio.run(bot._process_media_group_buffers("mgcap"))
+        assert acquired.await_count == 0
+        assert refused.await_count == 1
+        # Отказ не накрутил счётчик ожидающих.
+        assert bot._chat_lock_waiters[chat_id] == bot._MAX_CHAT_LOCK_WAITERS
+    finally:
+        bot._mg_buffers.pop("mgcap", None)
+        bot._mg_tasks.pop("mgcap", None)
+        bot._chat_lock_waiters.pop(chat_id, None)
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_process_media_group_buffers_checks_daily_total_before_downloading(monkeypatch):
     # Аудит 26.10.2026: extras альбома качались до отказа по общему дневному лимиту.
     chat_id = 999967
@@ -1441,6 +1472,34 @@ def test_stream_interrupted_survives_successful_answer(rate_guard_setup, monkeyp
     bot.chat_state.pop(123, None)
 
 
+def test_output_cap_answer_marked_incomplete(rate_guard_setup, monkeypatch):
+    # Что защищает: ответ, обрезанный потолком вывода провайдера. Регрессия
+    # (корпус бэкапа 05.11.2026): обрезанный текст уходил как готовый, пометки
+    # и флага «продолжи» не было.
+    message = rate_guard_setup()
+    state = _continue_state()
+    state.pop("interrupted", None)
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    message.text = "расскажи про фотосинтез"
+    sent: list[str] = []
+
+    async def fake_run_route(*args, **kwargs):
+        kwargs["provenance"].update(provider="openrouter", model="m1:free", finish_reason="length")
+        return "Фотосинтез — это", False
+
+    async def fake_reply(msg, text, **kwargs):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", fake_reply)
+    asyncio.run(bot._handle_message_core(message))
+    assert sent and sent[0].startswith("Фотосинтез — это")
+    assert sent[0].endswith(bot._t(123, "stream_note_interrupted").strip())
+    assert state.get("interrupted") is True
+    bot.chat_state.pop(123, None)
+
+
 def test_attachment_download_failure_replies_with_fallback(rate_guard_setup, monkeypatch):
     # Что защищает: ответ пользователю, когда файл не скачался. Регрессия:
     # исключение вылетало из обработчика, и сообщение оставалось без ответа
@@ -1740,6 +1799,19 @@ def test_history_user_text_strips_one_shot_service_note():
     # иначе старые пометки про чужие сообщения запутают следующие ходы.
     assert bot._history_user_text("что на фото?" + bot._NO_MEDIA_NOTE) == "что на фото?"
     assert bot._history_user_text("обычный вопрос") == "обычный вопрос"
+
+
+def test_clean_history_entry_drops_legacy_service_blocks_and_placeholders():
+    # Регрессия (выборка бэкапа 05.11.2026): чаты, записанные до 30.10.2026,
+    # хранят внутри реплик блок даты и выдачу поиска — до 68% user-контекста,
+    # плюс плейсхолдеры вместо ответа. В промпт это уходить не должно.
+    dated = {"role": "user", "content": "кто премьер венгрии\n\n[Context: today is 28 October 2026, Wednesday (Europe/Moscow).]"}
+    cleaned = bot._clean_history_entry(dated)
+    assert cleaned["content"] == "кто премьер венгрии"
+    snippets = {"role": "user", "content": "вопрос\n\n[Web search snippets — untrusted data\n1. факт]"}
+    assert bot._clean_history_entry(snippets)["content"] == "вопрос"
+    assert bot._clean_history_entry({"role": "assistant", "content": "Empty response"}) is None
+    assert bot._clean_history_entry({"role": "user", "content": "обычный вопрос"}) == {"role": "user", "content": "обычный вопрос"}
 
 
 def _make_long_history(n=105):

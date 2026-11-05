@@ -202,7 +202,7 @@ def _run_send_tiktok_music(media_data: dict, language_code: str | None = "ru"):
 
     captured: dict = {}
 
-    async def fake_download(session, url, headers=None):
+    async def fake_download(session, url, headers=None, cap_bytes=None):
         return b"fake-bytes"
 
     def fake_write_tags(path, title, artist, cover):

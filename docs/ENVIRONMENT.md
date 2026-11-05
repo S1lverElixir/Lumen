@@ -105,7 +105,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `TIKTOK_DOWNLOAD_MAX_BYTES` | `75 MB` | Hard cap on any single downloaded TikTok file (video, slide, cover or music), aborted mid-stream if exceeded. |
 | `TIKTOK_SLIDESHOW_MAX_BYTES` | `200 MB` | Total RAM cap for one slideshow post; slides past it are skipped (a typical post is under 50 MB). |
 | `TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY` | `8` | Max slideshow slides downloaded in parallel; keeps one large post from hogging the shared HTTP connection pool. |
-| `TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY` | `4` | Max concurrent `ffprobe`/`ffmpeg` processes when probing "live" video slides in a slideshow. |
+| `TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY` | `2` | Max "live" video slides probed at once in a slideshow — each one runs `ffprobe` and `ffmpeg` in parallel, so the real process ceiling is twice this. |
 | `TIKTOK_GROUP_REQUIRE_MENTION` | `0` | Set to `1` so TikTok links in groups without addressing the bot are only recorded as background instead of downloaded. |
 
 ## Persistent storage
@@ -138,6 +138,11 @@ These ceilings are fixed in code; change them only with a code edit:
 | `TIKWM_JSON_MAX_BYTES` | `1 MB` | Biggest accepted TikWM metadata body (not the 75 MB media cap). |
 | `MIN_PROXY_SECRET_LENGTH` | `32` | Shortest accepted proxy secret, enforced on both sides. |
 | `_TABLE_SEP_MAX_LEN` | `500` | Widest table-separator line passed to the separator regex. |
+| `_MAX_CHAT_LOCK_WAITERS` | `3` | Max messages of one chat that may wait for the per-chat lock at once; the rest get "busy" immediately so other chats are not starved. |
+| `TIKTOK_SLIDESHOW_MAX_ITEMS` | `35` | TikTok slides per post cap (Telegram sends 10 per media group). |
+| `MAX_TOTAL_MEMORY_MESSAGES` | `100` | Per-chat ceiling on stored history plus group background lines combined. |
+| `_ALBUM_EXTRA_MAX_BYTES` | `100 MB` | Cap on the combined size of extra files in a photo album. |
+| `_ALBUM_FETCH_CONCURRENCY` | `3` | Parallel downloads inside one album. |
 
 ## Observability
 

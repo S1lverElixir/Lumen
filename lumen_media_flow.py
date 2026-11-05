@@ -68,10 +68,15 @@ async def _read_capped_telegram_body(resp: Any, url: str) -> bytes:
     """Тело ответа Telegram с капом: Content-Length врёт/отсутствует —
     та же проверка потоково по факту (см. кап TikWM-скачиваний)."""
     import bot
+    # Какой именно файл не влез — иначе в альбоме из 10 файлов отказ нечем
+    # локализовать. Ссылка Telegram содержит токен в пути, поэтому только с
+    # заменённым токеном (тот же приём, что в тексте ошибок выше).
+    safe_url = url.replace(bot.BOT_TOKEN, "<TOKEN>") if bot.BOT_TOKEN else url
     content_length = resp.headers.get("Content-Length")
     if content_length is not None:
         try:
             if int(content_length) > bot.TELEGRAM_DOWNLOAD_MAX_BYTES:
+                log.warning("[media] Telegram file over the cap by Content-Length: %s", safe_url)
                 raise _MediaTooLargeError(int(content_length), bot.TELEGRAM_DOWNLOAD_MAX_BYTES)
         except ValueError:
             pass
@@ -80,6 +85,7 @@ async def _read_capped_telegram_body(resp: Any, url: str) -> bytes:
     async for chunk in resp.content.iter_chunked(65536):
         total += len(chunk)
         if total > bot.TELEGRAM_DOWNLOAD_MAX_BYTES:
+            log.warning("[media] Telegram file over the cap mid-stream: %s", safe_url)
             raise _MediaTooLargeError(total, bot.TELEGRAM_DOWNLOAD_MAX_BYTES)
         chunks.append(chunk)
     return b"".join(chunks)
