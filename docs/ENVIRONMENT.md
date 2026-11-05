@@ -51,6 +51,11 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `GROQ_API_KEY` | — | Groq API key (free plan, no card: 1000 req/day). Second plain-text candidate after Gemma; without it those routes fall through to OpenRouter. Also powers voice transcription (Whisper). |
 | `OPENROUTER_DAILY_LIMIT` | `50` | Daily free-model request budget shown in `/stats` (OpenRouter section). Raise it if the plan changes, so the remainder stays honest. |
 | `GROQ_DAILY_LIMIT` | `1000` | Same for Groq (free plan: 1000 req/day). |
+| `MUNITO_API_KEY` | — | Munito AI key (open models hosted in the EU, free daily token quota). No key means the provider stays invisible to the router, flag or not. |
+| `MUNITO_ENABLED` | `0` | Experiment switch (05.11.2026): with `1` every plain-text route — normal, heavy and fresh — goes to Munito only, and history summaries head there too. Attachments, links, YouTube and TTS stay on Gemini. Set back to `0` (plus restart) to restore the previous chains untouched. |
+| `MUNITO_KEEP_FALLBACKS` | `0` | With `MUNITO_ENABLED=1`, keep the previous chains as reserves instead of replacing them. Off means a Munito `429`/`503` ("no free capacity") leaves the message unanswered. |
+| `MUNITO_BASE_URL` | `https://api.munito.ai/inference/v1` | OpenAI-compatible endpoint. `api.eu.munito.ai` / `api.us.munito.ai` pin the region — note the US host serves only Qwen and OCR, no DeepSeek or GLM (checked live 05.11.2026). |
+| `MUNITO_DAILY_LIMIT` | `250` | Request budget shown in the `/stats` Munito section: the 3M tokens/day free quota divided by ~11K tokens per Lumen request. |
 | `GEMINI_DAILY_LIMITS` | — | Per-model Gemini daily limits for `/stats` as `model=limit` pairs (`gemini-2.5-flash=1500`). Models missing here show usage without a limit. |
 | `OPENROUTER_HTTP_REFERER` | `https://t.me/{BOT_USERNAME}` | `HTTP-Referer` header sent with OpenRouter requests. |
 | `OPENROUTER_TITLE` | `BOT_USERNAME` | App title header sent with OpenRouter requests. |

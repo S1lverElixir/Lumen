@@ -1344,6 +1344,7 @@ def test_or_chat_completion_with_fallback_no_longer_accepts_attempts_per_model()
 @pytest.mark.parametrize(("request_name", "key_attr", "fake_key", "error_cls"), [
     ("_or_request", "OPENROUTER_API_KEY", "fake-secret-or-key-123", "OpenRouterAPIError"),
     ("_groq_request", "GROQ_API_KEY", "fake-groq-key-123", "GroqAPIError"),
+    ("_munito_request", "MUNITO_API_KEY", "fake-munito-key-123", "MunitoAPIError"),
 ])
 def test_provider_request_scrubs_api_key_from_network_exception_message(
     monkeypatch, request_name, key_attr, fake_key, error_cls,
@@ -1527,6 +1528,49 @@ def test_ask_groq_text_falls_back_to_next_model(monkeypatch):
     answer = asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]))
     assert answer == "ok"
     assert seen == ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
+
+
+def test_ask_munito_text_falls_back_to_next_model_and_is_dispatched(monkeypatch):
+    # Что защищает: провайдер munito в _run_route — и в обычном пути (ask_munito_text),
+    # и в стрим-пробе (_streamable/_try_stream). Регрессия: без ветки маршрута пару
+    # ("munito", …) молча отправляла бы запрос в OpenRouter с чужим ключом, а без
+    # "_streamable" чат терял посимвольный вывод на Munito.
+    from collections import deque
+    chat_id = 999703
+    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
+    seen = []
+
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+        seen.append(json_body["model"])
+        if json_body["model"] == "m1":
+            raise bot.MunitoAPIError("no free capacity", status_code=503)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    stream_probe = AsyncMock(return_value=(None, None))
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_try_munito_streaming", stream_probe)
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, **kw: None)
+    answer, _ = asyncio.run(bot._run_route(
+        chat_id, "привет", [("munito", "m1"), ("munito", "m2")], message=None, allow_stream=True,
+    ))
+    assert answer == "ok"
+    assert stream_probe.await_count == 2, "стрим-проба обязана пройти по обеим моделям Munito"
+    assert seen == ["m1", "m2"], "обычный путь должен дойти до второй модели после 503"
+
+
+def test_munito_request_requires_key_and_maps_provider_error(monkeypatch):
+    # Тот же контракт, что у Groq: без ключа — понятная ошибка вместо сетевого вызова,
+    # а ответ API не показывается пользователю сырым (внутри может быть что угодно).
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
+    with pytest.raises(bot.MunitoAPIError):
+        asyncio.run(bot._munito_request("chat/completions", "POST", json_body={"model": "x"}))
+    text = bot._route_error_reply_text(
+        bot.MunitoAPIError("Free tier capacity exhausted", status_code=503),
+        "deepseek-ai/deepseek-v4.1-flash-1017", youtube_url_to_analyze=None, lang="en",
+    )
+    assert "Free tier capacity exhausted" not in text
+    assert text.strip()
 
 
 def test_ask_groq_text_raises_last_error_when_whole_chain_fails(monkeypatch):

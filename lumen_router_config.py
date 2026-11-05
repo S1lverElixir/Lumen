@@ -1,5 +1,5 @@
 """
-lumen_router_config.py — модели и выбор маршрута (Gemini/OpenRouter/Groq) для одного сообщения.
+lumen_router_config.py — модели и выбор маршрута (Gemini/OpenRouter/Groq/Munito) для одного сообщения.
 
 Конфигурация плюс функции решения (_build_route, эвристики тяжести и свежести, фильтры квот). Обращений к API отсюда нет, bot.py импортирует имена напрямую.
 """
@@ -148,6 +148,10 @@ _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
     # Groq-ID без :free-суффикса — те же семейства, что выше через OpenRouter; дословно в ответе им тоже не место.
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-120b",
+    # Munito AI (эксперимент 05.11.2026): org-префикс part_of_org тут тоже узнаётся детектором.
+    "deepseek-ai/deepseek-v4.1-flash-1017",
+    "deepseek-ai/deepseek-v4-flash",
+    "zai-org/glm-5.3-flash",
 ]
 TEXT_MODEL_ORDER = _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION  # алиас для обратной совместимости
 # Аудит 02.08.2026 (логи + каталог): laguna-s-2.1 и ling-3.0-flash, калибровку не проходили (только факт free-квоты).
@@ -404,6 +408,44 @@ def _groq_route(models: list[str]) -> list[tuple[str, str]]:
     return [("groq", m) for m in _skip_exhausted("groq", models)]
 
 
+# ── Munito AI (временный провайдер владельца, 05.11.2026) ──
+# Живой замер eval/munito_probe.py 05.11.2026, глобальный хост, ключ владельца:
+# deepseek-v4.1-flash-1017 — первый токен 0.24с и 200 запросов за 30-секундное окно;
+# glm-5.3-flash — 1.50с и 10 запросов; deepseek-v4-flash — 0.19с и 10 запросов;
+# qwen3.8-27b — без стрима вернул ПУСТОЙ content (400 reasoning-токенов), поэтому
+# головой не берём. Данные: ноль-хранение по умолчанию, обучение на промптах запрещено.
+_MUNITO_ORDER: list[str] = [
+    "deepseek-ai/deepseek-v4.1-flash-1017",
+    "zai-org/glm-5.3-flash",
+    "deepseek-ai/deepseek-v4-flash",
+]
+
+
+def _env_flag(name: str) -> bool:
+    return (os.getenv(name, "") or "").strip().lower() in ("1", "true", "on", "yes")
+
+
+# Включено — весь обычный текст идёт только в Munito, прежние цепочки не удалены:
+# выключение одной переменной окружения возвращает маршрут один в один.
+_MUNITO_ENABLED = _env_flag("MUNITO_ENABLED")
+# Без запасных 429/503 Munito означает тишину для всех; режим для живой проверки —
+# по умолчанию выключен, включается только если нужен и квотный расход, и отказоустойчивость.
+_MUNITO_KEEP_FALLBACKS = _env_flag("MUNITO_KEEP_FALLBACKS")
+
+
+def _munito_active() -> bool:
+    """Флаг плюс живой ключ: без ключа путь в Munito бессмысленен и маршруту не виден."""
+    try:
+        import bot
+        return bool(_MUNITO_ENABLED and bot.MUNITO_API_KEY)
+    except Exception:
+        return False
+
+
+def _munito_route() -> list[tuple[str, str]]:
+    return [("munito", m) for m in _skip_exhausted("munito", _MUNITO_ORDER)]
+
+
 # ── Gemma в голове обычного текста (22.10.2026).
 # Офлайн-замер 25 вопросов (eval/persona_models.py, Actions): обе Gemma 47/50,
 # gemini-3.5-flash-lite 45/50, OR-lightning 39/50; Groq из Actions недоступен
@@ -609,6 +651,27 @@ def _looks_like_freshness_query(text: str) -> bool:
     return bool(text) and bool(_FRESHNESS_QUERY_RE.search(text))
 
 
+def _text_route(*, is_heavy: bool, needs_freshness: bool) -> list[tuple[str, str]]:
+    """Штатный маршрут для текста без медиа — общий для обычного порядка и для резерва под Munito."""
+    if needs_freshness:
+        # Текст со свежестью — Gemini с поиском; дальше OpenRouter и Groq резервом без поиска.
+        return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_HEAVY_ORDER if is_heavy else _OR_LIGHT_ORDER) + _groq_route(_GROQ_LIGHT_ORDER)
+
+    # Обычный текст с 22.10.2026: Gemma первой (замер выше: 47/50 против 42 по
+    # журналу владельца в Groq-эре; квота 14.4K/сутки). Groq второй — независимый
+    # провайдер на случай отказа Google целиком; дальше OR и Gemini резервом.
+    # Тяжёлый — без изменения: Groq первой (аудит D3, 30.09.2026), свободная
+    # квота Groq-Tier экономит scarce-квоты OR/Gemini.
+    if is_heavy:
+        return _groq_route(_GROQ_LIGHT_ORDER) + _or_route(_OR_HEAVY_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
+    return (
+        _gemini_route(_GEMMA_TEXT_CHAIN)
+        + _groq_route(_GROQ_LIGHT_ORDER)
+        + _or_route(_OR_LIGHT_ORDER)
+        + _gemini_route(GEMINI_SEARCH_CHAIN)
+    )
+
+
 def _build_route(
     *, needs_youtube: bool, needs_website: bool, media_mime: str | None,
     is_heavy: bool, needs_freshness: bool,
@@ -633,20 +696,13 @@ def _build_route(
         # Картинка без поиска — сначала vision OpenRouter, Gemini резервом.
         return _or_route(_OR_VISION_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
 
-    if needs_freshness:
-        # Текст со свежестью — Gemini с поиском; дальше OpenRouter и Groq резервом без поиска.
-        return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_HEAVY_ORDER if is_heavy else _OR_LIGHT_ORDER) + _groq_route(_GROQ_LIGHT_ORDER)
+    if _munito_active():
+        # Эксперимент владельца 05.11.2026: весь обычный текст — только Munito.
+        # Резерв включается отдельным флагом, потому что без него 429/503
+        # провайдера означает молчание бота для всех.
+        chain = _munito_route()
+        if _MUNITO_KEEP_FALLBACKS or not chain:
+            return chain + _text_route(is_heavy=is_heavy, needs_freshness=needs_freshness)
+        return chain
 
-    # Обычный текст с 22.10.2026: Gemma первой (замер выше: 47/50 против 42 по
-    # журналу владельца в Groq-эре; квота 14.4K/сутки). Groq второй — независимый
-    # провайдер на случай отказа Google целиком; дальше OR и Gemini резервом.
-    # Тяжёлый — без изменения: Groq первой (аудит D3, 30.09.2026), свободная
-    # квота Groq-Tier экономит scarce-квоты OR/Gemini.
-    if is_heavy:
-        return _groq_route(_GROQ_LIGHT_ORDER) + _or_route(_OR_HEAVY_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
-    return (
-        _gemini_route(_GEMMA_TEXT_CHAIN)
-        + _groq_route(_GROQ_LIGHT_ORDER)
-        + _or_route(_OR_LIGHT_ORDER)
-        + _gemini_route(GEMINI_SEARCH_CHAIN)
-    )
+    return _text_route(is_heavy=is_heavy, needs_freshness=needs_freshness)

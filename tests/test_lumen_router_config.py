@@ -19,6 +19,8 @@ logger="bot") ниже продолжает работать так же, как
 Запуск:
     pytest test_lumen_router_config.py -v
 """
+import pytest
+
 import lumen_router_config
 from datetime import date
 
@@ -273,6 +275,68 @@ def test_build_route_image_with_freshness_forces_gemini_search_chain():
     # ОБНОВЛЕНО (аудит D3, 30.09.2026): дальше vision OpenRouter резервом без
     # поиска — раньше при исчерпании Gemini пользователь получал ошибку квоты.
     assert any(p == "openrouter" for p, _ in route)
+
+
+# ── Munito AI: эксперимент владельца 05.11.2026 ──
+
+def _munito_mode(monkeypatch, *, enabled=True, keep_fallbacks=False, key="fake-munito-key-123"):
+    """Флаг и ключ живут в разных модулях: флаг — данные роутера, ключ — bot.py."""
+    import bot
+    monkeypatch.setattr(lumen_router_config, "_MUNITO_ENABLED", enabled)
+    monkeypatch.setattr(lumen_router_config, "_MUNITO_KEEP_FALLBACKS", keep_fallbacks)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", key)
+
+
+def _plain_text_route(**kwargs):
+    return lumen_router_config._build_route(
+        needs_youtube=False, needs_website=False,
+        media_mime=kwargs.pop("media_mime", None), **kwargs,
+    )
+
+
+@pytest.mark.parametrize(("is_heavy", "needs_freshness"), [(False, False), (True, False), (False, True), (True, True)])
+def test_build_route_munito_flag_sends_every_text_shape_only_to_munito(monkeypatch, is_heavy, needs_freshness):
+    # Защищает сам эксперимент: с флагом ни одна текстовая форма (обычная, тяжёлая,
+    # свежая) не должна доставать прежних провайдеров — иначе сравнение качества
+    # непригодно. Без флага этот маршрут отдаёт Gemma/Groq/OpenRouter.
+    _munito_mode(monkeypatch)
+    route = _plain_text_route(is_heavy=is_heavy, needs_freshness=needs_freshness)
+    assert route and all(p == "munito" for p, _ in route)
+    assert route[0] == ("munito", lumen_router_config._MUNITO_ORDER[0])
+
+
+def test_build_route_munito_without_key_changes_nothing(monkeypatch):
+    # Ключ — условие включении: без него флаг не должен превращать маршрут в пустоту
+    # и уводить трафик на провайдер, которого нет.
+    _munito_mode(monkeypatch, key="")
+    route = _plain_text_route(is_heavy=False, needs_freshness=False)
+    assert all(p != "munito" for p, _ in route)
+    assert route[0] == ("gemini", "gemma-4-26b-a4b-it")
+
+
+def test_build_route_munito_keep_fallbacks_appends_previous_chain(monkeypatch):
+    # Второй режим: Munito головой, прежние цепочки резервом — иначе 429/503
+    # провайдера означает молчание бота для всех.
+    _munito_mode(monkeypatch, keep_fallbacks=True)
+    route = _plain_text_route(is_heavy=False, needs_freshness=False)
+    assert [p for p, _ in route[:len(lumen_router_config._MUNITO_ORDER)]] == ["munito"] * len(lumen_router_config._MUNITO_ORDER)
+    assert any(p == "gemini" for p, _ in route) and any(p == "groq" for p, _ in route)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"media_mime": "video/mp4"},
+    {"needs_website": True},
+    {"media_mime": "image/jpeg"},
+])
+def test_build_route_munito_flag_leaves_media_and_links_on_their_providers(monkeypatch, kwargs):
+    # Munito принимает только текст: переключение эксперимента не должно увести
+    # видео/аудио и чтение сайта в провайдер, который их физически не примет.
+    _munito_mode(monkeypatch)
+    route = lumen_router_config._build_route(
+        needs_youtube=False, needs_website=kwargs.get("needs_website", False),
+        media_mime=kwargs.get("media_mime"), is_heavy=False, needs_freshness=False,
+    )
+    assert route and all(p != "munito" for p, _ in route)
 
 
 def test_or_route_excludes_uncensored_and_dead_models():

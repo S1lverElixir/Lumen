@@ -250,6 +250,23 @@ async def _groq_stream_pieces(model_id: str, messages: list[dict], *, deadline: 
     ):
         yield piece
 
+async def _munito_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
+    """Куски от Munito AI: тот же OpenAI-SSE через общий _sse_pieces (замер 05.11.2026: первый токен 0.24с у головы цепочки)."""
+    import bot
+    if not bot.MUNITO_API_KEY:
+        raise bot.MunitoAPIError("MUNITO_API_KEY is not set")
+    headers = {
+        "Authorization": f"Bearer {bot.MUNITO_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    session = await bot._get_http_session()
+    async for piece in _sse_pieces(
+        session, f"{bot.MUNITO_BASE_URL}/chat/completions", headers,
+        {"model": model_id, "messages": messages, "stream": True},
+        err_cls=bot.MunitoAPIError, provider_label="Munito", deadline=deadline,
+    ):
+        yield piece
+
 async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
     deadline: float | None = None, status=None, history_text=None,
@@ -647,3 +664,11 @@ async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, mo
     # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
     piece_agen = bot._groq_stream_pieces(model_id, messages, deadline=deadline)
     return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
+
+async def _try_munito_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
+    """Обёртка _run_streaming_reply для Munito (SSE через chat/completions), история без резки — см. докстринг ask_munito_text."""
+    import bot
+    messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
+    # Генератор — через bot.: тесты подменяют bot._munito_stream_pieces фейком.
+    piece_agen = bot._munito_stream_pieces(model_id, messages, deadline=deadline)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="munito", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
