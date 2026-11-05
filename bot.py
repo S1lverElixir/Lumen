@@ -72,6 +72,7 @@ _LOG_LISTENER: logging.handlers.QueueListener | None = None
 _SECRET_NAMES = (
     "BOT_TOKEN", "TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY",
     "OPENROUTER_API_KEY", "OPENROUTER_KEY", "GROQ_API_KEY", "ADMIN_SECRET_SEED",
+    "MUNITO_API_KEY",
     "_ADMIN_SECRET_SEED", "WEBHOOK_SECRET", "ADMIN_PANEL_KEY",
     "UPSTASH_REDIS_REST_TOKEN", "LUMEN_PROXY_SECRET",
 )
@@ -307,6 +308,13 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Groq — прямой провайдер лёгкого текста (калибровка 21.09.2026): 1000 запросов/день против 50 у OpenRouter.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+# Munito AI — провайдер эксперимента владельца 05.11.2026 (замер eval/munito_probe.py):
+# текст идёт туда только при MUNITO_ENABLED=1; ноль-хранение по умолчанию, обучение на
+# промптах запрещено. Ключа нет — маршрут делает вид, что провайдера не существует.
+MUNITO_API_KEY = os.getenv("MUNITO_API_KEY", "").strip()
+MUNITO_BASE_URL = (os.getenv("MUNITO_BASE_URL", "").strip() or "https://api.munito.ai/inference/v1").rstrip("/")
+# 3M токенов/сутки по тарифу владельца при ~11K входных токенов на запрос — это ~250 ответов.
+MUNITO_DAILY_LIMIT = _env_number("MUNITO_DAILY_LIMIT", 250, cast=int, min_value=1)
 # Голосовые длиннее не транскрибируем (Whisper API всё равно режет 25 МБ) — такие идут прежним путём через Gemini-аудио.
 VOICE_TRANSCRIBE_MAX_BYTES = _env_number("VOICE_TRANSCRIBE_MAX_BYTES", 10 * 1024 * 1024, cast=int, min_value=1024)
 # Раньше у OpenRouter был свой отдельный лимит истории (30), меньший, чем у Gemini
@@ -687,6 +695,7 @@ from lumen_router_config import (
     _OR_HEAVY_ORDER,
     _OR_VISION_ORDER,
     _GROQ_LIGHT_ORDER,
+    _MUNITO_ORDER,
     GEMINI_TTS_MODELS,
     FISH_AUDIO_TTS_MODEL,
     FISH_AUDIO_ENABLED,
@@ -833,10 +842,12 @@ __all__ = [
     "_pieces_with_waiting_feedback",
     "_openrouter_stream_pieces",
     "_groq_stream_pieces",
+    "_munito_stream_pieces",
     "_run_streaming_reply",
     "_try_gemini_streaming",
     "_try_openrouter_streaming",
     "_try_groq_streaming",
+    "_try_munito_streaming",
     # Точка подмены тестов (см. monkeypatch в tests/) — сам код bot.py её
     # больше не читает напрямую после выноса стриминга.
     "_model_first_chunk_limit",
@@ -869,8 +880,10 @@ __all__ = [
     # существующим тестам и `_handle_message_core` ниже.
     "OpenRouterAPIError",
     "GroqAPIError",
+    "MunitoAPIError",
     "_or_request",
     "_groq_request",
+    "_munito_request",
     "_attempt_timeout",
     "_or_extract_text",
     "_is_account_wide_or_rate_limit",
@@ -880,6 +893,7 @@ __all__ = [
     "ask_openrouter_text",
     "ask_openrouter_multimodal",
     "ask_groq_text",
+    "ask_munito_text",
     "selftest_llm_head",
     "_transcribe_audio",
     "_gemini_history_contents",
@@ -897,6 +911,7 @@ __all__ = [
     "_OR_HEAVY_ORDER",
     "_OR_VISION_ORDER",
     "_GROQ_LIGHT_ORDER",
+    "_MUNITO_ORDER",
     "_history_user_text",
     "_clean_history_entry",
     # Пространство имён genai-типов для тестов (bot.types.Content/...).
@@ -1112,8 +1127,10 @@ from lumen_security import (
 from lumen_routes import (
     OpenRouterAPIError,
     GroqAPIError,
+    MunitoAPIError,
     _or_request,
     _groq_request,
+    _munito_request,
     _or_extract_text,
     _attempt_timeout,
     _is_account_wide_or_rate_limit,
@@ -1123,6 +1140,7 @@ from lumen_routes import (
     ask_openrouter_text,
     ask_openrouter_multimodal,
     ask_groq_text,
+    ask_munito_text,
     selftest_llm_head,
     _transcribe_audio,
     _gemini_history_contents,
@@ -1201,10 +1219,12 @@ from lumen_streaming import (
     _pieces_with_waiting_feedback,
     _openrouter_stream_pieces,
     _groq_stream_pieces,
+    _munito_stream_pieces,
     _run_streaming_reply,
     _try_gemini_streaming,
     _try_openrouter_streaming,
     _try_groq_streaming,
+    _try_munito_streaming,
 )
 
 # Чистые функции парсинга — в lumen_message_parse.py. clean_mention остаётся

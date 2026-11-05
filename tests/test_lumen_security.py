@@ -30,6 +30,17 @@ def test_detect_identity_leak_catches_self_reference_plus_brand():
     assert lumen_security._detect_identity_leak("I am powered by Anthropic Claude") is True
 
 
+def test_detect_identity_leak_catches_munito_provider_and_glm5_model():
+    # Эксперимент 05.11.2026: текст идёт через Munito AI на GLM-5.3-Flash. старый
+    # шаблон ловил только glm4, хостинг-провайдера в списке не было вовсе — бот
+    # назвал бы себя в первой же строке.
+    assert lumen_security._detect_identity_leak("Я работаю на Munito AI.") is True
+    assert lumen_security._detect_identity_leak("I am a language model made by Zhipu") is True
+    assert lumen_security._detect_identity_leak("На самом деле я — GLM-5.3 Flash.") is True
+    # Разговор про статистику, а не про себя: голое упоминание не утечка.
+    assert lumen_security._detect_identity_leak("В статистике GLM-4 и GLM-5 — обобщённые линейные модели") is False
+
+
 def test_detect_identity_leak_based_on_needs_first_person():
     # Ложные срабатывания: архитектура третьих лиц, не слова бота о себе.
     assert lumen_security._detect_identity_leak("Его архитектура основана на Google Transformer") is False

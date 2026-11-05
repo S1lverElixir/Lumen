@@ -339,7 +339,7 @@ def test_openrouter_stream_pieces_raises_on_midstream_error_chunk():
 
 def test_sse_parsers_share_one_implementation(monkeypatch):
     # Было grep-тестом по исходникам (запрещённый класс): теперь проверяем
-    # поведение — обе обёртки разбирают SSE через общий _sse_pieces.
+    # поведение — все обёртки разбирают SSE через общий _sse_pieces.
     real_sse = lumen_streaming._sse_pieces
     calls = []
 
@@ -363,12 +363,46 @@ def test_sse_parsers_share_one_implementation(monkeypatch):
 
     monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "_get_http_session", _fake_session)
     or_pieces = asyncio.run(collect(bot._openrouter_stream_pieces("m:free", [])))
     groq_pieces = asyncio.run(collect(bot._groq_stream_pieces("m", [])))
+    munito_pieces = asyncio.run(collect(bot._munito_stream_pieces("m", [])))
     assert or_pieces == ["Раз", " два"]
     assert groq_pieces == ["Раз", " два"]
-    assert len(calls) == 2
+    assert munito_pieces == ["Раз", " два"]
+    assert len(calls) == 3
+
+
+def test_munito_stream_pieces_sends_reasoning_effort(monkeypatch):
+    # protected: SSE-путь Munito несёт то же reasoning_effort, что и обычный текст.
+    # Регрессия: поле добавили только в ask_munito_text — тогда посимвольный ответ
+    # снова сжигает бюджет на размышление и тормозит.
+    captured = {}
+
+    class _RecordingSSESession(_FakeSessionForSSE):
+        def post(self, url, **kwargs):
+            captured.update(kwargs)
+            return self._resp
+
+    lines = [b'data: {"choices":[{"delta":{"content":"ok"}}]}\n', b"data: [DONE]\n"]
+
+    async def _fake_session():
+        return _RecordingSSESession(_FakeSSEResponse(lines))
+
+    async def collect(gen):
+        return [piece async for piece in gen]
+
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_get_http_session", _fake_session)
+    monkeypatch.setenv("MUNITO_REASONING_EFFORT", "low")
+    assert asyncio.run(collect(bot._munito_stream_pieces("m", [{"role": "user", "content": "hi"}]))) == ["ok"]
+    assert captured["json"]["reasoning_effort"] == "low"
+
+    captured.clear()
+    monkeypatch.setenv("MUNITO_REASONING_EFFORT", "")
+    asyncio.run(collect(bot._munito_stream_pieces("m", [{"role": "user", "content": "hi"}])))
+    assert "reasoning_effort" not in captured["json"]
 
 
 def test_streaming_history_goes_through_summarizing_trim(monkeypatch):

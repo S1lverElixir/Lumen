@@ -712,6 +712,13 @@ async def cmd_stats(message: Message) -> None:
     gemini_text = _quota_section(gemini_quota, None, bot.GEMINI_DAILY_LIMITS)
     or_text = _quota_section(bot.GLOBAL_QUOTA.get("openrouter", {}), bot.OPENROUTER_DAILY_LIMIT)
     groq_text = _quota_section(bot.GLOBAL_QUOTA.get("groq", {}), bot.GROQ_DAILY_LIMIT)
+    # Секция Munito только при включённом эксперименте: пустая строка в /stats не нужна.
+    from lumen_router_config import _munito_active
+    munito_block = (
+        f"<b>Munito — запросов по моделям (лимит провайдера справочно):</b>\n"
+        f"{_quota_section(bot.GLOBAL_QUOTA.get('munito', {}), bot.MUNITO_DAILY_LIMIT)}\n\n"
+        if _munito_active() else ""
+    )
     _quarantined_now = bot._quarantine_status()
     if _quarantined_now:
         quarantine_text = "\n".join(
@@ -745,6 +752,7 @@ async def cmd_stats(message: Message) -> None:
         f"Попыток к моделям: {_day_stats.get('model_attempts', 0)}, "
         f"пустых: {_day_stats.get('model_failures', 0)}\n\n"
         f"<b>Gemini — запросов по моделям (лимит провайдера справочно):</b>\n{gemini_text}\n\n"
+        f"{munito_block}"
         f"<b>OpenRouter — запросов по моделям (лимит провайдера справочно):</b>\n{or_text}\n\n"
         f"<b>Groq — запросов по моделям (лимит провайдера справочно):</b>\n{groq_text}\n\n"
         f"<b>Карантин моделей:</b>\n{quarantine_text}\n\n"
@@ -803,7 +811,11 @@ async def cmd_selftest(message: Message) -> None:
     want_gemini = len(args) > 1 and args[1].split("@")[0].lower() == "gemini"
     rows: list[str] = []
     summary: list[str] = []
-    for provider, label in (("groq", "Groq"), ("openrouter", "OpenRouter")):
+    from lumen_router_config import _munito_active
+    # Munito в списке только когда эксперимент включён — иначе /selftest тратит пробу впустую.
+    probe_providers = (("munito", "Munito"), ("groq", "Groq"), ("openrouter", "OpenRouter")) if _munito_active() \
+        else (("groq", "Groq"), ("openrouter", "OpenRouter"))
+    for provider, label in probe_providers:
         ok, detail, elapsed = await bot.selftest_llm_head(provider, chat_id=message.chat.id)
         rows.append(_selftest_row(label, ok, detail, elapsed))
         summary.append(f"{provider}={'ok' if ok else 'FAIL'}/{elapsed:.1f}s")

@@ -176,6 +176,9 @@ GLOBAL_QUOTA: dict[str, Any] = {
     # used/exhausted сбрасываются в полночь LA: иначе вечный рост и залипший "лимит исчерпан" (калибровка 25.07.2026).
     "quota_day": None,
 }
+# Единственный список провайдеров с суточными счётчиками: новый провайдер обязан
+# быть тут, иначе его счётчик не сбрасывается на новых сутках и не грузится из снапшота.
+_QUOTA_PROVIDERS = ("gemini", "openrouter", "groq", "munito")
 
 # Дата пересчитывается не чаще раза в минуту: ZoneInfo на каждое обращение дорого.
 _QUOTA_CHECK_THROTTLE_SEC = 60.0
@@ -212,7 +215,7 @@ def _reset_quota_if_new_day() -> None:
     if GLOBAL_QUOTA.get("quota_day") == today:
         return
     had_previous = GLOBAL_QUOTA.get("quota_day") is not None
-    for provider in ("gemini", "openrouter", "groq"):
+    for provider in _QUOTA_PROVIDERS:
         for entry in GLOBAL_QUOTA.get(provider, {}).values():
             if isinstance(entry, dict):
                 entry["used"] = 0
@@ -261,7 +264,7 @@ def load_global_quota() -> None:
             return
         loaded = json.loads(raw)
         if isinstance(loaded, dict):
-            for provider in ("gemini", "openrouter", "groq"):
+            for provider in _QUOTA_PROVIDERS:
                 if provider in loaded:
                     # Чужой тип (список вместо dict) раньше ломал _quota_entry на каждом обращении.
                     if isinstance(loaded[provider], dict):
@@ -1401,20 +1404,25 @@ async def _summarize_text(text: str) -> str:
         {"role": "user", "content": text},
     ]
     payload = {"messages": messages, "temperature": 0.2, "max_tokens": 400, "stream": False}
-    candidates: list[tuple[str, str, str]] = []
+    from lumen_router_config import _GROQ_LIGHT_ORDER, _MUNITO_ORDER, _OR_LIGHT_ORDER, _munito_active, _munito_payload_extras
+    # Порядок = самый дешёвый живой: Munito во время эксперимента, иначе Groq, иначе OpenRouter.
+    candidates: list[tuple[str, str]] = []
+    if _munito_active():
+        candidates.append(("munito", _MUNITO_ORDER[0]))
     if bot.GROQ_API_KEY:
-        from lumen_router_config import _GROQ_LIGHT_ORDER
-        candidates = [("groq", _GROQ_LIGHT_ORDER[0], "chat/completions")]
+        candidates.append(("groq", _GROQ_LIGHT_ORDER[0]))
     if bot.OPENROUTER_API_KEY:
-        from lumen_router_config import _OR_LIGHT_ORDER
-        candidates.append(("openrouter", _OR_LIGHT_ORDER[0], "chat/completions"))
-    for provider, model, path in candidates:
+        candidates.append(("openrouter", _OR_LIGHT_ORDER[0]))
+    # Имена через bot.: подмена тестами продолжает работать.
+    request_fns = {"munito": bot._munito_request, "groq": bot._groq_request, "openrouter": bot._or_request}
+    for provider, model in candidates:
         try:
-            payload["model"] = model
-            if provider == "groq":
-                resp = await bot._groq_request(path, "POST", json_body=payload)
-            else:
-                resp = await bot._or_request(path, "POST", json_body=payload)
+            # Поле reasoning_effort знает только Munito: на чужих эндпоинтах неизвестный
+            # параметр — это 400, поэтому тело собирается на каждого провайдера.
+            body = {**payload, "model": model}
+            if provider == "munito":
+                body.update(_munito_payload_extras())
+            resp = await request_fns[provider]("chat/completions", "POST", json_body=body)
             choices = resp.get("choices") or []
             answer = ""
             if choices:
