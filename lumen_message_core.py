@@ -214,7 +214,7 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     # выкачивал девять файлов (аудит 26.10.2026).
     uid = bot._user_key_for_message(main_msg)
     entry = bot._user_daily_peek(uid)
-    if await _refuse_daily_total(main_msg, uid, entry):
+    if not wants_tiktok and await _refuse_daily_total(main_msg, uid, entry):
         return
     # Видео-слайд делает весь альбом Gemini-only: без этой проверки extras
     # качались бы до отказа по квоте Gemini.
@@ -618,22 +618,27 @@ async def _handle_message_core(
 
     # Общий дневной лимит — до любой обработки и до get_state: отказ не создаёт
     # ни запись чата, ни запись пользователя, ни messages_received.
+    # Ссылка на TikTok из этой проверки вырезана 06.11.2026 по решению владельца:
+    # скачивание не тратит ни токенов, ни генерацию, а отказ по общему лимиту
+    # выглядел для людей как сломанный бот. Как только решим, чем платить за
+    # скачивания, условие ниже убирается вместе с комментарием.
     uid_early = bot._user_key_for_message(message)
     _early_entry = bot._user_daily_peek(uid_early)
-    if await _refuse_daily_total(message, uid_early, _early_entry):
+    url = extract_url(t)
+    wants_tiktok = bool(url) and is_tiktok(url)
+    if not wants_tiktok and await _refuse_daily_total(message, uid_early, _early_entry):
         return
 
     # Видео/аудио при исчерпанном Gemini отказываем до скачивания: поздняя
     # проверка после маршрута уже скачала бы файл и пожгла транскрибацию.
     # Картинки пропускаем — на них есть Munito, и маршрут переживёт исчерпанный Gemini.
-    if _direct_attachment_needs_gemini(message) and await _refuse_daily_gemini(message, uid_early, _early_entry):
+    if not wants_tiktok and _direct_attachment_needs_gemini(message) and await _refuse_daily_gemini(message, uid_early, _early_entry):
         return
 
     state = bot.get_state(message.chat.id)
 
     # Проверка на ссылки загрузки (TikTok — сразу всегда, даже в группах без упоминания)
 
-    url = extract_url(t)
     needs_youtube = False
     needs_website = False
     youtube_url_to_analyze: str | None = None
@@ -801,7 +806,7 @@ async def _handle_message_core(
     # Проба без создания: иначе отказ заводил бы запись и раздувал day_users.
     uid = bot._user_key_for_message(message)
     _late_entry = bot._user_daily_peek(uid)
-    if await _refuse_daily_total(message, uid, _late_entry):
+    if not wants_tiktok and await _refuse_daily_total(message, uid, _late_entry):
         return
     user_gemini_limited = False
     if bot._user_daily_gemini_exhausted(uid, _late_entry):

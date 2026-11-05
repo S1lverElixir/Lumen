@@ -3248,6 +3248,40 @@ def test_core_refuses_when_user_daily_total_exhausted(rate_guard_setup, monkeypa
         bot.chat_state.pop(123, None)
 
 
+def test_core_serves_tiktok_link_when_user_daily_total_exhausted(rate_guard_setup, monkeypatch):
+    # Решение владельца 06.11.2026: скачивание TikTok не тратит дневной лимит и не
+    # блокируется им. Регрессия, которую ловит тест: возврат `_record_user_daily` в
+    # TikTok-ветку или перенос проверки общего лимита обратно выше развилки ссылки —
+    # и человек вместо видео получает «лимит исчерпан», хотя бот не потратил ни токена.
+    message = rate_guard_setup()
+    message.text = "https://www.tiktok.com/@user/video/1234567890"
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    bot._record_user_daily(456)
+    called: list[str] = []
+    replies: list[str] = []
+
+    async def fake_tiktok(msg, url):
+        called.append(url)
+
+    async def fail_route(*args, **kwargs):
+        raise AssertionError("TikTok-ветка не должна доходить до моделей")
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    monkeypatch.setattr(bot, "handle_tiktok", fake_tiktok)
+    monkeypatch.setattr(bot, "_run_route", fail_route)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert called == ["https://www.tiktok.com/@user/video/1234567890"]
+        assert not replies, "отказ по дневному лимиту не должен догонять ссылку на TikTok"
+        assert bot._user_daily_entry(456)["total"] == 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
+        bot.chat_state.pop(123, None)
+
+
 def test_core_falls_back_without_gemini_and_marks_no_search(rate_guard_setup, monkeypatch):
     # Свежесть без ссылок при исчерпанном лимите Gemini идёт через Munito;
     # внешний поиск пробует дать ему сниппеты, и только пустой поиск оставляет
