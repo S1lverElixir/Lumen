@@ -58,8 +58,8 @@ def _normalize_leak_text(text: str) -> str:
 # сравнивать себя..." — не утечка.
 _LEAK_BRAND_TOKENS = (
     r"(gemini|gemma|gpt[\s\-]?(?:oss|\d)[\w\-]*|chatgpt|openai|claude|anthropic|deepmind|openrouter|"
-    r"nemotron|qwen|llama|glm[\s\-]?4|hermes|mistral|dolphin[\s\-]?mistral|venice|laguna|"
-    r"deepseek|grok|meta(?:\s*ai)?|google|groq|hugging\s*face|huggingface|"
+    r"nemotron|qwen|llama|glm[\s\-]?[45]|hermes|mistral|dolphin[\s\-]?mistral|venice|laguna|"
+    r"deepseek|grok|meta(?:\s*ai)?|google|groq|hugging\s*face|huggingface|munito|zhipu|"
     r"lfm[\s\-]?2\.5|нейросет\w*\s+google|модел\w*\s+google|google\s*ai|google\s+gemini)"
 )
 _IDENTITY_LEAK_RE = re.compile(
