@@ -892,12 +892,13 @@ __all__ = [
     "_route_error_reply_text",
     "RouteBudgetExceededError",
     "_run_route",
-    # Порядки моделей и _history_user_text читаются тестами как bot.X.
+    # Порядки моделей и чистка истории читаются тестами как bot.X.
     "_OR_LIGHT_ORDER",
     "_OR_HEAVY_ORDER",
     "_OR_VISION_ORDER",
     "_GROQ_LIGHT_ORDER",
     "_history_user_text",
+    "_clean_history_entry",
     # Пространство имён genai-типов для тестов (bot.types.Content/...).
     "types",
     # Имена из lumen_chat_state.py код bot.py сам не читает — они нужны как
@@ -1212,6 +1213,7 @@ from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
     _NO_MEDIA_NOTE,
+    _clean_history_entry,
     _history_user_text,
     _match_trigger_prefix,
     _media_reference_category,

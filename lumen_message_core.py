@@ -992,11 +992,16 @@ async def _handle_message_core(
                         await bot._tg_call(status.message.edit_text, plain_text, parse_mode=None, call_timeout=15.0)
                 else:
                     await bot._edit_message_quietly(status.message, ans)
+        # Ответ упёрся в потолок вывода провайдера: без пометки обрезка приходила
+        # как готовый ответ (корпус бэкапа 05.11.2026), и «продолжи» не предлагалось.
+        _cut_by_cap = provenance.get("finish_reason") == "length"
+        if _cut_by_cap and not reply_already_sent:
+            ans = ans + bot._t(message.chat.id, "stream_note_interrupted")
         if not reply_already_sent:
             await bot._safe_reply(message, ans)
         # Частичный стрим тоже «успешен» для вызывающего, но его пометка
         # «продолжи» должна пережить этот блок (аудит 27.10.2026).
-        if state.pop("stream_interrupted", False):
+        if state.pop("stream_interrupted", False) or _cut_by_cap:
             state["interrupted"] = True
         else:
             state.pop("interrupted", None)

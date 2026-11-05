@@ -24,7 +24,7 @@ from lumen_errors import _is_empty_like
 from lumen_formatting import _split_text_chunks, _strip_provider_artifacts
 from lumen_lang import DEFAULT_LANG
 from lumen_media import _is_gemini_supported_mime
-from lumen_message_parse import _history_user_text
+from lumen_message_parse import _clean_history_entry, _history_user_text
 from lumen_model_speed import (
     speed_key as _model_speed_key,
     record_response as _record_model_latency,
@@ -644,11 +644,13 @@ async def _gemini_history_contents(history: list[dict]) -> list[types.Content]:
     import bot
     contents: list[types.Content] = []
     for item in history:
-        r = "model" if str(item.get("role")).lower() in {"assistant", "model"} else "user"
-        cont = item.get("content") or ""
+        entry = _clean_history_entry(item)
+        if entry is None:
+            continue
+        r = "model" if str(entry.get("role")).lower() in {"assistant", "model"} else "user"
+        cont = entry.get("content") or ""
         txt = bot._or_extract_text(cont) if isinstance(cont, (dict, list)) else str(cont).strip()
-        # Плейсхолдеры из старой истории не должны становиться репликой модели.
-        if txt and not _is_empty_like(txt):
+        if txt:
              contents.append(types.Content(role=r, parts=[types.Part.from_text(text=txt)]))
     return contents
 
@@ -994,7 +996,7 @@ def _build_openrouter_turn_messages(chat_id: int, user_text: str, model_id: str)
     full += user_text
     history = state.setdefault("history", [])
     messages: list[dict] = [{"role": "system", "content": bot.get_system_prompt(model_id)}]
-    messages.extend(history)
+    messages.extend(filter(None, (_clean_history_entry(item) for item in history)))
     messages.append({"role": "user", "content": full})
     return messages
 

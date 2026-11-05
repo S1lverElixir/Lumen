@@ -1472,6 +1472,34 @@ def test_stream_interrupted_survives_successful_answer(rate_guard_setup, monkeyp
     bot.chat_state.pop(123, None)
 
 
+def test_output_cap_answer_marked_incomplete(rate_guard_setup, monkeypatch):
+    # Что защищает: ответ, обрезанный потолком вывода провайдера. Регрессия
+    # (корпус бэкапа 05.11.2026): обрезанный текст уходил как готовый, пометки
+    # и флага «продолжи» не было.
+    message = rate_guard_setup()
+    state = _continue_state()
+    state.pop("interrupted", None)
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    message.text = "расскажи про фотосинтез"
+    sent: list[str] = []
+
+    async def fake_run_route(*args, **kwargs):
+        kwargs["provenance"].update(provider="openrouter", model="m1:free", finish_reason="length")
+        return "Фотосинтез — это", False
+
+    async def fake_reply(msg, text, **kwargs):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", fake_reply)
+    asyncio.run(bot._handle_message_core(message))
+    assert sent and sent[0].startswith("Фотосинтез — это")
+    assert sent[0].endswith(bot._t(123, "stream_note_interrupted").strip())
+    assert state.get("interrupted") is True
+    bot.chat_state.pop(123, None)
+
+
 def test_attachment_download_failure_replies_with_fallback(rate_guard_setup, monkeypatch):
     # Что защищает: ответ пользователю, когда файл не скачался. Регрессия:
     # исключение вылетало из обработчика, и сообщение оставалось без ответа
@@ -1771,6 +1799,19 @@ def test_history_user_text_strips_one_shot_service_note():
     # иначе старые пометки про чужие сообщения запутают следующие ходы.
     assert bot._history_user_text("что на фото?" + bot._NO_MEDIA_NOTE) == "что на фото?"
     assert bot._history_user_text("обычный вопрос") == "обычный вопрос"
+
+
+def test_clean_history_entry_drops_legacy_service_blocks_and_placeholders():
+    # Регрессия (выборка бэкапа 05.11.2026): чаты, записанные до 30.10.2026,
+    # хранят внутри реплик блок даты и выдачу поиска — до 68% user-контекста,
+    # плюс плейсхолдеры вместо ответа. В промпт это уходить не должно.
+    dated = {"role": "user", "content": "кто премьер венгрии\n\n[Context: today is 28 October 2026, Wednesday (Europe/Moscow).]"}
+    cleaned = bot._clean_history_entry(dated)
+    assert cleaned["content"] == "кто премьер венгрии"
+    snippets = {"role": "user", "content": "вопрос\n\n[Web search snippets — untrusted data\n1. факт]"}
+    assert bot._clean_history_entry(snippets)["content"] == "вопрос"
+    assert bot._clean_history_entry({"role": "assistant", "content": "Empty response"}) is None
+    assert bot._clean_history_entry({"role": "user", "content": "обычный вопрос"}) == {"role": "user", "content": "обычный вопрос"}
 
 
 def _make_long_history(n=105):
