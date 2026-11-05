@@ -484,6 +484,26 @@ def test_or_empty_response_falls_through_to_next_model(monkeypatch, empty_payloa
     assert calls == ["m1:free", "m2:free"]
 
 
+def test_openrouter_provenance_names_model_and_truncation(monkeypatch):
+    # Выборка бэкапа 05.11.2026: у OR/Groq в provenance писалась None — след
+    # нельзя было привязать к модели, а обрыв по потолку вывода не был виден нигде.
+    chat_id = 999399
+
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+        return {"choices": [{"message": {"content": "текст до потолка"}, "finish_reason": "length"}]}
+
+    monkeypatch.setattr(bot, "_or_request", fake_or_request)
+    prov: dict = {}
+    try:
+        answer = asyncio.run(bot.ask_openrouter_text(chat_id, "привет", model_chain=["m1:free"], provenance=prov))
+    finally:
+        bot.chat_state.pop(chat_id, None)
+    assert answer == "текст до потолка"
+    assert prov.get("provider") == "openrouter"
+    assert prov.get("model") == "m1:free"
+    assert prov.get("finish_reason") == "length"
+
+
 def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
     # Три пустых подряд в одну голову — карантин (реальная регрессия: мёртвая голова
     # жевала бы каждую попытку до конца суток вместо объезда после третьей).

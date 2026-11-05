@@ -1001,13 +1001,17 @@ async def _handle_message_core(
         else:
             state.pop("interrupted", None)
         bot.mark_state_dirty(message.chat.id)
+        # truncated — потолок вывода провайдера, partial — оборванный стрим: без этого
+        # усечённый ответ в следе неотличим от полного (выборка бэкапа 05.11.2026).
+        _truncated = provenance.get("finish_reason") == "length"
         lumen_devtrace.record_answer(
             message.chat.id, user_text=clean_prompt, route=route,
             provider=provenance.get("provider", ""), model=provenance.get("model") or "",
             latency_ms=int((time.monotonic() - _trace_start) * 1000), reply=ans,
             ctx_tail=list(state.get("ctx") or [])[-3:],
             flags={"fresh": bool(needs_freshness), "snippets": bool(snippets_injected),
-                   "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent)},
+                   "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent),
+                   "truncated": _truncated, "partial": bool(state.get("interrupted"))},
         )
     except Exception as exc:
         lumen_devtrace.record_failure(
