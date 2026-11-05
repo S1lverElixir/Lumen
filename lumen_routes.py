@@ -21,7 +21,7 @@ from aiogram.types import Message
 from google.genai import types
 
 from lumen_errors import _is_empty_like
-from lumen_formatting import _split_text_chunks
+from lumen_formatting import _split_text_chunks, _strip_provider_artifacts
 from lumen_lang import DEFAULT_LANG
 from lumen_media import _is_gemini_supported_mime
 from lumen_message_parse import _history_user_text
@@ -286,7 +286,7 @@ async def _chat_completion_chain(
             answer = ""
             if choices:
                 answer = bot._or_extract_text(choices[0].get("message") or "")
-            answer = answer.strip()
+            answer = _strip_provider_artifacts(answer)
             if _is_empty_like(answer):
                 # Пустой ответ — повод попробовать следующую модель (прод 17.09.2026: юзер дважды увидел "Empty response").
                 bot._record_model_outcome(provider, model_trial, bad=True)
@@ -520,7 +520,7 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
             )
             ans = await bot._extract_gemini_answer_text(
                 resp, model_id=model, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
-            if _is_empty_like(ans):
+            if _is_empty_like(_strip_provider_artifacts(ans)):
                 bot._record_model_outcome("gemini", model, bad=True)
                 raise RuntimeError(f"Model {model} returned an empty response")
             # Та же честность, что у остальных проб: успех сбрасывает счётчик.
@@ -881,7 +881,7 @@ async def ask_gemini(
                 timeout=_attempt_timeout(bot, deadline),
             )
             ans = await bot._extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
-            ans = ans.strip()
+            ans = _strip_provider_artifacts(ans)
             if _is_empty_like(ans):
                 # Пустой ответ — пробуем следующую модель (прод 17.09.2026: юзер увидел буквальное "Empty response").
                 bot._record_model_outcome("gemini", curr_model_id, bad=True)

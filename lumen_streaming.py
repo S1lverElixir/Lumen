@@ -14,7 +14,7 @@ from aiogram.enums import ChatType, ParseMode
 from aiogram.types import Message
 
 from lumen_errors import _is_empty_like
-from lumen_formatting import _md_to_html, _split_text_chunks, _truncate_html_to_fit
+from lumen_formatting import _md_to_html, _split_text_chunks, _strip_provider_artifacts, _truncate_html_to_fit
 from lumen_lang import t as _lang_t
 from lumen_status import _spinner_glyph, thought_block
 from lumen_message_parse import _history_user_text
@@ -432,6 +432,9 @@ async def _run_streaming_reply(
                 last_edited_plain = current_chunk_text
                 last_edit_ts = now
 
+        # Метки классификатора и разметка инструмента — не ответ: чат должен
+        # видеть следующую модель, а не 39 символов «User Safety: safe».
+        full_text = _strip_provider_artifacts(full_text)
         if _is_empty_like(full_text):
             # Пустой стрим — неудача, но плейсхолдер отдаём вызывающему коду (см. докстринг).
             return None, sent_messages[-1]

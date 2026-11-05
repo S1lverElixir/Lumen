@@ -504,6 +504,20 @@ def test_openrouter_provenance_names_model_and_truncation(monkeypatch):
     assert prov.get("finish_reason") == "length"
 
 
+def test_or_safety_label_only_response_moves_to_next_model(monkeypatch):
+    # Прод-кейс из бэкапа 05.11.2026: весь ответ пользователя — 39 символов
+    # «User Safety: safe» от модели-головы; непустая строка проходила проверку.
+    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+        if json_body["model"] == "m1:free":
+            return {"choices": [{"message": {"content": "User Safety: safe\nResponse Safety: safe"}}]}
+        return {"choices": [{"message": {"content": "живой ответ"}}]}
+
+    monkeypatch.setattr(bot, "_or_request", fake_or_request)
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["m1:free", "m2:free"], "m1:free"))
+    assert (answer, used) == ("живой ответ", "m2:free")
+
+
 def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
     # Три пустых подряд в одну голову — карантин (реальная регрессия: мёртвая голова
     # жевала бы каждую попытку до конца суток вместо объезда после третьей).

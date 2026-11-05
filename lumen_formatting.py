@@ -10,6 +10,22 @@ from urllib.parse import urlparse
 
 _URL_LABEL_RE = re.compile(r"^(?:https?://|www\.)", re.IGNORECASE)
 
+# Артефакты провайдеров в тексте ответа: метки классификатора безопасности
+# (Groq/Llama) и разметка вызова инструмента у бесплатных OR-моделей. В чате
+# это выглядит как мусор вместо ответа (корпус бэкапа 05.11.2026: 39 символов
+# «User Safety: safe» целиком и сырой <|tool_call_start|> на 167).
+_SAFETY_LABEL_RE = re.compile(r"^[ \t]*(?:user|response|prompt) safety[ \t]*:.*$", re.IGNORECASE | re.MULTILINE)
+_TOOL_CALL_SPAN_RE = re.compile(r"<\|[^|>]{0,40}\|>(?:.*?<\|[^|>]{0,40}\|>)?", re.DOTALL)
+
+
+def _strip_provider_artifacts(text: str) -> str:
+    """Текст без служебных меток провайдера; пустым станет, если ответа не было."""
+    if not text:
+        return ""
+    cleaned = _TOOL_CALL_SPAN_RE.sub("", text)
+    cleaned = _SAFETY_LABEL_RE.sub("", cleaned)
+    return cleaned.strip()
+
 
 def _safe_link_label(label: str, url: str) -> str:
     """Метка-URL, ведущая на другой хост, — готовый фишинг: показываем реальный
