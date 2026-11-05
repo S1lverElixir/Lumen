@@ -13,6 +13,7 @@ import aiohttp
 from aiogram.enums import ChatType, ParseMode
 from aiogram.types import Message
 
+from lumen_errors import _is_empty_like
 from lumen_formatting import _md_to_html, _split_text_chunks, _truncate_html_to_fit
 from lumen_lang import t as _lang_t
 from lumen_status import _spinner_glyph, thought_block
@@ -431,7 +432,7 @@ async def _run_streaming_reply(
                 last_edited_plain = current_chunk_text
                 last_edit_ts = now
 
-        if not full_text.strip():
+        if _is_empty_like(full_text):
             # Пустой стрим — неудача, но плейсхолдер отдаём вызывающему коду (см. докстринг).
             return None, sent_messages[-1]
 
@@ -540,7 +541,7 @@ async def _run_streaming_reply(
                 await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
 
     except Exception as exc:
-        if not full_text.strip():
+        if _is_empty_like(full_text):
             # 429 до первого куска — в /stats и ненадолго из роута. Суточный лимит
             # держим до утра, минутный всплеск — короткая остывка (иначе один 429
             # запирал модель до полуночи — враждебное ревью 27.09.2026).

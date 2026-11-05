@@ -7,10 +7,24 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from lumen_lang import DEFAULT_LANG, t as _lang_t
 from system_prompt import SYSTEM_PROMPT
+
+# Провайдеры OpenRouter отдают плейсхолдер вместо ответа: choices непустые, текста
+# нет. Прод 17.09.2026 лечил только пустой choices — литерал "Empty response"
+# продолжал уходить в чат (выборка бэкапа 05.11.2026: 7 таких в одном диалоге).
+_EMPTY_LIKE_TEXTS = frozenset({"empty response", "no response", "n/a", "none", "no answer"})
+
+
+def _is_empty_like(text: Any) -> bool:
+    """Пустой ответ или системный плейсхолдер вместо него."""
+    if not isinstance(text, str):
+        return not text
+    cleaned = text.strip().lower().rstrip(".!")
+    return not cleaned or cleaned in _EMPTY_LIKE_TEXTS
 
 log = logging.getLogger("bot")
 

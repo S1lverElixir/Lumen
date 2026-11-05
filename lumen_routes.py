@@ -20,6 +20,7 @@ from aiogram.enums import ChatType, ParseMode
 from aiogram.types import Message
 from google.genai import types
 
+from lumen_errors import _is_empty_like
 from lumen_formatting import _split_text_chunks
 from lumen_lang import DEFAULT_LANG
 from lumen_media import _is_gemini_supported_mime
@@ -277,7 +278,7 @@ async def _chat_completion_chain(
             if choices:
                 answer = bot._or_extract_text(choices[0].get("message") or "")
             answer = answer.strip()
-            if not answer:
+            if _is_empty_like(answer):
                 # Пустой ответ — повод попробовать следующую модель (прод 17.09.2026: юзер дважды увидел "Empty response").
                 bot._record_model_outcome(provider, model_trial, bad=True)
                 raise RuntimeError(f"Model {model_trial} returned an empty response")
@@ -496,7 +497,7 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
             )
             ans = await bot._extract_gemini_answer_text(
                 resp, model_id=model, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
-            if not ans.strip():
+            if _is_empty_like(ans):
                 bot._record_model_outcome("gemini", model, bad=True)
                 raise RuntimeError(f"Model {model} returned an empty response")
             # Та же честность, что у остальных проб: успех сбрасывает счётчик.
@@ -620,7 +621,8 @@ async def _gemini_history_contents(history: list[dict]) -> list[types.Content]:
         r = "model" if str(item.get("role")).lower() in {"assistant", "model"} else "user"
         cont = item.get("content") or ""
         txt = bot._or_extract_text(cont) if isinstance(cont, (dict, list)) else str(cont).strip()
-        if txt:
+        # Плейсхолдеры из старой истории не должны становиться репликой модели.
+        if txt and not _is_empty_like(txt):
              contents.append(types.Content(role=r, parts=[types.Part.from_text(text=txt)]))
     return contents
 
@@ -854,7 +856,7 @@ async def ask_gemini(
             )
             ans = await bot._extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
             ans = ans.strip()
-            if not ans:
+            if _is_empty_like(ans):
                 # Пустой ответ — пробуем следующую модель (прод 17.09.2026: юзер увидел буквальное "Empty response").
                 bot._record_model_outcome("gemini", curr_model_id, bad=True)
                 raise RuntimeError(f"Model {curr_model_id} returned an empty response")

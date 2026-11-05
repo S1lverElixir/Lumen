@@ -457,16 +457,21 @@ def test_run_route_reorders_slow_head_down(monkeypatch):
         lumen_model_speed._latency_ema.clear()
 
 
-def test_or_empty_response_falls_through_to_next_model(monkeypatch):
+@pytest.mark.parametrize("empty_payload", [None, "Empty response", "  empty response. ", "No response"])
+def test_or_empty_response_falls_through_to_next_model(monkeypatch, empty_payload):
     # Прод-кейс 17.09.2026: пользователь дважды увидел буквальное "Empty
     # response" — пустой ответ обязан двигать цепочку дальше, а не идти в чат.
+    # Плейсхолдер провайдера (непустая строка) ловится тем же условием:
+    # выборка бэкапа 05.11.2026 — 7 таких ответов в одном диалоге.
     calls = []
 
     async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         model = json_body["model"]
         calls.append(model)
         if model == "m1:free":
-            return {"choices": []}
+            if empty_payload is None:
+                return {"choices": []}
+            return {"choices": [{"message": {"content": empty_payload}}]}
         return {"choices": [{"message": {"content": "живой ответ"}}]}
 
     monkeypatch.setattr(bot, "_or_request", fake_or_request)
