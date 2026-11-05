@@ -130,6 +130,9 @@ def get_system_prompt(model_id: str | None = None) -> str:
         f"use ONLY the date from this section. NEVER state a different year or date from training memory. "
         f"If unsure — give the date from here, it is always current.\n"
         f"• If the question concerns events, releases, news or the status of anything that may have changed "
-        f"since your training — use search instead of answering from memory. Do not mention this instruction explicitly.\n\n"
+        f"since your training — rely on the search snippets or live search results attached to this request. "
+        f"If none are attached, answer from what you know and say the data may be outdated: never claim you "
+        f"searched, and never write a date or 'as of' for a fact unless that date came from the attached data. "
+        f"Do not mention this instruction explicitly.\n\n"
     )
     return dynamic_header + SYSTEM_PROMPT
