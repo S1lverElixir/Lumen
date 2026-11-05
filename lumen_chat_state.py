@@ -172,13 +172,12 @@ class QuotaEntry(TypedDict):
 
 GLOBAL_QUOTA: dict[str, Any] = {
     "gemini": {},
-    "openrouter": {},
     # used/exhausted сбрасываются в полночь LA: иначе вечный рост и залипший "лимит исчерпан" (калибровка 25.07.2026).
     "quota_day": None,
 }
 # Единственный список провайдеров с суточными счётчиками: новый провайдер обязан
 # быть тут, иначе его счётчик не сбрасывается на новых сутках и не грузится из снапшота.
-_QUOTA_PROVIDERS = ("gemini", "openrouter", "groq", "munito")
+_QUOTA_PROVIDERS = ("gemini", "groq", "munito")
 
 # Дата пересчитывается не чаще раза в минуту: ZoneInfo на каждое обращение дорого.
 _QUOTA_CHECK_THROTTLE_SEC = 60.0
@@ -200,7 +199,8 @@ _last_quota_check_monotonic: float = 0.0
 
 
 def _reset_quota_if_new_day() -> None:
-    """Сбрасывает used/exhausted_at у ВСЕХ моделей (Gemini и OpenRouter), если с
+    """Сбрасывает used/exhausted_at у ВСЕХ моделей всех провайдеров из
+    _QUOTA_PROVIDERS, если с
     последнего сброса наступили новые сутки (по America/Los_Angeles). Вызывается и лениво (см.
     _quota_entry — на любое обращение к квоте), и явно раз в час из фонового цикла
     в _webhook_startup, чтобы сброс не зависел от того, придёт ли вообще новое
@@ -1099,7 +1099,7 @@ def _quota_entry(provider: str, model_id: str) -> QuotaEntry:
 # снова пробуют. Раньше минутный всплеск ставил метку до полуночи, и модель выпадала
 # из роута на остаток суток (враждебное ревью 27.09.2026): снять метку было нечем,
 # потому что заведомо мёртвую модель не зовут, а успешный ответ чистит метку.
-# 10 минут с большим запасом переживают окно Groq в 30 RPM.
+# 10 минут с большим запасом переживают 30-секундное окно Munito (200 запросов).
 QUOTA_RATE_LIMIT_COOLDOWN_SEC = 600.0
 
 def _mark_quota_exhausted(provider: str, model_id: str) -> None:
@@ -1363,8 +1363,8 @@ _HISTORY_SUMMARY_INPUT_MAX_CHARS = 6000
 
 async def _trim_history(history: list[dict[str, Any]]) -> None:
     """Обрезка истории с саммари: старшие сообщения сверх HISTORY_SUMMARIZE_KEEP сжимаются
-    одним вызовом дешёвой модели (Groq, резерв — голова OpenRouter), свежие остаются как есть.
-    При любой неудаче (нет ключей, ошибка API, пустое саммари) — старая молчаливая обрезка до лимита."""
+    одним вызовом дешёвой модели (голова цепочки Munito), свежие остаются как есть.
+    При любой неудаче (нет ключа, ошибка API, пустое саммари) — старая молчаливая обрезка до лимита."""
     import bot
     if len(history) <= bot.SHARED_HISTORY_MAX_LEN:
         return
@@ -1404,33 +1404,25 @@ async def _summarize_text(text: str) -> str:
         {"role": "user", "content": text},
     ]
     payload = {"messages": messages, "temperature": 0.2, "max_tokens": 400, "stream": False}
-    from lumen_router_config import _GROQ_LIGHT_ORDER, _MUNITO_ORDER, _OR_LIGHT_ORDER, _munito_active, _munito_payload_extras
-    # Порядок = самый дешёвый живой: Munito во время эксперимента, иначе Groq, иначе OpenRouter.
-    candidates: list[tuple[str, str]] = []
-    if _munito_active():
-        candidates.append(("munito", _MUNITO_ORDER[0]))
-    if bot.GROQ_API_KEY:
-        candidates.append(("groq", _GROQ_LIGHT_ORDER[0]))
-    if bot.OPENROUTER_API_KEY:
-        candidates.append(("openrouter", _OR_LIGHT_ORDER[0]))
-    # Имена через bot.: подмена тестами продолжает работать.
-    request_fns = {"munito": bot._munito_request, "groq": bot._groq_request, "openrouter": bot._or_request}
-    for provider, model in candidates:
-        try:
-            # Поле reasoning_effort знает только Munito: на чужих эндпоинтах неизвестный
-            # параметр — это 400, поэтому тело собирается на каждого провайдера.
-            body = {**payload, "model": model}
-            if provider == "munito":
-                body.update(_munito_payload_extras())
-            resp = await request_fns[provider]("chat/completions", "POST", json_body=body)
-            choices = resp.get("choices") or []
-            answer = ""
-            if choices:
-                answer = bot._or_extract_text(choices[0].get("message") or "").strip()
-            if answer:
-                bot._record_quota_usage(provider, model, service=True)
-                return answer
-        except Exception as exc:
-            log.warning("[history] Summarization via %s/%s failed, trying next: %s", provider, model, exc)
-            continue
-    return ""
+    from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
+    # Единственный оставшийся OpenAI-совместимый провайдер; без него — молчаливая обрезка (см. _trim_history).
+    if not _munito_active():
+        return ""
+    model = _MUNITO_ORDER[0]
+    try:
+        # Имя запроса читаем через bot.: подмена тестами продолжает работать.
+        resp = await bot._munito_request(
+            "chat/completions", "POST",
+            json_body={**payload, "model": model, **_munito_payload_extras()},
+        )
+        choices = resp.get("choices") or []
+        answer = ""
+        if choices:
+            answer = bot._or_extract_text(choices[0].get("message") or "").strip()
+        if answer:
+            bot._record_quota_usage("munito", model, service=True)
+            return answer
+        return ""
+    except Exception as exc:
+        log.warning("[history] Summarization via munito/%s failed, plain cut: %s", model, exc)
+        return ""

@@ -1,5 +1,5 @@
 """
-lumen_tts.py — TTS: Gemini TTS (ветка Fish Audio S2.1 Pro отключена флагом — зеркало снято с free-каталога 17.09.2026), плюс pcm_to_wav.
+lumen_tts.py — TTS: Gemini TTS (с 05.11.2026 единственная ветка: зеркало Fish Audio с OpenRouter снято вместе с провайдером), плюс pcm_to_wav.
 
 Вынесено из bot.py (аудит техдолга). Внешнее состояние (сессия, ключи, клиент, квота, классификация ошибок) не дублируется — принимается параметрами и callback'ами; bot.py держит тонкие обёртки с теми же именами, интерфейс и тесты не изменились.
 """
@@ -9,11 +9,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
-import json
 import logging
 from typing import Any, Callable
 
-import aiohttp
 from google.genai import types
 
 log = logging.getLogger("bot")
@@ -31,74 +29,6 @@ def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sam
          wav_file.setframerate(sample_rate)
          wav_file.writeframes(pcm_data)
     return wav_buf.getvalue()
-
-
-# ── Fish Audio S2.1 Pro (free) — ОТКЛЮЧЁН флагом FISH_AUDIO_ENABLED: сейчас всегда идёт Gemini TTS. Ветка оставлена: при возврате free-доступа достаточно вернуть True.
-
-async def _fish_audio_tts_bytes(
-    session: aiohttp.ClientSession, text: str, *,
-    api_key: str, http_referer: str, title: str, base_url: str,
-    model_id: str, request_timeout_sec: float,
-) -> bytes | None:
-    """Fish Audio через OpenRouter, mp3-байты или None при любой неудаче для отката на Gemini TTS. Формат ответа на реальном трафике не проверялся."""
-    if not api_key:
-        return None
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "HTTP-Referer": http_referer,
-        "X-OpenRouter-Title": title,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model_id,
-        "messages": [{"role": "user", "content": text}],
-        "modalities": ["text", "audio"],
-        "audio": {"voice": "default", "format": "mp3"},
-        "stream": True,
-    }
-    url = f"{base_url}/chat/completions"
-    chunks_b64: list[str] = []
-    try:
-        async with session.post(
-            url, headers=headers, json=payload,
-            timeout=aiohttp.ClientTimeout(total=request_timeout_sec, connect=10.0),
-        ) as resp:
-            if resp.status >= 400:
-                body = await resp.read()
-                log.warning("[tts] Fish Audio HTTP %s: %r", resp.status, body[:300])
-                return None
-            async for raw_line in resp.content:
-                line = raw_line.decode("utf-8", errors="ignore").strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data_str = line[len("data:"):].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(data_str)
-                except Exception:
-                    continue
-                choices = obj.get("choices") or []
-                if not choices:
-                    continue
-                audio_piece = ((choices[0].get("delta") or {}).get("audio") or {}).get("data")
-                if audio_piece:
-                    chunks_b64.append(audio_piece)
-    except Exception as exc:
-        # Ключ из текста ошибок вычищаем (тот же defense-in-depth, что у _or_request/_groq_request).
-        exc_str = str(exc) or repr(exc) or exc.__class__.__name__
-        if api_key and len(api_key) > 8:
-            exc_str = exc_str.replace(api_key, "<KEY>")
-        log.warning("[tts] Fish Audio request failed, falling back to Gemini TTS: %s", exc_str)
-        return None
-    if not chunks_b64:
-        log.warning('[tts] Fish Audio: stream ended without a single audio chunk (response format may have changed) — falling back to Gemini TTS.')
-        return None
-    try:
-        return base64.b64decode("".join(chunks_b64))
-    except Exception as exc:
-        log.warning('[tts] Fish Audio: failed to decode base64 audio, falling back to Gemini TTS: %s', exc)
-        return None
 
 
 async def _gemini_tts_bytes(

@@ -159,12 +159,12 @@ async def _sse_pieces(
     session, url: str, headers: dict[str, str], payload: dict, *, err_cls, provider_label: str,
     deadline: float | None = None,
 ):
-    """Общий разбор OpenAI-совместимого SSE для OpenRouter, Groq и Munito (все дают
+    """Общий разбор OpenAI-совместимого SSE (Munito даёт
     `data: {"choices":[{"delta":{"content":...}}]}` и финальный `data: [DONE]`).
 
-    Раньше это были две копии по 45 строк, расходившиеся деталями: у Groq не было
-    теста на HTTP-ошибку и на ошибку внутри чанка (аудит 26.09.2026). Ошибка внутри
-    чанка (HTTP 200, стрим уже открыт) поднимается: ранний сбой — откат на
+    Раньше это были несколько копий по 45 строк, расходившихся деталями: в одной не
+    было теста на HTTP-ошибку и на ошибку внутри чанка (аудит 26.09.2026). Ошибка
+    внутри чанка (HTTP 200, стрим уже открыт) поднимается: ранний сбой — откат на
     следующую модель, поздний — пометка "соединение прервалось"."""
     import bot
     post_cm = session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=None, connect=12.0))
@@ -211,44 +211,6 @@ async def _sse_pieces(
     finally:
         with contextlib.suppress(Exception):
             await post_cm.__aexit__(None, None, None)
-
-async def _openrouter_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
-    """Куски от OpenRouter: SSE через общий _sse_pieces, таймаут на строку — тот же
-    STREAM_CHUNK_TIMEOUT_SEC, но не дольше остатка бюджета маршрута."""
-    import bot
-    if not bot.OPENROUTER_API_KEY:
-        raise bot.OpenRouterAPIError("OPENROUTER_API_KEY is not set")
-    headers = {
-        "Authorization": f"Bearer {bot.OPENROUTER_API_KEY}",
-        "HTTP-Referer": bot.OPENROUTER_HTTP_REFERER,
-        "X-OpenRouter-Title": bot.OPENROUTER_TITLE,
-        "Content-Type": "application/json",
-    }
-    session = await bot._get_http_session()
-    async for piece in _sse_pieces(
-        session, f"{bot.OPENROUTER_BASE_URL}/chat/completions", headers,
-        {"model": model_id, "messages": messages, "stream": True},
-        err_cls=bot.OpenRouterAPIError, provider_label="OpenRouter", deadline=deadline,
-    ):
-        yield piece
-
-async def _groq_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
-    """Куски от Groq: тот же OpenAI-SSE через общий _sse_pieces (Groq —
-    OpenAI-совместимый API), таймаут на строку — как у OpenRouter."""
-    import bot
-    if not bot.GROQ_API_KEY:
-        raise bot.GroqAPIError("GROQ_API_KEY is not set")
-    headers = {
-        "Authorization": f"Bearer {bot.GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    session = await bot._get_http_session()
-    async for piece in _sse_pieces(
-        session, f"{bot.GROQ_BASE_URL}/chat/completions", headers,
-        {"model": model_id, "messages": messages, "stream": True},
-        err_cls=bot.GroqAPIError, provider_label="Groq", deadline=deadline,
-    ):
-        yield piece
 
 async def _munito_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
     """Куски от Munito AI: тот же OpenAI-SSE через общий _sse_pieces (замер 05.11.2026: первый токен 0.24с у головы цепочки)."""
@@ -569,9 +531,9 @@ async def _run_streaming_reply(
             try:
                 _txt = bot._error_text(exc).strip() or exc.__class__.__name__
                 if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":
-                    # Дневную квоту опознаём предикатом провайдера, как текстовый
-                    # путь: общий account-wide ловит только OpenRouter-тексты.
-                    _daily = bot._is_gemini_daily_quota(_txt) if provider == "gemini" else bot._is_account_wide_or_rate_limit(_txt.lower())
+                    # Суточную квоту опознаёт только Gemini: у Munito лимиты оконные
+                    # (200 запросов за 30 секунд), держать его 429 до утра незачем.
+                    _daily = provider == "gemini" and bot._is_gemini_daily_quota(_txt)
                     if _daily:
                         bot._mark_quota_exhausted(provider, model_id)
                     else:
@@ -649,27 +611,10 @@ async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, 
     piece_agen = _gemini_stream_pieces(model_id, call_contents, gconfig, deadline=deadline)
     return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
 
-async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
-    """Обёртка _run_streaming_reply для OpenRouter (SSE через chat/completions)."""
-    import bot
-    messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
-    # Генератор — через bot.: тесты подменяют bot._openrouter_stream_pieces фейком.
-    piece_agen = bot._openrouter_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
-
-async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
-    """Обёртка _run_streaming_reply для Groq (SSE через chat/completions). Историю режем тем же _trim_messages_for_groq, что обычный путь, — иначе стрим-проба падает с 413 ещё до цепочки."""
-    import bot
-    from lumen_routes import _trim_messages_for_groq
-    messages = _trim_messages_for_groq(bot._build_openrouter_turn_messages(chat_id, user_text, model_id))
-    # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
-    piece_agen = bot._groq_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
-
 async def _try_munito_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Munito (SSE через chat/completions), история без резки — см. докстринг ask_munito_text."""
     import bot
-    messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
+    messages = bot._build_openai_turn_messages(chat_id, user_text, model_id)
     # Генератор — через bot.: тесты подменяют bot._munito_stream_pieces фейком.
     piece_agen = bot._munito_stream_pieces(model_id, messages, deadline=deadline)
     return await _run_streaming_reply(chat_id, user_text, message, provider="munito", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)

@@ -1,5 +1,5 @@
 """
-Lumen — телеграм-бот на Gemini/OpenRouter, webhook-режим.
+Lumen — телеграм-бот на Munito с резервом в Gemini, webhook-режим.
 История диалога — 100 сообщений, TikTok через TikWM без водяных знаков,
 генерация картинок через Pollinations, озвучка через Gemini TTS.
 """
@@ -71,7 +71,7 @@ _LOG_LISTENER: logging.handlers.QueueListener | None = None
 
 _SECRET_NAMES = (
     "BOT_TOKEN", "TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN", "GEMINI_API_KEY",
-    "OPENROUTER_API_KEY", "OPENROUTER_KEY", "GROQ_API_KEY", "ADMIN_SECRET_SEED",
+    "GROQ_API_KEY", "ADMIN_SECRET_SEED",
     "MUNITO_API_KEY",
     "_ADMIN_SECRET_SEED", "WEBHOOK_SECRET", "ADMIN_PANEL_KEY",
     "UPSTASH_REDIS_REST_TOKEN", "LUMEN_PROXY_SECRET",
@@ -299,28 +299,22 @@ def _env_number(name: str, default: float | int, *, cast: type = float, min_valu
     return value
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-OPENROUTER_API_KEY = (os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENROUTER_KEY") or "").strip()
-# Referer пересчитываем в try_setup, если владелец не задал его явно: иначе t.me остался бы со заглушкой.
-_OPENROUTER_HTTP_REFERER_ENV_SET = bool(os.getenv("OPENROUTER_HTTP_REFERER", "").strip())
-OPENROUTER_HTTP_REFERER = os.getenv("OPENROUTER_HTTP_REFERER", f"https://t.me/{BOT_USERNAME}").strip()
-OPENROUTER_TITLE = os.getenv("OPENROUTER_TITLE", BOT_USERNAME).strip()
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-# Groq — прямой провайдер лёгкого текста (калибровка 21.09.2026): 1000 запросов/день против 50 у OpenRouter.
+# Groq — только Whisper для голосовых (_transcribe_audio); чат-модели Groq из кода убраны 05.11.2026.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-# Munito AI — провайдер эксперимента владельца 05.11.2026 (замер eval/munito_probe.py):
-# текст идёт туда только при MUNITO_ENABLED=1; ноль-хранение по умолчанию, обучение на
-# промптах запрещено. Ключа нет — маршрут делает вид, что провайдера не существует.
+# Munito AI — основной текстовый и vision-провайдер с 05.11.2026 (замер eval/munito_probe.py):
+# ноль-хранение по умолчанию, обучение на промптах запрещено. Ключа нет — маршрут
+# делает вид, что провайдера не существует и отвечает только Gemini.
 MUNITO_API_KEY = os.getenv("MUNITO_API_KEY", "").strip()
 MUNITO_BASE_URL = (os.getenv("MUNITO_BASE_URL", "").strip() or "https://api.munito.ai/inference/v1").rstrip("/")
 # 3M токенов/сутки по тарифу владельца при ~11K входных токенов на запрос — это ~250 ответов.
 MUNITO_DAILY_LIMIT = _env_number("MUNITO_DAILY_LIMIT", 250, cast=int, min_value=1)
 # Голосовые длиннее не транскрибируем (Whisper API всё равно режет 25 МБ) — такие идут прежним путём через Gemini-аудио.
 VOICE_TRANSCRIBE_MAX_BYTES = _env_number("VOICE_TRANSCRIBE_MAX_BYTES", 10 * 1024 * 1024, cast=int, min_value=1024)
-# Раньше у OpenRouter был свой отдельный лимит истории (30), меньший, чем у Gemini
-# (100) — при переключении провайдера (/provider или /model) ощущалось резкое
-# "обнуление" контекста разговора. Теперь история ОБЩАЯ (см. state["history"] в
-# get_state) и лимит один и тот же для обоих провайдеров.
+# Раньше у второго текстового провайдера был свой отдельный лимит истории (30),
+# меньший, чем у Gemini (100) — при смене провайдера ощущалось резкое "обнуление"
+# контекста разговора. Теперь история ОБЩАЯ (см. state["history"] в get_state) и
+# лимит один для всех.
 SHARED_HISTORY_MAX_LEN = 100
 
 # ── Sentry (опционально) — персистентный трекинг ошибок между рестартами ──
@@ -436,10 +430,6 @@ TTS_TOTAL_BUDGET_SEC = _env_number("TTS_TOTAL_BUDGET_SEC", 240, min_value=30)
 DAILY_USER_MESSAGE_LIMIT = _env_number("DAILY_USER_MESSAGE_LIMIT", 30, cast=int, min_value=1)
 DAILY_USER_GEMINI_LIMIT = _env_number("DAILY_USER_GEMINI_LIMIT", 5, cast=int, min_value=1)
 DAILY_USER_TTS_LIMIT = _env_number("DAILY_USER_TTS_LIMIT", 5, cast=int, min_value=1)
-# Суточные лимиты провайдеров для /stats: раньше хардкоды 50/1000 жили в самой
-# команде и расходились бы с реальностью при смене тарифа.
-OPENROUTER_DAILY_LIMIT = _env_number("OPENROUTER_DAILY_LIMIT", 50, cast=int, min_value=1)
-GROQ_DAILY_LIMIT = _env_number("GROQ_DAILY_LIMIT", 1000, cast=int, min_value=1)
 
 
 def _parse_gemini_daily_limits(raw: str) -> dict[str, int]:
@@ -689,16 +679,8 @@ from lumen_media_flow import (
 from lumen_router_config import (
     DEFAULT_GEMINI_MODEL,
     _check_unconfirmed_model_quotas,
-    _check_temporary_free_models_expiry,
-    _check_scheduled_removals_due,
-    _OR_LIGHT_ORDER,
-    _OR_HEAVY_ORDER,
-    _OR_VISION_ORDER,
-    _GROQ_LIGHT_ORDER,
     _MUNITO_ORDER,
     GEMINI_TTS_MODELS,
-    FISH_AUDIO_TTS_MODEL,
-    FISH_AUDIO_ENABLED,
     _record_model_outcome,
     _is_quarantined,
     _quarantine_status,
@@ -840,13 +822,9 @@ __all__ = [
     # существующим тестам и `_run_route` ниже.
     "_tick_waiting_dots",
     "_pieces_with_waiting_feedback",
-    "_openrouter_stream_pieces",
-    "_groq_stream_pieces",
     "_munito_stream_pieces",
     "_run_streaming_reply",
     "_try_gemini_streaming",
-    "_try_openrouter_streaming",
-    "_try_groq_streaming",
     "_try_munito_streaming",
     # Точка подмены тестов (см. monkeypatch в tests/) — сам код bot.py её
     # больше не читает напрямую после выноса стриминга.
@@ -878,39 +856,25 @@ __all__ = [
     "_fetch_tikwm_media_data",
     # Имена из lumen_routes.py код bot.py сам не читает — они нужны как `bot.X`
     # существующим тестам и `_handle_message_core` ниже.
-    "OpenRouterAPIError",
-    "GroqAPIError",
     "MunitoAPIError",
-    "_or_request",
-    "_groq_request",
     "_munito_request",
     "_attempt_timeout",
     "_or_extract_text",
-    "_is_account_wide_or_rate_limit",
     "_is_gemini_daily_quota",
-    "_probe_or_model_liveness",
-    "_or_chat_completion_with_fallback",
-    "ask_openrouter_text",
-    "ask_openrouter_multimodal",
-    "ask_groq_text",
     "ask_munito_text",
+    "ask_munito_multimodal",
     "selftest_llm_head",
     "_transcribe_audio",
     "_gemini_history_contents",
-    "_build_gemma_identity_contents",
     "_build_gemini_call_config",
     "_extract_gemini_answer_text",
     "ask_gemini",
     "_build_gemini_turn_contents",
-    "_build_openrouter_turn_messages",
+    "_build_openai_turn_messages",
     "_route_error_reply_text",
     "RouteBudgetExceededError",
     "_run_route",
     # Порядки моделей и чистка истории читаются тестами как bot.X.
-    "_OR_LIGHT_ORDER",
-    "_OR_HEAVY_ORDER",
-    "_OR_VISION_ORDER",
-    "_GROQ_LIGHT_ORDER",
     "_MUNITO_ORDER",
     "_history_user_text",
     "_clean_history_entry",
@@ -969,11 +933,8 @@ __all__ = [
     "_user_daily_reset_in",
     # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
     "GEMINI_TTS_MODELS",
-    "FISH_AUDIO_TTS_MODEL",
-    "FISH_AUDIO_ENABLED",
     "_pick_image_model",
     "_pollinations_text_to_image",
-    "_fish_audio_tts_bytes",
     "_gemini_tts_bytes",
     "chat_state",
     "GLOBAL_QUOTA",
@@ -1108,8 +1069,6 @@ from lumen_media import (
 
 
 
-# API OpenRouter.
-#
 # Списки моделей и здоровье роута живут в lumen_router_config.py — здесь только
 # код, который реально ходит в API.
 
@@ -1125,31 +1084,21 @@ from lumen_security import (
 # LLM-маршрутизация живёт в lumen_routes.py (P2): здесь только реэкспорт
 # имён, чтобы `bot.X` в тестах и `_handle_message_core` не менялись.
 from lumen_routes import (
-    OpenRouterAPIError,
-    GroqAPIError,
     MunitoAPIError,
-    _or_request,
-    _groq_request,
     _munito_request,
     _or_extract_text,
     _attempt_timeout,
-    _is_account_wide_or_rate_limit,
     _is_gemini_daily_quota,
-    _probe_or_model_liveness,
-    _or_chat_completion_with_fallback,
-    ask_openrouter_text,
-    ask_openrouter_multimodal,
-    ask_groq_text,
     ask_munito_text,
+    ask_munito_multimodal,
     selftest_llm_head,
     _transcribe_audio,
     _gemini_history_contents,
-    _build_gemma_identity_contents,
     _build_gemini_call_config,
     _extract_gemini_answer_text,
     ask_gemini,
     _build_gemini_turn_contents,
-    _build_openrouter_turn_messages,
+    _build_openai_turn_messages,
     _route_error_reply_text,
     RouteBudgetExceededError,
     _run_route,
@@ -1217,13 +1166,9 @@ _dots_sleep = asyncio.sleep
 from lumen_streaming import (
     _tick_waiting_dots,
     _pieces_with_waiting_feedback,
-    _openrouter_stream_pieces,
-    _groq_stream_pieces,
     _munito_stream_pieces,
     _run_streaming_reply,
     _try_gemini_streaming,
-    _try_openrouter_streaming,
-    _try_groq_streaming,
     _try_munito_streaming,
 )
 
@@ -1283,7 +1228,6 @@ from lumen_commands import (
     cmd_start,
     inline_draw,
     cmd_draw,
-    _fish_audio_tts_bytes,
     _gemini_tts_bytes,
     inline_tts,
     cmd_tts,
@@ -1430,9 +1374,7 @@ async def _webhook_startup() -> None:
         TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY,
         TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES / (1024 * 1024),
     )
-    _check_temporary_free_models_expiry()
     _check_unconfirmed_model_quotas()
-    _check_scheduled_removals_due()
     # запросы ДО того, как Telegram попробует провалидировать доступность
     # /webhook при регистрации через setWebhook.
     await asyncio.sleep(1.5)
@@ -1477,17 +1419,12 @@ async def _webhook_startup() -> None:
     ]
 
     async def try_setup():
-        global BOT_USERNAME, OPENROUTER_HTTP_REFERER
+        global BOT_USERNAME
         try:
             me_data = await telegram_api_call("getMe", {})
             if isinstance(me_data, dict) and me_data.get("username"):
                 BOT_USERNAME = me_data["username"].strip().lstrip("@")
                 log.info("[webhook] Dynamically fetched BOT_USERNAME: @%s", BOT_USERNAME)
-                if not _OPENROUTER_HTTP_REFERER_ENV_SET:
-                    # См. комментарий у _OPENROUTER_HTTP_REFERER_ENV_SET выше — без этого
-                    # заголовок HTTP-Referer к OpenRouter так и остался бы со старым/
-                    # заглушечным юзернеймом весь срок жизни процесса.
-                    OPENROUTER_HTTP_REFERER = f"https://t.me/{BOT_USERNAME}"
         except Exception as exc:
             log.warning("[webhook] Failed fetching BOT_USERNAME dynamically, using fallback @%s: %s", BOT_USERNAME, exc)
 
@@ -1596,10 +1533,7 @@ async def _webhook_startup() -> None:
             today = date.today()
             if today != _last_daily_check_date:
                 _last_daily_check_date = today
-                _check_temporary_free_models_expiry()
                 _check_unconfirmed_model_quotas()
-                _check_scheduled_removals_due()
-                await _probe_or_model_liveness()
         except Exception:
             # Упавший тик не убивает цикл: иначе чистки и квоты вставали бы навсегда.
             log.exception("[webhook] Hourly maintenance tick failed, next tick in an hour")

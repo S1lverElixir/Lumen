@@ -274,7 +274,7 @@ def _scrub_contaminated_sentences(text: str, *, kind: str) -> str | None:
 
 
 def _scrub_identity_leak(text: str, *, source: str) -> str:
-    """Точка применения фильтра для НЕстримингового пути (ask_gemini, ask_openrouter_*).
+    """Точка применения фильтра для НЕстримингового пути (ask_gemini, ask_munito_text, ask_munito_multimodal).
     Вызывается непосредственно перед записью ответа в историю чата — если вызвать её
     только перед показом пользователю, но не перед hist.append/history.append, утечка
     осталась бы в истории и могла бы повлиять на последующие ответы модели.

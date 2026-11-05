@@ -38,7 +38,6 @@ from lumen_media import (
     _youtube_summary_prompt,
 )
 from lumen_router_config import (
-    _GEMMA_TEXT_CHAIN,
     _build_route,
     _looks_like_freshness_query,
     _looks_like_heavy_query,
@@ -626,7 +625,7 @@ async def _handle_message_core(
 
     # Видео/аудио при исчерпанном Gemini отказываем до скачивания: поздняя
     # проверка после маршрута уже скачала бы файл и пожгла транскрибацию.
-    # Картинки пропускаем — их отдаст Groq/OpenRouter через поздний фолбэк.
+    # Картинки пропускаем — на них есть Munito, и маршрут переживёт исчерпанный Gemini.
     if _direct_attachment_needs_gemini(message) and await _refuse_daily_gemini(message, uid_early, _early_entry):
         return
 
@@ -806,9 +805,11 @@ async def _handle_message_core(
         return
     user_gemini_limited = False
     if bot._user_daily_gemini_exhausted(uid, _late_entry):
-        # Gemma не тратит дефицитную квоту, поэтому остаётся и после лимита:
-        # обычный текст должен работать, как и обещает отказ (аудит 27.10.2026).
-        allowed = [(p, m) for p, m in route if p != "gemini" or m in _GEMMA_TEXT_CHAIN]
+        # Резерв после лимита Gemini — Munito: он не тратит квоту Google. Раньше
+        # здесь же жила Gemma с отдельной большой квотой (аудит 27.10.2026), она
+        # удалена 05.11.2026, поэтому вычёркиваем весь gemini и проверяем, осталось
+        # ли что показать.
+        allowed = [(p, m) for p, m in route if p != "gemini"]
         if not allowed:
             # Ссылки, YouTube, видео/аудио и документы читает только Gemini.
             await _refuse_daily_gemini(message, uid, _late_entry)

@@ -39,7 +39,6 @@ from lumen_limits import (
 from lumen_tiktok import _communicate_process
 from lumen_tts import (
     pcm_to_wav,
-    _fish_audio_tts_bytes as _lumen_fish_audio_tts_bytes,
     _gemini_tts_bytes as _lumen_gemini_tts_bytes,
 )
 
@@ -214,21 +213,6 @@ async def cmd_draw(message: Message) -> None:
 
 
 
-async def _fish_audio_tts_bytes(text: str) -> bytes | None:
-    import bot
-    if not bot.OPENROUTER_API_KEY:
-        # Без ключа всё равно вернётся None: сессию не открываем (в тестах
-        # она оставалась жить до выхода интерпретатора и печатала в stderr).
-        return None
-    session = await bot._get_http_session()
-    return await _lumen_fish_audio_tts_bytes(
-        session, text,
-        api_key=bot.OPENROUTER_API_KEY, http_referer=bot.OPENROUTER_HTTP_REFERER,
-        title=bot.OPENROUTER_TITLE, base_url=bot.OPENROUTER_BASE_URL,
-        model_id=bot.FISH_AUDIO_TTS_MODEL, request_timeout_sec=bot.ROUTE_MODEL_TIMEOUT_SEC,
-    )
-
-
 async def _gemini_tts_bytes(text: str) -> tuple[bytes, str, str]:
     import bot
     def _is_rate_limit(e: Exception) -> bool:
@@ -294,13 +278,7 @@ async def _synthesize_tts_voice(text: str) -> tuple[bytes, str, int]:
     """Синтез + ffmpeg-конвертация одного куска в OGG/Opus. Тело прежнего
     inline_tts без смены логики — чанки идут тем же путём, что одиночный текст."""
     import bot
-    # Fish снят с free-каталога (17.09.2026) — пропускаем мёртвую попытку, ветка оставлена (см. флаг).
-    fish_bytes = await bot._fish_audio_tts_bytes(text) if bot.FISH_AUDIO_ENABLED else None
-    if fish_bytes is not None:
-        pcm_bytes, mime_type, used_tts_model = fish_bytes, "audio/mp3", bot.FISH_AUDIO_TTS_MODEL
-        bot._record_quota_usage("openrouter", bot.FISH_AUDIO_TTS_MODEL)
-    else:
-        pcm_bytes, mime_type, used_tts_model = await bot._gemini_tts_bytes(text)
+    pcm_bytes, mime_type, used_tts_model = await bot._gemini_tts_bytes(text)
     log.info('[tts] Synthesis received from %s, mime_type=%s, bytes=%d', used_tts_model, mime_type, len(pcm_bytes))
 
     # определяем формат исходника
@@ -710,9 +688,7 @@ async def cmd_stats(message: Message) -> None:
         return "\n".join(lines) or _noData
 
     gemini_text = _quota_section(gemini_quota, None, bot.GEMINI_DAILY_LIMITS)
-    or_text = _quota_section(bot.GLOBAL_QUOTA.get("openrouter", {}), bot.OPENROUTER_DAILY_LIMIT)
-    groq_text = _quota_section(bot.GLOBAL_QUOTA.get("groq", {}), bot.GROQ_DAILY_LIMIT)
-    # Секция Munito только при включённом эксперименте: пустая строка в /stats не нужна.
+    # Секция Munito только при активном провайдере: пустая строка в /stats не нужна.
     from lumen_router_config import _munito_active
     munito_block = (
         f"<b>Munito — запросов по моделям (лимит провайдера справочно):</b>\n"
@@ -753,8 +729,6 @@ async def cmd_stats(message: Message) -> None:
         f"пустых: {_day_stats.get('model_failures', 0)}\n\n"
         f"<b>Gemini — запросов по моделям (лимит провайдера справочно):</b>\n{gemini_text}\n\n"
         f"{munito_block}"
-        f"<b>OpenRouter — запросов по моделям (лимит провайдера справочно):</b>\n{or_text}\n\n"
-        f"<b>Groq — запросов по моделям (лимит провайдера справочно):</b>\n{groq_text}\n\n"
         f"<b>Карантин моделей:</b>\n{quarantine_text}\n\n"
         f"Вебхук: {webhook_text}\n"
         f"Память: {_process_memory_text()}\n"
@@ -785,7 +759,7 @@ def _selftest_row(label: str, ok: bool, detail: str, elapsed: float) -> str:
     return base if ok or not detail else f"{base} — {detail}"
 
 async def cmd_selftest(message: Message) -> None:
-    """Живая проверка голов маршрутов: по крошечной пробе в Groq, лёгкий OpenRouter
+    """Живая проверка голов маршрутов: по крошечной пробе в Munito
     и сеть (прокси Telegram, TikWM) логикой /diag. Gemini — только по явному
     аргументу, квота самая дефицитная. Только владелец, только личка, не чаще
     раза в минуту. Успешные пробы честно пишутся в квоту."""
@@ -812,9 +786,8 @@ async def cmd_selftest(message: Message) -> None:
     rows: list[str] = []
     summary: list[str] = []
     from lumen_router_config import _munito_active
-    # Munito в списке только когда эксперимент включён — иначе /selftest тратит пробу впустую.
-    probe_providers = (("munito", "Munito"), ("groq", "Groq"), ("openrouter", "OpenRouter")) if _munito_active() \
-        else (("groq", "Groq"), ("openrouter", "OpenRouter"))
+    # Munito в списке только когда провайдер активен — иначе /selftest тратит пробу впустую.
+    probe_providers = (("munito", "Munito"),) if _munito_active() else ()
     for provider, label in probe_providers:
         ok, detail, elapsed = await bot.selftest_llm_head(provider, chat_id=message.chat.id)
         rows.append(_selftest_row(label, ok, detail, elapsed))
