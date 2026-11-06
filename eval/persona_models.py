@@ -94,8 +94,9 @@ def load_env() -> None:
             os.environ[name] = value
 
 
-def load_questions() -> dict:
-    return json.loads(QUESTIONS_FILE.read_text(encoding="utf-8"))
+def load_questions(path: Path | None = None) -> dict:
+    # path — альтернативный набор вопросов (например живой диалог для сравнения с Claude).
+    return json.loads((path or QUESTIONS_FILE).read_text(encoding="utf-8"))
 
 
 @dataclass(frozen=True)
@@ -439,7 +440,7 @@ def check_quota_budget(targets: list[Target], questions: list[dict], judge: Targ
 
 def cmd_run(args: argparse.Namespace) -> int:
     load_env()
-    data = load_questions()
+    data = load_questions(Path(args.questions) if args.questions else None)
     questions = data["questions"]
     if args.only:
         wanted = {int(x) for x in args.only.split(",")}
@@ -561,6 +562,7 @@ def main() -> int:
     run.add_argument("--models", required=True, help="provider:model через запятую")
     run.add_argument("--judge", default="gemini:gemini-2.5-flash")
     run.add_argument("--only", default=None, help="номера вопросов через запятую")
+    run.add_argument("--questions", default=None, help="альтернативный JSON с вопросами, например eval/persona_questions_casual.json")
     run.add_argument("--out", default=None)
     run.add_argument("--dry-run", action="store_true")
     run.set_defaults(func=cmd_run)
