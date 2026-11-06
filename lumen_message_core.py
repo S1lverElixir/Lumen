@@ -55,6 +55,7 @@ from lumen_search import (
 from lumen_security import _looks_like_injection_probe
 from lumen_status import StatusMessage
 import lumen_devtrace
+import lumen_memory
 
 log = logging.getLogger("bot")
 
@@ -197,13 +198,13 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
             is_guest=bot.is_guest_message(main_msg),
             mentioned=bot.message_mentions_bot(main_msg),
         ):
-            # Файлы 2..10 пассивного альбома тоже в recent_media_ids: иначе
+            # Файлы 2..10 пассивного альбома тоже в общий лог: иначе
             # "что на втором фото" их не найдёт (порядок — как в альбоме).
             _passive_state = bot.get_state(main_msg.chat.id)
-            bot._record_passive_group_context(main_msg, _passive_state, t_text)
-            _passive_uid = main_msg.from_user.id if main_msg.from_user else None
-            for _m in messages[1:]:
-                bot._save_media_to_history(_msg_media_source(_m), _passive_state, _passive_uid)
+            await bot._record_passive_group_context(
+                main_msg, _passive_state, t_text,
+                extra_sources=[_msg_media_source(m) for m in messages[1:]],
+            )
             return
     # Лимит — ДО скачивания: раньше альбом грузился целиком даже для отклонённого
     # автора (аудит 26.09.2026). Слот ровно один: handle_message буферизует альбом
@@ -265,7 +266,10 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
         log.warning("[album] Skipped %d of %d files: over the download size cap.", too_big, len(targets))
     # Рейт-лимит уже списан в _process_media_group_buffers_locked: второй раз
     # альбом не должен занимать слот (аудит 28.10.2026).
-    await bot._handle_message_core(main_msg, extra_media=extra_media or None, skip_rate_limit=True)
+    await bot._handle_message_core(
+        main_msg, extra_media=extra_media or None, skip_rate_limit=True,
+        extra_media_sources=[src for _, _, src in targets],
+    )
 
 
 # Основное сообщение уходит отдельно, до +9 дополнительных (итого 10 — как лимит TikTok-слайдшоу).
@@ -291,30 +295,48 @@ def _album_extra_sources(messages: list, main_msg: Any) -> list[tuple[str, str, 
 
 
 _PASSIVE_LINE_MAX_CHARS = 500
-_PASSIVE_CTX_MAX_CHARS = 12000
 
 
-def _record_passive_group_context(message: Message, state: dict[str, Any], t: str) -> None:
-    """Фон группы без упоминания: только контекст и медиа в state, без ответа."""
+def _message_ts(message: Any) -> float:
+    """Время сообщения в настенных часах: для памяти и ждущей просьбы перед фото."""
+    date = getattr(message, "date", None)
+    try:
+        return float(date.timestamp())
+    except Exception:
+        return time.time()
+
+
+async def _record_passive_group_context(
+    message: Message, state: dict[str, Any], t: str, extra_sources: list[Any] | None = None,
+) -> None:
+    """Фон группы без упоминания: реплика в общий лог и медиа, без ответа."""
     import bot
-    if t.strip():
-        sender = message.from_user
-        display = bot._note_sender(
-            state,
-            sender.id if sender is not None else None,
-            getattr(sender, "username", None) if sender is not None else None,
-            getattr(sender, "first_name", None) if sender is not None else None,
+    sender = message.from_user
+    display = bot._note_sender(
+        state,
+        sender.id if sender is not None else None,
+        getattr(sender, "username", None) if sender is not None else None,
+        getattr(sender, "first_name", None) if sender is not None else None,
+    )
+    display = _flatten_untrusted(display, 80)
+    text_line = _flatten_untrusted(t, _PASSIVE_LINE_MAX_CHARS)
+    refs = []
+    for source in [_msg_media_source(message), *(extra_sources or [])]:
+        ref = lumen_memory.media_ref(source)
+        if ref:
+            refs.append(ref)
+    if text_line.strip() or refs:
+        lumen_memory.append_user(
+            state, text_line, sender=display,
+            sender_id=sender.id if sender is not None else None,
+            ts=_message_ts(message), media=refs, addressed=False,
         )
-        display = _flatten_untrusted(display, 80)
-        text_line = _flatten_untrusted(t, _PASSIVE_LINE_MAX_CHARS)
-        state["ctx"].append(f"{display}: {text_line}")
-        # Общий лимит 100 сообщений на чат, старые фоновые уходят первыми.
-        bot._trim_combined(state)
-        # Кап по символам: 100 сообщений по 4096 символов раздували промпт
-        # и позволяли одному участнику забить чужой контекст (аудит 28.10.2026).
-        while len(state["ctx"]) > 1 and sum(len(line) for line in state["ctx"]) > _PASSIVE_CTX_MAX_CHARS:
-            state["ctx"].popleft()
-    bot._save_media_to_history(_msg_media_source(message), state, message.from_user.id if message.from_user else None)
+        await bot._trim_history(state["history"], state)
+    # Корзинка на отправителя остаётся запасным путём для старых чатов и ссылок по типу.
+    _uid = sender.id if sender is not None else None
+    bot._save_media_to_history(_msg_media_source(message), state, _uid)
+    for source in extra_sources or []:
+        bot._save_media_to_history(source, state, _uid)
     bot.mark_state_dirty(message.chat.id)
 
 
@@ -444,19 +466,27 @@ _CONTINUE_INSTRUCTION = (
 
 def _continue_after_interrupt(state: dict, clean_prompt: str) -> str | None:
     """«продолжи» после оборванного стрима: исходный вопрос + пометка продолжить
-    с места обрыва. Частичный ответ уже лежит в истории — модель его видит,
-    дублировать его в промт не нужно. Без флага обрыва или без пары
-    вопрос-ответ в хвосте истории — None (обычный путь)."""
+    с места обрыва. Пара вопрос-ответ ищется с конца: после ответа в общий лог
+    могли дописаться фоновые реплики группы, и просто hist[-2:] уже не пара."""
     if not _CONTINUE_RE.match((clean_prompt or "").strip()):
         return None
+    if not state.get("interrupted"):
+        return None
     hist = state.get("history") or []
-    if (
-        state.get("interrupted")
-        and len(hist) >= 2
-        and isinstance(hist[-1], dict) and hist[-1].get("role") == "assistant" and (hist[-1].get("content") or "").strip()
-        and isinstance(hist[-2], dict) and hist[-2].get("role") == "user" and (hist[-2].get("content") or "").strip()
-    ):
-        return hist[-2]["content"].strip() + _CONTINUE_INSTRUCTION
+    for idx in range(len(hist) - 1, 0, -1):
+        answer = hist[idx]
+        question = hist[idx - 1]
+        if not isinstance(answer, dict) or answer.get("role") != "assistant":
+            continue
+        if not (answer.get("content") or "").strip():
+            continue
+        if not isinstance(question, dict) or question.get("role") != "user":
+            continue
+        if question.get("addressed") is False:
+            continue
+        if not (question.get("content") or "").strip():
+            continue
+        return question["content"].strip() + _CONTINUE_INSTRUCTION
     return None
 
 
@@ -531,26 +561,35 @@ async def _resolve_incoming_media(
                     media_tuple = fetched
 
     # №3 ищем у автора, не последнее в чате: калибровка 18.08.2026 — "покажи стикер" описывал чужое фото.
-    if media_tuple is None and state.get("recent_media_ids"):
-        category = _media_reference_category(clean_prompt)
-        if category:
-            buckets: dict[str, Any] = state["recent_media_ids"]
-            own_bucket = buckets.get(str(asking_user_id)) if asking_user_id is not None else None
-            fid_mime = None
-            if own_bucket:
-                fid_mime = _find_recent_media_by_category(own_bucket, category)
-            elif is_private:
-                # В личке с ботом собеседник ровно один — не так критично,
-                # можно поискать по всем известным бакетам чата вообще.
-                for bucket in buckets.values():
-                    fid_mime = _find_recent_media_by_category(bucket, category)
-                    if fid_mime:
-                        break
-            if fid_mime:
-                fid, mime = fid_mime
-                fetched = await bot._fetch_media(fid, mime)
-                if fetched:
-                    media_tuple = fetched
+    category = _media_reference_category(clean_prompt)
+    if media_tuple is None and category:
+        # Сначала общий лог: он помнит 200 сообщений с file_id, корзинка ниже — запас для старых чатов.
+        found = lumen_memory.last_media_for_user(
+            state, category, sender_id=asking_user_id, private=is_private,
+        )
+        if found:
+            _entry, ref = found
+            fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
+            if fetched:
+                media_tuple = fetched
+    if media_tuple is None and state.get("recent_media_ids") and category:
+        buckets: dict[str, Any] = state["recent_media_ids"]
+        own_bucket = buckets.get(str(asking_user_id)) if asking_user_id is not None else None
+        fid_mime = None
+        if own_bucket:
+            fid_mime = _find_recent_media_by_category(own_bucket, category)
+        elif is_private:
+            # В личке с ботом собеседник ровно один — не так критично,
+            # можно поискать по всем известным бакетам чата вообще.
+            for bucket in buckets.values():
+                fid_mime = _find_recent_media_by_category(bucket, category)
+                if fid_mime:
+                    break
+        if fid_mime:
+            fid, mime = fid_mime
+            fetched = await bot._fetch_media(fid, mime)
+            if fetched:
+                media_tuple = fetched
 
     return med_name, media_tuple
 
@@ -594,7 +633,7 @@ def _direct_attachment_needs_gemini(message: Message) -> bool:
 
 async def _handle_message_core(
     message: Message, extra_media: list[tuple[bytes, str]] | None = None, *,
-    skip_rate_limit: bool = False,
+    skip_rate_limit: bool = False, extra_media_sources: list[Any] | None = None,
 ) -> None:
     import bot
     t = message.text or message.caption or ""
@@ -606,7 +645,7 @@ async def _handle_message_core(
 
     if bot._should_only_record_passively(message, t, is_private=is_private, is_guest=is_guest, mentioned=mentioned):
         # Пассивный фон — единственное место, где состояние нужно ДО лимита.
-        bot._record_passive_group_context(message, bot.get_state(message.chat.id), t)
+        await bot._record_passive_group_context(message, bot.get_state(message.chat.id), t)
         lumen_devtrace.record_passive(message.chat.id, t, is_private=is_private, mentioned=mentioned)
         return
 
@@ -753,6 +792,20 @@ async def _handle_message_core(
                 await bot._safe_reply(message, bot._t(message.chat.id, "injection_probe_reply"))
                 return
 
+    # Фото без подписи после просьбы «сейчас кину, что мне идёт?»: модель должна
+    # ответить на просьбу, а не получить служебное «опиши подробно» (решение 06.11.2026).
+    pending = None
+    if media_tuple and not clean_prompt and _msg_media_source(message) is not None:
+        _pending_sender = message.from_user.id if message.from_user else None
+        pending = lumen_memory.pending_instruction(
+            state, _pending_sender, now=_message_ts(message),
+        )
+    if media_tuple and not clean_prompt and pending:
+        clean_prompt = (
+            pending
+            + "\n\n[The user wrote this just before sending the attachment; answer that "
+              "request using the attachment, do not describe the attachment on its own.]"
+        )
     if media_tuple and not clean_prompt:
          clean_prompt = _ensure_prompt_text(
              None, media_tuple[1], _media_prompt_lang(message, state),
@@ -910,6 +963,46 @@ async def _handle_message_core(
         ai_prompt += _NO_MEDIA_NOTE
     gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
     gemini_media_list = gemini_media_list or None
+    # Что записать в общий лог: подпись вместо служебного промпта, ссылки на медиа
+    # и флаг «приложить прошлые фото». Байты в память не идут, только file_id.
+    direct_source = _msg_media_source(message)
+    reply_source = _msg_media_source(message.reply_to_message) if message.reply_to_message else None
+    media_refs = [
+        ref for ref in (
+            lumen_memory.media_ref(src)
+            for src in ([direct_source] if direct_source is not None else [])
+            + list(extra_media_sources or [])
+        ) if ref
+    ]
+    if direct_source is None and reply_source is not None and media_tuple is not None:
+        reply_ref = lumen_memory.media_ref(reply_source)
+        if reply_ref:
+            media_refs.append(reply_ref)
+    skip_file_ids = [ref["file_id"] for ref in media_refs]
+    # Медиа найдено по слову «фото» в истории: оно уже едет как текущее, дубль не нужен.
+    attach_past = not (
+        media_tuple is not None and direct_source is None and reply_source is None
+    )
+    history_text = clean_prompt
+    if direct_source is not None and media_tuple is not None:
+        # Подпись (уже без @упоминания) — в память; служебное «опиши подробно» и
+        # ждущая просьба остаются только в промпте текущего хода.
+        history_text = clean_prompt if (message.caption or "").strip() else ""
+    _sender = message.from_user
+    history_meta = {
+        "sender": _flatten_untrusted(bot._note_sender(
+            state,
+            _sender.id if _sender is not None else None,
+            getattr(_sender, "username", None) if _sender is not None else None,
+            getattr(_sender, "first_name", None) if _sender is not None else None,
+        ), 80),
+        "sender_id": _sender.id if _sender is not None else None,
+        "ts": _message_ts(message),
+        "media": media_refs,
+        "addressed": True,
+        "skip_file_ids": skip_file_ids,
+        "attach_past": attach_past,
+    }
     # Стриминг ("живой" эффект печати) имеет смысл только для простого
     # текстового обмена без вложений/YouTube — см. _run_route. При пометке
     # "без поиска" стрим гасим: она дописывается к готовому ответу.
@@ -936,7 +1029,7 @@ async def _handle_message_core(
             media=gemini_media_list, media_filename=med_name,
             youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
             deadline=route_deadline, provenance=provenance, status=status,
-            history_text=clean_prompt,
+            history_text=history_text, history_meta=history_meta,
         )
         answered_grounded = answered_with_live_search(provenance)
         if needs_freshness and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:
@@ -964,7 +1057,7 @@ async def _handle_message_core(
                         media=gemini_media_list, media_filename=med_name,
                         youtube_url=youtube_url_to_analyze, allow_stream=False,
                         deadline=route_deadline, provenance=provenance,
-                        history_text=clean_prompt,
+                        history_text=history_text, history_meta=history_meta,
                     )
                     # Ретрай уже с найденными сниппетами: пометка «без поиска»
                     # была бы ложью (аудит 28.10.2026).
@@ -1019,7 +1112,13 @@ async def _handle_message_core(
             message.chat.id, user_text=clean_prompt, route=route,
             provider=provenance.get("provider", ""), model=provenance.get("model") or "",
             latency_ms=int((time.monotonic() - _trace_start) * 1000), reply=ans,
-            ctx_tail=list(state.get("ctx") or [])[-3:],
+            # Хвост фона — из общего лога: отдельного ctx больше нет.
+            ctx_tail=[
+                lumen_memory.format_entry(entry)
+                for entry in (state.get("history") or [])
+                if isinstance(entry, dict) and entry.get("role") == "user"
+                and entry.get("addressed") is False
+            ][-3:],
             flags={"fresh": bool(needs_freshness), "snippets": bool(snippets_injected),
                    "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent),
                    "truncated": _truncated, "partial": bool(state.get("interrupted"))},

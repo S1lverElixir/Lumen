@@ -1634,7 +1634,6 @@ def test_munito_text_trims_history_with_summary_not_silent_cut(monkeypatch):
     # Аудит A4-05: история резалась молчаливым срезом вместо _trim_history с саммари.
     # Регрессия: саммари выпиливают (дорогой вызов) — и дальние ходы исчезают без следа.
     import lumen_chat_state
-    from collections import deque
     chat_id = 999811
     answer = "ответ"
 
@@ -1649,21 +1648,125 @@ def test_munito_text_trims_history_with_summary_not_silent_cut(monkeypatch):
     state = bot.get_state(chat_id)
     state["history"] = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"сообщение {i}"}
-        for i in range(105)
+        for i in range(205)
     ]
-    state["ctx"] = deque()
     try:
         asyncio.run(bot.ask_munito_text(chat_id, "новый вопрос", model_chain=["probe/m1"]))
-        history = bot.chat_state[chat_id]["history"]
-        assert len(history) == 81
-        assert history[0]["content"].startswith("[Ранее в диалоге]")
-        assert "погода" in history[0]["content"]
+        state = bot.chat_state[chat_id]
+        history = state["history"]
+        assert len(history) == bot.HISTORY_SUMMARIZE_KEEP
+        assert state["memory_summary"].startswith("итог: погода и коты")
+        assert state["memory_pending"] == []
         assert history[-2:] == [
             {"role": "user", "content": "новый вопрос"},
             {"role": "assistant", "content": answer},
         ]
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def test_openai_turn_messages_carry_summary_authors_and_past_photo(monkeypatch):
+    # Память для модели: сводка в системном промпте, автор/время у реплик,
+    # прошлое фото отдельной репликой — модель видит его без слова «фото».
+    chat_id = 999812
+    state = bot.get_state(chat_id)
+    now = time.time()
+    state["history"] = [
+        {"role": "user", "content": "лови кота", "sender": "@m1st", "sender_id": 7, "ts": now - 60},
+        {"role": "assistant", "content": "Кот хорош."},
+        {"role": "user", "content": "", "sender": "@m1st", "sender_id": 7, "ts": now - 30,
+         "media": [{"file_id": "p1", "mime": "image/jpeg"}]},
+        {"role": "assistant", "content": "На фото рыжий кот."},
+    ]
+    state["memory_summary"] = "Договорились про кота."
+    fetched = []
+
+    async def fake_fetch(fid, mime):
+        fetched.append(fid)
+        return b"img", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    try:
+        msgs = asyncio.run(bot._build_openai_turn_messages(chat_id, "а какой окрас?", "probe/m1"))
+        assert "LONG-TERM MEMORY" in msgs[0]["content"]
+        assert "Договорились про кота." in msgs[0]["content"]
+        assert any("[@m1st, " in m["content"] for m in msgs if isinstance(m.get("content"), str))
+        assert any("[фото]" in m["content"] for m in msgs if isinstance(m.get("content"), str))
+        assert any(
+            isinstance(m.get("content"), list)
+            and any(part.get("type") == "image_url" for part in m["content"])
+            for m in msgs
+        )
+        assert fetched == ["p1"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_openai_turn_messages_respects_attach_past_and_skip(monkeypatch):
+    # Явная ссылка «покажи фото» уже едет текущим вложением: дубль прошлого фото
+    # не прикладываем; чужие file_id из текущего запроса тоже пропускаем.
+    chat_id = 999815
+    state = bot.get_state(chat_id)
+    now = time.time()
+    state["history"] = [
+        {"role": "user", "content": "первое", "sender": "@m1st", "sender_id": 7, "ts": now - 30,
+         "media": [{"file_id": "p1", "mime": "image/jpeg"}]},
+        {"role": "user", "content": "второе", "sender": "@m1st", "sender_id": 7, "ts": now - 20,
+         "media": [{"file_id": "p2", "mime": "image/jpeg"}]},
+        {"role": "user", "content": "третье", "sender": "@m1st", "sender_id": 7, "ts": now - 10,
+         "media": [{"file_id": "p3", "mime": "image/jpeg"}]},
+    ]
+    fetched = []
+
+    async def fake_fetch(fid, mime):
+        fetched.append(fid)
+        return b"img", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    try:
+        asyncio.run(bot._build_openai_turn_messages(
+            chat_id, "что на фото?", "probe/m1",
+            history_meta={"attach_past": False, "skip_file_ids": ["p3"]},
+        ))
+        assert fetched == []
+        fetched.clear()
+        asyncio.run(bot._build_openai_turn_messages(
+            chat_id, "что на фото?", "probe/m1",
+            history_meta={"attach_past": True, "skip_file_ids": ["p3"]},
+        ))
+        assert fetched == ["p1", "p2"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_trimmed_summary_is_accepted_by_the_next_request(monkeypatch):
+    # Сводка не теряется между обрезкой и следующим запросом: она лежит в системе.
+    import lumen_chat_state
+    chat_id = 999816
+    state = bot.get_state(chat_id)
+    state["history"] = [
+        {"role": "user", "content": f"старое {i}"} for i in range(205)
+    ]
+
+    async def fake_summarize(text):
+        return "Люди: m1st. Факты: кот рыжий."
+
+    monkeypatch.setattr(lumen_chat_state, "_summarize_text", fake_summarize)
+    try:
+        asyncio.run(bot._trim_history(state["history"], state))
+        msgs = asyncio.run(bot._build_openai_turn_messages(chat_id, "новый вопрос", "probe/m1"))
+        assert "Люди: m1st. Факты: кот рыжий." in msgs[0]["content"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_gemini_call_config_includes_memory_summary():
+    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
+    _, gconfig = bot._build_gemini_call_config(
+        bot.DEFAULT_GEMINI_MODEL, contents, memory_summary="Люди: m1st.",
+    )
+    assert "LONG-TERM MEMORY OF THIS CHAT" in gconfig.system_instruction
+    assert "Люди: m1st." in gconfig.system_instruction
 
 
 @pytest.mark.parametrize("mode", ["text", "vision"])

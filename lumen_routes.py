@@ -11,7 +11,6 @@ import json
 import logging
 import re
 import time
-from collections import deque
 from typing import Any
 
 import aiohttp
@@ -24,6 +23,7 @@ from lumen_formatting import _split_text_chunks, _strip_provider_artifacts
 from lumen_lang import DEFAULT_LANG
 from lumen_media import _is_gemini_supported_mime
 from lumen_message_parse import _clean_history_entry, _history_user_text
+import lumen_memory
 from lumen_model_speed import (
     speed_key as _model_speed_key,
     record_response as _record_model_latency,
@@ -253,17 +253,17 @@ async def _chat_completion_chain(
     raise RuntimeError("No candidate model returned an answer.")
 
 
-async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None, provenance: dict | None = None) -> str:
+async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None, provenance: dict | None = None, history_meta: dict[str, Any] | None = None) -> str:
     """Текст через Munito AI: одна попытка на модель, скраб утечек, расход в квоту "munito".
-    Историю не режем: у головы Munito 400K входных токенов на окно (замер 05.11.2026),
-    общий лимит истории в 100 сообщений туда влезает (резка была нужна Groq с его 8K TPM)."""
+    Память — единый лог до 200 сообщений; прошлые фото прикладываются отдельной репликой."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_payload_extras
     state = bot.get_state(chat_id)
-    history = state.setdefault("history", [])
     trial_models = list(dict.fromkeys(model_chain)) or [_MUNITO_ORDER[0]]
     primary_model_id = trial_models[0]
-    messages = bot._build_openai_turn_messages(chat_id, user_text, primary_model_id)
+    messages = await bot._build_openai_turn_messages(
+        chat_id, user_text, primary_model_id, history_meta=history_meta,
+    )
 
     async def _request(payload: dict, dl: float | None):
         return await bot._munito_request("chat/completions", "POST", json_body=payload, deadline=dl)
@@ -276,17 +276,17 @@ async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], 
     )
     _note_provenance(provenance, "munito", _out)
 
-    history.append({"role": "user", "content": _history_user_text(history_text or user_text)})
-    history.append({"role": "assistant", "content": answer})
-    await bot._trim_history(history)
-    bot._trim_combined(state)
+    hist_text = _history_user_text(history_text if history_text is not None else user_text)
+    lumen_memory.append_user_from_meta(state, hist_text, history_meta)
+    lumen_memory.append_assistant(state, answer)
+    await bot._trim_history(state["history"], state)
     bot._record_quota_usage("munito", model_trial)
     return answer
 
 async def ask_munito_multimodal(
     chat_id: int, user_text: str, media_tuple: tuple[bytes, str] | list[tuple[bytes, str]], media_filename: str,
     model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None,
-    provenance: dict | None = None,
+    provenance: dict | None = None, history_meta: dict[str, Any] | None = None,
 ) -> str:
     """Картинки через Munito AI (vision проверен 05.11.2026 живым вызовом): все картинки
     одним сообщением блоками image_url — по одному на фото, иначе 2-9 фото альбома
@@ -308,23 +308,12 @@ async def ask_munito_multimodal(
     if not parts:
         raise RuntimeError("No images for Munito multimodal (video goes to Gemini)")
 
-    ctx = state.get("ctx", deque())
-    full_text = user_text
-    if ctx:
-        full_text = "Фон разговора в чате (для контекста, не обращение к тебе):\n" + "\n".join(ctx) + "\n\nТекущий вопрос/сообщение: " + user_text
-
-    history = state.setdefault("history", [])
     trial_models = list(dict.fromkeys(model_chain)) or [_MUNITO_ORDER[0]]
     primary_model_id = trial_models[0]
-    messages: list[dict] = [{"role": "system", "content": bot.get_system_prompt(primary_model_id)}]
-    messages.extend(history)
-    messages.append({
-        "role": "user",
-        "content": [
-            {"type": "text", "text": full_text},
-            *parts,
-        ]
-    })
+    messages = await bot._build_openai_turn_messages(
+        chat_id, user_text, primary_model_id,
+        history_meta=history_meta, current_parts=parts,
+    )
 
     async def _request(payload: dict, dl: float | None):
         return await bot._munito_request("chat/completions", "POST", json_body=payload, deadline=dl)
@@ -337,10 +326,10 @@ async def ask_munito_multimodal(
     )
     _note_provenance(provenance, "munito", _out)
 
-    history.append({"role": "user", "content": _history_user_text(history_text or user_text)})
-    history.append({"role": "assistant", "content": answer})
-    await bot._trim_history(history)
-    bot._trim_combined(state)
+    hist_text = _history_user_text(history_text if history_text is not None else user_text)
+    lumen_memory.append_user_from_meta(state, hist_text, history_meta)
+    lumen_memory.append_assistant(state, answer)
+    await bot._trim_history(state["history"], state)
     bot._record_quota_usage("munito", model_trial)
     return answer
 
@@ -462,23 +451,28 @@ async def _gemini_history_contents(history: list[dict]) -> list[types.Content]:
     import bot
     contents: list[types.Content] = []
     for item in history:
-        entry = _clean_history_entry(item)
+        entry = _clean_history_entry(item) if isinstance(item, dict) else None
         if entry is None:
             continue
         r = "model" if str(entry.get("role")).lower() in {"assistant", "model"} else "user"
         cont = entry.get("content") or ""
-        txt = bot._or_extract_text(cont) if isinstance(cont, (dict, list)) else str(cont).strip()
+        # Старые записи могли хранить не строку, а структуру провайдера: разбираем.
+        txt = lumen_memory.format_entry(entry) if isinstance(cont, str) else bot._or_extract_text(cont)
         if txt:
              contents.append(types.Content(role=r, parts=[types.Part.from_text(text=txt)]))
     return contents
 
-def _build_gemini_call_config(model_id: str, contents: list[types.Content]) -> tuple[list[types.Content], "types.GenerateContentConfig | None"]:
+def _build_gemini_call_config(
+    model_id: str, contents: list[types.Content], *, memory_summary: str = "",
+) -> tuple[list[types.Content], "types.GenerateContentConfig | None"]:
     """Строит (call_contents, gconfig) для ОДНОГО вызова Gemini: system_instruction и
     grounding по дашборду. Одна функция на ask_gemini и стриминг — чтобы не расходились."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
     kwargs: dict[str, Any] = {}
-    kwargs["system_instruction"] = bot.get_system_prompt(model_id)
+    kwargs["system_instruction"] = lumen_memory.system_prompt_with_memory(
+        bot.get_system_prompt(model_id), {"memory_summary": memory_summary},
+    )
     # Инструменты — только у кого есть free-квота по дашборду (у 3.5/preview map 0/0).
     tools_list = []
     if conf.get("search_grounding", True):
@@ -590,14 +584,13 @@ async def ask_gemini(
     chat_id: int, user_text: str, media: list[tuple[bytes, str]] | None = None,
     youtube_url: str | None = None, model_chain: list[str] | None = None,
     deadline: float | None = None, provenance: dict | None = None,
-    history_text: str | None = None,
+    history_text: str | None = None, history_meta: dict[str, Any] | None = None,
 ) -> str:
     import bot
     state = bot.get_state(chat_id)
     chain = list(model_chain) if model_chain else list(GEMINI_DEFAULT_CHAIN)
     if deadline is None:
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
-    hist = state.setdefault("history", [])
 
     # Медиа/YouTube-части в тот же Content, что и текст (сборка — только в _build_gemini_turn_contents).
     extra_parts: list[types.Part] = []
@@ -610,7 +603,9 @@ async def ask_gemini(
     if youtube_url:
           # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))
-    contents = await bot._build_gemini_turn_contents(chat_id, user_text, extra_parts=extra_parts or None)
+    contents = await bot._build_gemini_turn_contents(
+        chat_id, user_text, extra_parts=extra_parts or None, history_meta=history_meta,
+    )
 
     # to_thread — не вешаем event loop. Ровно одна попытка на модель (ретраи одной давали ответы по 2+ минуты); порядок — от роутера, сверху режет общий deadline.
     resp = None
@@ -632,7 +627,9 @@ async def ask_gemini(
             raise bot.RouteBudgetExceededError(sorted(tried_models))
         tried_models.add(curr_model_id)
         bot._record_stats_event("model_attempts")
-        call_contents, gconfig = bot._build_gemini_call_config(curr_model_id, contents)
+        call_contents, gconfig = bot._build_gemini_call_config(
+            curr_model_id, contents, memory_summary=state.get("memory_summary") or "",
+        )
 
         attempt_start = time.monotonic()
         try:
@@ -717,11 +714,11 @@ async def ask_gemini(
     bot._record_model_outcome("gemini", curr_model_id,
                               bad=_detect_garbled_mix(ans) and not _is_garbled_echo(ans, user_text))
 
-    hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
-    hist.append({"role": "assistant", "content": ans})
-    # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
-    await bot._trim_history(hist)
-    bot._trim_combined(state)
+    hist_text = _history_user_text(history_text if history_text is not None else user_text)
+    lumen_memory.append_user_from_meta(state, hist_text, history_meta)
+    lumen_memory.append_assistant(state, ans)
+    # Обрезка со сводкой старого (см. _trim_history), а не молчаливый срез.
+    await bot._trim_history(state["history"], state)
     bot._record_quota_usage("gemini", curr_model_id)
     if provenance is not None:
         provenance.update(provider="gemini", model=curr_model_id)
@@ -729,35 +726,105 @@ async def ask_gemini(
 
 async def _build_gemini_turn_contents(
     chat_id: int, user_text: str, extra_parts: list[types.Part] | None = None,
+    *, history_meta: dict[str, Any] | None = None,
 ) -> list[types.Content]:
-    """Contents на один ход (история + фон группы + вопрос). Одна функция на ask_gemini и стриминг — правка формата не разойдётся."""
+    """Contents на один ход: память с авторами, прошлые фото и текущий вопрос."""
     import bot
     state = bot.get_state(chat_id)
-    hist = state.setdefault("history", [])
-    contents = await bot._gemini_history_contents(hist)
-    ctx = state.get("ctx", deque())
-    full_prompt = user_text
-    if ctx:
-        full_prompt = "Фон разговора в чате (для контекста, не обращение к тебе):\n" + "\n".join(ctx) + "\n\nТекущий вопрос/сообщение: " + user_text
-    parts = [types.Part.from_text(text=full_prompt)]
+    contents = await bot._gemini_history_contents(state.get("history") or [])
+    meta = history_meta if isinstance(history_meta, dict) else {}
+    skip = set(meta.get("skip_file_ids") or [])
+    if meta.get("attach_past", True):
+        past = lumen_memory.recent_media(
+            state, "photo",
+            window=lumen_memory.PHOTO_CONTEXT_WINDOW,
+            max_items=lumen_memory.PHOTO_CONTEXT_MAX,
+            skip_file_ids=skip,
+        )
+        if past:
+            past_parts: list[types.Part] = [types.Part.from_text(text=(
+                "Earlier in this chat, these photos were sent. Use them only if the "
+                "current message refers to them; do not describe them otherwise."
+            ))]
+            for entry, ref in past:
+                past_parts.append(types.Part.from_text(
+                    text=f"Photo — {lumen_memory.format_entry(entry)}:",
+                ))
+                if not _is_gemini_supported_mime(ref["mime"]):
+                    continue
+                try:
+                    fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
+                except Exception:
+                    fetched = None
+                if not fetched:
+                    continue
+                data, mime = fetched
+                past_parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+            if len(past_parts) > 1:
+                contents.append(types.Content(role="user", parts=past_parts))
+    parts = [types.Part.from_text(text=user_text)]
     if extra_parts:
         parts.extend(extra_parts)
     contents.append(types.Content(role="user", parts=parts))
     return contents
 
-def _build_openai_turn_messages(chat_id: int, user_text: str, model_id: str) -> list[dict]:
-    """Сообщения для OpenAI-совместимого chat/completions (общая у ask_munito_text и стриминга)."""
+async def _build_openai_turn_messages(
+    chat_id: int, user_text: str, model_id: str, *,
+    history_meta: dict[str, Any] | None = None,
+    current_parts: list[dict] | None = None,
+) -> list[dict]:
+    """Сообщения для OpenAI-совместимого chat/completions: память, авторы, прошлые фото.
+
+    Прошлые фото прикладываются отдельной user-репликой, а не к текущему вопросу:
+    модель не должна путать их с только что присланным вложением."""
     import bot
     state = bot.get_state(chat_id)
-    ctx = state.get("ctx", deque())
-    full = ""
-    if ctx:
-        full = "Фон разговора:\n" + "\n".join(ctx) + "\n\nТекущий вопрос: "
-    full += user_text
-    history = state.setdefault("history", [])
-    messages: list[dict] = [{"role": "system", "content": bot.get_system_prompt(model_id)}]
-    messages.extend(filter(None, (_clean_history_entry(item) for item in history)))
-    messages.append({"role": "user", "content": full})
+    meta = history_meta if isinstance(history_meta, dict) else {}
+    system_text = lumen_memory.system_prompt_with_memory(bot.get_system_prompt(model_id), state)
+    messages: list[dict] = [{"role": "system", "content": system_text}]
+    history = state.get("history") or []
+    skip = set(meta.get("skip_file_ids") or [])
+    if meta.get("attach_past", True):
+        past = lumen_memory.recent_media(
+            state, "photo",
+            window=lumen_memory.PHOTO_CONTEXT_WINDOW,
+            max_items=lumen_memory.PHOTO_CONTEXT_MAX,
+            skip_file_ids=skip,
+        )
+        if past:
+            parts: list[dict] = [{"type": "text", "text": (
+                "Earlier in this chat, these photos were sent. Use them only if the "
+                "current message refers to them; do not describe them otherwise."
+            )}]
+            for entry, ref in past:
+                parts.append({"type": "text", "text": f"Photo — {lumen_memory.format_entry(entry)}:"})
+                try:
+                    fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
+                except Exception:
+                    fetched = None
+                if not fetched:
+                    continue
+                data, mime = fetched
+                b64 = base64.b64encode(data).decode("utf-8")
+                parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            if len(parts) > 1:
+                messages.append({"role": "user", "content": parts})
+    # История: авторы и время; старые служебные блоки вычищаем на лету.
+    for item in history:
+        entry = _clean_history_entry(item) if isinstance(item, dict) else None
+        if entry is None:
+            continue
+        cont = entry.get("content")
+        # Старые записи могли хранить структуру провайдера: разбираем, как Gemini-ветка.
+        text = lumen_memory.format_entry(entry) if isinstance(cont, str) else bot._or_extract_text(cont)
+        if not text:
+            continue
+        role = "assistant" if entry.get("role") == "assistant" else "user"
+        messages.append({"role": role, "content": text})
+    if current_parts:
+        messages.append({"role": "user", "content": [{"type": "text", "text": user_text}, *current_parts]})
+    else:
+        messages.append({"role": "user", "content": user_text})
     return messages
 
 
@@ -790,6 +857,7 @@ async def _run_route(
     youtube_url: str | None = None, allow_stream: bool = False,
     deadline: float | None = None, provenance: dict | None = None,
     status: Any | None = None, history_text: str | None = None,
+    history_meta: dict[str, Any] | None = None,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
@@ -798,7 +866,9 @@ async def _run_route(
     route_started = time.monotonic()
     # В историю пишем чистый запрос пользователя, а не ai_prompt со сниппетами
     # и датой: чужой текст не должен переживать ход (аудит 28.10.2026).
-    history_text = history_text or ai_prompt
+    # Пустая строка — законный текст фото без подписи, поэтому None, а не or.
+    if history_text is None:
+        history_text = ai_prompt
     # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
     route = _reorder_route_by_speed(route)
     if deadline is None:
@@ -848,6 +918,7 @@ async def _run_route(
     async def _try_stream(provider_name: str, model_id: str):
         kwargs = dict(
             deadline=deadline, status=status, history_text=history_text,
+            history_meta=history_meta,
             reuse_placeholder=reusable_placeholder, wait_started=stream_wait_started,
         )
         if provider_name == "gemini":
@@ -885,11 +956,11 @@ async def _run_route(
                     return streamed, True
         try:
             if provider == "gemini":
-                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text)
+                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text, history_meta=history_meta)
             elif provider == "munito" and media:
-                ans = await bot.ask_munito_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance)
+                ans = await bot.ask_munito_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta)
             elif provider == "munito":
-                ans = await bot.ask_munito_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance)
+                ans = await bot.ask_munito_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta)
             else:
                 # Явный провайдер вместо «всё остальное = Munito»: опечатка в имени
                 # молча ушла бы в чужой API с нашим ключом (ревью 05.11.2026).

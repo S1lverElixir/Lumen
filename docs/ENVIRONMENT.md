@@ -127,9 +127,12 @@ These ceilings are fixed in code; change them only with a code edit:
 |---|---|---|
 | `FLUSH_INTERVAL_SEC` | `10` | Period of the background state-flush cycle. |
 | `MAX_CHAT_LIMIT` / `PRUNED_CHAT_TARGET` | `5000` / `4500` | Chat-count ceiling and prune target. |
-| `MAX_CHAT_HISTORY_LEN` | `100` | Max stored messages per chat. |
+| `MAX_TOTAL_MEMORY_MESSAGES` | `200` | Max stored messages per chat, group background included. |
 | `QUOTA_RATE_LIMIT_COOLDOWN_SEC` | `600` | Cooldown after a rate-limit hit. |
-| `HISTORY_SUMMARIZE_KEEP` | `80` | Recent messages kept verbatim when older history is summarized. |
+| `HISTORY_SUMMARIZE_KEEP` | `150` | Recent messages kept verbatim when older history is summarized. |
+| `PHOTO_CONTEXT_WINDOW` / `PHOTO_CONTEXT_MAX` | `30` / `2` | Recent-photo context window and how many photos are attached. |
+| `MAX_MEMORY_PENDING` | `400` | Messages waiting for a failed summary before the oldest are dropped. |
+| `MEMORY_SUMMARY_RETRY_SEC` | `60` | Delay between retries of a failed summary. |
 | `TG_MAX_LEN` | `4096` | Telegram message limit in UTF-16 code units; chunking and HTML fit are measured against it. |
 | `TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES` | `50 MB` | Telegram upload ceiling; bigger variants are skipped before downloading. |
 | `WEBHOOK_MAX_BODY_BYTES` | `512 KB` | Biggest accepted webhook update body. |

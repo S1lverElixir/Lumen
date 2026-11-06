@@ -1800,6 +1800,10 @@ def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
     chat_id = 999806
     bot.chat_state[chat_id] = {
         "history": [{"role": "user", "content": "hi"}],
+        "memory_summary": "старая память",
+        "memory_pending": [{"role": "user", "content": "в очереди"}],
+        "memory_epoch": 7,
+        "memory_retry_at": 9999999999.0,
         "ctx": deque(["фон"]),
         "recent_media_ids": {"1": deque(["file-1"])},
         "user_names": {"1": "User"},
@@ -1813,6 +1817,10 @@ def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
         asyncio.run(bot.cmd_reset(incoming))
         state = bot.chat_state[chat_id]
         assert state["history"] == []
+        assert state["memory_summary"] == ""
+        assert state["memory_pending"] == []
+        assert state["memory_epoch"] == 8
+        assert "memory_retry_at" not in state
         assert len(state["ctx"]) == 0
         assert state["recent_media_ids"] == {}
         assert state["user_names"] == {}

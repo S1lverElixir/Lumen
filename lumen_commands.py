@@ -492,7 +492,18 @@ async def cmd_reset(message: Message) -> None:
         return
     state = bot.get_state(message.chat.id)
     state["history"] = []
-    state["ctx"].clear()
+    # Сводка и очередь на неё — та же память: после /reset старое не должно всплывать.
+    # Поколение гасит сводку, которая уже летит в сеть и вернулась бы после сброса.
+    state["memory_summary"] = ""
+    state["memory_pending"] = []
+    state["memory_epoch"] = int(state.get("memory_epoch") or 0) + 1
+    state.pop("memory_trimming", None)
+    state.pop("memory_retry_at", None)
+    # Старое раздельное поле фона (ctx) после миграции обычно пустое, но /reset
+    # обязан чистить и его, если снимок пришёл из прежней версии.
+    legacy_ctx = state.get("ctx")
+    if hasattr(legacy_ctx, "clear"):
+        legacy_ctx.clear()
     # Сброс должен забывать и ссылки на медиа/имена: иначе старые файлы
     # всплывали после /reset (аудит 28.10.2026).
     state.get("recent_media_ids", {}).clear()

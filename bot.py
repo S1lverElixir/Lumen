@@ -311,12 +311,6 @@ MUNITO_BASE_URL = (os.getenv("MUNITO_BASE_URL", "").strip() or "https://api.muni
 MUNITO_DAILY_LIMIT = _env_number("MUNITO_DAILY_LIMIT", 250, cast=int, min_value=1)
 # Голосовые длиннее не транскрибируем (Whisper API всё равно режет 25 МБ) — такие идут прежним путём через Gemini-аудио.
 VOICE_TRANSCRIBE_MAX_BYTES = _env_number("VOICE_TRANSCRIBE_MAX_BYTES", 10 * 1024 * 1024, cast=int, min_value=1024)
-# Раньше у второго текстового провайдера был свой отдельный лимит истории (30),
-# меньший, чем у Gemini (100) — при смене провайдера ощущалось резкое "обнуление"
-# контекста разговора. Теперь история ОБЩАЯ (см. state["history"] в get_state) и
-# лимит один для всех.
-SHARED_HISTORY_MAX_LEN = 100
-
 # ── Sentry (опционально) — персистентный трекинг ошибок между рестартами ──
 # Sentry: bot.log теряется при редеплое, Upstash логи не покрывает; ловит log.error без правок точек вызова.
 def _redactable_secrets() -> tuple[str, ...]:
@@ -513,6 +507,7 @@ import lumen_chat_state
 from lumen_chat_state import (
     chat_state,
     MAX_TOTAL_MEMORY_MESSAGES,
+    HISTORY_SUMMARIZE_KEEP,
     _STATE_DIR,
     _CHATS_DIR,
     _storage_config,
@@ -584,7 +579,6 @@ from lumen_chat_state import (
     _user_key_for_message,
     _user_daily_reset_in,
     _trim_history,
-    _trim_combined,
     _note_sender,
     _resolve_nick,
 )
@@ -883,6 +877,7 @@ __all__ = [
     # Имена из lumen_chat_state.py код bot.py сам не читает — они нужны как
     # `bot.X` существующим тестам.
     "MAX_TOTAL_MEMORY_MESSAGES",
+    "HISTORY_SUMMARIZE_KEEP",
     "_CHATS_DIR",
     "_storage_config",
     "_upstash_set",
@@ -949,7 +944,6 @@ __all__ = [
     "_mark_rate_limited",
     "_record_quota_usage",
     "_trim_history",
-    "_trim_combined",
     "_note_sender",
     "_resolve_nick",
     "_pending_picks",

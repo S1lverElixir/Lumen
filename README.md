@@ -131,7 +131,7 @@ More owner-only commands stay out of the menu on purpose, since they surface int
 | `/ban <ID>` / `/unban <ID>` (or as a reply) | bot owner, DMs only | Block/unblock a user by Telegram ID. Banned users are fully ignored: no answers, no group context, no limit counters. Survives restarts. |
 | `/banlist` | bot owner, DMs only | Shows banned user IDs. |
 
-In groups the bot keeps recent messages (up to 100, with a total character cap) as context and sends them to the model providers together with the question; `/reset` (group admins/owner) clears them.
+The bot keeps one chronological chat memory of up to 200 messages (group background, messages addressed to it and its answers, with author and time); older messages are folded into a long-term summary. Photos are kept as Telegram references, and up to two recent photos are attached as context. `/reset` (group admins/owner) clears the memory and its summary.
 
 ## Testing
 

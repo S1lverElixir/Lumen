@@ -367,7 +367,7 @@ def test_streaming_history_goes_through_summarizing_trim(monkeypatch):
 
     calls = {}
 
-    async def fake_trim(hist):
+    async def fake_trim(hist, state=None):
         calls["n"] = calls.get("n", 0) + 1
         hist[:] = hist[-10:]
 
