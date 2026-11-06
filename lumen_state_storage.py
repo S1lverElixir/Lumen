@@ -22,7 +22,7 @@ from typing import Any
 
 log = logging.getLogger("bot")
 
-CHAT_STATE_SCHEMA_VERSION = 1
+CHAT_STATE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -138,17 +138,21 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
     хранилище просто тихо игнорируются при чтении, как и остальные удалённые поля
     выше."""
     # Ленивый импорт: lumen_chat_state импортирует этот модуль, топ-уровень закольцует.
-    from lumen_chat_state import MAX_CHAT_HISTORY_LEN
+    from lumen_memory import MAX_MEMORY_PENDING
+    raw_pending = state.get("memory_pending")
+    pending = list(raw_pending) if isinstance(raw_pending, list) else []
     return {
         "schema_version": CHAT_STATE_SCHEMA_VERSION,
+        # Единый лог: фон группы, обращения и ответы бота с авторами и медиа-ссылками.
         "history": list(state.get("history", [])),
+        # Долговременная сводка и очередь на неё переживают деплой вместе с логом.
+        "memory_summary": state.get("memory_summary", "") or "",
+        "memory_pending": pending[-MAX_MEMORY_PENDING:],
         "recent_media_ids": {
             uid: list(dq) for uid, dq in state.get("recent_media_ids", {}).items()
         },
         # Ники переживают рестарт: без них после деплоя бот снова не знал бы авторов.
         "user_names": dict(state.get("user_names", {}) or {}),
-        # Фон тоже переживает рестарт: иначе единые 100 сообщений сбрасывались деплоем.
-        "ctx": [line for line in (state.get("ctx") or []) if isinstance(line, str)][:MAX_CHAT_HISTORY_LEN],
         # Настенные часы для подсчёта активных в /stats: monotonic сбрасывается
         # рестартом и делал все чаты "активными", time.time() переживает его.
         "last_activity": state.get("last_activity", 0.0),

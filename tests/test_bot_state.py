@@ -564,15 +564,23 @@ def test_flush_concurrency_falls_back_on_garbage(monkeypatch, env_value, expecte
         lumen_chat_state._state_flush_semaphore = orig_sem
 
 
-def test_load_global_quota_restores_groq():
-    # Внешний аудит: groq-счётчики сохранялись, но при загрузке терялись.
+def test_load_global_quota_restores_groq_and_munito():
+    # Внешний аудит: groq-счётчики сохранялись, но при загрузке терялись. Тот же
+    # разбор для munito — головы текстового маршрута с 05.11.2026: её счётчик
+    # обязан переживать рестарт. Groq в снимке только Whisper (чат-модели убраны).
     import json
-    payload = json.dumps({"gemini": {}, "openrouter": {}, "groq": {"qwen/qwen3.8-27b": {"used": 4, "exhausted_at": None}}, "quota_day": bot._current_quota_day()})
+    payload = json.dumps({
+        "gemini": {},
+        "munito": {"deepseek-ai/deepseek-v4.1-flash-1017": {"used": 6, "exhausted_at": None}},
+        "groq": {"whisper-large-v3-turbo": {"used": 4, "exhausted_at": None}},
+        "quota_day": bot._current_quota_day(),
+    })
     real = dict(bot.GLOBAL_QUOTA)
     with patch("bot._storage_read_text", return_value=payload):
         try:
             bot.load_global_quota()
-            assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["used"] == 4
+            assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["used"] == 4
+            assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["used"] == 6
         finally:
             bot.GLOBAL_QUOTA.clear()
             bot.GLOBAL_QUOTA.update(real)
@@ -664,7 +672,7 @@ def test_successful_startup_load_keeps_index_and_quota_writes():
     orig_throttle = lcs._last_quota_check_monotonic
     lcs._state_load_failed = False
     try:
-        payload = json.dumps({"gemini": {}, "openrouter": {}, "quota_day": bot._current_quota_day()})
+        payload = json.dumps({"gemini": {}, "munito": {}, "quota_day": bot._current_quota_day()})
 
         def fake_read(key, path):
             if key == "lumen:global_quota":
@@ -697,19 +705,22 @@ def test_successful_startup_load_keeps_index_and_quota_writes():
 
 
 def test_trim_history_plain_cuts_when_summarizer_over_budget(monkeypatch):
-    # Внешний аудит: саммаризация держала lock чата мимо бюджета — теперь колпак, дальше plain cut.
+    # Внешний аудит: саммаризация держала lock чата мимо бюджета — теперь колпак,
+    # а старые сообщения не выбрасываются молча, а ждут сводку в memory_pending.
     async def hanging_summarize(text):
         await asyncio.sleep(3600)
         return "never"
 
     monkeypatch.setattr(lumen_chat_state, "_summarize_text", hanging_summarize)
     monkeypatch.setattr(bot, "HISTORY_SUMMARY_BUDGET_SEC", 0.05)
-    history = [{"role": "user", "content": f"m{i}"} for i in range(105)]
+    history = [{"role": "user", "content": f"m{i}"} for i in range(205)]
+    state = {}
     started = time.monotonic()
-    asyncio.run(bot._trim_history(history))
+    asyncio.run(bot._trim_history(history, state))
     assert time.monotonic() - started < 5
-    assert len(history) == 100
-    assert history[0]["content"] == "m5"
+    assert len(history) == bot.HISTORY_SUMMARIZE_KEEP
+    assert history[0]["content"] == "m55"
+    assert len(state["memory_pending"]) == 55
 
 
 def test_save_chat_to_storage_limited_snapshots_before_thread():
@@ -730,29 +741,30 @@ def test_save_chat_to_storage_limited_snapshots_before_thread():
 
 
 def test_sentry_scrub_secrets_redacts_known_tokens():
-    original_bot_token, original_gemini_key, original_or_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY
+    original_bot_token, original_gemini_key, original_munito_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.MUNITO_API_KEY
     bot.BOT_TOKEN = "secret-bot-token-123"
     bot.GEMINI_API_KEY = "secret-gemini-key-456"
-    bot.OPENROUTER_API_KEY = "secret-or-key-789"
+    bot.MUNITO_API_KEY = "secret-munito-key-789"
     try:
         event = {
             "message": "failed calling token secret-bot-token-123",
-            "extra": {"note": "gemini key was secret-gemini-key-456, or key was secret-or-key-789"},
+            "extra": {"note": "gemini key was secret-gemini-key-456, munito key was secret-munito-key-789"},
         }
         scrubbed = bot._sentry_scrub_secrets(event, {})
         payload = json.dumps(scrubbed)
         assert "secret-bot-token-123" not in payload
         assert "secret-gemini-key-456" not in payload
-        assert "secret-or-key-789" not in payload
+        assert "secret-munito-key-789" not in payload
         assert payload.count("<REDACTED>") == 3
     finally:
-        bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY = original_bot_token, original_gemini_key, original_or_key
+        bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.MUNITO_API_KEY = original_bot_token, original_gemini_key, original_munito_key
 
 
 def test_sentry_scrub_secrets_redacts_webhook_admin_and_upstash_tokens():
     # РЕГРЕССИЯ: раньше _redactable_secrets (тогда — инлайн-кортеж) вычищал
-    # только BOT_TOKEN/GEMINI_API_KEY/OPENROUTER_API_KEY — WEBHOOK_SECRET/
-    # ADMIN_PANEL_KEY/UPSTASH_REDIS_REST_TOKEN утекли бы в Sentry как есть.
+    # только BOT_TOKEN/GEMINI_API_KEY и ключ текстового провайдера (тогда ещё
+    # OpenRouter) — WEBHOOK_SECRET/ADMIN_PANEL_KEY/UPSTASH_REDIS_REST_TOKEN
+    # утекли бы в Sentry как есть.
     original_upstash = bot.UPSTASH_REDIS_REST_TOKEN
     bot.UPSTASH_REDIS_REST_TOKEN = "secret-upstash-token-xyz"
     try:
@@ -766,13 +778,13 @@ def test_sentry_scrub_secrets_redacts_webhook_admin_and_upstash_tokens():
 
 
 def test_sentry_scrub_secrets_passthrough_when_no_secrets_configured():
-    original_bot_token, original_gemini_key, original_or_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY
-    bot.BOT_TOKEN = bot.GEMINI_API_KEY = bot.OPENROUTER_API_KEY = ""
+    original_bot_token, original_gemini_key, original_munito_key = bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.MUNITO_API_KEY
+    bot.BOT_TOKEN = bot.GEMINI_API_KEY = bot.MUNITO_API_KEY = ""
     try:
         event = {"message": "ordinary error, nothing secret here"}
         assert bot._sentry_scrub_secrets(event, {}) == event
     finally:
-        bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.OPENROUTER_API_KEY = original_bot_token, original_gemini_key, original_or_key
+        bot.BOT_TOKEN, bot.GEMINI_API_KEY, bot.MUNITO_API_KEY = original_bot_token, original_gemini_key, original_munito_key
 
 
 def test_sentry_not_initialized_without_dsn_in_test_env():
@@ -1018,7 +1030,7 @@ def test_process_media_group_buffers_ignores_passive_group_album(monkeypatch):  
 
     monkeypatch.setattr(bot, "_reject_rate_limited_message", fake_rate_limit)
     monkeypatch.setattr(bot, "_should_only_record_passively", lambda *a, **k: True)
-    monkeypatch.setattr(bot, "_record_passive_group_context", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "_record_passive_group_context", AsyncMock())
     monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
     monkeypatch.setattr(bot, "_handle_message_core", fake_core)
     bot._mg_buffers["mgpassive"] = [msg, msg_extra]
@@ -1484,7 +1496,7 @@ def test_output_cap_answer_marked_incomplete(rate_guard_setup, monkeypatch):
     sent: list[str] = []
 
     async def fake_run_route(*args, **kwargs):
-        kwargs["provenance"].update(provider="openrouter", model="m1:free", finish_reason="length")
+        kwargs["provenance"].update(provider="munito", model="m1", finish_reason="length")
         return "Фотосинтез — это", False
 
     async def fake_reply(msg, text, **kwargs):
@@ -1723,10 +1735,12 @@ def test_rate_limit_dict_has_hard_cap_on_fresh_flood(monkeypatch):
 
 def test_passive_group_context_survives_missing_from_user():
     # Пост от имени канала без from_user — не роняет запись фона (внешний аудит).
-    state = {"history": [], "ctx": __import__("collections").deque(), "recent_media_ids": {}}
+    state = {"history": [], "memory_summary": "", "memory_pending": [], "recent_media_ids": {}}
     message = SimpleNamespace(chat=SimpleNamespace(id=777), from_user=None, text="привет всем")
-    bot._record_passive_group_context(message, state, "привет всем")
-    assert any("привет всем" in line for line in state["ctx"])
+    asyncio.run(bot._record_passive_group_context(message, state, "привет всем"))
+    entry = state["history"][-1]
+    assert entry["role"] == "user" and entry["content"] == "привет всем"
+    assert entry["addressed"] is False
 
 
 def test_message_core_sends_typing_indicator(rate_guard_setup, monkeypatch):
@@ -1826,8 +1840,8 @@ def test_trim_history_short_is_untouched(monkeypatch):
     async def must_not_be_called(*args, **kwargs):
         raise AssertionError("no LLM call for short history")
 
-    monkeypatch.setattr(bot, "_groq_request", must_not_be_called)
-    monkeypatch.setattr(bot, "_or_request", must_not_be_called)
+    monkeypatch.setattr(bot, "_munito_request", must_not_be_called)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     history = _make_long_history(50)
     asyncio.run(bot._trim_history(history))
     assert len(history) == 50
@@ -1835,51 +1849,136 @@ def test_trim_history_short_is_untouched(monkeypatch):
 
 
 def test_trim_history_summarizes_old_keeps_recent(monkeypatch):
-    # Переполнение: старое сжимается в первую запись с пометкой, свежие 80 — как были.
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None):
-        assert json_body["model"] == "qwen/qwen3.8-27b"
+    # Переполнение: старые 55 уходят в сводку state, последние 150 — как были.
+    from lumen_router_config import _MUNITO_ORDER
+
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None):
+        assert json_body["model"] == _MUNITO_ORDER[0]
         return {"choices": [{"message": {"content": "Обсуждали погоду и котов."}}]}
 
-    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
-    history = _make_long_history(105)
-    asyncio.run(bot._trim_history(history))
-    assert len(history) == 81
-    assert history[0]["content"].startswith("[Ранее в диалоге]: ")
-    assert "погоду" in history[0]["content"]
-    assert history[1]["content"] == "сообщение 25"
-    assert history[-1]["content"] == "сообщение 104"
+    history = _make_long_history(205)
+    state = {}
+    asyncio.run(bot._trim_history(history, state))
+    assert len(history) == bot.HISTORY_SUMMARIZE_KEEP
+    assert "погоду" in state["memory_summary"]
+    assert state["memory_pending"] == []
+    assert history[0]["content"] == "сообщение 55"
+    assert history[-1]["content"] == "сообщение 204"
 
 
-def test_trim_history_falls_back_to_plain_cut_on_failure(monkeypatch):
-    # Саммаризатор упал — режем по-старому, ответ не ломается.
+def test_trim_history_falls_back_to_pending_on_failure(monkeypatch):
+    # Саммаризатор упал — окно памяти цело, старые ждут повторной сводки.
     async def failing_request(*args, **kwargs):
-        raise bot.GroqAPIError("overloaded", status_code=503)
+        raise bot.MunitoAPIError("overloaded", status_code=503)
 
-    monkeypatch.setattr(bot, "_groq_request", failing_request)
-    monkeypatch.setattr(bot, "_or_request", failing_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
-    history = _make_long_history(105)
-    asyncio.run(bot._trim_history(history))
-    assert len(history) == 100
-    assert history[0]["content"] == "сообщение 5"
+    monkeypatch.setattr(bot, "_munito_request", failing_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    history = _make_long_history(205)
+    state = {}
+    asyncio.run(bot._trim_history(history, state))
+    assert len(history) == bot.HISTORY_SUMMARIZE_KEEP
+    assert history[0]["content"] == "сообщение 55"
+    assert len(state["memory_pending"]) == 55
+    assert state.get("memory_summary", "") == ""
 
 
-def test_trim_history_without_keys_cuts_plainly(monkeypatch):
-    # Нет ключей — даже не пробуем сеть, сразу старая обрезка.
+def test_summarize_prefers_gemini_and_falls_back_to_munito(monkeypatch):
+    # Факты старой памяти теряла слабая голова Munito: сначала пробуем Gemini,
+    # и только при его сбое идём в Munito.
+    class _Models:
+        def __init__(self, fail=False):
+            self.fail = fail
+            self.calls = 0
+
+        async def generate_content(self, **kwargs):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("gemini down")
+            return SimpleNamespace(text="Люди: m1st. Факты: кот рыжий.")
+
+    class _Aio:
+        def __init__(self, fail=False):
+            self.models = _Models(fail)
+
+    class _Client:
+        def __init__(self, fail=False):
+            self.aio = _Aio(fail)
+
+    munito_calls = []
+
+    async def fake_munito(*args, **kwargs):
+        munito_calls.append(kwargs)
+        return {"choices": [{"message": {"content": "память из munito"}}]}
+
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    try:
+        bot.client = _Client()
+        assert asyncio.run(lumen_chat_state._summarize_text("digest")) == "Люди: m1st. Факты: кот рыжий."
+        assert munito_calls == []
+        bot.client = _Client(fail=True)
+        assert asyncio.run(lumen_chat_state._summarize_text("digest")) == "память из munito"
+        assert len(munito_calls) == 1
+    finally:
+        bot.client = None
+
+
+def test_reset_during_summary_does_not_resurrect_memory(monkeypatch):
+    # /reset во время сетевой сводки: вернувшийся старый пересказ не должен всплыть.
+    state = {"history": [], "memory_summary": "", "memory_pending": [], "memory_epoch": 1}
+    history = _make_long_history(205)
+
+    async def fake_summarize(text):
+        state["memory_epoch"] = 2
+        state["history"] = []
+        state["memory_pending"] = []
+        return "старая память"
+
+    monkeypatch.setattr(lumen_chat_state, "_summarize_text", fake_summarize)
+    asyncio.run(bot._trim_history(history, state))
+    assert state["memory_epoch"] == 2
+    assert state["memory_summary"] == ""
+    assert state["memory_pending"] == []
+
+
+def test_trim_history_failed_summary_does_not_retry_every_message(monkeypatch):
+    # Провайдер сводки лежит: иначе каждый ответ ждал бы сеть заново по 5 секунд.
+    calls = []
+
+    async def failing_summarize(text):
+        calls.append(text)
+        raise RuntimeError("summary provider down")
+
+    monkeypatch.setattr(lumen_chat_state, "_summarize_text", failing_summarize)
+    history = _make_long_history(205)
+    state = {"memory_summary": "", "memory_pending": []}
+    asyncio.run(bot._trim_history(history, state))
+    assert len(calls) == 1
+    assert len(state["memory_pending"]) == 55
+    asyncio.run(bot._trim_history(history, state))
+    assert len(calls) == 1
+    state["memory_retry_at"] = time.time() - 1
+    asyncio.run(bot._trim_history(history, state))
+    assert len(calls) == 2
+
+
+def test_trim_history_without_keys_keeps_pending(monkeypatch):
+    # Нет ключа Munito — сеть не трогаем, старые остаются в очереди сводки.
     async def must_not_be_called(*args, **kwargs):
         raise AssertionError("no LLM call without keys")
 
-    monkeypatch.setattr(bot, "_groq_request", must_not_be_called)
-    monkeypatch.setattr(bot, "_or_request", must_not_be_called)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "")
-    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "")
-    history = _make_long_history(105)
-    asyncio.run(bot._trim_history(history))
-    assert len(history) == 100
-    assert history[0]["content"] == "сообщение 5"
+    monkeypatch.setattr(bot, "_munito_request", must_not_be_called)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
+    history = _make_long_history(205)
+    state = {}
+    asyncio.run(bot._trim_history(history, state))
+    assert len(history) == bot.HISTORY_SUMMARIZE_KEEP
+    assert history[0]["content"] == "сообщение 55"
+    assert len(state["memory_pending"]) == 55
 
 
 def test_looks_like_media_reference_true_for_explicit_media_nouns():
@@ -1985,14 +2084,15 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
     # подменой monotonic на 12.0).
     original_quota = {
         "gemini": dict(bot.GLOBAL_QUOTA.get("gemini", {})),
-        "openrouter": dict(bot.GLOBAL_QUOTA.get("openrouter", {})),
+        "munito": dict(bot.GLOBAL_QUOTA.get("munito", {})),
         "quota_day": bot.GLOBAL_QUOTA.get("quota_day"),
     }
     original_throttle = lumen_chat_state._last_quota_check_monotonic
     try:
         bot.GLOBAL_QUOTA["gemini"] = {"gemini-2.5-flash": {"used": 106, "remaining": 0, "limit": 1500, "exhausted_at": 12345.0, "cooldown_until": time.time() + 600.0}}
-        bot.GLOBAL_QUOTA["openrouter"] = {"some-model:free": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None, "cooldown_until": None}}
-        bot.GLOBAL_QUOTA["groq"] = {"qwen/qwen3.8-27b": {"used": 9, "exhausted_at": 12345.0}}
+        bot.GLOBAL_QUOTA["munito"] = {"deepseek-ai/deepseek-v4.1-flash-1017": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None, "cooldown_until": None}}
+        # groq остаётся только там, где он реально нужен — Whisper в транскрибации.
+        bot.GLOBAL_QUOTA["groq"] = {"whisper-large-v3-turbo": {"used": 9, "exhausted_at": 12345.0}}
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"  # заведомо "вчерашний" день
         lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
 
@@ -2001,14 +2101,15 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["used"] == 0
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["exhausted_at"] is None
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["cooldown_until"] is None
-        assert bot.GLOBAL_QUOTA["openrouter"]["some-model:free"]["used"] == 0
+        assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["used"] == 0
+        assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["cooldown_until"] is None
         # Groq сбрасывается вместе с остальными (внешний аудит: провайдер забыли в цикле сброса/загрузки).
-        assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["used"] == 0
-        assert bot.GLOBAL_QUOTA["groq"]["qwen/qwen3.8-27b"]["exhausted_at"] is None
+        assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["used"] == 0
+        assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["exhausted_at"] is None
         assert bot.GLOBAL_QUOTA["quota_day"] == bot._current_quota_day()
     finally:
         bot.GLOBAL_QUOTA["gemini"] = original_quota["gemini"]
-        bot.GLOBAL_QUOTA["openrouter"] = original_quota["openrouter"]
+        bot.GLOBAL_QUOTA["munito"] = original_quota["munito"]
         bot.GLOBAL_QUOTA.pop("groq", None)
         bot.GLOBAL_QUOTA["quota_day"] = original_quota["quota_day"]
         lumen_chat_state._last_quota_check_monotonic = original_throttle
@@ -2115,8 +2216,9 @@ def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
     orig_throttle = lcs._last_quota_check_monotonic
     real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
     try:
-        bot.GLOBAL_QUOTA["openrouter"] = {"m1": {"used": 5, "exhausted_at": None, "cooldown_until": None}}
-        bot.GLOBAL_QUOTA["groq"] = {"m2": {"used": 7, "exhausted_at": None, "cooldown_until": None}}
+        bot.GLOBAL_QUOTA["munito"] = {"m1": {"used": 5, "exhausted_at": None, "cooldown_until": None}}
+        # groq в снимке только про Whisper: чат-модели Groq из маршрута убраны 05.11.2026.
+        bot.GLOBAL_QUOTA["groq"] = {"whisper-large-v3-turbo": {"used": 7, "exhausted_at": None, "cooldown_until": None}}
         bot.GLOBAL_QUOTA["gemini"] = {"m3": {"used": 2, "exhausted_at": None, "cooldown_until": None}}
         bot.GLOBAL_QUOTA["user_daily"] = {"42": {"total": 3, "gemini": 1, "tts": 0, "bonus": 0}}
         bot.GLOBAL_QUOTA["stats"] = {"messages_received": 9, "answers_sent": 8, "all_failed": 1, "fallbacks": 2, "daily_limit_denials": 3}
@@ -2131,8 +2233,8 @@ def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
         lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: captured["quota"])
         bot.load_global_quota()
-        assert bot.GLOBAL_QUOTA["openrouter"]["m1"]["used"] == 5
-        assert bot.GLOBAL_QUOTA["groq"]["m2"]["used"] == 7
+        assert bot.GLOBAL_QUOTA["munito"]["m1"]["used"] == 5
+        assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["used"] == 7
         assert bot.GLOBAL_QUOTA["gemini"]["m3"]["used"] == 2
         assert bot.GLOBAL_QUOTA["user_daily"]["42"]["total"] == 3
         stats = bot.GLOBAL_QUOTA["stats"]
@@ -2520,10 +2622,10 @@ def test_passive_group_message_does_not_consume_quota(rate_guard_setup, monkeypa
     message = rate_guard_setup()
     message.chat.type = bot.ChatType.GROUP
     message.text = "обычный разговор"
-    record = MagicMock()
+    record = AsyncMock()
     monkeypatch.setattr(bot, "_record_passive_group_context", record)
     asyncio.run(bot._handle_message_core(message))
-    record.assert_called_once()
+    record.assert_awaited_once()
     assert lumen_limits.user_rate_limits == {}
     bot._tg_call.assert_not_awaited()
 
@@ -2745,6 +2847,134 @@ def test_passive_album_keeps_all_files_in_recent_media():
         assert [fid for fid, _ in bucket] == ["fid1", "fid2"]
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def _photo_core_message(rate_guard_setup):
+    message = rate_guard_setup()
+    message.text = ""
+    message.caption = None
+    message.photo = [SimpleNamespace(file_id="p1", mime_type="image/jpeg")]
+    return message
+
+
+def test_photo_without_caption_uses_pending_instruction(rate_guard_setup, monkeypatch):
+    # «Сейчас кину фотку, что мне идёт?» → фото без подписи отвечает на просьбу,
+    # а не получает служебное «опиши подробно» (сценарий владельца 06.11.2026).
+    message = _photo_core_message(rate_guard_setup)
+    state = {
+        "history": [
+            {"role": "user", "content": "сейчас кину фотку, что мне больше идёт?",
+             "sender": "User", "sender_id": 456, "ts": time.time() - 60},
+            {"role": "assistant", "content": "Давай."},
+        ],
+        "memory_summary": "", "memory_pending": [], "recent_media_ids": {},
+        "user_names": {}, "last_activity": 0,
+    }
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    captured = {}
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return "", (b"img", "image/jpeg")
+
+    async def fake_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        captured["history_text"] = kwargs.get("history_text")
+        captured["meta"] = kwargs.get("history_meta")
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert "что мне больше идёт?" in captured["prompt"]
+        assert "do not describe" in captured["prompt"]
+        assert captured["history_text"] == ""
+        assert captured["meta"]["media"][0]["file_id"] == "p1"
+        assert captured["meta"]["skip_file_ids"] == ["p1"]
+    finally:
+        bot.chat_state.pop(123, None)
+        bot._dirty_chat_ids.discard(123)
+
+
+def test_photo_with_caption_keeps_caption_in_history(rate_guard_setup, monkeypatch):
+    # Подпись — и промпт, и чистая запись в память; служебный Describe туда не едет.
+    message = _photo_core_message(rate_guard_setup)
+    message.caption = "что на этом фото?"
+    state = {"history": [], "memory_summary": "", "memory_pending": [],
+             "recent_media_ids": {}, "user_names": {}, "last_activity": 0}
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    captured = {}
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return "", (b"img", "image/jpeg")
+
+    async def fake_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        captured["history_text"] = kwargs.get("history_text")
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert "что на этом фото?" in captured["prompt"]
+        assert captured["history_text"] == "что на этом фото?"
+    finally:
+        bot.chat_state.pop(123, None)
+        bot._dirty_chat_ids.discard(123)
+
+
+def test_photo_without_caption_or_request_describes_it(rate_guard_setup, monkeypatch):
+    # Обычное фото без подписи — как у других ИИ: описать содержимое.
+    message = _photo_core_message(rate_guard_setup)
+    state = {"history": [], "memory_summary": "", "memory_pending": [],
+             "recent_media_ids": {}, "user_names": {}, "last_activity": 0}
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    captured = {}
+
+    async def fake_resolve(message, state, clean_prompt, *, is_private):
+        return "", (b"img", "image/jpeg")
+
+    async def fake_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        captured["history_text"] = kwargs.get("history_text")
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_resolve_incoming_media", fake_resolve)
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert "Describe in detail what is shown in this image" in captured["prompt"]
+        assert captured["history_text"] == ""
+    finally:
+        bot.chat_state.pop(123, None)
+        bot._dirty_chat_ids.discard(123)
+
+
+def test_resolve_incoming_media_finds_photo_in_shared_history(monkeypatch):
+    # Явное «покажи фото» ищет по общему логу, а не только по корзинке на 8 медиа.
+    state = {
+        "history": [{
+            "role": "user", "content": "", "sender": "@m1st", "sender_id": 555,
+            "media": [{"file_id": "history_fid", "mime": "image/jpeg"}],
+        }],
+        "memory_summary": "", "memory_pending": [], "recent_media_ids": {}, "user_names": {},
+    }
+    message = SimpleNamespace(chat=SimpleNamespace(id=123), from_user=SimpleNamespace(id=555),
+                              reply_to_message=None)
+
+    async def fake_fetch(fid, mime):
+        assert fid == "history_fid"
+        return b"img", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    try:
+        _name, media = asyncio.run(bot._resolve_incoming_media(
+            message, state, "покажи фото", is_private=True,
+        ))
+        assert media == (b"img", "image/jpeg")
+    finally:
+        bot.chat_state.pop(123, None)
 
 
 def test_resolve_incoming_media_saves_reply_attachment_to_history():
@@ -3194,7 +3424,7 @@ def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
 ])
 def test_load_global_quota_restores_user_daily(incoming, expected):
     # Новое: счётчики переживают рестарт; битые записи отбрасываются, а не роняют загрузку.
-    full = {"gemini": {}, "openrouter": {}, "groq": {}, "quota_day": bot._current_quota_day()}
+    full = {"gemini": {}, "munito": {}, "groq": {}, "quota_day": bot._current_quota_day()}
     full.update(incoming)
     real = json.loads(json.dumps(bot.GLOBAL_QUOTA))
     try:
@@ -3238,12 +3468,47 @@ def test_core_refuses_when_user_daily_total_exhausted(rate_guard_setup, monkeypa
         bot.chat_state.pop(123, None)
 
 
+def test_core_serves_tiktok_link_when_user_daily_total_exhausted(rate_guard_setup, monkeypatch):
+    # Решение владельца 06.11.2026: скачивание TikTok не тратит дневной лимит и не
+    # блокируется им. Регрессия, которую ловит тест: возврат `_record_user_daily` в
+    # TikTok-ветку или перенос проверки общего лимита обратно выше развилки ссылки —
+    # и человек вместо видео получает «лимит исчерпан», хотя бот не потратил ни токена.
+    message = rate_guard_setup()
+    message.text = "https://www.tiktok.com/@user/video/1234567890"
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    bot._record_user_daily(456)
+    called: list[str] = []
+    replies: list[str] = []
+
+    async def fake_tiktok(msg, url):
+        called.append(url)
+
+    async def fail_route(*args, **kwargs):
+        raise AssertionError("TikTok-ветка не должна доходить до моделей")
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    monkeypatch.setattr(bot, "handle_tiktok", fake_tiktok)
+    monkeypatch.setattr(bot, "_run_route", fail_route)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    try:
+        asyncio.run(bot._handle_message_core(message))
+        assert called == ["https://www.tiktok.com/@user/video/1234567890"]
+        assert not replies, "отказ по дневному лимиту не должен догонять ссылку на TikTok"
+        assert bot._user_daily_entry(456)["total"] == 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
+        bot.chat_state.pop(123, None)
+
+
 def test_core_falls_back_without_gemini_and_marks_no_search(rate_guard_setup, monkeypatch):
-    # Свежесть без ссылок при исчерпанном Gemini идёт через Groq/OpenRouter;
-    # внешний поиск пробует дать им сниппеты, и только пустой поиск оставляет
+    # Свежесть без ссылок при исчерпанном лимите Gemini идёт через Munito;
+    # внешний поиск пробует дать ему сниппеты, и только пустой поиск оставляет
     # пометку "без поиска".
     message = rate_guard_setup()
     message.text = "что нового сегодня"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "DAILY_USER_GEMINI_LIMIT", 1)
     bot._record_user_daily(456, gemini=True)
     captured = {}
@@ -3332,20 +3597,25 @@ def test_core_refuses_video_before_download_when_gemini_exhausted(rate_guard_set
         bot.chat_state.pop(123, None)
 
 
-def test_combined_memory_caps_background_at_100():
-    # Общий лимит 100 сообщений включая фон: история цела, старые фоновые уходят.
-    from collections import deque
-    state = {"history": [{"role": "user", "content": f"вопрос {i}"} for i in range(60)],
-             "ctx": deque(), "recent_media_ids": {}, "user_names": {}}
+def test_combined_memory_keeps_background_next_to_addressed():
+    # Старое поведение вытесняло фон до нуля, как только обращений набиралось 100.
+    # Теперь фон и обращения живут в одном логе и делят общий лимит 200.
+    state = {
+        "history": [{"role": "user", "content": f"вопрос {i}", "addressed": True} for i in range(150)],
+        "memory_summary": "", "memory_pending": [], "recent_media_ids": {}, "user_names": {},
+    }
     try:
-        for i in range(60):
-            message = SimpleNamespace(chat=SimpleNamespace(id=9001),
-                                      from_user=SimpleNamespace(id=7, username="m1st", first_name="M"),
-                                      text=f"фон {i}")
-            bot._record_passive_group_context(message, state, f"фон {i}")
-        assert len(state["history"]) == 60
-        assert len(state["history"]) + len(state["ctx"]) <= bot.MAX_TOTAL_MEMORY_MESSAGES
-        assert state["ctx"][0].endswith("фон 20")
+        for i in range(50):
+            message = SimpleNamespace(
+                chat=SimpleNamespace(id=9001),
+                from_user=SimpleNamespace(id=7, username="m1st", first_name="M"),
+                text=f"фон {i}", date=None,
+            )
+            asyncio.run(bot._record_passive_group_context(message, state, f"фон {i}"))
+        assert len(state["history"]) == bot.MAX_TOTAL_MEMORY_MESSAGES
+        tail = state["history"][-50:]
+        assert all(entry.get("addressed") is False for entry in tail)
+        assert tail[-1]["content"] == "фон 49"
     finally:
         bot._dirty_chat_ids.discard(9001)
 
@@ -3375,24 +3645,23 @@ def test_media_download_slot_limits_global_concurrency(monkeypatch):
         bot._media_semaphores.clear()
 
 
-def test_passive_context_caps_line_and_total_chars():
-    # Аудит 28.10.2026: 100 сообщений по 4096 символов раздували промпт и
-    # позволяли одному участнику забить чужой контекст.
-    from collections import deque
-    from lumen_message_core import _PASSIVE_CTX_MAX_CHARS
-    state = {"history": [], "ctx": deque(), "recent_media_ids": {}, "user_names": {}}
+def test_passive_context_caps_single_line_not_total():
+    # Потолок на одну строку остался: одно сообщение не должно раздувать память.
+    # Общий лимит теперь 200 сообщений (lumen_memory), а не 12K символов на фон.
+    state = {"history": [], "memory_summary": "", "memory_pending": [], "recent_media_ids": {}, "user_names": {}}
     try:
         def _msg():
             return SimpleNamespace(chat=SimpleNamespace(id=9002),
                                    from_user=SimpleNamespace(id=8, username="u", first_name="U"),
-                                   text="x")
+                                   text="x", date=None)
 
-        bot._record_passive_group_context(_msg(), state, "я" * 5000)
-        assert len(state["ctx"]) == 1
-        assert len(state["ctx"][0]) <= 600
+        asyncio.run(bot._record_passive_group_context(_msg(), state, "я" * 5000))
+        assert len(state["history"]) == 1
+        assert len(state["history"][0]["content"]) <= 500
         for _ in range(50):
-            bot._record_passive_group_context(_msg(), state, "x" * 400)
-        assert sum(len(line) for line in state["ctx"]) <= _PASSIVE_CTX_MAX_CHARS + 600
+            asyncio.run(bot._record_passive_group_context(_msg(), state, "x" * 400))
+        assert len(state["history"]) == 51
+        assert all(len(entry["content"]) <= 500 for entry in state["history"])
     finally:
         bot._dirty_chat_ids.discard(9002)
 
@@ -3451,19 +3720,30 @@ def test_tagged_prompt_hints_nickname():
     assert "Подсказка" in prompt and "Блинчик" in prompt
 
 
-def test_ctx_survives_serialize_restore():
-    # Фон переживает рестарт: иначе единые 100 сообщений сбрасывались деплоем.
-    from collections import deque
+def test_legacy_ctx_migrates_into_history_on_restore():
+    # Фон переживает рестарт уже в общем логе: старый снимок с ctx вливается
+    # в history как реплика addressed=False, а сводка едет отдельным полем.
     cid = 9005
-    state = {"history": [{"role": "user", "content": "вопрос"}],
-             "ctx": deque(["@m1st (M): фоновая реплика"]),
-             "recent_media_ids": {}, "user_names": {"7": {"username": "m1st", "first_name": "M"}},
-             "last_activity": 1.0, "lang": "ru"}
+    old_snapshot = {
+        "history": [{"role": "user", "content": "вопрос"}],
+        "ctx": ["@m1st (M): фоновая реплика"],
+        "memory_summary": "люди: m1st",
+        "memory_pending": [{"role": "user", "content": "в очереди"}],
+        "recent_media_ids": {}, "user_names": {"7": {"username": "m1st", "first_name": "M"}},
+        "last_activity": 1.0, "lang": "ru",
+    }
     try:
+        bot._restore_single_chat(cid, old_snapshot)
+        state = bot.chat_state[cid]
+        assert [entry["content"] for entry in state["history"]] == ["вопрос", "фоновая реплика"]
+        assert state["history"][-1]["sender"] == "@m1st (M)"
+        assert state["history"][-1]["addressed"] is False
+        assert state["memory_summary"] == "люди: m1st"
+        assert state["memory_pending"] == [{"role": "user", "content": "в очереди"}]
+        assert state["user_names"] == {"7": {"username": "m1st", "first_name": "M"}}
+        # Новый снимок пишет память без legacy-поля.
         snapshot = bot._serialize_chat_state(state)
-        assert snapshot["ctx"] == ["@m1st (M): фоновая реплика"]
-        bot._restore_single_chat(cid, snapshot)
-        assert list(bot.chat_state[cid]["ctx"]) == ["@m1st (M): фоновая реплика"]
-        assert bot.chat_state[cid]["user_names"] == {"7": {"username": "m1st", "first_name": "M"}}
+        assert "ctx" not in snapshot
+        assert snapshot["memory_summary"] == "люди: m1st"
     finally:
         bot.chat_state.pop(cid, None)

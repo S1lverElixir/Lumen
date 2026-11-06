@@ -17,7 +17,7 @@ pinned: false
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-A Telegram bot styled after Claude's tone and personality (direct, warm, light on hedging), running on Google Gemini, free OpenRouter models and Groq with automatic per-message routing between them. Lumen also generates images, downloads TikTok videos (usually without watermarks, watermarked copy as a last resort), and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
+A Telegram bot styled after Claude's tone and personality (direct, warm, light on hedging), running on Munito AI with Google Gemini as the automatic reserve and automatic per-message routing between them. Groq is left for one job: transcribing voice notes. Lumen also generates images, downloads TikTok videos (usually without watermarks, watermarked copy as a last resort), and reads text back as speech. It runs as a webhook service on Hugging Face Spaces (Docker).
 
 **Stack:** Python 3.13 · aiogram · FastAPI · google-genai · Docker
 
@@ -41,7 +41,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 ## Features
 
-- **Automatic model routing.** Every message goes to whichever provider actually has what it needs: plain text starts at Gemma (the largest free quota), then Groq and OpenRouter; web search and link reading go to Gemini. Every fresh query also gets external snippets (DuckDuckGo and Google News with publication dates) for whichever model answers, including the non-Gemini reserves.
+- **Automatic model routing.** Every message goes to whichever provider actually has what it needs: plain text and images start at Munito AI (open models over one OpenAI-compatible endpoint), with Gemini as the automatic reserve; web search, link reading, video and audio go to Gemini, since no other provider can do them. Voice notes are transcribed by Groq Whisper first, which is the only thing Groq is left for. Every fresh query also gets external snippets (DuckDuckGo and Google News with publication dates) for whichever model answers.
 - **Streaming replies** with a self-calibrating typing-speed pacer, so answers type themselves in instead of landing in a few large chunks.
 - **Claude-style live status.** In private chats search and media requests show a sparkle timeline ("Searching the web", found sources, a thinking timer) and finish with a collapsed "Thought for Ns" block; simple answers get a subtle italic thought line. Private answers are plain messages, without Telegram reply quotes.
 - **Defenses against prompt injection and identity leaks.** A deterministic input filter plus output scrubbers keep the bot from revealing which model or provider actually answered.
@@ -57,7 +57,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 
 ## How it works
 
-Lumen is a single FastAPI + aiogram service. Telegram delivers updates to a webhook; duplicate `update_id` deliveries are ignored. Each message gets routed through a chain of candidate models, built on the fly from the message's content: attachments, links, and a couple of lightweight heuristics for "does this need current information" and "is this a heavy request." Plain text starts on Gemma, then Groq and OpenRouter; search and link reading go to Gemini; every fresh query also gets external DuckDuckGo/Google News snippets attached for any provider. The first provider that answers wins, the next one is tried as a fallback if its whole chain fails. Models that already returned 429 today are skipped by the router.
+Lumen is a single FastAPI + aiogram service. Telegram delivers updates to a webhook; duplicate `update_id` deliveries are ignored. Each message gets routed through a chain of candidate models, built on the fly from the message's content: attachments, links, and a couple of lightweight heuristics for "does this need current information" and "is this a heavy request." Plain text and images start on Munito AI, with Gemini as the automatic reserve; search, links, YouTube and video/audio go to Gemini; every fresh query also gets external DuckDuckGo/Google News snippets attached for any provider. The first provider that answers wins, the next one is tried as a fallback if its whole chain fails. Models that already returned 429 today are skipped by the router.
 
 The codebase is a modular monolith. `bot.py` is the entry point and composition root; the rest is split into focused modules: `lumen_admin.py` (FastAPI app, secret gates, admin/diag/export endpoints), `lumen_message_core.py` (message-handling core), `lumen_routes.py` (LLM calls with fallback, `_run_route`), `lumen_streaming.py` (provider-agnostic streaming), `lumen_status.py` (Claude-style live status/activity bubble), `lumen_search.py` (external DuckDuckGo/Bing/Google News snippets), `lumen_chat_state.py` (chat state, quotas, locks), `lumen_commands.py` (commands, TTS/draw pipelines, pick buttons), `lumen_tiktok_flow.py` (TikTok send orchestration), `lumen_rich.py` (sending: guests, Rich Messages, chunking), `lumen_media_flow.py` (Telegram attachment downloads), `lumen_transport_calls.py` (sessions, proxy rotation, Telegram calls), `lumen_errors.py` (model error classification), `lumen_limits.py` (rate window, pick queue), `lumen_router_config.py` (model routing), `lumen_formatting.py` (markdown to Telegram HTML, plus Rich Messages for tables/headings/math), `lumen_security.py` (injection and leak defenses), `lumen_message_parse.py` (links, draw/tts triggers, media references), `lumen_media.py` (mime types, file-id parsing), `lumen_images.py`, `lumen_tts.py`, `lumen_tiktok.py`, `lumen_telegram_transport.py`, `lumen_state_storage.py`, `lumen_typing_pace.py`, `lumen_model_speed.py`, and `lumen_lang.py` (bot language: system messages in 25 languages). `lumen_devtrace.py` writes an opt-in JSONL trace (requests, answers, passive background) for prompt debugging.
 
@@ -102,7 +102,7 @@ All endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/admin_k
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /diag` | Checks outbound network reachability (Telegram, Gemini, OpenRouter, TikWM, Pollinations, etc.) from inside the container. |
+| `GET /diag` | Checks outbound network reachability (Telegram, Gemini, Groq, Munito, TikWM, Pollinations, etc.) from inside the container. |
 | `GET /webhook_url` | Shows the computed webhook URL and a ready-to-open registration link. |
 | `GET /export_state` | Dumps all chat histories and quota counters as JSON, for manual backup. |
 | `GET /devtrace?n=200` | Tails the dev trace (requests, answers, passive background) as JSON, for prompt debugging. Needs `DEV_TRACE=1`. |
@@ -127,11 +127,11 @@ More owner-only commands stay out of the menu on purpose, since they surface int
 |---|---|---|
 | `/stats` | bot owner, DMs only | Active chat count, process uptime, per-model quota usage. |
 | `/logs` | bot owner, DMs only | Sends `bot.log` with secrets redacted. |
-| `/selftest [gemini]` | bot owner, DMs only, max once a minute | Live probe of route heads (Groq, light OpenRouter, Telegram proxy, TikWM; Gemini only with the `gemini` argument). Successful probes count against quota. |
+| `/selftest [gemini]` | bot owner, DMs only, max once a minute | Live probe of the route heads (Munito, then Gemini only with the `gemini` argument) plus the Telegram proxy and TikWM. Successful probes count against quota. |
 | `/ban <ID>` / `/unban <ID>` (or as a reply) | bot owner, DMs only | Block/unblock a user by Telegram ID. Banned users are fully ignored: no answers, no group context, no limit counters. Survives restarts. |
 | `/banlist` | bot owner, DMs only | Shows banned user IDs. |
 
-In groups the bot keeps recent messages (up to 100, with a total character cap) as context and sends them to the model providers together with the question; `/reset` (group admins/owner) clears them.
+The bot keeps one chronological chat memory of up to 200 messages (group background, messages addressed to it and its answers, with author and time); older messages are folded into a long-term summary. Photos are kept as Telegram references, and up to two recent photos are attached as context. `/reset` (group admins/owner) clears the memory and its summary.
 
 ## Testing
 

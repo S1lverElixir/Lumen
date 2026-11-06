@@ -267,8 +267,10 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         "google_generic": "https://www.google.com",
         "gemini_api": "https://generativelanguage.googleapis.com",
         "huggingface": "https://huggingface.co",
-        "openrouter": "https://openrouter.ai",
         "groq_api": "https://api.groq.com",
+        # Голое начало адреса: путь /chat/completions без ключа ответил бы 401/404
+        # и окрасил живой хост красным.
+        "munito_api": urlsplit(bot.MUNITO_BASE_URL)._replace(path="", query="", fragment="").geturl(),
         # /api/ — тот же путь, что у реальных запросов: корень прокси мог
         # отвечать 200, пока сам API-путь сломан (ревью 28.10.2026).
         "tikwm": (tikwm_base + "/api/") if tikwm_via_proxy else "https://www.tikwm.com",

@@ -13,8 +13,8 @@ from zoneinfo import ZoneInfo
 from lumen_lang import DEFAULT_LANG, t as _lang_t
 from system_prompt import SYSTEM_PROMPT
 
-# Провайдеры OpenRouter отдают плейсхолдер вместо ответа: choices непустые, текста
-# нет. Прод 17.09.2026 лечил только пустой choices — литерал "Empty response"
+# OpenAI-совместимые провайдеры отдают плейсхолдер вместо ответа: choices непустые,
+# текста нет. Прод 17.09.2026 лечил только пустой choices — литерал "Empty response"
 # продолжал уходить в чат (выборка бэкапа 05.11.2026: 7 таких в одном диалоге).
 _EMPTY_LIKE_TEXTS = frozenset({"empty response", "no response", "n/a", "none", "no answer"})
 

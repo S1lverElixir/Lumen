@@ -124,6 +124,9 @@ def _clean_history_entry(item: dict) -> dict | None:
         return item
     cleaned = _HISTORY_SERVICE_RE.sub("", text).strip()
     if not cleaned or _is_empty_like(cleaned):
+        # Медиа без подписи — законная реплика: её метку [фото] строит lumen_memory.
+        if item.get("media"):
+            return {**item, "content": ""}
         return None
     if cleaned == text:
         return item

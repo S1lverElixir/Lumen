@@ -193,11 +193,12 @@ def test_empty_external_search_with_grounded_answer_has_no_note(rate_guard_setup
 
 
 def test_daily_limit_still_gets_external_search_snippets(rate_guard_setup, monkeypatch):
-    # Дневной лимит Gemini не отключает внешний поиск: сниппеты едут дешёвым
-    # моделям маршрута, иначе они отвечают по памяти (задумка поиска — искать
-    # умеет не только Gemini).
+    # Дневной лимит Gemini не отключает внешний поиск: сниппеты едут резерву
+    # (Munito), иначе он отвечает по памяти (задумка поиска — искать умеет не
+    # только Gemini).
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "_user_daily_gemini_exhausted", lambda uid, entry: True)
     captured: dict = {}
 
@@ -224,6 +225,7 @@ def test_daily_limit_with_empty_search_keeps_no_search_note(rate_guard_setup, mo
     # Если и внешний поиск пуст — пометка «без поиска» обязана остаться.
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "_user_daily_gemini_exhausted", lambda uid, entry: True)
     captured: dict = {}
 

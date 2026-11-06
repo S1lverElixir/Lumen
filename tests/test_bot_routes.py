@@ -1,5 +1,5 @@
 """
-test_bot_routes.py — Маршрутизация LLM: классификация ошибок, ask_gemini/ask_openrouter, _run_route.
+test_bot_routes.py — Маршрутизация LLM: классификация ошибок, ask_gemini/ask_munito, _run_route.
 
 Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
 """
@@ -197,32 +197,28 @@ def test_ask_gemini_scrubs_identity_leak_before_storing_history():
 
 
 @pytest.mark.parametrize("mode", ["text", "vision"])
-def test_empty_model_chain_falls_back_to_current_order_head(mode):
+def test_empty_model_chain_falls_back_to_current_order_head(monkeypatch, mode):
     # РЕГРЕССИЯ (24.07.2026): раньше запасным вариантом на случай пустого model_chain
-    # стоял захардкоженный литерал мёртвой модели; теперь дефолт ссылается на голову
-    # актуального ORDER-списка (_OR_LIGHT_ORDER для текста, _OR_VISION_ORDER для vision).
+    # стоял захардкоженный литерал мёртвой модели. Порядок подменяем своим списком:
+    # тест падает, если дефолт снова вернут в виде литерала, а не чтения головы
+    # _MUNITO_ORDER (у Munito текст и vision в одной цепочке).
+    import lumen_routes
     chat_id = 999401
 
     calls = []
 
-    async def fake_or_fallback(messages, trial_models, primary_model_id, **kwargs):
+    async def fake_chain(messages, trial_models, primary_model_id, **kwargs):
         calls.append(trial_models)
         return "ответ", trial_models[0]
 
-    original = bot._or_chat_completion_with_fallback
-    bot._or_chat_completion_with_fallback = fake_or_fallback
-    try:
-        if mode == "text":
-            asyncio.run(bot.ask_openrouter_text(chat_id, "привет", model_chain=[]))
-            expected = [bot._OR_LIGHT_ORDER[0]]
-        else:
-            asyncio.run(bot.ask_openrouter_multimodal(chat_id, "привет", (b"fake", "image/jpeg"), "photo.jpg", model_chain=[]))
-            expected = [bot._OR_VISION_ORDER[0]]
-        assert calls[0] == expected
-        assert "meta-llama/llama-3.3-70b-instruct:free" not in calls[0]
-    finally:
-        bot._or_chat_completion_with_fallback = original
-        bot.chat_state.pop(chat_id, None)
+    monkeypatch.setattr(lumen_routes, "_chat_completion_chain", fake_chain)
+    monkeypatch.setattr(lumen_router_config, "_MUNITO_ORDER", ["probe/order-head", "probe/second"])
+    if mode == "text":
+        asyncio.run(bot.ask_munito_text(chat_id, "привет", model_chain=[]))
+    else:
+        asyncio.run(bot.ask_munito_multimodal(chat_id, "привет", (b"fake", "image/jpeg"), "photo.jpg", model_chain=[]))
+    assert calls[0] == ["probe/order-head"]
+    bot.chat_state.pop(chat_id, None)
 
 
 def test_run_route_falls_back_to_second_provider_when_first_fully_fails():
@@ -230,52 +226,58 @@ def test_run_route_falls_back_to_second_provider_when_first_fully_fails():
     # роутер должен попробовать резерв в ДРУГОМ провайдере, а не сдаваться сразу.
     chat_id = 999301
 
-    async def failing_or_text(*args, **kwargs):
-        raise bot.OpenRouterAPIError("всё сломано", status_code=500)
+    async def failing_munito_text(*args, **kwargs):
+        raise bot.MunitoAPIError("всё сломано", status_code=500)
 
     async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None, **kwargs):
         return "Ответ от Gemini (резерв)"
 
-    original_or_text = bot.ask_openrouter_text
+    original_munito_text = bot.ask_munito_text
     original_ask_gemini = bot.ask_gemini
-    bot.ask_openrouter_text = failing_or_text
+    bot.ask_munito_text = failing_munito_text
     bot.ask_gemini = fake_ask_gemini
     try:
-        route = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free"), ("gemini", "gemini-3.1-flash-lite")]
+        route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"), ("gemini", "gemini-3.1-flash-lite")]
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=False))
         assert ans == "Ответ от Gemini (резерв)"
         assert sent is False
     finally:
-        bot.ask_openrouter_text = original_or_text
+        bot.ask_munito_text = original_munito_text
         bot.ask_gemini = original_ask_gemini
 
 
 def test_run_route_raises_when_both_providers_fail():
     chat_id = 999302
+    tried = []
 
-    async def failing_or_text(*args, **kwargs):
-        raise bot.OpenRouterAPIError("сломано", status_code=500)
+    async def failing_munito_text(*args, **kwargs):
+        tried.append("munito")
+        raise bot.MunitoAPIError("сломано", status_code=500)
 
     async def failing_gemini(*args, **kwargs):
+        tried.append("gemini")
         raise RuntimeError("тоже сломано")
 
-    original_or_text = bot.ask_openrouter_text
+    original_munito_text = bot.ask_munito_text
     original_ask_gemini = bot.ask_gemini
-    bot.ask_openrouter_text = failing_or_text
+    bot.ask_munito_text = failing_munito_text
     bot.ask_gemini = failing_gemini
     try:
-        route = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free"), ("gemini", "gemini-3.1-flash-lite")]
-        with pytest.raises(Exception):
+        route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"), ("gemini", "gemini-3.1-flash-lite")]
+        # Поднимается последняя ошибка маршрута: пользователю её текст маппит
+        # _route_error_reply_text, поэтому важен именно последний провайдер.
+        with pytest.raises(RuntimeError, match="тоже сломано"):
             asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=False))
+        assert tried == ["munito", "gemini"]
     finally:
-        bot.ask_openrouter_text = original_or_text
+        bot.ask_munito_text = original_munito_text
         bot.ask_gemini = original_ask_gemini
 
 
-def test_shared_history_between_gemini_and_openrouter():
-    # Регрессия на требование "общая память между Gemini и OpenRouter, чтобы не
-    # чувствовалось переключение между моделями" — раньше у каждого провайдера
-    # была своя ОТДЕЛЬНАЯ история (gemini_history/or_history).
+def test_shared_history_between_gemini_and_munito(monkeypatch):
+    # Регрессия на требование "общая память между Gemini и текстовым провайдером,
+    # чтобы не чувствовалось переключение между моделями" — раньше у каждого
+    # провайдера была своя ОТДЕЛЬНАЯ история (gemini_history/or_history).
     chat_id = 999201
 
     def fake_generate_content(*, model, contents, config=None):
@@ -286,27 +288,25 @@ def test_shared_history_between_gemini_and_openrouter():
     original_client = bot.client
     bot.client = fake_client
 
-    async def fake_or_fallback(messages, trial_models, primary_model_id, **kwargs):
-        return "Ответ от OpenRouter", trial_models[0]
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+        return {"choices": [{"message": {"content": "Ответ от Munito"}}]}
 
-    original_or_fallback = bot._or_chat_completion_with_fallback
-    bot._or_chat_completion_with_fallback = fake_or_fallback
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
 
     try:
         asyncio.run(bot.ask_gemini(chat_id, "Первый вопрос (через Gemini)"))
-        asyncio.run(bot.ask_openrouter_text(chat_id, "Второй вопрос (через OpenRouter)", model_chain=["meta-llama/llama-3.3-70b-instruct:free"]))
+        asyncio.run(bot.ask_munito_text(chat_id, "Второй вопрос (через Munito)", model_chain=["deepseek-ai/deepseek-v4.1-flash-1017"]))
 
         history = bot.chat_state[chat_id]["history"]
         contents = [h["content"] for h in history]
         # Обе записи должны быть в ОДНОЙ и той же истории, а не в раздельных
         assert "Первый вопрос (через Gemini)" in contents
         assert "Ответ от Gemini" in contents
-        assert "Второй вопрос (через OpenRouter)" in contents
-        assert "Ответ от OpenRouter" in contents
+        assert "Второй вопрос (через Munito)" in contents
+        assert "Ответ от Munito" in contents
         assert len(history) == 4
     finally:
         bot.client = original_client
-        bot._or_chat_completion_with_fallback = original_or_fallback
         bot.chat_state.pop(chat_id, None)
 
 
@@ -442,138 +442,150 @@ def test_run_route_reorders_slow_head_down(monkeypatch):
         seen.append(list(model_chain))
         return "ok"
 
-    monkeypatch.setattr(bot, "ask_openrouter_text", fake_ask)
+    monkeypatch.setattr(bot, "ask_munito_text", fake_ask)
     lumen_model_speed._latency_ema.clear()
     lumen_model_speed.record_response(
-        lumen_model_speed.speed_key("openrouter", "slow:free"), total_sec=100.0)
+        lumen_model_speed.speed_key("munito", "slow-model"), total_sec=100.0)
     incoming = _FakeIncomingMessage(999303)
     try:
         ans, sent = asyncio.run(bot._run_route(
-            999303, "Привет", [("openrouter", "slow:free"), ("openrouter", "fast:free")], incoming))
+            999303, "Привет", [("munito", "slow-model"), ("munito", "deepseek-ai/deepseek-v4-flash")], incoming))
         assert (ans, sent) == ("ok", False)
-        assert seen[0][0] == "fast:free"
+        assert seen[0][0] == "deepseek-ai/deepseek-v4-flash"
     finally:
         bot.chat_state.pop(999303, None)
         lumen_model_speed._latency_ema.clear()
 
 
 @pytest.mark.parametrize("empty_payload", [None, "Empty response", "  empty response. ", "No response"])
-def test_or_empty_response_falls_through_to_next_model(monkeypatch, empty_payload):
+def test_chain_empty_response_falls_through_to_next_model(monkeypatch, empty_payload):
     # Прод-кейс 17.09.2026: пользователь дважды увидел буквальное "Empty
     # response" — пустой ответ обязан двигать цепочку дальше, а не идти в чат.
     # Плейсхолдер провайдера (непустая строка) ловится тем же условием:
     # выборка бэкапа 05.11.2026 — 7 таких ответов в одном диалоге.
+    import lumen_routes
     calls = []
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        model = json_body["model"]
+    async def fake_request(payload, deadline):
+        model = payload["model"]
         calls.append(model)
-        if model == "m1:free":
+        if model == "probe/empty-head":
             if empty_payload is None:
                 return {"choices": []}
             return {"choices": [{"message": {"content": empty_payload}}]}
         return {"choices": [{"message": {"content": "живой ответ"}}]}
 
-    monkeypatch.setattr(bot, "_or_request", fake_or_request)
     messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "hi"},
     ]
-    answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["m1:free", "m2:free"], "m1:free"))
-    assert (answer, used) == ("живой ответ", "m2:free")
-    assert calls == ["m1:free", "m2:free"]
+    answer, used = asyncio.run(lumen_routes._chat_completion_chain(
+        messages, ["probe/empty-head", "probe/good"], "probe/empty-head",
+        request_fn=fake_request, provider="munito",
+    ))
+    assert (answer, used) == ("живой ответ", "probe/good")
+    assert calls == ["probe/empty-head", "probe/good"]
 
 
-def test_openrouter_provenance_names_model_and_truncation(monkeypatch):
-    # Выборка бэкапа 05.11.2026: у OR/Groq в provenance писалась None — след
-    # нельзя было привязать к модели, а обрыв по потолку вывода не был виден нигде.
+def test_munito_provenance_names_model_and_truncation(monkeypatch):
+    # Выборка бэкапа 05.11.2026: у прежних провайдеров в provenance писалась None —
+    # след нельзя было привязать к модели, а обрыв по потолку вывода не был виден нигде.
     chat_id = 999399
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "текст до потолка"}, "finish_reason": "length"}]}
 
-    monkeypatch.setattr(bot, "_or_request", fake_or_request)
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda *args, **kwargs: None)
     prov: dict = {}
     try:
-        answer = asyncio.run(bot.ask_openrouter_text(chat_id, "привет", model_chain=["m1:free"], provenance=prov))
+        answer = asyncio.run(bot.ask_munito_text(chat_id, "привет", model_chain=["probe/m1"], provenance=prov))
     finally:
         bot.chat_state.pop(chat_id, None)
     assert answer == "текст до потолка"
-    assert prov.get("provider") == "openrouter"
-    assert prov.get("model") == "m1:free"
+    assert prov.get("provider") == "munito"
+    assert prov.get("model") == "probe/m1"
     assert prov.get("finish_reason") == "length"
 
 
-def test_or_safety_label_only_response_moves_to_next_model(monkeypatch):
+def test_chain_safety_label_only_response_moves_to_next_model(monkeypatch):
     # Прод-кейс из бэкапа 05.11.2026: весь ответ пользователя — 39 символов
     # «User Safety: safe» от модели-головы; непустая строка проходила проверку.
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        if json_body["model"] == "m1:free":
+    import lumen_routes
+
+    async def fake_request(payload, deadline):
+        if payload["model"] == "probe/empty-head":
             return {"choices": [{"message": {"content": "User Safety: safe\nResponse Safety: safe"}}]}
         return {"choices": [{"message": {"content": "живой ответ"}}]}
 
-    monkeypatch.setattr(bot, "_or_request", fake_or_request)
     messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
-    answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["m1:free", "m2:free"], "m1:free"))
-    assert (answer, used) == ("живой ответ", "m2:free")
+    answer, used = asyncio.run(lumen_routes._chat_completion_chain(
+        messages, ["probe/empty-head", "probe/good"], "probe/empty-head",
+        request_fn=fake_request, provider="munito",
+    ))
+    assert (answer, used) == ("живой ответ", "probe/good")
 
 
 def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
     # Три пустых подряд в одну голову — карантин (реальная регрессия: мёртвая голова
     # жевала бы каждую попытку до конца суток вместо объезда после третьей).
-    async def fake_empty(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    import lumen_routes
+
+    async def fake_request(payload, deadline):
         return {"choices": []}
 
-    monkeypatch.setattr(bot, "_or_request", fake_empty)
     messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "hi"},
     ]
     for _ in range(3):
         with pytest.raises(RuntimeError, match="empty response"):
-            asyncio.run(bot._or_chat_completion_with_fallback(messages, ["qe:free"], "qe:free"))
-    assert bot._is_quarantined("openrouter", "qe:free") is True
+            asyncio.run(lumen_routes._chat_completion_chain(
+                messages, ["probe/qe"], "probe/qe", request_fn=fake_request, provider="munito"))
+    assert bot._is_quarantined("munito", "probe/qe") is True
 
 
 def test_chain_garbled_response_delivered_but_feeds_quarantine(monkeypatch):
     # Каша доставляется как раньше (без подмены), но в счётчик идёт: три таких —
     # и голова в карантине.
+    import lumen_routes
     mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
     assert len(mush) >= 100
 
-    async def fake_mush(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_request(payload, deadline):
         return {"choices": [{"message": {"content": mush}}]}
 
-    monkeypatch.setattr(bot, "_or_request", fake_mush)
     messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "hi"},
     ]
     for _ in range(3):
-        answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["qm:free"], "qm:free"))
-        assert (answer, used) == (mush, "qm:free")
-    assert bot._is_quarantined("openrouter", "qm:free") is True
+        answer, used = asyncio.run(lumen_routes._chat_completion_chain(
+            messages, ["probe/qm"], "probe/qm", request_fn=fake_request, provider="munito"))
+        assert (answer, used) == (mush, "probe/qm")
+    assert bot._is_quarantined("munito", "probe/qm") is True
 
 
 def test_chain_echoed_mix_does_not_feed_quarantine(monkeypatch):
     # Тот же mush, но токены уже были в запросе: модель повторила за
     # пользователем — это эхо, карантин не кормим (иначе любой клал бы модели).
+    import lumen_routes
     mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
     user_text = "повтори за мной: dataданные fileфайл testтест и дальше своими словами"
 
-    async def fake_mush(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_request(payload, deadline):
         return {"choices": [{"message": {"content": mush}}]}
 
-    monkeypatch.setattr(bot, "_or_request", fake_mush)
     messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "hi"},
     ]
     for _ in range(5):
-        answer, used = asyncio.run(
-            bot._or_chat_completion_with_fallback(messages, ["qe2:free"], "qe2:free", user_text=user_text))
-        assert (answer, used) == (mush, "qe2:free")
-    assert bot._is_quarantined("openrouter", "qe2:free") is False
+        answer, used = asyncio.run(lumen_routes._chat_completion_chain(
+            messages, ["probe/qe2"], "probe/qe2", request_fn=fake_request,
+            provider="munito", user_text=user_text))
+        assert (answer, used) == (mush, "probe/qe2")
+    assert bot._is_quarantined("munito", "probe/qe2") is False
 
 
 def test_attempt_timeout_caps_by_remaining_route_budget():
@@ -629,30 +641,6 @@ def test_is_gemini_daily_quota_recognizes_google_per_day_metric():
     ) is False
 
 
-def test_or_chain_stops_on_account_wide_limit(monkeypatch):
-    # Регрессия объединения петель (враждебное ревью 27.09.2026): ранний выход по
-    # аккаунтному лимиту OpenRouter уехал внутрь request_fn, где его проглатывал
-    # общий except, — цепочка выжигалась целиком. Проверяем, что остальные кандидаты
-    # НЕ пробуются (иначе это минуты попыток впустую, как было в проде).
-    calls = []
-
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        model = json_body["model"]
-        calls.append(model)
-        raise bot.OpenRouterAPIError(
-            "free-models-per-day limit reached for your account",
-            status_code=429,
-        )
-
-    monkeypatch.setattr(bot, "_or_request", fake_or_request)
-    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
-    with pytest.raises(bot.OpenRouterAPIError):
-        asyncio.run(bot._or_chat_completion_with_fallback(
-            [{"role": "user", "content": "hi"}], ["m1:free", "m2:free", "m3:free"], "m1:free",
-        ))
-    assert calls == ["m1:free"], f"цепочка не должна выжигаться, отработали: {calls}"
-
-
 def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
     chat_id = 999304
     extracts = ["", "хороший ответ"]
@@ -673,27 +661,27 @@ def test_gemini_empty_response_falls_through_to_next_model(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
-def test_run_route_streams_openrouter_when_route_head_is_openrouter():
+def test_run_route_streams_munito_when_route_head_is_munito():
     chat_id = 999305
 
-    async def fake_or_stream(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
-        return "Стримленный ответ от OpenRouter", None
+    async def fake_munito_stream(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
+        return "Стримленный ответ от Munito", None
 
     async def must_not_be_called(*args, **kwargs):
-        raise AssertionError("ask_openrouter_text не должен вызываться, если стрим уже сработал")
+        raise AssertionError("ask_munito_text не должен вызываться, если стрим уже сработал")
 
-    original_stream = bot._try_openrouter_streaming
-    original_or_text = bot.ask_openrouter_text
-    bot._try_openrouter_streaming = fake_or_stream
-    bot.ask_openrouter_text = must_not_be_called
+    original_stream = bot._try_munito_streaming
+    original_munito_text = bot.ask_munito_text
+    bot._try_munito_streaming = fake_munito_stream
+    bot.ask_munito_text = must_not_be_called
     try:
-        route = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free"), ("gemini", "gemini-3.5-flash-lite")]
+        route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"), ("gemini", "gemini-3.5-flash-lite")]
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
-        assert ans == "Стримленный ответ от OpenRouter"
+        assert ans == "Стримленный ответ от Munito"
         assert sent is True
     finally:
-        bot._try_openrouter_streaming = original_stream
-        bot.ask_openrouter_text = original_or_text
+        bot._try_munito_streaming = original_stream
+        bot.ask_munito_text = original_munito_text
 
 
 def test_run_route_streams_fallback_model_after_head_stream_failure(monkeypatch):
@@ -714,15 +702,15 @@ def test_run_route_streams_fallback_model_after_head_stream_failure(monkeypatch)
         raise AssertionError("обычный вызов не нужен: резервный стрим сработал")
 
     monkeypatch.setattr(bot, "_try_gemini_streaming", fake_stream)
-    monkeypatch.setattr(bot, "_try_openrouter_streaming", fake_stream)
+    monkeypatch.setattr(bot, "_try_munito_streaming", fake_stream)
     monkeypatch.setattr(bot, "ask_gemini", must_not_be_called)
-    monkeypatch.setattr(bot, "ask_openrouter_text", must_not_be_called)
+    monkeypatch.setattr(bot, "ask_munito_text", must_not_be_called)
     try:
-        route = [("gemini", "gemini-3.8-flash"), ("openrouter", "meta-llama/llama-3.3-70b-instruct:free")]
+        route = [("gemini", "gemini-3.8-flash"), ("munito", "deepseek-ai/deepseek-v4.1-flash-1017")]
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert ans == "Ответ со стрима резерва"
         assert sent is True
-        assert [model for model, _, _ in calls] == ["gemini-3.8-flash", "meta-llama/llama-3.3-70b-instruct:free"]
+        assert [model for model, _, _ in calls] == ["gemini-3.8-flash", "deepseek-ai/deepseek-v4.1-flash-1017"]
         assert calls[1][1] is placeholder
         # Таймер ожидания общий на маршрут: переход к резерву не откатывает его в 0.
         assert calls[0][2] is not None and calls[0][2] == calls[1][2]
@@ -730,63 +718,34 @@ def test_run_route_streams_fallback_model_after_head_stream_failure(monkeypatch)
         bot.chat_state.pop(chat_id, None)
 
 
-def test_run_route_falls_back_from_failed_openrouter_stream_to_non_streaming():
+def test_run_route_falls_back_from_failed_munito_stream_to_non_streaming():
     chat_id = 999306
 
-    async def fake_or_stream_fail(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
+    async def fake_munito_stream_fail(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, None  # ранний сбой без плейсхолдера (например, message.reply сам не удался)
 
     calls = []
 
-    async def fake_or_text(cid, prompt, model_chain, deadline=None, **kwargs):
+    async def fake_munito_text(cid, prompt, model_chain, deadline=None, **kwargs):
         calls.append(model_chain)
         return "Ответ без стрима"
 
-    original_stream = bot._try_openrouter_streaming
-    original_or_text = bot.ask_openrouter_text
-    bot._try_openrouter_streaming = fake_or_stream_fail
-    bot.ask_openrouter_text = fake_or_text
+    original_stream = bot._try_munito_streaming
+    original_munito_text = bot.ask_munito_text
+    bot._try_munito_streaming = fake_munito_stream_fail
+    bot.ask_munito_text = fake_munito_text
     try:
-        route = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free"), ("openrouter", "openai/gpt-oss-20b:free")]
+        route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"), ("munito", "deepseek-ai/deepseek-v4-flash")]
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert ans == "Ответ без стрима"
         assert sent is False
         # Обычный вызов идёт по всему блоку: модель, у которой стрим упал раньше
         # показа, пробуется без потока — иначе сломанный SSE провайдера оставлял
         # бы чат без ответа вовсе (аудит 28.10.2026).
-        assert calls[0] == ["meta-llama/llama-3.3-70b-instruct:free", "openai/gpt-oss-20b:free"]
+        assert calls[0] == ["deepseek-ai/deepseek-v4.1-flash-1017", "deepseek-ai/deepseek-v4-flash"]
     finally:
-        bot._try_openrouter_streaming = original_stream
-        bot.ask_openrouter_text = original_or_text
-
-
-def test_run_route_tries_groq_head_with_stream_fallback_to_text():
-    # Groq-подключение 21.09.2026: голова-groq стримится через _try_groq_streaming, при раннем сбое — обычный ask_groq_text без пере-пробы упавшей модели.
-    chat_id = 999703
-
-    async def fake_groq_stream_fail(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
-        return None, None
-
-    calls = []
-
-    async def fake_groq_text(cid, prompt, model_chain, deadline=None, **kwargs):
-        calls.append(model_chain)
-        return "Ответ Groq без стрима"
-
-    original_stream = bot._try_groq_streaming
-    original_groq_text = bot.ask_groq_text
-    bot._try_groq_streaming = fake_groq_stream_fail
-    bot.ask_groq_text = fake_groq_text
-    try:
-        route = [("groq", "qwen/qwen3.8-27b"), ("groq", "openai/gpt-oss-120b")]
-        ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
-        assert ans == "Ответ Groq без стрима"
-        assert sent is False
-        # После раннего сбоя стрима модель пробуется обычным вызовом.
-        assert calls[0] == ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
-    finally:
-        bot._try_groq_streaming = original_stream
-        bot.ask_groq_text = original_groq_text
+        bot._try_munito_streaming = original_stream
+        bot.ask_munito_text = original_munito_text
 
 
 def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
@@ -798,18 +757,18 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
     chat_id = 999307
     placeholder = _FakeSentMessage()
 
-    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
+    async def fake_munito_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, placeholder
 
-    async def fake_or_text(cid, prompt, model_chain, deadline=None, **kwargs):
+    async def fake_munito_text(cid, prompt, model_chain, deadline=None, **kwargs):
         return "Ответ от резервной модели"
 
-    original_stream = bot._try_openrouter_streaming
-    original_or_text = bot.ask_openrouter_text
-    bot._try_openrouter_streaming = fake_or_stream_fail_with_placeholder
-    bot.ask_openrouter_text = fake_or_text
+    original_stream = bot._try_munito_streaming
+    original_munito_text = bot.ask_munito_text
+    bot._try_munito_streaming = fake_munito_stream_fail_with_placeholder
+    bot.ask_munito_text = fake_munito_text
     try:
-        route = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free"), ("openrouter", "openai/gpt-oss-20b:free")]
+        route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"), ("munito", "deepseek-ai/deepseek-v4-flash")]
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert ans == "Ответ от резервной модели"
         # sent=True означает, что ответ уже "доставлен" через правку плейсхолдера,
@@ -818,8 +777,8 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
         assert placeholder.deleted is False
         assert placeholder.edits[-1][0] == "Ответ от резервной модели"
     finally:
-        bot._try_openrouter_streaming = original_stream
-        bot.ask_openrouter_text = original_or_text
+        bot._try_munito_streaming = original_stream
+        bot.ask_munito_text = original_munito_text
 
 
 def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
@@ -835,10 +794,10 @@ def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
     async def fake_text(cid, prompt, model_chain, deadline=None, **kwargs):
         return "Ответ от резервной модели"
 
-    monkeypatch.setattr(bot, "_try_openrouter_streaming", fake_stream_fail)
-    monkeypatch.setattr(bot, "ask_openrouter_text", fake_text)
-    route = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free"),
-             ("openrouter", "openai/gpt-oss-20b:free")]
+    monkeypatch.setattr(bot, "_try_munito_streaming", fake_stream_fail)
+    monkeypatch.setattr(bot, "ask_munito_text", fake_text)
+    route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"),
+             ("munito", "deepseek-ai/deepseek-v4-flash")]
     ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=incoming, allow_stream=True))
     assert ans == "Ответ от резервной модели"
     assert sent is True
@@ -852,54 +811,24 @@ def test_run_route_deletes_orphaned_placeholder_when_whole_route_fails():
     chat_id = 999308
     placeholder = _FakeSentMessage()
 
-    async def fake_or_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
+    async def fake_munito_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, placeholder
 
-    async def failing_or_text(*args, **kwargs):
-        raise bot.OpenRouterAPIError("всё сломано", status_code=500)
+    async def failing_munito_text(*args, **kwargs):
+        raise bot.MunitoAPIError("всё сломано", status_code=500)
 
-    original_stream = bot._try_openrouter_streaming
-    original_or_text = bot.ask_openrouter_text
-    bot._try_openrouter_streaming = fake_or_stream_fail_with_placeholder
-    bot.ask_openrouter_text = failing_or_text
+    original_stream = bot._try_munito_streaming
+    original_munito_text = bot.ask_munito_text
+    bot._try_munito_streaming = fake_munito_stream_fail_with_placeholder
+    bot.ask_munito_text = failing_munito_text
     try:
-        route = [("openrouter", "meta-llama/llama-3.3-70b-instruct:free"), ("openrouter", "openai/gpt-oss-20b:free")]
-        with pytest.raises(Exception):
+        route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"), ("munito", "deepseek-ai/deepseek-v4-flash")]
+        with pytest.raises(bot.MunitoAPIError):
             asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert placeholder.deleted is True
     finally:
-        bot._try_openrouter_streaming = original_stream
-        bot.ask_openrouter_text = original_or_text
-
-
-def test_build_gemini_call_config_skips_all_grounding_tools_for_gemma():
-    # Прямая проверка на уровне _build_gemini_call_config: для no_search-модели
-    # (обе Gemma) итоговый config не должен включать вообще ни один
-    # grounding/url_context инструмент, независимо от прочих флагов в конфиге.
-    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
-    _, gconfig = bot._build_gemini_call_config("gemma-4-26b-a4b-it", contents)
-    assert not getattr(gconfig, "tools", None)
-
-
-def test_build_gemini_call_config_no_system_model_includes_full_system_prompt():
-    # РЕГРЕССИЯ (аудит системного промпта, 10 августа 2026): раньше для no_system-моделей
-    # (Gemma) фейковый первый обмен содержал ТОЛЬКО короткий захардкоженный список из 8
-    # пунктов — ни строчки из настоящего SYSTEM_PROMPT (system_prompt.py). Gemma полностью
-    # пропускала БЛАГОПОЛУЧИЕ И ЗДОРОВЬЕ ПОЛЬЗОВАТЕЛЯ (протокол при сообщении о суициде/
-    # самоповреждении — телефон доверия), АВТОРСКИЕ ПРАВА, ОБЪЕКТИВНОСТЬ И НЕПРЕДВЗЯТОСТЬ и
-    # т.д. Теперь get_system_prompt(model_id) подставляется в основу этого сообщения —
-    # проверяем, что и не встречающиеся в коротком чеклисте разделы теперь реально там есть.
-    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
-    call_contents, _ = bot._build_gemini_call_config("gemma-4-26b-a4b-it", contents)
-    first_user_text = call_contents[0].parts[0].text
-    # Системный промпт единый на английском (с сентября 2026).
-    assert "8-800-2000-122" in first_user_text
-    assert "USER WELLBEING" in first_user_text
-    assert "COPYRIGHT" in first_user_text
-    assert "EVENHANDEDNESS" in first_user_text
-    # Короткий проверенный на практике чеклист (личность/дата/защита от инъекций)
-    # сохранён поверх полного промпта, а не заменён им.
-    assert "Your name is Lumen" in first_user_text
+        bot._try_munito_streaming = original_stream
+        bot.ask_munito_text = original_munito_text
 
 
 def test_build_gemini_call_config_with_system_instruction_model_unaffected():
@@ -929,12 +858,6 @@ def test_build_gemini_call_config_does_not_override_thinking_on_heavy_query():
     _, gconfig = bot._build_gemini_call_config("gemini-3.7-flash", contents)
     assert gconfig.thinking_config is None
 
-
-def test_build_gemini_call_config_skips_thinking_override_for_gemma():
-    # Gemma не поддерживает thinking_config вообще — no_system уже исключает её.
-    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
-    _, gconfig = bot._build_gemini_call_config("gemma-4-26b-a4b-it", contents)
-    assert gconfig is None or gconfig.thinking_config is None
 
 
 def test_ask_gemini_daily_quota_marks_model_exhausted_and_switches():
@@ -1004,20 +927,18 @@ def test_ask_gemini_burst_429_only_cools_down_the_model():
         bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.6-flash", None)
 
 
-@pytest.mark.parametrize(("provider", "exc_cls_name"), [
-    ("openrouter", "OpenRouterAPIError"),
-    ("groq", "GroqAPIError"),
-])
-def test_chat_completion_chain_cools_down_model_on_429(provider, exc_cls_name):
-    # Нестриминговые OpenRouter/Groq не писали cooldown после 429 — зеркалим
-    # стриминг, иначе _is_quota_exhausted их не видит и модель долбят заново.
+def test_chat_completion_chain_cools_down_model_on_429():
+    # Нестриминговый текстовый провайдер обязан писать cooldown после 429 — зеркало
+    # стриминга, иначе _is_quota_exhausted его не видит и модель долбят заново.
+    # У Munito лимиты оконные, поэтому остывка, а не суточная метка.
     import lumen_routes
-    exc_cls = getattr(bot, exc_cls_name)
+    exc_cls = bot.MunitoAPIError
 
     async def boom_429(payload, deadline):
         raise exc_cls("HTTP 429 rate limit", status_code=429)
 
-    model = f"probe/rl-{provider}:free"
+    model = "probe/rl-munito"
+    provider = "munito"
     bot.GLOBAL_QUOTA.setdefault(provider, {}).pop(model, None)
     try:
         with pytest.raises(exc_cls):
@@ -1026,29 +947,27 @@ def test_chat_completion_chain_cools_down_model_on_429(provider, exc_cls_name):
                 [model], model, request_fn=boom_429, provider=provider,
             ))
         entry = bot.GLOBAL_QUOTA[provider][model]
-        assert entry["exhausted_at"] is None, "минутный всплеск не должен запирать модель до утра"
+        assert entry["exhausted_at"] is None, "оконный лимит не должен запирать модель до утра"
         assert entry["cooldown_until"] > time.time()
         assert lumen_router_config._is_quota_exhausted(provider, model) is True
     finally:
         bot.GLOBAL_QUOTA[provider].pop(model, None)
 
 
-@pytest.mark.parametrize(("provider", "exc_cls_name"), [
-    ("openrouter", "OpenRouterAPIError"),
-    ("groq", "GroqAPIError"),
-])
-def test_chat_completion_chain_cools_down_model_on_unavailable(provider, exc_cls_name):
-    # Прод 05.10.2026: модели Gemini 3.x отдавали 503 и повторялись на каждом
+def test_chat_completion_chain_cools_down_model_on_unavailable():
+    # Прод 05.10.2026: модели линейки Gemini 3.x отдавали 503 и повторялись на каждом
     # сообщении — до 22 секунд и нескольких попыток впустую. 503 не квота, но
     # модель на QUOTA_RATE_LIMIT_COOLDOWN_SEC пропускать надо. Падает на старом
-    # коде, где "unavailable" не оставлял метки.
+    # коде, где "unavailable" не оставлял метки. Прод 05.11.2026: у Munito те же 503
+    # «no free capacity» на бесплатном тарифе.
     import lumen_routes
-    exc_cls = getattr(bot, exc_cls_name)
+    exc_cls = bot.MunitoAPIError
 
     async def boom_503(payload, deadline):
         raise exc_cls("model is currently unavailable", status_code=503)
 
-    model = f"probe/unavail-{provider}:free"
+    model = "probe/unavail-munito"
+    provider = "munito"
     bot.GLOBAL_QUOTA.setdefault(provider, {}).pop(model, None)
     try:
         with pytest.raises(exc_cls):
@@ -1223,94 +1142,104 @@ def test_ask_gemini_raises_when_route_budget_exceeded():
 
 
 @pytest.mark.parametrize(("status_code", "message"), [(429, "rate limit exceeded"), (403, "forbidden")])
-def test_or_chat_completion_with_fallback_switches_model(status_code, message):
-    # И минутный 429, и "постоянная" на вид 403 не обрывают переход к следующей
-    # модели: при attempts_per_model=1 переход происходит независимо от классификации.
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        model = json_body["model"]
-        if model == "model-a":
-            raise bot.OpenRouterAPIError(message, status_code=status_code)
+def test_chain_switches_model_on_provider_error(status_code, message):
+    import lumen_routes
+    # И оконный 429, и "постоянная" на вид 403 не обрывают переход к следующей
+    # модели: ровно одна попытка на модель, независимо от классификации ошибки.
+    async def fake_request(payload, deadline):
+        if payload["model"] == "probe/model-a":
+            raise bot.MunitoAPIError(message, status_code=status_code)
         return {"choices": [{"message": {"content": "ответ от model-b"}}]}
 
-    original = bot._or_request
-    bot._or_request = fake_or_request
-    try:
-        messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
-        answer, used = asyncio.run(bot._or_chat_completion_with_fallback(messages, ["model-a", "model-b"], "model-a"))
-        assert answer == "ответ от model-b"
-        assert used == "model-b"
-    finally:
-        bot._or_request = original
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    answer, used = asyncio.run(lumen_routes._chat_completion_chain(
+        messages, ["probe/model-a", "probe/model-b"], "probe/model-a",
+        request_fn=fake_request, provider="munito",
+    ))
+    assert answer == "ответ от model-b"
+    assert used == "probe/model-b"
 
 
-def test_ask_openrouter_multimodal_sends_all_album_images_not_just_first():
+def test_chain_whole_failure_raises_last_model_error():
+    import lumen_routes
+    # Вся цепочка легла — наверх идёт ошибка ПОСЛЕДНЕЙ модели (её маппит
+    # _route_error_reply_text), а не первой: пользователь должен видеть статус
+    # резерва, а не голову. Регрессия: возврат первой ошибки показал бы «модель
+    # недоступна», когда резерв был жив и падал по другой причине.
+    async def fake_request(payload, deadline):
+        raise bot.MunitoAPIError(f"сбой {payload['model']}", status_code=500)
+
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}]
+    with pytest.raises(bot.MunitoAPIError, match="сбой probe/model-b"):
+        asyncio.run(lumen_routes._chat_completion_chain(
+            messages, ["probe/model-a", "probe/model-b"], "probe/model-a",
+            request_fn=fake_request, provider="munito",
+        ))
+
+
+def test_ask_munito_multimodal_sends_all_album_images_not_just_first(monkeypatch):
     # Внешний аудит: уходила только первая фотография альбома, остальные 2–9 молча терялись.
     chat_id = 999411
     captured = {}
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         captured["messages"] = json_body["messages"]
         return {"choices": [{"message": {"content": "вижу три фото"}}]}
 
-    original_request = bot._or_request
-    original_key = bot.OPENROUTER_API_KEY
-    bot._or_request = fake_or_request
-    bot.OPENROUTER_API_KEY = "fake-key"
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda *args, **kwargs: None)
     try:
         media = [(b"one", "image/jpeg"), (b"two", "image/png"), (b"three", "image/jpeg")]
-        answer = asyncio.run(bot.ask_openrouter_multimodal(chat_id, "что на фото?", media, "a.jpg", model_chain=["m"]))
+        answer = asyncio.run(bot.ask_munito_multimodal(chat_id, "что на фото?", media, "a.jpg", model_chain=["probe/m"]))
         assert answer == "вижу три фото"
         user_msg = captured["messages"][-1]
         images = [p for p in user_msg["content"] if isinstance(p, dict) and p.get("type") == "image_url"]
         assert len(images) == 3
     finally:
-        bot._or_request = original_request
-        bot.OPENROUTER_API_KEY = original_key
         bot.chat_state.pop(chat_id, None)
 
 
-def test_ask_openrouter_multimodal_skips_video_slides_for_gemini():
-    # Видео-слайды OpenRouter не принимает — их забирает Gemini-ветка, сюда едут только картинки.
+def test_ask_munito_multimodal_skips_video_slides_for_gemini(monkeypatch):
+    # Видео-слайды OpenAI-формат Munito не принимает — их забирает Gemini-ветка, сюда едут только картинки.
     chat_id = 999412
     captured = {}
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         captured["messages"] = json_body["messages"]
         return {"choices": [{"message": {"content": "вижу фото"}}]}
 
-    original_request = bot._or_request
-    original_key = bot.OPENROUTER_API_KEY
-    bot._or_request = fake_or_request
-    bot.OPENROUTER_API_KEY = "fake-key"
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda *args, **kwargs: None)
     try:
         media = [(b"vid", "video/mp4"), (b"pic", "image/jpeg")]
-        asyncio.run(bot.ask_openrouter_multimodal(chat_id, "что это?", media, "a.jpg", model_chain=["m"]))
+        asyncio.run(bot.ask_munito_multimodal(chat_id, "что это?", media, "a.jpg", model_chain=["probe/m"]))
         user_msg = captured["messages"][-1]
         images = [p for p in user_msg["content"] if isinstance(p, dict) and p.get("type") == "image_url"]
         assert len(images) == 1
     finally:
-        bot._or_request = original_request
-        bot.OPENROUTER_API_KEY = original_key
         bot.chat_state.pop(chat_id, None)
 
 
-def test_ask_openrouter_multimodal_rejects_video_only_album():
-    # Только видео без картинок — нечего слать в OpenRouter: ошибка уводит маршрут в Gemini.
+def test_ask_munito_multimodal_rejects_video_only_album(monkeypatch):
+    # Только видео без картинок — нечего слать в Munito: ошибка уводит маршрут в Gemini.
     chat_id = 999413
-    original_key = bot.OPENROUTER_API_KEY
-    bot.OPENROUTER_API_KEY = "fake-key"
-    try:
-        with pytest.raises(RuntimeError):
-            asyncio.run(bot.ask_openrouter_multimodal(
-                chat_id, "что это?", [(b"vid", "video/mp4")], "a.mp4", model_chain=["m"],
-            ))
-    finally:
-        bot.OPENROUTER_API_KEY = original_key
-        bot.chat_state.pop(chat_id, None)
+    calls = []
+
+    async def must_not_be_called(*args, **kwargs):
+        calls.append(1)
+        return {"choices": [{"message": {"content": "не допустимо"}}]}
+
+    monkeypatch.setattr(bot, "_munito_request", must_not_be_called)
+    with pytest.raises(RuntimeError, match="No images"):
+        asyncio.run(bot.ask_munito_multimodal(
+            chat_id, "что это?", [(b"vid", "video/mp4")], "a.mp4", model_chain=["probe/m"],
+        ))
+    assert calls == []
+    bot.chat_state.pop(chat_id, None)
 
 
 def test_route_error_reply_text_youtube_takes_priority_over_exception_type():
-    exc = bot.OpenRouterAPIError("boom", status_code=500)
+    exc = bot.MunitoAPIError("boom", status_code=500)
     text = bot._route_error_reply_text(exc, "gemini-3.6-flash", youtube_url_to_analyze="https://youtu.be/x")
     assert "video" in text.lower()
     text_ru = bot._route_error_reply_text(exc, "gemini-3.6-flash", youtube_url_to_analyze="https://youtu.be/x", lang="ru")
@@ -1325,31 +1254,17 @@ def test_route_error_reply_text_maps_known_exception_types():
     assert "overloaded" in bot._route_error_reply_text(budget_exc, "gemini-3.6-flash", youtube_url_to_analyze=None).lower()
     assert "перегруж" in bot._route_error_reply_text(budget_exc, "gemini-3.6-flash", youtube_url_to_analyze=None, lang="ru").lower()
 
-    or_exc = bot.OpenRouterAPIError("boom", status_code=500)
-    assert bot._route_error_reply_text(or_exc, "gemini-3.6-flash", youtube_url_to_analyze=None) == bot._or_error_msg(or_exc, "text")
+    munito_exc = bot.MunitoAPIError("boom", status_code=500)
+    assert bot._route_error_reply_text(munito_exc, "gemini-3.6-flash", youtube_url_to_analyze=None) == bot._or_error_msg(munito_exc, "munito")
 
     other_exc = RuntimeError("что-то сломалось")
     assert bot._route_error_reply_text(other_exc, "gemini-3.6-flash", youtube_url_to_analyze=None) == bot._gemini_error_msg(other_exc, "gemini-3.6-flash")
 
 
-def test_or_chat_completion_with_fallback_no_longer_accepts_attempts_per_model():
-    # attempts_per_model убран целиком (был мёртвым кодом — см. аудит техдолга):
-    # единственное реальное значение всегда было 1, поэтому внутренний повторный
-    # цикл никогда не делал вторую итерацию.
-    import inspect
-    sig = inspect.signature(bot._or_chat_completion_with_fallback)
-    assert "attempts_per_model" not in sig.parameters
+def test_provider_request_scrubs_api_key_from_network_exception_message(monkeypatch):
+    # Defense-in-depth у текстового провайдера: ключ не светится в тексте ошибок.
+    fake_key = "fake-munito-key-123"
 
-
-@pytest.mark.parametrize(("request_name", "key_attr", "fake_key", "error_cls"), [
-    ("_or_request", "OPENROUTER_API_KEY", "fake-secret-or-key-123", "OpenRouterAPIError"),
-    ("_groq_request", "GROQ_API_KEY", "fake-groq-key-123", "GroqAPIError"),
-    ("_munito_request", "MUNITO_API_KEY", "fake-munito-key-123", "MunitoAPIError"),
-])
-def test_provider_request_scrubs_api_key_from_network_exception_message(
-    monkeypatch, request_name, key_attr, fake_key, error_cls,
-):
-    # Defense-in-depth у обоих провайдеров: ключ не светится в тексте ошибок.
     class _FakeSessionRaisingWithKey:
         def request(self, *args, **kwargs):
             raise RuntimeError(f"connection failed, headers: Bearer {fake_key}")
@@ -1358,108 +1273,11 @@ def test_provider_request_scrubs_api_key_from_network_exception_message(
         return _FakeSessionRaisingWithKey()
 
     monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
-    monkeypatch.setattr(bot, key_attr, fake_key)
-    with pytest.raises(getattr(bot, error_cls)) as exc_info:
-        asyncio.run(getattr(bot, request_name)("chat/completions", "POST", json_body={"model": "x"}))
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", fake_key)
+    with pytest.raises(bot.MunitoAPIError) as exc_info:
+        asyncio.run(bot._munito_request("chat/completions", "POST", json_body={"model": "x"}))
     assert fake_key not in str(exc_info.value)
     assert "<KEY>" in str(exc_info.value)
-
-
-def test_probe_or_model_liveness_warns_on_dead_model_pattern(caplog):
-    # РЕГРЕССИЯ (аудит техдолга): раньше проверялась только голова (index 0) списка
-    # навсегда — теперь проверяемая модель зависит от дня года (day-of-year % len),
-    # чтобы за N дней проверить весь список ценой тех же 3 запросов/сутки, что и
-    # раньше (см. докстринг _probe_or_model_liveness). Тест вычисляет ожидаемую
-    # модель той же формулой, что и сама функция, вместо того чтобы полагаться на
-    # фиксированный index 0.
-    import logging
-    from datetime import date
-    expected_model = bot._OR_LIGHT_ORDER[date.today().timetuple().tm_yday % len(bot._OR_LIGHT_ORDER)]
-
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        model = json_body["model"]
-        if model == expected_model:
-            raise bot.OpenRouterAPIError("This model is unavailable for free. use another slug", status_code=404)
-        return {"choices": [{"message": {"content": "pong"}}]}
-
-    original_request = bot._or_request
-    original_key = bot.OPENROUTER_API_KEY
-    bot._or_request = fake_or_request
-    bot.OPENROUTER_API_KEY = "fake-key"
-    try:
-        with caplog.at_level(logging.WARNING, logger="bot"):
-            asyncio.run(bot._probe_or_model_liveness())
-        messages = "\n".join(r.getMessage() for r in caplog.records)
-        assert expected_model in messages
-        assert "_OR_LIGHT_ORDER" in messages
-    finally:
-        bot._or_request = original_request
-        bot.OPENROUTER_API_KEY = original_key
-
-
-def test_probe_or_model_liveness_rotates_by_day_of_year():
-    # Проверяем саму формулу ротации напрямую (не только эффект в одном из трёх
-    # списков, как в тесте выше) — на день N должен пробоваться models[N % len(models)].
-    from datetime import date
-    calls = []
-
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        calls.append(json_body["model"])
-        return {"choices": [{"message": {"content": "pong"}}]}
-
-    original_request = bot._or_request
-    original_key = bot.OPENROUTER_API_KEY
-    bot._or_request = fake_or_request
-    bot.OPENROUTER_API_KEY = "fake-key"
-    try:
-        asyncio.run(bot._probe_or_model_liveness())
-        day_idx = date.today().timetuple().tm_yday
-        assert calls == [
-            bot._OR_LIGHT_ORDER[day_idx % len(bot._OR_LIGHT_ORDER)],
-            bot._OR_HEAVY_ORDER[day_idx % len(bot._OR_HEAVY_ORDER)],
-            bot._OR_VISION_ORDER[day_idx % len(bot._OR_VISION_ORDER)],
-        ]
-    finally:
-        bot._or_request = original_request
-        bot.OPENROUTER_API_KEY = original_key
-
-
-def test_probe_or_model_liveness_silent_when_all_alive(caplog):
-    import logging
-
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        return {"choices": [{"message": {"content": "pong"}}]}
-
-    original_request = bot._or_request
-    original_key = bot.OPENROUTER_API_KEY
-    bot._or_request = fake_or_request
-    bot.OPENROUTER_API_KEY = "fake-key"
-    try:
-        with caplog.at_level(logging.WARNING, logger="bot"):
-            asyncio.run(bot._probe_or_model_liveness())
-        assert caplog.records == []
-    finally:
-        bot._or_request = original_request
-        bot.OPENROUTER_API_KEY = original_key
-
-
-def test_probe_or_model_liveness_noop_without_api_key():
-    original_key = bot.OPENROUTER_API_KEY
-    bot.OPENROUTER_API_KEY = ""
-    called = []
-
-    async def fake_or_request(*args, **kwargs):
-        called.append(1)
-        return {}
-
-    original_request = bot._or_request
-    bot._or_request = fake_or_request
-    try:
-        asyncio.run(bot._probe_or_model_liveness())
-        assert called == []
-    finally:
-        bot._or_request = original_request
-        bot.OPENROUTER_API_KEY = original_key
 
 
 def test_system_prompt_en_keeps_key_guards():
@@ -1490,51 +1308,31 @@ def test_get_system_prompt_header_english():
     assert "CURRENT TIME INFORMATION" in bot.get_system_prompt()
 
 
-def test_ask_groq_text_success_records_groq_quota(monkeypatch):
-    # Groq-подключение 21.09.2026: успешный ответ пишется в историю и в квоту "groq", как у остальных провайдеров.
+def test_ask_munito_text_success_records_munito_quota(monkeypatch):
+    # Успешный ответ пишется в квоту "munito", как у остальных провайдеров:
+    # /stats и /diag читают именно её.
     from collections import deque
     chat_id = 999701
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        assert json_body["model"] == "qwen/qwen3.8-27b"
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+        assert json_body["model"] == "deepseek-ai/deepseek-v4.1-flash-1017"
         return {"choices": [{"message": {"content": "Канберра."}}]}
 
-    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     recorded = {}
-    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model: recorded.setdefault("v", (provider, model)))
-    answer = asyncio.run(bot.ask_groq_text(chat_id, "Столица Австралии?", model_chain=["qwen/qwen3.8-27b"]))
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, **kw: recorded.setdefault("v", (provider, model)))
+    answer = asyncio.run(bot.ask_munito_text(chat_id, "Столица Австралии?", model_chain=["deepseek-ai/deepseek-v4.1-flash-1017"]))
     assert answer == "Канберра."
-    assert recorded["v"] == ("groq", "qwen/qwen3.8-27b")
-
-
-def test_ask_groq_text_falls_back_to_next_model(monkeypatch):
-    # Одна попытка на модель: первая падает — идём на вторую, а не ретраим.
-    from collections import deque
-    chat_id = 999702
-    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
-    seen = []
-
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        seen.append(json_body["model"])
-        if json_body["model"] == "qwen/qwen3.8-27b":
-            raise bot.GroqAPIError("overloaded", status_code=503)
-        return {"choices": [{"message": {"content": "ok"}}]}
-
-    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model: None)
-    answer = asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]))
-    assert answer == "ok"
-    assert seen == ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
+    assert recorded["v"] == ("munito", "deepseek-ai/deepseek-v4.1-flash-1017")
 
 
 def test_ask_munito_text_falls_back_to_next_model_and_is_dispatched(monkeypatch):
     # Что защищает: провайдер munito в _run_route — и в обычном пути (ask_munito_text),
-    # и в стрим-пробе (_streamable/_try_stream). Регрессия: без ветки маршрута пару
-    # ("munito", …) молча отправляла бы запрос в OpenRouter с чужим ключом, а без
-    # "_streamable" чат терял посимвольный вывод на Munito.
+    # и в стрим-пробе (_streamable/_try_stream). Регрессия: без текстового пути
+    # ("munito", …) весь обычный текст валился бы в Gemini-резерв и сжигал его дневную
+    # квоту, а без "_streamable" чат терял посимвольный вывод на Munito.
     from collections import deque
     chat_id = 999703
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
@@ -1584,8 +1382,8 @@ def test_ask_munito_text_sends_reasoning_effort_and_omits_it_when_unset(monkeypa
 
 
 def test_munito_request_requires_key_and_maps_provider_error(monkeypatch):
-    # Тот же контракт, что у Groq: без ключа — понятная ошибка вместо сетевого вызова,
-    # а ответ API не показывается пользователю сырым (внутри может быть что угодно).
+    # Без ключа — понятная ошибка вместо сетевого вызова, а ответ API не показывается
+    # пользователю сырым (внутри может быть что угодно, включая чужие данные).
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
     with pytest.raises(bot.MunitoAPIError):
         asyncio.run(bot._munito_request("chat/completions", "POST", json_body={"model": "x"}))
@@ -1597,57 +1395,6 @@ def test_munito_request_requires_key_and_maps_provider_error(monkeypatch):
     assert text.strip()
 
 
-def test_ask_groq_text_raises_last_error_when_whole_chain_fails(monkeypatch):
-    # Ветка «вся цепочка Groq упала» не была покрыта ни одним тестом (аудит 26.09.2026),
-    # и именно её выполнял общий цикл после объединения двух копий.
-    from collections import deque
-    chat_id = 999703
-    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
-
-    async def failing_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        raise bot.GroqAPIError("overloaded", status_code=503)
-
-    monkeypatch.setattr(bot, "_groq_request", failing_groq_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
-    with pytest.raises(bot.GroqAPIError):
-        asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]))
-
-
-def test_ask_groq_text_trims_long_history_to_token_budget(monkeypatch):
-    # Прод 05–07.10.2026: история 9–27K токенов давала HTTP 413 на каждую попытку
-    # Groq. Падает на старом коде, где история ехала целиком.
-    import lumen_routes
-    from collections import deque
-    chat_id = 999706
-    history = []
-    for i in range(60):
-        history.append({"role": "user", "content": "вопрос %d " % i + "x" * 500})
-        history.append({"role": "assistant", "content": "ответ %d " % i + "y" * 500})
-    monkeypatch.setattr(bot, "get_state", lambda cid: {"history": history, "ctx": deque()})
-    seen = {}
-
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        # Первый запрос — сам ответ; второй (если будет) — саммаризатор истории
-        # _trim_history, его не трогаем.
-        seen.setdefault("messages", json_body["messages"])
-        return {"choices": [{"message": {"content": "ok"}}]}
-
-    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
-    assert asyncio.run(bot.ask_groq_text(chat_id, "текущий вопрос", model_chain=["qwen/qwen3.8-27b"])) == "ok"
-    msgs = seen["messages"]
-    total = sum(lumen_routes._estimate_tokens(m.get("content") if isinstance(m.get("content"), str) else "") for m in msgs)
-    assert total <= lumen_routes._GROQ_PROMPT_TOKEN_BUDGET
-    # Системный промпт и текущий вопрос на месте, хранимая история не ужата.
-    assert msgs[0]["role"] == "system"
-    assert msgs[-1]["content"].endswith("текущий вопрос")
-    # Хранимая история ужатию не подлежит: текущий вопрос-ответ дописаны как есть.
-    assert history[-2]["content"] == "текущий вопрос"
-    assert history[-1] == {"role": "assistant", "content": "ok"}
-
-
 def test_model_attempt_counters_track_chain_success_and_failure(monkeypatch):
     # 08.10.2026: по счётчикам model_attempts/model_failures виден реальный КПД
     # маршрута (раньше делили ответы на попытки только вручную по логам).
@@ -1656,18 +1403,18 @@ def test_model_attempt_counters_track_chain_success_and_failure(monkeypatch):
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
     calls = {"n": 0}
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise bot.GroqAPIError("boom", status_code=500)
+            raise bot.MunitoAPIError("boom", status_code=500)
         return {"choices": [{"message": {"content": "ok"}}]}
 
-    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "_record_quota_usage", lambda provider, model, service=False: None)
     before_a = bot._stats_entry().get("model_attempts", 0)
     before_f = bot._stats_entry().get("model_failures", 0)
-    assert asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["qwen/qwen3.8-27b", "openai/gpt-oss-120b"])) == "ok"
+    assert asyncio.run(bot.ask_munito_text(chat_id, "привет", model_chain=["probe/a", "probe/b"])) == "ok"
     assert bot._stats_entry().get("model_attempts", 0) - before_a == 2
     assert bot._stats_entry().get("model_failures", 0) - before_f == 1
 
@@ -1679,31 +1426,16 @@ def test_shared_chain_raises_budget_error_without_second_attempt(monkeypatch):
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
     seen = []
 
-    async def slow_request(path, method="GET", *, json_body=None, deadline=None):
+    async def slow_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         seen.append(json_body["model"])
-        await asyncio.sleep(5)
+        await asyncio.sleep(0.4)
         return {"choices": []}
 
-    monkeypatch.setattr(bot, "_groq_request", slow_request)
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", slow_request)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     with pytest.raises(bot.RouteBudgetExceededError):
-        asyncio.run(bot.ask_groq_text(chat_id, "привет", model_chain=["m1", "m2"], deadline=time.monotonic() + 0.2))
-    assert seen == ["m1"]
-
-
-def test_groq_request_requires_key(monkeypatch):
-    # Без GROQ_API_KEY — понятная ошибка, а не сетевой вызов в никуда.
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "")
-    with pytest.raises(bot.GroqAPIError):
-        asyncio.run(bot._groq_request("chat/completions", "POST", json_body={"model": "x"}))
-
-
-def test_route_error_reply_text_maps_groq_error():
-    # Ошибка Groq — пользовательский текст через общую классификацию, без сырого API.
-    exc = bot.GroqAPIError("Rate limit reached", status_code=429)
-    text = bot._route_error_reply_text(exc, "qwen/qwen3.8-27b", youtube_url_to_analyze=None, lang="en")
-    assert "Rate limit reached" not in text
-    assert text.strip() != ""
+        asyncio.run(bot.ask_munito_text(chat_id, "привет", model_chain=["probe/m1", "probe/m2"], deadline=time.monotonic() + 0.2))
+    assert seen == ["probe/m1"]
 
 
 def _fake_groq_audio_session(response_json, status=200):
@@ -1807,6 +1539,25 @@ def test_transcribe_audio_http_error_is_none(monkeypatch):
     assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123)) is None
 
 
+def test_transcribe_audio_scrubs_key_from_failure_log(monkeypatch, caplog):
+    # Удаление Groq-чата не снимает защиту от утечки ключа: Whisper пишет в лог текст
+    # сетевого исключения, и без подмены туда попал бы GROQ_API_KEY (его в логах
+    # читает кто угодно — хостинг Spaces, агрегаторы).
+    import logging
+
+    async def raising_session():
+        raise RuntimeError("connection failed, headers: Bearer fake-groq-key-123")
+
+    monkeypatch.setattr(bot, "_get_http_session", raising_session)
+    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-groq-key-123")
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123)) is None
+    lines = [r.getMessage() for r in caplog.records if "Whisper request failed" in r.getMessage()]
+    assert len(lines) == 1
+    assert "fake-groq-key-123" not in lines[0]
+    assert "<KEY>" in lines[0]
+
+
 def test_transcribe_audio_uses_remaining_budget_not_full_timeout(monkeypatch):
     # Аудит A4-03: Whisper ждал полный ROUTE_MODEL_TIMEOUT_SEC вне бюджета маршрута.
     captured = {}
@@ -1879,41 +1630,33 @@ def test_transcribe_audio_capped_by_own_limit(monkeypatch):
     assert captured["timeout"].total < bot.ROUTE_MODEL_TIMEOUT_SEC
 
 
-@pytest.mark.parametrize(("ask_name", "stub_name", "answer"), [
-    ("ask_openrouter_text", "_or_chat_completion_with_fallback", "ответ"),
-    ("ask_groq_text", "_groq_request", "ответ groq"),
-])
-def test_text_provider_trims_history_with_summary_not_silent_cut(monkeypatch, ask_name, stub_name, answer):
+def test_munito_text_trims_history_with_summary_not_silent_cut(monkeypatch):
     # Аудит A4-05: история резалась молчаливым срезом вместо _trim_history с саммари.
+    # Регрессия: саммари выпиливают (дорогой вызов) — и дальние ходы исчезают без следа.
     import lumen_chat_state
-    from collections import deque
     chat_id = 999811
+    answer = "ответ"
 
-    async def fake_fallback(messages, trial_models, primary_model_id, **kwargs):
-        return answer, trial_models[0]
-
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": answer}}]}
-
-    stubs = {"_or_chat_completion_with_fallback": fake_fallback, "_groq_request": fake_groq_request}
 
     async def fake_summarize(text):
         return "итог: погода и коты"
 
-    monkeypatch.setattr(bot, stub_name, stubs[stub_name])
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
     monkeypatch.setattr(lumen_chat_state, "_summarize_text", fake_summarize)
     state = bot.get_state(chat_id)
     state["history"] = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"сообщение {i}"}
-        for i in range(105)
+        for i in range(205)
     ]
-    state["ctx"] = deque()
     try:
-        asyncio.run(getattr(bot, ask_name)(chat_id, "новый вопрос", model_chain=["m1"]))
-        history = bot.chat_state[chat_id]["history"]
-        assert len(history) == 81
-        assert history[0]["content"].startswith("[Ранее в диалоге]")
-        assert "погода" in history[0]["content"]
+        asyncio.run(bot.ask_munito_text(chat_id, "новый вопрос", model_chain=["probe/m1"]))
+        state = bot.chat_state[chat_id]
+        history = state["history"]
+        assert len(history) == bot.HISTORY_SUMMARIZE_KEEP
+        assert state["memory_summary"].startswith("итог: погода и коты")
+        assert state["memory_pending"] == []
         assert history[-2:] == [
             {"role": "user", "content": "новый вопрос"},
             {"role": "assistant", "content": answer},
@@ -1922,50 +1665,129 @@ def test_text_provider_trims_history_with_summary_not_silent_cut(monkeypatch, as
         bot.chat_state.pop(chat_id, None)
 
 
-def test_text_providers_keep_media_note_out_of_history(monkeypatch):
-    # Пометка одноразовая (как у ask_gemini): в историю — чистый текст, иначе старые пометки всплывут в следующих ходах.
-    async def fake_fallback(messages, trial_models, primary_model_id, **kwargs):
-        return "ответ", trial_models[0]
+def test_openai_turn_messages_carry_summary_authors_and_past_photo(monkeypatch):
+    # Память для модели: сводка в системном промпте, автор/время у реплик,
+    # прошлое фото отдельной репликой — модель видит его без слова «фото».
+    chat_id = 999812
+    state = bot.get_state(chat_id)
+    now = time.time()
+    state["history"] = [
+        {"role": "user", "content": "лови кота", "sender": "@m1st", "sender_id": 7, "ts": now - 60},
+        {"role": "assistant", "content": "Кот хорош."},
+        {"role": "user", "content": "", "sender": "@m1st", "sender_id": 7, "ts": now - 30,
+         "media": [{"file_id": "p1", "mime": "image/jpeg"}]},
+        {"role": "assistant", "content": "На фото рыжий кот."},
+    ]
+    state["memory_summary"] = "Договорились про кота."
+    fetched = []
 
-    async def fake_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_fetch(fid, mime):
+        fetched.append(fid)
+        return b"img", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    try:
+        msgs = asyncio.run(bot._build_openai_turn_messages(chat_id, "а какой окрас?", "probe/m1"))
+        assert "LONG-TERM MEMORY" in msgs[0]["content"]
+        assert "Договорились про кота." in msgs[0]["content"]
+        assert any("[@m1st, " in m["content"] for m in msgs if isinstance(m.get("content"), str))
+        assert any("[фото]" in m["content"] for m in msgs if isinstance(m.get("content"), str))
+        assert any(
+            isinstance(m.get("content"), list)
+            and any(part.get("type") == "image_url" for part in m["content"])
+            for m in msgs
+        )
+        assert fetched == ["p1"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_openai_turn_messages_respects_attach_past_and_skip(monkeypatch):
+    # Явная ссылка «покажи фото» уже едет текущим вложением: дубль прошлого фото
+    # не прикладываем; чужие file_id из текущего запроса тоже пропускаем.
+    chat_id = 999815
+    state = bot.get_state(chat_id)
+    now = time.time()
+    state["history"] = [
+        {"role": "user", "content": "первое", "sender": "@m1st", "sender_id": 7, "ts": now - 30,
+         "media": [{"file_id": "p1", "mime": "image/jpeg"}]},
+        {"role": "user", "content": "второе", "sender": "@m1st", "sender_id": 7, "ts": now - 20,
+         "media": [{"file_id": "p2", "mime": "image/jpeg"}]},
+        {"role": "user", "content": "третье", "sender": "@m1st", "sender_id": 7, "ts": now - 10,
+         "media": [{"file_id": "p3", "mime": "image/jpeg"}]},
+    ]
+    fetched = []
+
+    async def fake_fetch(fid, mime):
+        fetched.append(fid)
+        return b"img", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    try:
+        asyncio.run(bot._build_openai_turn_messages(
+            chat_id, "что на фото?", "probe/m1",
+            history_meta={"attach_past": False, "skip_file_ids": ["p3"]},
+        ))
+        assert fetched == []
+        fetched.clear()
+        asyncio.run(bot._build_openai_turn_messages(
+            chat_id, "что на фото?", "probe/m1",
+            history_meta={"attach_past": True, "skip_file_ids": ["p3"]},
+        ))
+        assert fetched == ["p1", "p2"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_trimmed_summary_is_accepted_by_the_next_request(monkeypatch):
+    # Сводка не теряется между обрезкой и следующим запросом: она лежит в системе.
+    import lumen_chat_state
+    chat_id = 999816
+    state = bot.get_state(chat_id)
+    state["history"] = [
+        {"role": "user", "content": f"старое {i}"} for i in range(205)
+    ]
+
+    async def fake_summarize(text):
+        return "Люди: m1st. Факты: кот рыжий."
+
+    monkeypatch.setattr(lumen_chat_state, "_summarize_text", fake_summarize)
+    try:
+        asyncio.run(bot._trim_history(state["history"], state))
+        msgs = asyncio.run(bot._build_openai_turn_messages(chat_id, "новый вопрос", "probe/m1"))
+        assert "Люди: m1st. Факты: кот рыжий." in msgs[0]["content"]
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_gemini_call_config_includes_memory_summary():
+    contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
+    _, gconfig = bot._build_gemini_call_config(
+        bot.DEFAULT_GEMINI_MODEL, contents, memory_summary="Люди: m1st.",
+    )
+    assert "LONG-TERM MEMORY OF THIS CHAT" in gconfig.system_instruction
+    assert "Люди: m1st." in gconfig.system_instruction
+
+
+@pytest.mark.parametrize("mode", ["text", "vision"])
+def test_munito_keeps_media_note_out_of_history(monkeypatch, mode):
+    # Пометка одноразовая (как у ask_gemini): в историю — чистый текст, иначе старые
+    # пометки всплывут в следующих ходах. У vision-ветки своя строка записи истории,
+    # поэтому проверяем оба входа.
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "ответ"}}]}
 
-    monkeypatch.setattr(bot, "_or_chat_completion_with_fallback", fake_fallback)
-    monkeypatch.setattr(bot, "_groq_request", fake_groq_request)
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
+    monkeypatch.setattr(bot, "_record_quota_usage", lambda *args, **kwargs: None)
     prompt = "что на фото?" + bot._NO_MEDIA_NOTE
+    chat_id = 999813 if mode == "text" else 999814
     try:
-        asyncio.run(bot.ask_openrouter_text(999813, prompt, model_chain=["m1"]))
-        asyncio.run(bot.ask_groq_text(999814, prompt, model_chain=["m1"]))
-        for cid in (999813, 999814):
-            assert bot.chat_state[cid]["history"][-2] == {"role": "user", "content": "что на фото?"}
-    finally:
-        bot.chat_state.pop(999813, None)
-        bot.chat_state.pop(999814, None)
-
-
-def test_run_route_marks_unsupported_media_for_text_fallback(monkeypatch):
-    # Аудит A4-15: ValueError Gemini уходил в текст-модели вслепую — фолбэк честно видит пометку.
-    chat_id = 999815
-    captured = {}
-
-    async def failing_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None, deadline=None, provenance=None, **kwargs):
-        raise ValueError("Тип вложения 'application/x-foo' не поддерживается для анализа.")
-
-    async def fake_groq_text(cid, prompt, model_chain, deadline=None, **kwargs):
-        captured["prompt"] = prompt
-        return "не вижу файла, пришлите его"
-
-    monkeypatch.setattr(bot, "ask_gemini", failing_gemini)
-    monkeypatch.setattr(bot, "ask_groq_text", fake_groq_text)
-    try:
-        route = [("gemini", "gemini-3.6-flash"), ("groq", "qwen/qwen3.8-27b")]
-        ans, sent = asyncio.run(bot._run_route(
-            chat_id, "что на фото?", route, message=None,
-            media=[(b"bytes", "application/x-foo")], allow_stream=False,
-        ))
-        assert ans == "не вижу файла, пришлите его"
-        assert sent is False
-        assert "[Служебная пометка" in captured["prompt"]
+        if mode == "text":
+            asyncio.run(bot.ask_munito_text(chat_id, prompt, model_chain=["probe/m1"]))
+        else:
+            asyncio.run(bot.ask_munito_multimodal(
+                chat_id, prompt, (b"pic", "image/jpeg"), "a.jpg", model_chain=["probe/m1"]))
+        assert bot.chat_state[chat_id]["history"][-2] == {"role": "user", "content": "что на фото?"}
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1980,14 +1802,14 @@ def test_run_route_cleans_placeholder_on_cancel(monkeypatch):
     async def cancelled_ask(*args, **kwargs):
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(bot, "_try_openrouter_streaming", failed_stream)
-    monkeypatch.setattr(bot, "ask_openrouter_text", cancelled_ask)
+    monkeypatch.setattr(bot, "_try_munito_streaming", failed_stream)
+    monkeypatch.setattr(bot, "ask_munito_text", cancelled_ask)
     incoming = _FakeIncomingMessage(999970)
     try:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(bot._run_route(
                 999970, "привет",
-                [("openrouter", "m1"), ("openrouter", "m2")],
+                [("munito", "probe/m1"), ("munito", "probe/m2")],
                 incoming, allow_stream=True,
             ))
         assert placeholder.deleted is True
@@ -2028,92 +1850,88 @@ def test_run_route_failure_records_no_user_daily():
     incoming.from_user = SimpleNamespace(id=777012)
 
     async def failing_ask(*args, **kwargs):
-        raise bot.OpenRouterAPIError("сломано", status_code=500)
+        raise bot.MunitoAPIError("сломано", status_code=500)
 
-    original = bot.ask_openrouter_text
-    bot.ask_openrouter_text = failing_ask
+    original = bot.ask_munito_text
+    bot.ask_munito_text = failing_ask
     try:
-        with pytest.raises(bot.OpenRouterAPIError):
+        with pytest.raises(bot.MunitoAPIError):
             asyncio.run(bot._run_route(
-                chat_id, "привет", [("openrouter", "m1")], incoming, allow_stream=False,
+                chat_id, "привет", [("munito", "probe/m1")], incoming, allow_stream=False,
             ))
         assert "777012" not in bot.GLOBAL_QUOTA.get("user_daily", {})
     finally:
-        bot.ask_openrouter_text = original
+        bot.ask_munito_text = original
         bot.chat_state.pop(chat_id, None)
 
 
 def test_run_route_keeps_route_block_order(monkeypatch):
-    # Что защищает: маршрут исполняется блоками в том порядке, как собран
-    # (Gemma → Groq → OpenRouter → Gemini-резерв). Регрессия: склейка блоков по
-    # провайдеру отправляла Gemma одним вызовом со всей Gemini-цепочкой и съедала
-    # бюджет до первого независимого провайдера (аудит 27.10.2026).
+    # Что защищает: маршрут исполняется блоками в том порядке, как собран, а блоки
+    # одного провайдера не склеиваются в один вызов (аудит 27.10.2026: склейка
+    # уводила резерв вперёд независимого провайдера и съедала бюджет).
+    import lumen_model_speed
     calls = []
+
+    async def fake_ask_munito(cid, prompt, model_chain, deadline=None, **kwargs):
+        calls.append(("munito", list(model_chain)))
+        raise bot.MunitoAPIError("no free capacity", status_code=503)
 
     async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None,
                               deadline=None, provenance=None, **kwargs):
         calls.append(("gemini", list(model_chain)))
-        if model_chain == ["gemini-3.8-flash"]:
-            if provenance is not None:
-                provenance.update(provider="gemini", model="gemini-3.8-flash")
+        if model_chain == ["gemini-2.5-flash"]:
             return "резерв Gemini"
-        raise RuntimeError("gemma недоступна")
-
-    async def failing_groq(cid, prompt, model_chain, deadline=None, **kwargs):
-        calls.append(("groq", list(model_chain)))
-        raise bot.GroqAPIError("overloaded", status_code=503)
-
-    async def failing_or(cid, prompt, model_chain, deadline=None, **kwargs):
-        calls.append(("openrouter", list(model_chain)))
-        raise bot.OpenRouterAPIError("сломано", status_code=500)
+        raise RuntimeError("модель недоступна")
 
     monkeypatch.setattr(bot, "ask_gemini", fake_ask_gemini)
-    monkeypatch.setattr(bot, "ask_groq_text", failing_groq)
-    monkeypatch.setattr(bot, "ask_openrouter_text", failing_or)
+    monkeypatch.setattr(bot, "ask_munito_text", fake_ask_munito)
     route = [
-        ("gemini", "gemma-4-26b-a4b-it"),
-        ("groq", "qwen/qwen3.8-27b"),
-        ("openrouter", "liquid/lfm-2.5-2.6b:free"),
+        ("munito", "probe/head"),
         ("gemini", "gemini-3.8-flash"),
+        ("munito", "probe/reserve"),
+        ("gemini", "gemini-2.5-flash"),
     ]
-    ans, sent = asyncio.run(bot._run_route(999310, "привет", route, message=None, allow_stream=False))
-    assert ans == "резерв Gemini" and sent is False
-    assert calls == [
-        ("gemini", ["gemma-4-26b-a4b-it"]),
-        ("groq", ["qwen/qwen3.8-27b"]),
-        ("openrouter", ["liquid/lfm-2.5-2.6b:free"]),
-        ("gemini", ["gemini-3.8-flash"]),
-    ]
+    lumen_model_speed._latency_ema.clear()
+    try:
+        ans, sent = asyncio.run(bot._run_route(999310, "привет", route, message=None, allow_stream=False))
+        assert ans == "резерв Gemini" and sent is False
+        assert calls == [
+            ("munito", ["probe/head"]),
+            ("gemini", ["gemini-3.8-flash"]),
+            ("munito", ["probe/reserve"]),
+            ("gemini", ["gemini-2.5-flash"]),
+        ]
+    finally:
+        lumen_model_speed._latency_ema.clear()
+        bot.chat_state.pop(999310, None)
 
 
-def test_run_route_gemma_answer_does_not_spend_gemini_user_limit():
-    # Что защищает: дневной лимит Gemini у пользователя. Регрессия: ответ Gemma
-    # считался как Gemini, и несколько обычных сообщений запирали голос/видео
-    # на сутки (аудит 27.10.2026). Модель берётся из provenance, как в проде.
+def test_run_route_munito_answer_does_not_spend_gemini_user_limit():
+    # Что защищает: дневной лимит Gemini у пользователя. Регрессия: ответ Munito
+    # засчитался бы как Gemini, и несколько обычных сообщений запирали голос/видео
+    # и ссылки на сутки (аудит 27.10.2026 был про Gemma, с 05.11.2026 тот же смысл
+    # у Munito: он не тратит квоту Google).
     from types import SimpleNamespace
     chat_id = 999311
     incoming = _FakeIncomingMessage(chat_id)
     incoming.from_user = SimpleNamespace(id=777013)
 
-    async def fake_ask_gemini(cid, prompt, media=None, youtube_url=None, model_chain=None,
-                              deadline=None, provenance=None, **kwargs):
-        if provenance is not None:
-            provenance.update(provider="gemini", model="gemma-4-26b-a4b-it")
-        return "Ответ Gemma"
+    async def fake_ask_munito(cid, prompt, model_chain, deadline=None, **kwargs):
+        return "Ответ Munito"
 
-    original = bot.ask_gemini
-    bot.ask_gemini = fake_ask_gemini
+    original = bot.ask_munito_text
+    bot.ask_munito_text = fake_ask_munito
     try:
         ans, _ = asyncio.run(bot._run_route(
-            chat_id, "привет", [("gemini", "gemma-4-26b-a4b-it")], incoming,
+            chat_id, "привет", [("munito", "deepseek-ai/deepseek-v4.1-flash-1017")], incoming,
             allow_stream=False, provenance={},
         ))
-        assert ans == "Ответ Gemma"
+        assert ans == "Ответ Munito"
         entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("777013")
         assert entry is not None
         assert entry["total"] == 1 and entry["gemini"] == 0
     finally:
-        bot.ask_gemini = original
+        bot.ask_munito_text = original
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777013", None)
         bot.chat_state.pop(chat_id, None)
 
@@ -2131,34 +1949,30 @@ def test_handled_message_grows_provider_quota_user_daily_and_stats(rate_guard_se
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
     # Стриминг в тестах без сети: гасим попытки, дальше обычный текстовый путь.
     monkeypatch.setattr(bot, "_try_gemini_streaming", AsyncMock(return_value=(None, None)))
-    monkeypatch.setattr(bot, "_try_openrouter_streaming", AsyncMock(return_value=(None, None)))
-    monkeypatch.setattr(bot, "_try_groq_streaming", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(bot, "_try_munito_streaming", AsyncMock(return_value=(None, None)))
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "Привет! Как сам?"}}]}
 
-    async def failing_groq_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
-        raise bot.GroqAPIError("overloaded", status_code=503)
-
-    monkeypatch.setattr(bot, "_or_request", fake_or_request)
-    monkeypatch.setattr(bot, "_groq_request", failing_groq_request)
-    monkeypatch.setattr(bot, "OPENROUTER_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
+    # Ключ включает Munito: без него _build_route отдаёт весь текст Gemini, и расход
+    # текстового провайдера перестал бы проверяться.
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
     before = dict(bot._stats_entry())
     try:
         asyncio.run(bot._handle_message_core(message))
-        or_quota = bot.GLOBAL_QUOTA.get("openrouter", {})
-        total_used = sum(int(e.get("used") or 0) for e in or_quota.values() if isinstance(e, dict))
+        munito_quota = bot.GLOBAL_QUOTA.get("munito", {})
+        total_used = sum(int(e.get("used") or 0) for e in munito_quota.values() if isinstance(e, dict))
         assert total_used == 1
         entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("456")
         assert entry is not None and entry["total"] == 1
+        # 05.11.2026: дневной лимит Gemini растёт только на ответы Gemini.
+        assert entry["gemini"] == 0
         after = bot._stats_entry()
         assert after["messages_received"] - before.get("messages_received", 0) == 1
         assert after["answers_sent"] - before.get("answers_sent", 0) == 1
-        # 22.10.2026: голова маршрута — Gemma (gemini-провайдер в заглушке падает),
-        # затем groq (заглушка "overloaded"); до успешного OR — два провайдерских
-        # падения, значит ровно 2 записи "fallbacks".
-        assert after["fallbacks"] - before.get("fallbacks", 0) == 2
+        # Munito отвечает головой: резерв не вызывался, переключений нет.
+        assert after.get("fallbacks", 0) == before.get("fallbacks", 0)
         assert after.get("all_failed", 0) == before.get("all_failed", 0)
     finally:
         bot.chat_state.pop(123, None)
@@ -2173,29 +1987,30 @@ def test_run_route_counts_fallback_and_total_failure(monkeypatch):
     incoming = _FakeIncomingMessage(chat_id)
     incoming.from_user = SimpleNamespace(id=777013)
 
-    async def failing_ask(*args, **kwargs):
-        raise bot.OpenRouterAPIError("сломано", status_code=500)
+    async def failing_munito(*args, **kwargs):
+        raise bot.MunitoAPIError("503 no free capacity", status_code=503)
 
-    async def ok_ask(*args, **kwargs):
+    async def ok_gemini(*args, **kwargs):
         return "ok"
 
+    async def failing_gemini(*args, **kwargs):
+        raise RuntimeError("и резерв сломан")
+
+    route = [("munito", "probe/m1"), ("gemini", "gemini-3.8-flash")]
     before = dict(bot._stats_entry())
-    monkeypatch.setattr(bot, "ask_openrouter_text", failing_ask)
-    monkeypatch.setattr(bot, "ask_groq_text", ok_ask)
-    ans, sent = asyncio.run(bot._run_route(
-        chat_id, "привет", [("openrouter", "m1"), ("groq", "m2")], incoming, allow_stream=False,
-    ))
+    monkeypatch.setattr(bot, "ask_munito_text", failing_munito)
+    monkeypatch.setattr(bot, "ask_gemini", ok_gemini)
+    ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, incoming, allow_stream=False))
     assert ans == "ok" and sent is False
     mid = dict(bot._stats_entry())
     assert mid["fallbacks"] - before.get("fallbacks", 0) == 1
     assert mid["answers_sent"] - before.get("answers_sent", 0) == 1
     assert mid.get("all_failed", 0) == before.get("all_failed", 0)
 
-    monkeypatch.setattr(bot, "ask_groq_text", failing_ask)
-    with pytest.raises(bot.OpenRouterAPIError):
-        asyncio.run(bot._run_route(
-            chat_id, "привет", [("openrouter", "m1"), ("groq", "m2")], incoming, allow_stream=False,
-        ))
+    monkeypatch.setattr(bot, "ask_gemini", failing_gemini)
+    # Наверх идёт ошибка последнего блока: её маппит _route_error_reply_text.
+    with pytest.raises(RuntimeError, match="и резерв сломан"):
+        asyncio.run(bot._run_route(chat_id, "привет", route, incoming, allow_stream=False))
     after = bot._stats_entry()
     assert after["fallbacks"] - mid.get("fallbacks", 0) == 1
     assert after["all_failed"] - mid.get("all_failed", 0) == 1
@@ -2264,26 +2079,26 @@ def test_gemini_success_logs_token_usage(caplog, with_usage):
         caplog.clear()
 
 
-def test_openrouter_success_logs_token_usage_when_api_returns_it(caplog, monkeypatch):
-    # Что защищает: точку калибровки для OpenRouter/Groq (поле usage.prompt_tokens/
-    # completion_tokens/total_tokens — общий цикл _chat_completion_chain, один тест
-    # покрывает обоих). Регрессия: потеря usage при правках цикла. Старые тесты
-    # мокают ответы без usage и строку [usage] не ищут.
+def test_munito_success_logs_token_usage_when_api_returns_it(caplog, monkeypatch):
+    # Что защищает: точку калибровки лимитов для текстового провайдера (поле
+    # usage.prompt_tokens/completion_tokens/total_tokens — общий цикл
+    # _chat_completion_chain). Регрессия: потеря usage при правках цикла. Старые
+    # тесты мокают ответы без usage и строку [usage] не ищут.
     import logging
     chat_id = 999903
 
-    async def fake_or_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
+    async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "ответ"}}],
                 "usage": {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33}}
 
-    monkeypatch.setattr(bot, "_or_request", fake_or_request)
+    monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
     try:
         with caplog.at_level(logging.INFO, logger="bot"):
-            asyncio.run(bot.ask_openrouter_text(chat_id, "привет", model_chain=["m1"]))
+            asyncio.run(bot.ask_munito_text(chat_id, "привет", model_chain=["probe/m1"]))
         usage_lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[usage]")]
         assert len(usage_lines) == 1
         line = usage_lines[0]
-        assert f"chat={chat_id}" in line and "provider=openrouter" in line and "model=m1" in line
+        assert f"chat={chat_id}" in line and "provider=munito" in line and "model=probe/m1" in line
         assert "prompt=11" in line and "completion=22" in line and "total=33" in line
     finally:
         bot.chat_state.pop(chat_id, None)

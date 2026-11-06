@@ -18,6 +18,12 @@ from typing import Any, TypedDict
 
 from aiogram.enums import ChatType
 from lumen_lang import DEFAULT_LANG, normalize_lang, t as _lang_t
+from lumen_memory import (
+    MAX_MEMORY_MESSAGES,
+    MEMORY_KEEP_MESSAGES,
+    MAX_MEMORY_PENDING,
+    summary_input,
+)
 from lumen_state_storage import (
     StorageConfig,
     _chat_storage_key,
@@ -35,20 +41,24 @@ log = logging.getLogger("bot")
 
 MAX_CHAT_LIMIT = 5000
 PRUNED_CHAT_TARGET = 4500
-MAX_CHAT_HISTORY_LEN = 100
 MAX_MEDIA_RECENT_IDS = 8  # хранится ОТДЕЛЬНО на каждого пользователя чата (см. recent_media_ids: dict[user_id, deque])
 # Живых отправителей медиа в чате десятки, 500 покрывает большие группы с запасом.
 # Потолок только против подделки user_id и раздувания снапшота, легитимные чаты не задевает.
 MAX_MEDIA_BUCKETS_PER_CHAT = 500
-# Общий лимит памяти чата в сообщениях, включая фоновые (требование владельца 08.10.2026).
-MAX_TOTAL_MEMORY_MESSAGES = 100
+# Единый лимит памяти на чат, включая фон группы (решение владельца 06.11.2026:
+# 100 было мало, фон вытеснялся до нуля; 200 — примерно день живого группового чата).
+MAX_TOTAL_MEMORY_MESSAGES = MAX_MEMORY_MESSAGES
 # Сколько отправителей помним на чат: ники для подписей и резолва прозвищ.
 MAX_KNOWN_SENDERS_PER_CHAT = 500
 
 
 class ChatState(TypedDict, total=False):
+    # history — единый хронологический лог: фон группы, обращения и ответы бота.
     history: list[dict[str, Any]]
-    ctx: "deque[str]"
+    memory_summary: str
+    memory_pending: list[dict[str, Any]]
+    # Поколение памяти: /reset во время сводки не должен вернуть старые факты.
+    memory_epoch: int
     recent_media_ids: dict[str, "deque[tuple[str, str]]"]
     user_names: dict[str, dict[str, str]]
     last_activity: float
@@ -172,13 +182,12 @@ class QuotaEntry(TypedDict):
 
 GLOBAL_QUOTA: dict[str, Any] = {
     "gemini": {},
-    "openrouter": {},
     # used/exhausted сбрасываются в полночь LA: иначе вечный рост и залипший "лимит исчерпан" (калибровка 25.07.2026).
     "quota_day": None,
 }
 # Единственный список провайдеров с суточными счётчиками: новый провайдер обязан
 # быть тут, иначе его счётчик не сбрасывается на новых сутках и не грузится из снапшота.
-_QUOTA_PROVIDERS = ("gemini", "openrouter", "groq", "munito")
+_QUOTA_PROVIDERS = ("gemini", "groq", "munito")
 
 # Дата пересчитывается не чаще раза в минуту: ZoneInfo на каждое обращение дорого.
 _QUOTA_CHECK_THROTTLE_SEC = 60.0
@@ -200,7 +209,8 @@ _last_quota_check_monotonic: float = 0.0
 
 
 def _reset_quota_if_new_day() -> None:
-    """Сбрасывает used/exhausted_at у ВСЕХ моделей (Gemini и OpenRouter), если с
+    """Сбрасывает used/exhausted_at у ВСЕХ моделей всех провайдеров из
+    _QUOTA_PROVIDERS, если с
     последнего сброса наступили новые сутки (по America/Los_Angeles). Вызывается и лениво (см.
     _quota_entry — на любое обращение к квоте), и явно раз в час из фонового цикла
     в _webhook_startup, чтобы сброс не зависел от того, придёт ли вообще новое
@@ -337,13 +347,20 @@ def save_global_quota() -> None:
 
 # schema_version — задел под следующую миграцию (if version < N); старые записи = v0 без смены поведения.
 
+def _split_legacy_ctx_line(line: str) -> tuple[str | None, str]:
+    """Старая строка фона "Display: text" → (display, text); без метки — весь текст."""
+    head, sep, tail = line.partition(": ")
+    if sep and head and len(head) <= 80 and "\n" not in head:
+        return head.strip(), tail.strip()
+    return None, line.strip()
+
+
 def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
     """Разворачивает сериализованный снимок одного чата (см. _serialize_chat_state)
     обратно в chat_state[cid] — общая логика между новым per-chat форматом чтения
     и одноразовой миграцией из старого общего блоба (см. load_state_from_disk).
 
     Старые поля моделей игнорируются: роутер автоматический; schema пока только задел."""
-    import bot
     # Битая запись не должна ронять восстановление остальных чатов: пропускаем с warning.
     if not isinstance(s, dict):
         log.warning('[state] Skip chat %s: snapshot is not a dict', cid)
@@ -392,18 +409,35 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         if raw_or is not None and not isinstance(raw_or, list):
             log.warning('[state] Skip chat %s: or_history is not a list', cid)
             return
+        # Старые письма не режем здесь: общий лимит и очередь сводки ниже.
         history = list(raw_gem or []) + list(raw_or or [])
-        if len(history) > bot.SHARED_HISTORY_MAX_LEN:
-            history = history[-bot.SHARED_HISTORY_MAX_LEN:]
+    # Старый фон (ctx) больше не отдельное хранилище: вливаем его в общий лог
+    # хвостом. Точный порядок между старыми форматами не восстановить, но факты целы.
     raw_ctx = s.get("ctx")
     if isinstance(raw_ctx, list):
-        ctx_lines = [line for line in raw_ctx if isinstance(line, str)][:MAX_CHAT_HISTORY_LEN]
-    else:
-        # Старые снимки фона не хранили: начинаем с пустого, как раньше.
-        ctx_lines = []
+        for line in raw_ctx[:MAX_TOTAL_MEMORY_MESSAGES]:
+            if not isinstance(line, str) or not line.strip():
+                continue
+            ctx_sender, ctx_text = _split_legacy_ctx_line(line)
+            entry: dict[str, Any] = {"role": "user", "content": ctx_text, "addressed": False}
+            if ctx_sender:
+                entry["sender"] = ctx_sender
+            history.append(entry)
+    raw_summary = s.get("memory_summary")
+    summary = raw_summary.strip()[:8000] if isinstance(raw_summary, str) else ""
+    raw_pending = s.get("memory_pending")
+    pending = (
+        [item for item in raw_pending if isinstance(item, dict)][-MAX_MEMORY_PENDING:]
+        if isinstance(raw_pending, list) else []
+    )
+    # Снимок мог превысить новый лимит: старые уходят в очередь сводки, а не теряются.
+    if len(history) > MAX_TOTAL_MEMORY_MESSAGES:
+        pending = (pending + history[:-MEMORY_KEEP_MESSAGES])[-MAX_MEMORY_PENDING:]
+        del history[:-MEMORY_KEEP_MESSAGES]
     chat_state[cid] = {
         "history": history,
-        "ctx": deque(ctx_lines, maxlen=MAX_CHAT_HISTORY_LEN),
+        "memory_summary": summary,
+        "memory_pending": pending,
         "recent_media_ids": media_buckets,
         "user_names": _restore_user_names(s.get("user_names")),
         # Настенные часы, а не monotonic: тот сбрасывается рестартом и делал все
@@ -413,7 +447,6 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         # раньше теряло (прод-баг: /lang слетал при каждом деплое).
         "lang": normalize_lang(s.get("lang")),
     }
-    _trim_combined(chat_state[cid])
 
 
 def _restore_last_activity(s: dict[str, Any]) -> float:
@@ -516,18 +549,6 @@ def _resolve_nick(state: dict[str, Any], nick: str) -> str | None:
         pass
     return None
 
-
-def _trim_combined(state: dict[str, Any]) -> None:
-    """Держит history + ctx в общем лимите: старые фоновые уходят первыми."""
-    try:
-        history = state.get("history")
-        ctx = state.get("ctx")
-        if not isinstance(history, list) or ctx is None:
-            return
-        while len(history) + len(ctx) > MAX_TOTAL_MEMORY_MESSAGES and len(ctx) > 0:
-            ctx.popleft()
-    except Exception:
-        pass
 
 def _save_chat_index() -> bool:
     """True/False для повтора в _flush_state_now: раньше неуспех молча терялся (аудит A5-1)."""
@@ -893,7 +914,9 @@ def get_state(chat_id: int) -> dict[str, Any]:
     if chat_id not in chat_state:
         chat_state[chat_id] = {
             "history": [],
-            "ctx": deque(maxlen=MAX_CHAT_HISTORY_LEN),
+            "memory_summary": "",
+            "memory_pending": [],
+            "memory_epoch": 0,
             "recent_media_ids": {},
             "user_names": {},
             # Настенные часы: monotonic обнуляется рестартом и ломал /stats.
@@ -1099,7 +1122,7 @@ def _quota_entry(provider: str, model_id: str) -> QuotaEntry:
 # снова пробуют. Раньше минутный всплеск ставил метку до полуночи, и модель выпадала
 # из роута на остаток суток (враждебное ревью 27.09.2026): снять метку было нечем,
 # потому что заведомо мёртвую модель не зовут, а успешный ответ чистит метку.
-# 10 минут с большим запасом переживают окно Groq в 30 RPM.
+# 10 минут с большим запасом переживают 30-секундное окно Munito (200 запросов).
 QUOTA_RATE_LIMIT_COOLDOWN_SEC = 600.0
 
 def _mark_quota_exhausted(provider: str, model_id: str) -> None:
@@ -1356,81 +1379,144 @@ def _user_daily_reset_in() -> tuple[int, int]:
         return 0, 0
     return int(secs // 3600), int((secs % 3600) // 60)
 
-# Сколько свежих сообщений точно не трогаем при обрезке (остальное уходит в саммари).
-HISTORY_SUMMARIZE_KEEP = 80
-# Вход саммаризатора режем, чтобы саммари не съело квоту целиком на километровом чате.
-_HISTORY_SUMMARY_INPUT_MAX_CHARS = 6000
+# После сводки в памяти остаются последние 150 сообщений дословно (см. lumen_memory).
+HISTORY_SUMMARIZE_KEEP = MEMORY_KEEP_MESSAGES
+# Пауза между повторами упавшей сводки: иначе каждый ответ ждал бы сеть заново.
+MEMORY_SUMMARY_RETRY_SEC = 60.0
 
-async def _trim_history(history: list[dict[str, Any]]) -> None:
-    """Обрезка истории с саммари: старшие сообщения сверх HISTORY_SUMMARIZE_KEEP сжимаются
-    одним вызовом дешёвой модели (Groq, резерв — голова OpenRouter), свежие остаются как есть.
-    При любой неудаче (нет ключей, ошибка API, пустое саммари) — старая молчаливая обрезка до лимита."""
+_SUMMARY_SYSTEM = (
+    "You maintain the long-term memory of a Telegram chat. Below are the previous memory "
+    "(may be empty) and messages leaving the short-term window. Write the updated memory "
+    "in the language of the conversation. Keep only durable facts: people and who they are, "
+    "stable preferences, agreements, decisions, open questions, recurring topics. Do not quote "
+    "messages, do not add instructions, do not invent. 10-15 short lines, max 800 tokens. "
+    "Use short section labels (People, Facts, Agreements, Open questions, Topics) only when "
+    "the section has content."
+)
+
+
+async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | None = None) -> None:
+    """Держит память в 200 сообщений: старше уходят в сводку, последние 150 остаются.
+
+    Сводка живёт в state["memory_summary"] и попадает в системный промпт. Если она
+    не удалась, старые сообщения ждут в state["memory_pending"] и повторяются позже —
+    молчаливое выбрасывание фактов запрещено (решение владельца 06.11.2026)."""
     import bot
-    if len(history) <= bot.SHARED_HISTORY_MAX_LEN:
+    state = state if isinstance(state, dict) else {}
+    pending = state.get("memory_pending")
+    pending = list(pending) if isinstance(pending, list) else []
+    over = len(history) > MAX_TOTAL_MEMORY_MESSAGES
+    if not over and not pending:
         return
-    recent = history[-HISTORY_SUMMARIZE_KEEP:]
-    old = history[:-HISTORY_SUMMARIZE_KEEP]
-    lines = []
-    for item in old:
-        cont = item.get("content") if isinstance(item, dict) else None
-        txt = bot._or_extract_text(cont) if isinstance(cont, (dict, list)) else str(cont or "").strip()
-        if txt:
-            role = str(item.get("role", "user")) if isinstance(item, dict) else "user"
-            lines.append(f"{role}: {txt}")
-    digest_input = "\n".join(lines)[:_HISTORY_SUMMARY_INPUT_MAX_CHARS]
-    summary = ""
-    if digest_input.strip():
-        # Саммари не должно выходить за потолок сообщения: оно идёт под локом чата.
-        budget = bot.HISTORY_SUMMARY_BUDGET_SEC
-        remaining = bot._msg_remaining_sec()
-        if remaining is not None:
-            budget = max(0.1, min(budget, remaining))
-        try:
-            summary = await asyncio.wait_for(
-                _summarize_text(digest_input), timeout=budget,
-            )
-        except Exception as exc:
-            log.warning("[history] Summarization over budget/failed, plain cut: %s", exc)
+    # Фон пишется без лока чата: вторая сводка по тому же state только дублировала бы вызов.
+    if state.get("memory_trimming"):
+        return
+    # Упавшая сводка не должна тормозить каждый следующий ответ: повтор по таймеру.
+    retry_at = state.get("memory_retry_at")
+    if pending and not over and isinstance(retry_at, (int, float)) and time.time() < retry_at:
+        return
+    old: list[dict[str, Any]] = []
+    if over:
+        old = list(history[:-HISTORY_SUMMARIZE_KEEP])
+        # del, а не history[:] = ...: конкурентный append фона в хвост не теряется.
+        del history[:-HISTORY_SUMMARIZE_KEEP]
+    old = pending + old
+    if not old:
+        return
+    if len(old) > MAX_MEMORY_PENDING:
+        log.warning(
+            "[history] Pending memory exceeds %d messages; the oldest %d facts are dropped.",
+            MAX_MEMORY_PENDING, len(old) - MAX_MEMORY_PENDING,
+        )
+    # В очередь ДО сетевого вызова: рестарт посреди сводки не должен терять факты.
+    state["memory_pending"] = old[-MAX_MEMORY_PENDING:]
+    epoch = state.get("memory_epoch")
+    digest = summary_input(state.get("memory_summary") or "", old)
+    # Сводка идёт под локом чата: она не должна выходить за потолок сообщения.
+    budget = bot.HISTORY_SUMMARY_BUDGET_SEC
+    remaining = bot._msg_remaining_sec()
+    if remaining is not None:
+        budget = max(0.1, min(budget, remaining))
+    state["memory_trimming"] = True
+    try:
+        summary = await asyncio.wait_for(_summarize_text(digest), timeout=budget)
+    except Exception as exc:
+        summary = ""
+        log.warning("[history] Summarization over budget/failed, keeping %d message(s) pending: %s", len(old), exc)
+    finally:
+        state.pop("memory_trimming", None)
+    # /reset во время сводки поднял поколение: старые факты возвращать нельзя.
+    if state.get("memory_epoch") != epoch:
+        return
     if summary:
-        history[:] = [{"role": "user", "content": "[Ранее в диалоге]: " + summary}] + recent
+        state["memory_summary"] = summary
+        state["memory_pending"] = []
+        state.pop("memory_retry_at", None)
     else:
-        history[:] = history[-bot.SHARED_HISTORY_MAX_LEN:]
+        state["memory_retry_at"] = time.time() + MEMORY_SUMMARY_RETRY_SEC
+        log.warning(
+            "[history] Summary failed; %d message(s) kept for retry, prompt keeps the last %d.",
+            len(state["memory_pending"]), HISTORY_SUMMARIZE_KEEP,
+        )
+
 
 async def _summarize_text(text: str) -> str:
-    """Одно саммари дешёвой моделью. Пустая строка при любой неудаче — вызывающий код режет по-старому."""
+    """Обновлённая память чата: Gemini flash-lite, затем голова Munito; пусто — сбой."""
     import bot
-    messages = [
-        {"role": "system", "content": "Summarize the conversation below briefly (5-8 sentences), in the conversation's own language. Facts and open questions only, no preamble."},
-        {"role": "user", "content": text},
-    ]
-    payload = {"messages": messages, "temperature": 0.2, "max_tokens": 400, "stream": False}
-    from lumen_router_config import _GROQ_LIGHT_ORDER, _MUNITO_ORDER, _OR_LIGHT_ORDER, _munito_active, _munito_payload_extras
-    # Порядок = самый дешёвый живой: Munito во время эксперимента, иначе Groq, иначе OpenRouter.
-    candidates: list[tuple[str, str]] = []
-    if _munito_active():
-        candidates.append(("munito", _MUNITO_ORDER[0]))
-    if bot.GROQ_API_KEY:
-        candidates.append(("groq", _GROQ_LIGHT_ORDER[0]))
-    if bot.OPENROUTER_API_KEY:
-        candidates.append(("openrouter", _OR_LIGHT_ORDER[0]))
-    # Имена через bot.: подмена тестами продолжает работать.
-    request_fns = {"munito": bot._munito_request, "groq": bot._groq_request, "openrouter": bot._or_request}
-    for provider, model in candidates:
+    from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
+    budget = bot.HISTORY_SUMMARY_BUDGET_SEC
+    remaining = bot._msg_remaining_sec()
+    if remaining is not None:
+        budget = max(0.1, min(budget, remaining))
+    deadline = time.monotonic() + budget
+    gemini_model = "gemini-2.5-flash-lite"
+    # Сильная модель на сводке: слабая голова теряла факты, ради которых память и нужна.
+    if bot.client is not None:
         try:
-            # Поле reasoning_effort знает только Munito: на чужих эндпоинтах неизвестный
-            # параметр — это 400, поэтому тело собирается на каждого провайдера.
-            body = {**payload, "model": model}
-            if provider == "munito":
-                body.update(_munito_payload_extras())
-            resp = await request_fns[provider]("chat/completions", "POST", json_body=body)
-            choices = resp.get("choices") or []
-            answer = ""
-            if choices:
-                answer = bot._or_extract_text(choices[0].get("message") or "").strip()
+            from google.genai import types
+            gemini_timeout = max(1.0, min(budget * 0.6, 12.0))
+            resp = await asyncio.wait_for(
+                bot.client.aio.models.generate_content(
+                    model=gemini_model,
+                    contents=[types.Content(role="user", parts=[types.Part.from_text(text=text)])],
+                    config=types.GenerateContentConfig(
+                        system_instruction=_SUMMARY_SYSTEM,
+                        temperature=0.2,
+                        max_output_tokens=800,
+                        # Без thinking: сводка — пересказ фактов, а не задача на рассуждение.
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
+                    ),
+                ),
+                timeout=gemini_timeout,
+            )
+            answer = (getattr(resp, "text", "") or "").strip()
             if answer:
-                bot._record_quota_usage(provider, model, service=True)
+                bot._record_quota_usage("gemini", gemini_model, service=True)
                 return answer
         except Exception as exc:
-            log.warning("[history] Summarization via %s/%s failed, trying next: %s", provider, model, exc)
-            continue
+            log.warning("[history] Summary via %s failed, trying Munito: %s", gemini_model, exc)
+    if not _munito_active() or time.monotonic() >= deadline:
+        return ""
+    model = _MUNITO_ORDER[0]
+    payload = {
+        "messages": [
+            {"role": "system", "content": _SUMMARY_SYSTEM},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0.2, "max_tokens": 800, "stream": False,
+    }
+    try:
+        # Имя запроса читаем через bot.: подмена тестами продолжает работать.
+        resp = await bot._munito_request(
+            "chat/completions", "POST",
+            json_body={**payload, "model": model, **_munito_payload_extras()},
+            deadline=deadline,
+        )
+        choices = resp.get("choices") or []
+        answer = bot._or_extract_text(choices[0].get("message") or "").strip() if choices else ""
+        if answer:
+            bot._record_quota_usage("munito", model, service=True)
+            return answer
+    except Exception as exc:
+        log.warning("[history] Summary via munito/%s failed: %s", model, exc)
     return ""

@@ -1,5 +1,5 @@
 """
-lumen_router_config.py — модели и выбор маршрута (Gemini/OpenRouter/Groq/Munito) для одного сообщения.
+lumen_router_config.py — модели и выбор маршрута (Munito/Gemini) для одного сообщения.
 
 Конфигурация плюс функции решения (_build_route, эвристики тяжести и свежести, фильтры квот). Обращений к API отсюда нет, bot.py импортирует имена напрямую.
 """
@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -20,7 +19,7 @@ log = logging.getLogger("bot")
 
 # ── модели ──
 
-# Поля name/badge/desc убраны (июль 2026, /model удалена) — читаются только grounding/url_context/no_search/no_system/stream/quota_unconfirmed.
+# Поля name/badge/desc убраны (июль 2026, /model удалена) — читаются только grounding/url_context/stream/quota_unconfirmed.
 #
 # ── Как дашборд AI Studio считает бесплатную квоту grounding-инструментов ──
 # Бакет "Gemini 3" — 0/0 на search и map (24.07 + перепроверка 17.08.2026 + аудит дашборда 08.10.2026); квота на поиск только у 2.5-flash/lite, map — только у 3.5/3.1-lite.
@@ -71,24 +70,11 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "stream": True,
         "search_grounding": True, "map_grounding": True, "url_context": True,
     },
-    "gemma-4-31b-it": {
-        "no_system": True, "no_search": True, "stream": True, "url_context": True,
-    },
-    "gemma-4-26b-a4b-it": {
-        "no_system": True,
-        # 24.07.2026: без no_search Gemma получала бы инструменты, которых не поддерживает.
-        "no_search": True, "stream": True, "url_context": True,
-    },
 }
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
 # ── TTS-модели (аудит техдолга, август 2026) ──
 GEMINI_TTS_MODELS: list[str] = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
-
-# Fish free — только до 31.08.2026 (fish.audio/blog); зеркала больше нет в живом каталоге.
-FISH_AUDIO_TTS_MODEL = "fish-audio/s2.1-pro-free:free"
-# ОТКЛЮЧЕНО (аудит 17.09.2026): зеркала нет в живом каталоге OpenRouter, продление после 31.08.2026 не объявлено. Флаг и функция оставлены: при возврате free-доступа достаточно вернуть True.
-FISH_AUDIO_ENABLED = False
 
 def _check_unconfirmed_model_quotas() -> None:
     """Напоминаем про модели с quota_unconfirmed: квота/grounding ещё не подтверждены по дашборду."""
@@ -156,141 +142,6 @@ _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
 TEXT_MODEL_ORDER = _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION  # алиас для обратной совместимости
 # Аудит 02.08.2026 (логи + каталог): laguna-s-2.1 и ling-3.0-flash, калибровку не проходили (только факт free-квоты).
 
-# ── Единый реестр нездоровых моделей ──
-# Один dict вместо трёх рассинхронных механизмов; excluded-множество вычисляется из него.
-@dataclass(frozen=True)
-class _ModelHealthNote:
-    reason: str
-    # Только для временного промо-доступа; у снятых навсегда поле пустое: предупреждать не о чем.
-    promo_expiry: date | None = None
-
-_OR_MODEL_HEALTH: dict[str, _ModelHealthNote] = {
-    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free": _ModelHealthNote(
-        reason="Uncensored-модель — может хуже соблюдать личность/правила Lumen. Раньше выбиралась "
-               "вручную только владельцем через /provider (команда удалена) — автоматический роутер "
-               "её не выбирает вообще."
-    ),
-    "qwen/qwen3-coder:free": _ModelHealthNote(
-        reason="Подтверждено при аудите моделей (июль 2026): :free-эндпоинт снят провайдером.",
-        promo_expiry=date(2026, 6, 30),
-    ),
-    "tencent/hy3:free": _ModelHealthNote(
-        reason="Собственная страница OpenRouter показывала 'Going away July 19, 2026' — :free-эндпоинт "
-               "уже снят провайдером.",
-        promo_expiry=date(2026, 7, 21),
-    ),
-    "qwen/qwen3-next-80b-a3b-instruct:free": _ModelHealthNote(
-        reason="Логи прода 25.07.2026, 20+ попыток: HTTP 404 'use this slug instead' (платный слаг) — не возвращать без бесплатного доступа."
-    ),
-    # ── Аудит 02.08.2026 (логи прода, ~5ч трафика) ──
-    "z-ai/glm-4.5-air:free": _ModelHealthNote(
-        reason="Логи прода 02.08.2026, 8 попыток: HTTP 404 'use this slug instead' (тот же паттерн снятия с free, что выше)."
-    ),
-    "meta-llama/llama-3.2-3b-instruct:free": _ModelHealthNote(
-        reason="Логи прода 02.08.2026, 7 попыток: HTTP 404 'use this slug instead' — Meta, похоже, убрала весь free-тир Llama."
-    ),
-    "liquid/lfm-2.5-1.2b-instruct:free": _ModelHealthNote(
-        reason="Логи прода 02.08.2026: 'No endpoints found' — для слага нет ни одного провайдера, плюс отсутствует в живом каталоге."
-    ),
-    "liquid/lfm-2.5-1.2b-thinking:free": _ModelHealthNote(
-        reason="Каталог OpenRouter 17.09.2026: слага нет среди бесплатных, LiquidAI выпустили замену liquid/lfm-2.5-2.6b:free."
-    ),
-    "nousresearch/hermes-3-llama-3.1-405b:free": _ModelHealthNote(
-        reason="Снимок API OpenRouter 27.07.2026 называет её среди снятых с free (5 из 7 того снимка уже независимо подтверждены) — уверенность ниже, чем по прямым логам."
-    ),
-    # ── Калибровка против Claude Sonnet 5 (18.08.2026, логи + скриншоты) ──
-    "nvidia/nemotron-nano-9b-v2:free": _ModelHealthNote(
-        reason="Логи+скриншоты 18.08.2026 (37/45 лёгких запросов): каждый развёрнутый ответ содержал вставки чужих языков внутрь слов ('modelo', 'زراعة', 'キュ', 'lagoo Isaacs' и т.п.) плюс стриминг 12-92с — текст нечитаем, хотя технически отвечает."
-    ),
-    # ── Логи прода 22.08.2026 ──
-    "inclusionai/ling-3.0-flash:free": _ModelHealthNote(
-        reason="Логи прода 22.08.2026, 2 попытки: HTTP 404 'use this slug instead' — стояла головой лёгкой цепочки, каждое сообщение теряло попытку."
-    ),
-    # ── Аудит 17.09.2026 (каталог OpenRouter через /models API: 444 модели, 24 бесплатных) ──
-    "nvidia/nemotron-3-nano-30b-a3b:free": _ModelHealthNote(
-        reason="Анонсированная дата снятия 24.08.2026 наступила, слага нет в живом каталоге free — стояла в лёгкой цепочке."
-    ),
-    "openai/gpt-oss-20b:free": _ModelHealthNote(
-        reason="Слага нет в живом каталоге free 17.09.2026 (в логах напрямую не поймана — уверенность ниже; убрать запись при первом успешном вызове)."
-    ),
-    "openai/gpt-oss-120b:free": _ModelHealthNote(
-        reason="То же снятие, что у gpt-oss-20b выше (каталог 17.09.2026, в логах не поймана)."
-    ),
-    "nvidia/nemotron-nano-12b-v2-vl:free": _ModelHealthNote(
-        reason="Слага нет в живом каталоге free 17.09.2026 — стояла головой vision-цепочки; заменена на gemma-4-31b-it:free."
-    ),
-    # ── Логи прода вечером 17.09.2026 (после утреннего аудита — новички уже пошли в бой) ──
-    "thinkingmachines/inkling-small:free": _ModelHealthNote(
-        reason="Логи прода 17.09.2026: 'only available on agentic harnesses' — не обслуживает обычные chat-запросы; стояла второй в лёгкой цепочке."
-    ),
-    # ── Логи прода 05.10.2026 ──
-    "nex-agi/nex-n2.5-mini:free": _ModelHealthNote(
-        reason="Логи прода 05.10.2026: 'This model is unavailable for free. The paid version is available now' — стояла второй в лёгкой цепочке."
-    ),
-    # ── Логи прода 05–07.10.2026: та же платная отсечка, что у nex-mini выше ──
-    "inclusionai/ling-3.0-flash-vl:free": _ModelHealthNote(
-        reason="Логи прода 05–06.10.2026: 'unavailable for free... use this slug instead' — замыкала vision-цепочку, каждая картинка теряла попытку."
-    ),
-    "inclusionai/ling-3.0-flash-fin:free": _ModelHealthNote(
-        reason="Логи прода 07.10.2026: тот же 'unavailable for free' — стояла третьей в лёгкой цепочке."
-    ),
-    "qwen/qwen3.8-27b:free": _ModelHealthNote(
-        reason="Liveness 07.10.2026: 'unavailable for free... use this slug instead: qwen/qwen3.8-27b' — тот же паттерн снятия с free."
-    ),
-    # ── Каталог OpenRouter 22.10.2026 (468 моделей, 18 бесплатных; проба eval/persona_models.py из Actions) ──
-    "inclusionai/ling-3.0-flash-sante:free": _ModelHealthNote(
-        reason="Каталог 22.10.2026: слага нет среди бесплатных; прямой вызов из Actions дал HTTP 404. "
-               "Была головой лёгкой цепочки (08.10.2026) — понижена автоматически этим переносом."
-    ),
-    "z-ai/glm-5.2:free": _ModelHealthNote(
-        reason="Каталог 22.10.2026: слага нет среди бесплатных — тот же уход с free, что у sante выше и ling-flash (22.08.2026)."
-    ),
-    "nex-agi/nex-n2.5-pro:free": _ModelHealthNote(
-        reason="Каталог 22.10.2026: слага нет среди бесплатных; nex-mini ушла раньше 05.10.2026 той же платной отсечкой."
-    ),
-    # ── Замер цепочек 22.10.2026 (Actions 39818227233; каталог числит обе, вызовы не проходят) ──
-    "nvidia/nemotron-3-super-120b-a12b:free": _ModelHealthNote(
-        reason="Замер 22.10.2026 из Actions: оба вопроса HTTP 404 Not Found, несмотря на присутствие слага в каталоге (468 моделей) — эндпойнтов нет. "
-               "Третий инцидент подряд (порча текста 17.09.2026 дважды, теперь недоступность) — исключена из heavy-цепочки."
-    ),
-    "thinkingmachines/inkling:free": _ModelHealthNote(
-        reason="Замер 22.10.2026 из Actions: все попытки HTTP 403 Forbidden; сестринская inkling-small исключена той же историей 17.09.2026 ('only available on agentic harnesses')."
-    ),
-}
-
-# Вычисляется из _OR_MODEL_HEALTH — роутер не должен выбирать эти модели.
-_ROUTER_EXCLUDED_OR_MODELS: frozenset[str] = frozenset(_OR_MODEL_HEALTH.keys())
-
-def _check_temporary_free_models_expiry() -> None:
-    """Предупреждает про модели с истёкшим промо (для снятых навсегда предупреждать не о чем)."""
-    today = date.today()
-    for model_id, note in _OR_MODEL_HEALTH.items():
-        # Реестр целиком уходит в исключённые, поэтому на деле ветка молчит: строки
-        # про снятые модели повторялись при каждом рестарте без пользы (прод 27.10.2026).
-        if model_id in _ROUTER_EXCLUDED_OR_MODELS:
-            continue
-        if note.promo_expiry is not None and today > note.promo_expiry:
-            log.warning(
-                '[or] Temporary free access to model %s expired on %s (today is %s) — %s The router no longer selects it (_ROUTER_EXCLUDED_OR_MODELS), but check the current price on openrouter.ai if you ever need to bring it back.',
-                model_id, note.promo_expiry.isoformat(), today.isoformat(), note.reason,
-            )
-
-# ── Анонсированные даты снятия ("Going away <дата>" на карточке OpenRouter) ──
-# Будущий анонс не исключает живую модель: только подтверждённые логи; реестр лишь предупреждает.
-# 28.10.2026: dots-3-note-preview снят из реестра — анонс 30.09.2026 не сработал,
-# модель жива в живом каталоге OpenRouter, и просроченная дата только шумела на старте.
-_SCHEDULED_OR_REMOVALS: dict[str, date] = {}
-
-def _check_scheduled_removals_due() -> None:
-    """Предупреждает, когда дата снятия наступила. >= вместо >: анонс действует уже в день снятия."""
-    today = date.today()
-    for model_id, removal_date in _SCHEDULED_OR_REMOVALS.items():
-        if today >= removal_date and model_id not in _ROUTER_EXCLUDED_OR_MODELS:
-            log.warning(
-                '[or] Model %s was scheduled by OpenRouter to go away on %s (today is %s) — check recent logs for 404/"no endpoints" errors on this model, and add a dated _OR_MODEL_HEALTH entry if confirmed dead. Not excluded automatically — still selectable until confirmed.',
-                model_id, removal_date.isoformat(), today.isoformat(),
-            )
-
 def _is_quota_exhausted(provider: str, model_id: str) -> bool:
     """Метка _mark_quota_exhausted после 429: роутер пропускает такие без траты попытки (аудит 26.09.2026). Сброс — смена суток или успешный ответ. Короткая остывка минутного 429 тоже пропускается (враждебное ревью 27.09.2026)."""
     try:
@@ -308,19 +159,17 @@ def _is_quota_exhausted(provider: str, model_id: str) -> bool:
         return False
 
 def _skip_exhausted(provider: str, models: list[str]) -> list[str]:
-    """Убирает модели с меткой квоты и временным карантином. Все мёртвы — один первый разрешённый вариант (не из реестра исключённых): каждое сообщение платит максимум одно лишнее обращение, а не по одному за всю цепочку."""
+    """Убирает модели с меткой квоты и временным карантином. Все мёртвы — первый из
+    списка: маршрут обязан остаться непустым, иначе сообщение вообще не дойдёт ни до
+    одной модели (каждое сообщение платит максимум одно лишнее обращение)."""
     alive = [m for m in models if not _is_quota_exhausted(provider, m) and not _is_quarantined(provider, m)]
     if alive:
         return alive
-    for candidate in models:
-        if candidate not in _ROUTER_EXCLUDED_OR_MODELS:
-            return [candidate]
-    return []
+    return [models[0]] if models else []
 
 # ── Временный карантин моделей ──
 # Только в памяти: N плохих ответов подряд (пусто или mush-каша) — и роутер
-# пропускает модель до конца суток квоты. Реестр _OR_MODEL_HEALTH не трогаем:
-# туда только датированные доказательства.
+# пропускает модель до конца суток квоты.
 _QUARANTINE: dict[tuple[str, str], dict[str, Any]] = {}
 
 def _quarantine_threshold() -> int:
@@ -384,65 +233,46 @@ def _quarantine_status() -> list[tuple[str, str, int]]:
     except Exception:
         return []
 
-def _or_route(models: list[str]) -> list[tuple[str, str]]:
-    """Список ID в пары (provider, model_id), минус реестр исключённых и модели с исчерпанной квотой."""
-    return [("openrouter", m) for m in _skip_exhausted("openrouter", models) if m not in _ROUTER_EXCLUDED_OR_MODELS]
-
 def _gemini_route(models: list[str]) -> list[tuple[str, str]]:
-    # Отдельного реестра здоровья, как _OR_MODEL_HEALTH, здесь нет осознанно:
+    # Отдельного реестра здоровья здесь нет осознанно:
     # временные отказы (503/unavailable) гасит остывка _mark_model_unavailable на
     # QUOTA_RATE_LIMIT_COOLDOWN_SEC, а снятие модели — только с датированным
     # подтверждением (аудит M8, 10.2026). При инциденте убирать из ORDER-списков с датой.
     return [("gemini", m) for m in _skip_exhausted("gemini", models)]
 
-# ── Groq (прямой провайдер, не через OpenRouter) ──
-# Калибровка живьём 21.09.2026: Qwen голова (чисто и по делу), gpt-oss второй (представляется ChatGPT и тратит reasoning-токены). Лимиты free: 30 RPM / 1000 RPD / 8K TPM / 200K TPD.
-# Базовый URL один: bot.GROQ_BASE_URL, дубля здесь нет (аудит 05.10.2026).
-_GROQ_LIGHT_ORDER: list[str] = [
-    "qwen/qwen3.8-27b",
-    "openai/gpt-oss-120b",
-]
-
-def _groq_route(models: list[str]) -> list[tuple[str, str]]:
-    # То же про остывку вместо реестра, что у _gemini_route выше.
-    return [("groq", m) for m in _skip_exhausted("groq", models)]
-
-
-# ── Munito AI (временный провайдер владельца, 05.11.2026) ──
+# ── Munito AI (основной текстовый провайдер с 05.11.2026) ──
 # Живой замер eval/munito_probe.py 05.11.2026, глобальный хост, ключ владельца:
 # deepseek-v4.1-flash-1017 — первый токен 0.24с и 200 запросов за 30-секундное окно;
 # glm-5.3-flash — 1.50с и 10 запросов; deepseek-v4-flash — 0.19с и 10 запросов;
 # qwen3.8-27b — без стрима вернул ПУСТОЙ content (400 reasoning-токенов), поэтому
 # головой не берём. Данные: ноль-хранение по умолчанию, обучение на промптах запрещено.
+# Картинки проверены 05.11.2026 живым вызовом: обе головы называют цвета
+# синтетического PNG и отдают реальные tool_calls, поэтому vision тоже здесь.
 _MUNITO_ORDER: list[str] = [
     "deepseek-ai/deepseek-v4.1-flash-1017",
     "zai-org/glm-5.3-flash",
     "deepseek-ai/deepseek-v4-flash",
 ]
 
-
-def _env_flag(name: str) -> bool:
-    return (os.getenv(name, "") or "").strip().lower() in ("1", "true", "on", "yes")
-
-
-# Включено — весь обычный текст идёт только в Munito, прежние цепочки не удалены:
-# выключение одной переменной окружения возвращает маршрут один в один.
-_MUNITO_ENABLED = _env_flag("MUNITO_ENABLED")
-# Без запасных 429/503 Munito означает тишину для всех; режим для живой проверки —
-# по умолчанию выключен, включается только если нужен и квотный расход, и отказоустойчивость.
-_MUNITO_KEEP_FALLBACKS = _env_flag("MUNITO_KEEP_FALLBACKS")
+# Выключатель, а не включатель: Munito активен, пока задан ключ и переменная не
+# выставлена в 0/false/off. Удаление секрета из Space само возвращает маршрут на
+# цепочки Gemini, правки кода для этого не нужны.
+_MUNITO_DISABLED = (os.getenv("MUNITO_ENABLED", "") or "").strip().lower() in ("0", "false", "off")
 
 
 def _munito_active() -> bool:
-    """Флаг плюс живой ключ: без ключа путь в Munito бессмысленен и маршруту не виден."""
+    """Ключ плюс невыключенный флаг: без ключа путь в Munito бессмысленен и маршруту не виден."""
     try:
         import bot
-        return bool(_MUNITO_ENABLED and bot.MUNITO_API_KEY)
+        return bool(not _MUNITO_DISABLED and bot.MUNITO_API_KEY)
     except Exception:
         return False
 
 
 def _munito_route() -> list[tuple[str, str]]:
+    """Пусто без ключа или под выключателем: маршрут тогда целиком идёт в Gemini."""
+    if not _munito_active():
+        return []
     return [("munito", m) for m in _skip_exhausted("munito", _MUNITO_ORDER)]
 
 
@@ -459,57 +289,8 @@ def _munito_payload_extras() -> dict[str, Any]:
     return {"reasoning_effort": effort} if effort else {}
 
 
-# ── Gemma в голове обычного текста (22.10.2026).
-# Офлайн-замер 25 вопросов (eval/persona_models.py, Actions): обе Gemma 47/50,
-# gemini-3.5-flash-lite 45/50, OR-lightning 39/50; Groq из Actions недоступен
-# (403 Cloudflare) — сравруется живым прогоном. Первой 26B-A4B: тот же балл,
-# но первый токен 13.5с против 26.4с у 31B. Квота Gemma 14.4K/сутки на модель
-# (дашборд 22.10.2026) против 20-500 у линейки Gemini; search grounding у Gemma
-# нет, поэтому свежесть шла в GEMINI_SEARCH_CHAIN как раньше.
-_GEMMA_TEXT_CHAIN: list[str] = [
-    "gemma-4-26b-a4b-it",
-    "gemma-4-31b-it",
-]
-
-
-# ── "Лёгкие" запросы — самый частый маршрут, целиком OpenRouter.
-# Порядок по аудитам 22.08/17.09.2026; nex-mini повышен продом 17.09.2026, снят
-# 05.10.2026 (платная отсечка — см. _OR_MODEL_HEALTH): второй стала sante.
-# 08.10.2026: fin и qwen3.8-27b:free сняты той же отсечкой — убраны из цепочки.
-# 08.10.2026: голова — sante (фактически отвечает в проде), nemotron-3.5-lightning
-# понижен в хвост (таймауты в проде 07.10.2026) — резервом перед openrouter/free.
-# 22.10.2026: sante пропала из живого каталога (вызов из Actions — HTTP 404) —
-# снята; обычный текст теперь уходит через Gemma/Groq раньше этого резерва.
-_OR_LIGHT_ORDER: list[str] = [
-    "liquid/lfm-2.5-2.6b:free",
-    "nvidia/nemotron-3.5-lightning:free",
-    "openrouter/free",
-]
-
-# ── "Тяжёлые" запросы без медиа — сначала OpenRouter, квоту Gemini бережём.
-# super-120b понижен под ultra-550b (второй инцидент порчи текста 17.09.2026; при третьем — исключать).
-# 22.10.2026: glm-5.2 и nex-n2.5-pro пропали из живого каталога — сняты (см. _OR_MODEL_HEALTH).
-# 22.10.2026: super-120b (404 на каждый вызов, третий инцидент) и inkling (403 на каждый
-# вызов) сняты замером цепочек — иначе тяжёлые запросы тратили бы повторы впустую.
-_OR_HEAVY_ORDER: list[str] = [
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "poolside/laguna-s-2.1:free",
-    "cohere/north-mini-code:free",
-    "poolside/laguna-xs-2.1:free",
-    "dots-studio/dots-3-note-preview:free",
-    "openrouter/free",
-]
-
-# ── Картинки без свежести — vision OpenRouter (только base64-картинки).
-# Голова gemma-4-31b (квота подтверждена); ling-vl снят 08.10.2026 той же
-# платной отсечкой (см. _OR_MODEL_HEALTH) — убран из цепочки.
-_OR_VISION_ORDER: list[str] = [
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-    "google/gemma-4-26b-a4b-it:free",
-]
-
-# ── Цепочки Gemini, где нужен именно Gemini.
+# ── Цепочки Gemini: где нужен именно Gemini (ссылки, YouTube, видео/аудио) и где
+# он резерв после Munito (весь остальной текст и картинки).
 # Голова — 2.5-flash: единственная, кто фактически отвечал в проде 05–07.10.2026,
 # и единственная с реальной квотой search grounding (линейка 3.x — 0/0, аудит
 # ДД.ММ.ГГГГ по дашборду AI Studio владельца).
@@ -529,8 +310,6 @@ GEMINI_HEAVY_CHAIN: list[str] = [
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
-    "gemma-4-31b-it",
-    "gemma-4-26b-a4b-it",
 ]
 # Сначала модели с реальной квотой search grounding (2.5-flash/lite), линейка 3.x — резервом (ответ по знаниям/url_context).
 GEMINI_SEARCH_CHAIN: list[str] = [
@@ -547,9 +326,10 @@ GEMINI_SEARCH_CHAIN: list[str] = [
 # Дефолт для прямых вызовов ask_gemini без явной цепочки.
 # Копия, а не алиас: раньше правка дефолта молча меняла тяжёлую цепочку (аудит 26.09.2026).
 GEMINI_DEFAULT_CHAIN: list[str] = list(GEMINI_HEAVY_CHAIN)
-# Сайты по ссылке и YouTube умеют только "полноценные" (не no_system/Gemma) модели.
-GEMINI_LINK_CHAIN: list[str] = [m for m in GEMINI_HEAVY_CHAIN if not GEMINI_MODELS.get(m, {}).get("no_system")]
-GEMINI_LINK_SEARCH_CHAIN: list[str] = [m for m in GEMINI_SEARCH_CHAIN if not GEMINI_MODELS.get(m, {}).get("no_system")]
+# Сайты по ссылке и YouTube умеют те же цепочки; имена оставлены раздельными,
+# потому что их читают разные вызывающие места (фильтр по no_system умер вместе с Gemma).
+GEMINI_LINK_CHAIN: list[str] = list(GEMINI_HEAVY_CHAIN)
+GEMINI_LINK_SEARCH_CHAIN: list[str] = list(GEMINI_SEARCH_CHAIN)
 
 
 # ── Эвристика тяжёлого запроса без LLM.
@@ -664,32 +444,18 @@ def _looks_like_freshness_query(text: str) -> bool:
     return bool(text) and bool(_FRESHNESS_QUERY_RE.search(text))
 
 
-def _text_route(*, is_heavy: bool, needs_freshness: bool) -> list[tuple[str, str]]:
-    """Штатный маршрут для текста без медиа — общий для обычного порядка и для резерва под Munito."""
-    if needs_freshness:
-        # Текст со свежестью — Gemini с поиском; дальше OpenRouter и Groq резервом без поиска.
-        return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_HEAVY_ORDER if is_heavy else _OR_LIGHT_ORDER) + _groq_route(_GROQ_LIGHT_ORDER)
-
-    # Обычный текст с 22.10.2026: Gemma первой (замер выше: 47/50 против 42 по
-    # журналу владельца в Groq-эре; квота 14.4K/сутки). Groq второй — независимый
-    # провайдер на случай отказа Google целиком; дальше OR и Gemini резервом.
-    # Тяжёлый — без изменения: Groq первой (аудит D3, 30.09.2026), свободная
-    # квота Groq-Tier экономит scarce-квоты OR/Gemini.
-    if is_heavy:
-        return _groq_route(_GROQ_LIGHT_ORDER) + _or_route(_OR_HEAVY_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
-    return (
-        _gemini_route(_GEMMA_TEXT_CHAIN)
-        + _groq_route(_GROQ_LIGHT_ORDER)
-        + _or_route(_OR_LIGHT_ORDER)
-        + _gemini_route(GEMINI_SEARCH_CHAIN)
-    )
+def _gemini_text_chain(*, needs_freshness: bool) -> list[str]:
+    """Какая цепочка Gemini резервом для текста: с поиском — если нужна свежесть,
+    иначе общая тяжёлая. Разделения на «лёгкий/тяжёлый» больше нет: с 05.11.2026
+    сила запроса влияет только на reasoning внутри Munito, а резерв один."""
+    return GEMINI_SEARCH_CHAIN if needs_freshness else GEMINI_HEAVY_CHAIN
 
 
 def _build_route(
     *, needs_youtube: bool, needs_website: bool, media_mime: str | None,
     is_heavy: bool, needs_freshness: bool,
 ) -> list[tuple[str, str]]:
-    """Приоритетный список кандидатов (provider, model_id), непустой; первый пробуется первым. Внутри провайдера — по возрастанию цены для дефицитной квоты."""
+    """Приоритетный список кандидатов (provider, model_id), непустой; первый пробуется первым. Внутри провайдера — по возрастанию цены для дефицитной квоты. is_heavy с 05.11.2026 на состав не влияет: различие «лёгкий/тяжёлый» остался только в reasoning самой модели (Munito), поэтому резерв у обоих один — особый тяжёлый резерв заводить здесь."""
     is_video_or_audio_media = bool(media_mime) and not media_mime.startswith("image/")
 
     if needs_youtube or needs_website:
@@ -699,23 +465,17 @@ def _build_route(
 
     if media_mime:
         if is_video_or_audio_media:
-            # Видео/аудио — только Gemini (OpenRouter не примет не-изображение).
+            # Видео/аудио — только Gemini (Munito принимает только картинки).
             chain = GEMINI_SEARCH_CHAIN if needs_freshness else GEMINI_HEAVY_CHAIN
             return _gemini_route(chain)
         if needs_freshness:
-            # Картинка+свежесть: Gemini с поиском головой, дальше vision
-            # OpenRouter без поиска (аудит D3, 30.09.2026: раньше резерва не было).
-            return _gemini_route(GEMINI_SEARCH_CHAIN) + _or_route(_OR_VISION_ORDER)
-        # Картинка без поиска — сначала vision OpenRouter, Gemini резервом.
-        return _or_route(_OR_VISION_ORDER) + _gemini_route(GEMINI_HEAVY_CHAIN)
+            # Картинка+свежесть: нужен живой поиск, а его у Munito нет — только
+            # Gemini, как со ссылками.
+            return _gemini_route(GEMINI_SEARCH_CHAIN)
+        # Картинка без поиска: vision Munito головой (проверен 05.11.2026),
+        # тяжёлая цепочка Gemini резервом.
+        return _munito_route() + _gemini_route(GEMINI_HEAVY_CHAIN)
 
-    if _munito_active():
-        # Эксперимент владельца 05.11.2026: весь обычный текст — только Munito.
-        # Резерв включается отдельным флагом, потому что без него 429/503
-        # провайдера означает молчание бота для всех.
-        chain = _munito_route()
-        if _MUNITO_KEEP_FALLBACKS or not chain:
-            return chain + _text_route(is_heavy=is_heavy, needs_freshness=needs_freshness)
-        return chain
-
-    return _text_route(is_heavy=is_heavy, needs_freshness=needs_freshness)
+    # Весь обычный текст — Munito, Gemini резервом: провайдер отдаёт 503
+    # "no free capacity" на бесплатном тарифе, без резерва это тишина для всех.
+    return _munito_route() + _gemini_route(_gemini_text_chain(needs_freshness=needs_freshness))

@@ -18,6 +18,7 @@ from lumen_formatting import _md_to_html, _split_text_chunks, _strip_provider_ar
 from lumen_lang import t as _lang_t
 from lumen_status import _spinner_glyph, thought_block
 from lumen_message_parse import _history_user_text
+import lumen_memory
 from lumen_model_speed import (
     speed_key as _model_speed_key,
     record_response as _record_model_latency,
@@ -159,12 +160,12 @@ async def _sse_pieces(
     session, url: str, headers: dict[str, str], payload: dict, *, err_cls, provider_label: str,
     deadline: float | None = None,
 ):
-    """Общий разбор OpenAI-совместимого SSE для OpenRouter, Groq и Munito (все дают
+    """Общий разбор OpenAI-совместимого SSE (Munito даёт
     `data: {"choices":[{"delta":{"content":...}}]}` и финальный `data: [DONE]`).
 
-    Раньше это были две копии по 45 строк, расходившиеся деталями: у Groq не было
-    теста на HTTP-ошибку и на ошибку внутри чанка (аудит 26.09.2026). Ошибка внутри
-    чанка (HTTP 200, стрим уже открыт) поднимается: ранний сбой — откат на
+    Раньше это были несколько копий по 45 строк, расходившихся деталями: в одной не
+    было теста на HTTP-ошибку и на ошибку внутри чанка (аудит 26.09.2026). Ошибка
+    внутри чанка (HTTP 200, стрим уже открыт) поднимается: ранний сбой — откат на
     следующую модель, поздний — пометка "соединение прервалось"."""
     import bot
     post_cm = session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=None, connect=12.0))
@@ -212,43 +213,16 @@ async def _sse_pieces(
         with contextlib.suppress(Exception):
             await post_cm.__aexit__(None, None, None)
 
-async def _openrouter_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
-    """Куски от OpenRouter: SSE через общий _sse_pieces, таймаут на строку — тот же
-    STREAM_CHUNK_TIMEOUT_SEC, но не дольше остатка бюджета маршрута."""
+async def _remember_turn(
+    state: dict, history_text, user_text: str, answer: str, history_meta: dict | None,
+) -> None:
+    """Пишет пару вопрос-ответ в общий лог и запускает сводку при переполнении."""
     import bot
-    if not bot.OPENROUTER_API_KEY:
-        raise bot.OpenRouterAPIError("OPENROUTER_API_KEY is not set")
-    headers = {
-        "Authorization": f"Bearer {bot.OPENROUTER_API_KEY}",
-        "HTTP-Referer": bot.OPENROUTER_HTTP_REFERER,
-        "X-OpenRouter-Title": bot.OPENROUTER_TITLE,
-        "Content-Type": "application/json",
-    }
-    session = await bot._get_http_session()
-    async for piece in _sse_pieces(
-        session, f"{bot.OPENROUTER_BASE_URL}/chat/completions", headers,
-        {"model": model_id, "messages": messages, "stream": True},
-        err_cls=bot.OpenRouterAPIError, provider_label="OpenRouter", deadline=deadline,
-    ):
-        yield piece
+    hist_text = _history_user_text(history_text if history_text is not None else user_text)
+    lumen_memory.append_user_from_meta(state, hist_text, history_meta)
+    lumen_memory.append_assistant(state, answer)
+    await bot._trim_history(state["history"], state)
 
-async def _groq_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
-    """Куски от Groq: тот же OpenAI-SSE через общий _sse_pieces (Groq —
-    OpenAI-совместимый API), таймаут на строку — как у OpenRouter."""
-    import bot
-    if not bot.GROQ_API_KEY:
-        raise bot.GroqAPIError("GROQ_API_KEY is not set")
-    headers = {
-        "Authorization": f"Bearer {bot.GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    session = await bot._get_http_session()
-    async for piece in _sse_pieces(
-        session, f"{bot.GROQ_BASE_URL}/chat/completions", headers,
-        {"model": model_id, "messages": messages, "stream": True},
-        err_cls=bot.GroqAPIError, provider_label="Groq", deadline=deadline,
-    ):
-        yield piece
 
 async def _munito_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
     """Куски от Munito AI: тот же OpenAI-SSE через общий _sse_pieces (замер 05.11.2026: первый токен 0.24с у головы цепочки)."""
@@ -272,11 +246,11 @@ async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
     deadline: float | None = None, status=None, history_text=None,
     reuse_placeholder: Message | None = None, wait_started: float | None = None,
+    history_meta: dict | None = None,
 ) -> tuple[str | None, Message | None]:
     """Стриминг: генератор кусков + плейсхолдер, чанкинг, троттлинг, обрыв при утечке/инъекции, HTML-финал, запись в историю. Возвращает (ответ, плейсхолдер): успех — (текст, None); сбой до показа — (None, плейсхолдер для следующей модели); сбой после — (показанное + пометка, None)."""
     import bot
     state = bot.get_state(chat_id)
-    hist = state.setdefault("history", [])
 
     sent_messages: list[Message] = []
     full_text = ""
@@ -391,11 +365,7 @@ async def _run_streaming_reply(
                         await aclose()
                 final_answer = _IDENTITY_LEAK_FALLBACK if leak_kind == "identity" else _INJECTED_PAYLOAD_ECHO_FALLBACK
                 await bot._tg_call(sent_messages[-1].edit_text, final_answer, parse_mode=None, call_timeout=15.0)
-                hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
-                hist.append({"role": "assistant", "content": final_answer})
-                # Обрезка с саммари старого (см. _trim_history), а не молчаливый срез.
-                await bot._trim_history(hist)
-                bot._trim_combined(state)
+                await _remember_turn(state, history_text, user_text, final_answer, history_meta)
                 bot._record_quota_usage(provider, model_id)
                 return final_answer, None
 
@@ -416,12 +386,7 @@ async def _run_streaming_reply(
                         # Пометка важнее хвоста куска (см. _append_note_fit).
                         await bot._tg_call(sent_messages[idx].edit_text, _append_note_fit(chunks[idx], note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0)
                     final_answer = full_text.strip()
-                    hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
-                    hist.append({"role": "assistant", "content": final_answer})
-                    # Обрезка с саммари (см. _trim_history): молчаливый срез оставлял
-                    # саммаризацию только нестриминговым путям (аудит 26.09.2026).
-                    await bot._trim_history(hist)
-                    bot._trim_combined(state)
+                    await _remember_turn(state, history_text, user_text, final_answer, history_meta)
                     bot._record_quota_usage(provider, model_id)
                     return final_answer, None
                 if not edits_dead:
@@ -569,9 +534,9 @@ async def _run_streaming_reply(
             try:
                 _txt = bot._error_text(exc).strip() or exc.__class__.__name__
                 if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":
-                    # Дневную квоту опознаём предикатом провайдера, как текстовый
-                    # путь: общий account-wide ловит только OpenRouter-тексты.
-                    _daily = bot._is_gemini_daily_quota(_txt) if provider == "gemini" else bot._is_account_wide_or_rate_limit(_txt.lower())
+                    # Суточную квоту опознаёт только Gemini: у Munito лимиты оконные
+                    # (200 запросов за 30 секунд), держать его 429 до утра незачем.
+                    _daily = provider == "gemini" and bot._is_gemini_daily_quota(_txt)
                     if _daily:
                         bot._mark_quota_exhausted(provider, model_id)
                     else:
@@ -630,46 +595,30 @@ async def _run_streaming_reply(
     final_answer = full_text
     bot._record_model_outcome(provider, model_id,
                               bad=_detect_garbled_mix(full_text.strip()) and not _is_garbled_echo(full_text.strip(), user_text))
-    hist.append({"role": "user", "content": _history_user_text(history_text or user_text)})
-    hist.append({"role": "assistant", "content": final_answer})
-    # Тот же _trim_history, что в нестриминговых путях (см. комментарий выше).
-    await bot._trim_history(hist)
-    bot._trim_combined(state)
+    await _remember_turn(state, history_text, user_text, final_answer, history_meta)
     bot._record_quota_usage(provider, model_id)
     return final_answer, None
 
-async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
+async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None, history_meta=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Gemini (строит contents/config)."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
     if not conf.get("stream", True):
         return None, None
-    contents = await bot._build_gemini_turn_contents(chat_id, user_text)
-    call_contents, gconfig = bot._build_gemini_call_config(model_id, contents)
+    state = bot.get_state(chat_id)
+    contents = await bot._build_gemini_turn_contents(chat_id, user_text, history_meta=history_meta)
+    call_contents, gconfig = bot._build_gemini_call_config(
+        model_id, contents, memory_summary=state.get("memory_summary") or "",
+    )
     piece_agen = _gemini_stream_pieces(model_id, call_contents, gconfig, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started, history_meta=history_meta)
 
-async def _try_openrouter_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
-    """Обёртка _run_streaming_reply для OpenRouter (SSE через chat/completions)."""
+async def _try_munito_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None, history_meta=None) -> tuple[str | None, Message | None]:
+    """Обёртка _run_streaming_reply для Munito (SSE через chat/completions), память без резки — см. ask_munito_text."""
     import bot
-    messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
-    # Генератор — через bot.: тесты подменяют bot._openrouter_stream_pieces фейком.
-    piece_agen = bot._openrouter_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="openrouter", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
-
-async def _try_groq_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
-    """Обёртка _run_streaming_reply для Groq (SSE через chat/completions). Историю режем тем же _trim_messages_for_groq, что обычный путь, — иначе стрим-проба падает с 413 ещё до цепочки."""
-    import bot
-    from lumen_routes import _trim_messages_for_groq
-    messages = _trim_messages_for_groq(bot._build_openrouter_turn_messages(chat_id, user_text, model_id))
-    # Генератор — через bot.: тесты подменяют bot._groq_stream_pieces фейком.
-    piece_agen = bot._groq_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="groq", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
-
-async def _try_munito_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None) -> tuple[str | None, Message | None]:
-    """Обёртка _run_streaming_reply для Munito (SSE через chat/completions), история без резки — см. докстринг ask_munito_text."""
-    import bot
-    messages = bot._build_openrouter_turn_messages(chat_id, user_text, model_id)
+    messages = await bot._build_openai_turn_messages(
+        chat_id, user_text, model_id, history_meta=history_meta,
+    )
     # Генератор — через bot.: тесты подменяют bot._munito_stream_pieces фейком.
     piece_agen = bot._munito_stream_pieces(model_id, messages, deadline=deadline)
-    return await _run_streaming_reply(chat_id, user_text, message, provider="munito", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started)
+    return await _run_streaming_reply(chat_id, user_text, message, provider="munito", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started, history_meta=history_meta)

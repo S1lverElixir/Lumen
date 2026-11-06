@@ -1,20 +1,23 @@
 """
 test_lumen_router_config.py — юнит-тесты на lumen_router_config.py: конфигурация моделей
-(GEMINI_MODELS, GEMINI_TTS_MODELS), единый реестр "нездоровых" моделей OpenRouter
-(_OR_MODEL_HEALTH/_ROUTER_EXCLUDED_OR_MODELS), эвристики "это тяжёлый запрос?"/"нужна
-свежая информация?" (_looks_like_heavy_query/_looks_like_freshness_query), построение
-маршрута для одного сообщения (_build_route/_or_route), проверки истечения промо-доступа
-(_check_temporary_free_models_expiry) и неподтверждённых квот
-(_check_unconfirmed_model_quotas).
+(GEMINI_MODELS, GEMINI_TTS_MODELS), эвристики "это тяжёлый запрос?"/"нужна свежая
+информация?"/"просят поиск в вебе" (_looks_like_heavy_query/_looks_like_freshness_query/
+_looks_like_search_request), построение маршрута для одного сообщения (_build_route:
+провайдеры munito и gemini, выключатель _munito_active, extras запроса _munito_payload_extras),
+фильтры исчерпанной квоты и карантина моделей (_skip_exhausted/_is_quota_exhausted) и
+реестр ID для детекта утечки личности (_KNOWN_MODEL_IDS_FOR_LEAK_DETECTION).
 
+Снятые провайдеры (OpenRouter, Groq-чат, Gemma) из маршрута убраны 05.11.2026 вместе с
+их реестром здоровья и order-списками — от них осталась только проверка, что их ID
+не возвращаются в выборку и не исчезают из детекта утечек.
 
 Часть разбиения test_bot_helpers.py по модулям — см. test_lumen_formatting.py про общий
 принцип. lumen_router_config.py — чистые данные и функции принятия решения о маршруте без
-единого обращения к Telegram/Gemini/OpenRouter API, поэтому тестируется здесь напрямую
+единого обращения к Telegram/Gemini/Munito API, поэтому тестируется здесь напрямую
 (import lumen_router_config), без импорта bot.py. Логгер внутри lumen_router_config.py
 намеренно называется "bot" (см. комментарий в самом модуле) — поэтому caplog.at_level(...,
 logger="bot") ниже продолжает работать так же, как и раньше, независимо от того, что этот
-файл не импортирует bot.py вообще.
+файл не импортирует bot.py вообще (состояние квоты и карантина тесты берут всё же из bot).
 
 Запуск:
     pytest test_lumen_router_config.py -v
@@ -204,114 +207,128 @@ def test_looks_like_heavy_query_ignores_substrings_and_handles_plurals():
     assert lumen_router_config._looks_like_heavy_query("write two scripts for backup") is True
 
 
-def test_build_route_youtube_link_forces_gemini_only():
-    route = lumen_router_config._build_route(needs_youtube=True, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
-    assert all(p == "gemini" for p, _ in route)
-    # ОБНОВЛЕНО 08.10.2026: линейка 3.x убрана из цепочек (503 в проде 05.10.2026) —
-    # голова LINK-цепочки теперь живая 2.5-flash.
-    assert route[0] == ("gemini", "gemini-2.5-flash")
+# ─────────── состав маршрута: Munito головой, цепочки Gemini резервом ───────────
+# OpenRouter, Groq-чат и Gemma из маршрута убраны 05.11.2026: текст и картинки
+# обслуживает Munito, Gemini — автоматический резерв; ссылки, YouTube и видео/аудио
+# остаются на Gemini, потому что Munito их физически не принимает.
 
-
-def test_build_route_website_link_forces_gemini_only_and_excludes_gemma():
-    route = lumen_router_config._build_route(needs_youtube=False, needs_website=True, media_mime=None, is_heavy=False, needs_freshness=False)
-    assert all(p == "gemini" for p, _ in route)
-    # Gemma (no_system=True) не умеет читать сайты по ссылке — не должна попадать в маршрут.
-    assert "gemma-4-31b-it" not in [m for _, m in route]
-    assert "gemma-4-26b-a4b-it" not in [m for _, m in route]
-
-
-def test_build_route_freshness_query_prioritizes_search_capable_gemini_models():
-    route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=True)
-    # Search grounding подтверждён только у 2.5 (дашборд 24.07.2026; у 3.x бакет 0/0) — первой идёт 2.5-flash.
-    assert route[0] == ("gemini", "gemini-2.5-flash")
-    assert route[0][0] == "gemini"
-    # OpenRouter должен присутствовать как резерв на случай полного отказа Gemini.
-    assert any(p == "openrouter" for p, _ in route)
-    # Groq — последним резервом (ответ по знаниям, если легли оба).
-    assert route[-1][0] == "groq"
-
-
-def test_build_route_plain_text_prefers_gemma_head():
-    # 22.10.2026 (офлайн-замер eval/, журнал docs/PROMPT_EVAL.md): Gemma 47/50
-    # против 42 у Гroq-эры; квота Gemma 14.4K/сутки на модель. Gemma головой,
-    # дальше Groq (независимый провайдер), OpenRouter, Gemini резервом.
-    route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime=None, is_heavy=False, needs_freshness=False)
-    assert route[0] == ("gemini", "gemma-4-26b-a4b-it")
-    assert route[1] == ("gemini", "gemma-4-31b-it")
-    assert route[2] == ("groq", "qwen/qwen3.8-27b")
-    assert any(p == "openrouter" for p, _ in route)
-    assert any(p == "gemini" for p, _ in route)  # Gemini всё ещё есть как резерв
-
-
-def test_build_route_heavy_plain_text_uses_strong_openrouter_models_first():
-    # ОБНОВЛЕНО (аудит D3, 30.09.2026): тяжёлый текст идёт через Groq головой
-    # (свободные 1000/день экономят scarce-квоты OR/Gemini), дальше сильные OR.
-    route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime=None, is_heavy=True, needs_freshness=False)
-    assert route[0] == ("groq", "qwen/qwen3.8-27b")
-    assert route[2] == ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free")
-
-
-def test_build_route_image_without_freshness_prefers_openrouter_vision():
-    route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime="image/jpeg", is_heavy=False, needs_freshness=False)
-    # ОБНОВЛЕНО (аудит моделей, 17.09.2026): nano-12b-v2-vl пропал из бесплатного
-    # каталога — головой стала gemma-4-31b-it.
-    assert route[0] == ("openrouter", "google/gemma-4-31b-it:free")
-
-
-def test_build_route_video_attachment_forces_gemini_even_without_freshness():
-    # Видео/аудио — OpenRouter физически не может принять такое вложение
-    # (только base64-изображения), поэтому маршрут должен быть Gemini-only,
-    # даже если поиск не нужен.
-    route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime="video/mp4", is_heavy=False, needs_freshness=False)
-    assert all(p == "gemini" for p, _ in route)
-
-
-def test_build_route_image_with_freshness_forces_gemini_search_chain():
-    route = lumen_router_config._build_route(needs_youtube=False, needs_website=False, media_mime="image/png", is_heavy=False, needs_freshness=True)
-    assert route[0][0] == "gemini"
-    # См. обновлённый GEMINI_SEARCH_CHAIN (24.07.2026) — реальная квота на search
-    # grounding подтверждена только у Gemini 2.5, не у 3.x lite-моделей.
-    assert route[0][1] == "gemini-2.5-flash"
-    # ОБНОВЛЕНО (аудит D3, 30.09.2026): дальше vision OpenRouter резервом без
-    # поиска — раньше при исчерпании Gemini пользователь получал ошибку квоты.
-    assert any(p == "openrouter" for p, _ in route)
-
-
-# ── Munito AI: эксперимент владельца 05.11.2026 ──
-
-def _munito_mode(monkeypatch, *, enabled=True, keep_fallbacks=False, key="fake-munito-key-123"):
-    """Флаг и ключ живут в разных модулях: флаг — данные роутера, ключ — bot.py."""
+def _munito_mode(monkeypatch, *, disabled=False, key="fake-munito-key-123"):
+    """Выключатель — данные роутера (считываются при импорте), ключ — bot.py: патчить надо оба места."""
     import bot
-    monkeypatch.setattr(lumen_router_config, "_MUNITO_ENABLED", enabled)
-    monkeypatch.setattr(lumen_router_config, "_MUNITO_KEEP_FALLBACKS", keep_fallbacks)
+    monkeypatch.setattr(lumen_router_config, "_MUNITO_DISABLED", disabled)
     monkeypatch.setattr(bot, "MUNITO_API_KEY", key)
 
 
-def _plain_text_route(**kwargs):
+def _route_for(**kwargs):
     return lumen_router_config._build_route(
-        needs_youtube=False, needs_website=False,
-        media_mime=kwargs.pop("media_mime", None), **kwargs,
+        needs_youtube=kwargs.get("needs_youtube", False),
+        needs_website=kwargs.get("needs_website", False),
+        media_mime=kwargs.get("media_mime"),
+        is_heavy=kwargs.get("is_heavy", False),
+        needs_freshness=kwargs.get("needs_freshness", False),
     )
 
 
-@pytest.mark.parametrize(("is_heavy", "needs_freshness"), [(False, False), (True, False), (False, True), (True, True)])
-def test_build_route_munito_flag_sends_every_text_shape_only_to_munito(monkeypatch, is_heavy, needs_freshness):
-    # Защищает сам эксперимент: с флагом ни одна текстовая форма (обычная, тяжёлая,
-    # свежая) не должна доставать прежних провайдеров — иначе сравнение качества
-    # непригодно. Без флага этот маршрут отдаёт Gemma/Groq/OpenRouter.
+@pytest.mark.parametrize("kwargs, reserve", [
+    ({"is_heavy": False, "needs_freshness": False}, lumen_router_config.GEMINI_HEAVY_CHAIN),
+    ({"is_heavy": True, "needs_freshness": False}, lumen_router_config.GEMINI_HEAVY_CHAIN),
+    ({"is_heavy": False, "needs_freshness": True}, lumen_router_config.GEMINI_SEARCH_CHAIN),
+    ({"is_heavy": True, "needs_freshness": True}, lumen_router_config.GEMINI_SEARCH_CHAIN),
+])
+def test_build_route_text_goes_to_munito_with_gemini_reserve(monkeypatch, kwargs, reserve):
+    # Резерв теперь безусловный (MUNITO_KEEP_FALLBACKS удалён): бесплатный тариф
+    # Munito отвечает 503 "no free capacity", и без цепочки Gemini это молчание бота.
+    # Обычный и тяжёлый текст резервируются одной тяжёлой цепочкой — лёгкой не было.
     _munito_mode(monkeypatch)
-    route = _plain_text_route(is_heavy=is_heavy, needs_freshness=needs_freshness)
-    assert route and all(p == "munito" for p, _ in route)
-    assert route[0] == ("munito", lumen_router_config._MUNITO_ORDER[0])
+    route = _route_for(**kwargs)
+    n = len(lumen_router_config._MUNITO_ORDER)
+    assert route[:n] == [("munito", m) for m in lumen_router_config._MUNITO_ORDER]
+    assert route[n:] == [("gemini", m) for m in reserve]
+    assert route[0] == ("munito", "deepseek-ai/deepseek-v4.1-flash-1017")
 
 
-def test_build_route_munito_without_key_changes_nothing(monkeypatch):
-    # Ключ — условие включении: без него флаг не должен превращать маршрут в пустоту
-    # и уводить трафик на провайдер, которого нет.
-    _munito_mode(monkeypatch, key="")
-    route = _plain_text_route(is_heavy=False, needs_freshness=False)
-    assert all(p != "munito" for p, _ in route)
-    assert route[0] == ("gemini", "gemma-4-26b-a4b-it")
+@pytest.mark.parametrize("needs_freshness", [False, True])
+def test_build_route_image_goes_to_munito_unless_it_needs_search(monkeypatch, needs_freshness):
+    # Vision голов Munito проверен 05.11.2026 живым вызовом, а живого поиска у него
+    # нет — "покажи картинку и найди, что это за новость" целиком уходит в Gemini.
+    _munito_mode(monkeypatch)
+    route = _route_for(media_mime="image/png", needs_freshness=needs_freshness)
+    n = len(lumen_router_config._MUNITO_ORDER)
+    if needs_freshness:
+        assert route == [("gemini", m) for m in lumen_router_config.GEMINI_SEARCH_CHAIN]
+    else:
+        assert route[:n] == [("munito", m) for m in lumen_router_config._MUNITO_ORDER]
+        assert route[n:] == [("gemini", m) for m in lumen_router_config.GEMINI_HEAVY_CHAIN]
+
+
+@pytest.mark.parametrize("kwargs, chain", [
+    ({"media_mime": "video/mp4"}, lumen_router_config.GEMINI_HEAVY_CHAIN),
+    ({"media_mime": "audio/ogg"}, lumen_router_config.GEMINI_HEAVY_CHAIN),
+    ({"media_mime": "video/mp4", "needs_freshness": True}, lumen_router_config.GEMINI_SEARCH_CHAIN),
+    ({"needs_website": True}, lumen_router_config.GEMINI_LINK_CHAIN),
+    ({"needs_youtube": True}, lumen_router_config.GEMINI_LINK_CHAIN),
+    ({"needs_website": True, "needs_freshness": True}, lumen_router_config.GEMINI_LINK_SEARCH_CHAIN),
+    ({"needs_youtube": True, "needs_freshness": True}, lumen_router_config.GEMINI_LINK_SEARCH_CHAIN),
+])
+def test_build_route_gemini_only_shapes(monkeypatch, kwargs, chain):
+    # Munito принимает только текст и картинки: эскалировать ссылки и видео некуда,
+    # поэтому они Gemini-only даже при активном Munito.
+    _munito_mode(monkeypatch)
+    route = _route_for(**kwargs)
+    assert route == [("gemini", m) for m in chain]
+    assert all(p == "gemini" for p, _ in route)
+
+
+@pytest.mark.parametrize("disabled, key", [
+    (True, "fake-munito-key-123"),
+    (False, ""),
+])
+def test_build_route_without_active_munito_is_gemini_only(monkeypatch, disabled, key):
+    # Два независимых способа выключить провайдер: флаг и удаление ключа из Space.
+    # Маршрут обязан целиком вернуться на Gemini, а не остаться без Munito-головы.
+    _munito_mode(monkeypatch, disabled=disabled, key=key)
+    route = _route_for()
+    assert route and all(p == "gemini" for p, _ in route)
+    assert route[0] == ("gemini", "gemini-2.5-flash")
+    assert all(p == "gemini" for p, _ in _route_for(media_mime="image/jpeg"))
+
+
+@pytest.mark.parametrize("disabled, key, expected", [
+    (False, "fake-munito-key-123", True),
+    (True, "fake-munito-key-123", False),
+    (False, "", False),
+    (True, "", False),
+])
+def test_munito_active_requires_key_and_enabled_flag(monkeypatch, disabled, key, expected):
+    # Выключатель, а не включатель: если _munito_active перестанет смотреть на флаг,
+    # MUNITO_ENABLED=0 не вернёт трафик с Munito (503 на каждое сообщение), а если
+    # перестанет смотреть на ключ — маршрут уйдёт в провайдер, которого нет в Space.
+    _munito_mode(monkeypatch, disabled=disabled, key=key)
+    assert lumen_router_config._munito_active() is expected
+    assert bool(lumen_router_config._munito_route()) is expected
+
+
+@pytest.mark.parametrize("kwargs", [
+    {},
+    {"is_heavy": True},
+    {"needs_freshness": True},
+    {"media_mime": "image/jpeg"},
+    {"media_mime": "video/mp4"},
+    {"needs_website": True},
+    {"needs_youtube": True},
+])
+def test_build_route_never_returns_retired_providers(monkeypatch, kwargs):
+    # Ключей OpenRouter и Groq-чат в проде больше нет, Gemma вычеркнута из
+    # GEMINI_MODELS: вернувшийся в цепочку ID дал бы 401/404 в самом конце маршрута,
+    # когда живые попытки уже потрачены.
+    _munito_mode(monkeypatch)
+    route = _route_for(**kwargs)
+    assert route
+    assert {p for p, _ in route} <= {"munito", "gemini"}
+    live = set(lumen_router_config.GEMINI_MODELS) | set(lumen_router_config._MUNITO_ORDER)
+    for _, model_id in route:
+        assert model_id in live, f"{model_id} в цепочке, но не в конфиге моделей"
+        assert not model_id.endswith(":free")
 
 
 @pytest.mark.parametrize(("value", "expected"), [
@@ -331,61 +348,7 @@ def test_munito_payload_extras_default_low_and_absent_when_unset(monkeypatch, va
     assert lumen_router_config._munito_payload_extras() == expected
 
 
-def test_build_route_munito_keep_fallbacks_appends_previous_chain(monkeypatch):
-    # Второй режим: Munito головой, прежние цепочки резервом — иначе 429/503
-    # провайдера означает молчание бота для всех.
-    _munito_mode(monkeypatch, keep_fallbacks=True)
-    route = _plain_text_route(is_heavy=False, needs_freshness=False)
-    assert [p for p, _ in route[:len(lumen_router_config._MUNITO_ORDER)]] == ["munito"] * len(lumen_router_config._MUNITO_ORDER)
-    assert any(p == "gemini" for p, _ in route) and any(p == "groq" for p, _ in route)
-
-
-@pytest.mark.parametrize("kwargs", [
-    {"media_mime": "video/mp4"},
-    {"needs_website": True},
-    {"media_mime": "image/jpeg"},
-])
-def test_build_route_munito_flag_leaves_media_and_links_on_their_providers(monkeypatch, kwargs):
-    # Munito принимает только текст: переключение эксперимента не должно увести
-    # видео/аудио и чтение сайта в провайдер, который их физически не примет.
-    _munito_mode(monkeypatch)
-    route = lumen_router_config._build_route(
-        needs_youtube=False, needs_website=kwargs.get("needs_website", False),
-        media_mime=kwargs.get("media_mime"), is_heavy=False, needs_freshness=False,
-    )
-    assert route and all(p != "munito" for p, _ in route)
-
-
-def test_or_route_excludes_uncensored_and_dead_models():
-    # cognitivecomputations/dolphin-mistral...:free (uncensored, раньше доступна
-    # только владельцу через /provider), qwen/qwen3-coder:free (подтверждённо снята
-    # провайдером) и tencent/hy3:free (временное промо истекло 21.07.2026) роутер
-    # никогда не должен выбирать сам.
-    route = lumen_router_config._or_route([
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-        "qwen/qwen3-coder:free",
-        "tencent/hy3:free",
-    ])
-    ids = [m for _, m in route]
-    assert "cognitivecomputations/dolphin-mistral-24b-venice-edition:free" not in ids
-    assert "qwen/qwen3-coder:free" not in ids
-    assert "tencent/hy3:free" not in ids
-    assert "meta-llama/llama-3.3-70b-instruct:free" in ids
-
-
 # ─────────────────────────── новые модели Gemini (3.6 Flash / 3.5 Flash-Lite) ───────────────────────────
-
-def test_gemma_models_both_have_no_search_flag():
-    # РЕГРЕССИЯ (найдено при перепроверке конфига 24.07.2026): у gemma-4-31b-it
-    # "no_search": True стоял с самого начала, а у gemma-4-26b-a4b-it — отсутствовал.
-    # Без него _build_gemini_call_config по умолчанию (search_grounding/url_context
-    # по умолчанию True при отсутствии ключа) пытался бы включить google_search И
-    # url_context для модели, которая (как и любая Gemma) их не поддерживает —
-    # реальный риск ошибки API на каждый вызов этой модели.
-    assert lumen_router_config.GEMINI_MODELS["gemma-4-31b-it"].get("no_search") is True
-    assert lumen_router_config.GEMINI_MODELS["gemma-4-26b-a4b-it"].get("no_search") is True
-
 
 def test_new_gemini_models_present_and_prioritized():
     # Аудит 17.08.2026: 3.7 Flash (GA 13.08) сменил 3.6 в роли флагмана.
@@ -423,7 +386,10 @@ def test_gemini_3_flash_preview_restored_after_official_docs_confirmation():
     # были временным отказом, поэтому откат снятия — вернуть в цепочки, а отход
     # обеспечивает остывка по "unavailable" (_mark_model_unavailable).
     chain = lumen_router_config.GEMINI_HEAVY_CHAIN
-    assert chain.index("gemini-3.5-flash") < chain.index("gemini-3-flash-preview") < chain.index("gemma-4-31b-it")
+    assert chain.index("gemini-3.5-flash") < chain.index("gemini-3-flash-preview")
+    # 05.11.2026: Gemma вычеркнута из GEMINI_MODELS, поэтому хвост цепочки теперь
+    # не на ней, а на последней живой 3.x-модели.
+    assert chain[-1] == "gemini-3-flash-preview"
 
 
 def test_gemini_3_flash_preview_quota_config_matches_dashboard():
@@ -436,7 +402,6 @@ def test_gemini_3_flash_preview_quota_config_matches_dashboard():
     assert conf.get("map_grounding") is False
     assert conf.get("url_context") is True
     assert conf.get("stream") is True
-    assert not conf.get("no_system")
 
 
 def test_gemini_3_7_flash_config_matches_3_6_flash_pattern():
@@ -469,281 +434,60 @@ def test_check_unconfirmed_model_quotas_no_warnings_once_all_models_confirmed(ca
     assert warnings == []
 
 
-# ─────────────────── мёртвая модель qwen3-next-80b исключена из роутера ───────────────────
-# Регрессия на реальный найденный при калибровке случай: qwen/qwen3-next-80b-a3b-
-# instruct:free возвращала HTTP 404 на 100% попыток (провайдер снял бесплатный
-# слаг) — модель должна быть полностью исключена из автоматического выбора.
+# ─────────── снятые ID остаются в детекте утечки личности ───────────
+# Реестр здоровья OpenRouter (_OR_MODEL_HEALTH), его order-списки и Gemma-цепочка
+# удалены из роутера 05.11.2026 вместе с самими провайдерами. Из всей этой истории
+# остаётся одно требование: дословный ID снятой модели по-прежнему нельзя видеть в
+# ответе — модель может назвать себя прежним слагом, и детект ловит его только если
+# ID лежит в _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION. Даты снятия каждого — в git-истории
+# (404/403, платная отсечка, порча текста на калибровке).
 
-def test_dead_qwen3_next_model_excluded_from_router():
-    # Аудит 02.08.2026: glm-4.5-air сам умер (8/8 HTTP 404) — живым примером стал nemotron-3-super.
-    assert "qwen/qwen3-next-80b-a3b-instruct:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    route = lumen_router_config._or_route(["qwen/qwen3-next-80b-a3b-instruct:free", "poolside/laguna-s-2.1:free"])
-    ids = [m for _, m in route]
-    assert "qwen/qwen3-next-80b-a3b-instruct:free" not in ids
-    assert "poolside/laguna-s-2.1:free" in ids
-
-
-def test_or_light_order_no_longer_starts_with_dead_or_worst_offender_models():
-    # qwen3-next (мёртвая модель) убрана из списка вообще; gpt-oss-20b и
-    # nemotron-3-nano-30b-a3b (подтверждённые случаи порчи текста при калибровке)
-    # понижены и не должны стоять первыми.
-    assert "qwen/qwen3-next-80b-a3b-instruct:free" not in lumen_router_config._OR_LIGHT_ORDER
-    assert lumen_router_config._OR_LIGHT_ORDER[0] not in {"openai/gpt-oss-20b:free", "nvidia/nemotron-3-nano-30b-a3b:free"}
-
-
-def test_nemotron_nano_9b_v2_excluded_after_calibration_run():
-    # РЕГРЕССИЯ (калибровочный прогон против Claude Sonnet 5, 18 августа 2026):
-    # раньше стояла ПЕРВОЙ в _OR_LIGHT_ORDER и реально отвечала на 82% лёгких
-    # текстовых запросов сессии — каждый развёрнутый ответ содержал грубую порчу
-    # текста (случайные фрагменты слов на десятке не относящихся к разговору
-    # языков внутри русских предложений, см. полный разбор в _OR_MODEL_HEALTH).
-    assert "nvidia/nemotron-nano-9b-v2:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "nvidia/nemotron-nano-9b-v2:free" not in lumen_router_config._OR_LIGHT_ORDER
-    assert lumen_router_config._OR_MODEL_HEALTH["nvidia/nemotron-nano-9b-v2:free"].reason
-    # Замена контрольной "живой" модели: inclusionai/ling-3.0-flash:free сама
-    # подтверждённо умерла 22 августа 2026 (см. test_ling_3_0_flash_excluded_after_
-    # paid_tier_cutover ниже) — заменена на nemotron-3.5-lightning, чей живой
-    # статус ничем не поставлен под сомнение.
-    route = lumen_router_config._or_route(["nvidia/nemotron-nano-9b-v2:free", "nvidia/nemotron-3.5-lightning:free"])
-    assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free"]
-
-
-# ─────────────────── единый реестр "нездоровых" моделей OpenRouter (аудит техдолга) ───────────────────
-# Раньше "эта модель сейчас плохая" отслеживалось тремя независимыми механизмами
-# (_TEMPORARY_FREE_MODELS/_ROUTER_EXCLUDED_OR_MODELS/точечные вычёркивания из
-# order-списков) — тесты ниже закрепляют, что теперь единственный источник
-# правды — _OR_MODEL_HEALTH, а всё остальное вычисляется из него.
-
-def test_router_excluded_or_models_is_derived_from_health_registry():
-    assert lumen_router_config._ROUTER_EXCLUDED_OR_MODELS == frozenset(lumen_router_config._OR_MODEL_HEALTH.keys())
+_RETIRED_MODEL_IDS = (
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    "qwen/qwen3-coder:free",
+    "tencent/hy3:free",
+    "nvidia/nemotron-nano-9b-v2:free",
+    "inclusionai/ling-3.0-flash:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "openai/gpt-oss-20b:free",
+    "openai/gpt-oss-120b:free",
+    "liquid/lfm-2.5-1.2b-thinking:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "thinkingmachines/inkling-small:free",
+    "thinkingmachines/inkling:free",
+    "nex-agi/nex-n2.5-mini:free",
+    "nex-agi/nex-n2.5-pro:free",
+    "inclusionai/ling-3.0-flash-sante:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "inclusionai/ling-3.0-flash-vl:free",
+    "z-ai/glm-5.2:free",
+    "dots-studio/dots-3-note-preview:free",
+    "qwen/qwen3.8-27b:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "poolside/laguna-s-2.1:free",
+    "cohere/north-mini-code:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+)
 
 
-def test_model_health_registry_contains_all_three_known_incidents():
-    for model_id in (
-        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-        "qwen/qwen3-coder:free",
-        "tencent/hy3:free",
-        "qwen/qwen3-next-80b-a3b-instruct:free",
-    ):
-        assert model_id in lumen_router_config._OR_MODEL_HEALTH
-        assert lumen_router_config._OR_MODEL_HEALTH[model_id].reason
+@pytest.mark.parametrize("model_id", _RETIRED_MODEL_IDS)
+def test_retired_model_ids_stay_in_leak_detection_registry(model_id):
+    # Падает, если кто-то "почистил" реестр под актуальный каталог провайдера:
+    # снятая модель перестаёт выбираться, но её ID всё ещё может прийти в тексте
+    # ответа, и без строки в реестре скраб её не увидит.
+    assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
+    assert model_id not in lumen_router_config._MUNITO_ORDER
 
 
-def test_check_temporary_free_models_expiry_warns_only_for_selectable_models(caplog, monkeypatch):
-    import logging
-    # Снятые модели уже вне роутера — предупреждать не о чем (прод 27.10.2026).
-    with caplog.at_level(logging.WARNING, logger="bot"):
-        lumen_router_config._check_temporary_free_models_expiry()
-    assert not [r for r in caplog.records if "Temporary free access" in r.getMessage()]
-
-    # Ещё выбираемая модель с истёкшим промо — предупреждение с причиной из реестра,
-    # а не отдельным захардкоженным текстом.
-    caplog.clear()
-    monkeypatch.setattr(lumen_router_config, "_ROUTER_EXCLUDED_OR_MODELS", frozenset())
-    with caplog.at_level(logging.WARNING, logger="bot"):
-        lumen_router_config._check_temporary_free_models_expiry()
-    messages = "\n".join(r.getMessage() for r in caplog.records)
-    assert "qwen/qwen3-coder:free" in messages
-    assert "tencent/hy3:free" in messages
-    assert lumen_router_config._OR_MODEL_HEALTH["qwen/qwen3-coder:free"].reason in messages
-
-
-def test_model_health_note_without_promo_expiry_is_permanent_exclusion():
-    # qwen3-next и dolphin-mistral сняты НЕ по истечении промо-акции (нет даты) —
-    # они не должны попадать в предупреждение об истёкшем промо вообще.
-    for model_id in (
-        "qwen/qwen3-next-80b-a3b-instruct:free",
-        "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-    ):
-        assert lumen_router_config._OR_MODEL_HEALTH[model_id].promo_expiry is None
-
-
-# ─────────────── inclusionai/ling-3.0-flash:free — снята с бесплатного тира (22.08.2026) ───────────────
-# ПОДТВЕРЖДЕНО ПО РЕАЛЬНЫМ ЛОГАМ ПРОДА HF Spaces (22 августа 2026): стояла головой
-# _OR_LIGHT_ORDER, две попытки подряд получили идентичный HTTP 404 "This model is
-# unavailable for free... use this slug instead: inclusionai/ling-3.0-flash" — тот
-# же паттерн платного перевода, что и у z-ai/glm-4.5-air/meta-llama/llama-3.2-3b.
-
-def test_ling_3_0_flash_excluded_after_paid_tier_cutover():
-    assert "inclusionai/ling-3.0-flash:free" in lumen_router_config._OR_MODEL_HEALTH
-    assert "inclusionai/ling-3.0-flash:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "inclusionai/ling-3.0-flash:free" not in lumen_router_config._OR_LIGHT_ORDER
-    route = lumen_router_config._or_route(["inclusionai/ling-3.0-flash:free", "nvidia/nemotron-3.5-lightning:free"])
-    assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free"]
-
-
-def test_ling_3_0_flash_still_flagged_for_leak_detection():
-    # Мёртвая модель остаётся в списке для утечки идентичности (см. докстринг
-    # TEXT_MODEL_ORDER в lumen_router_config.py) — её ID всё ещё нельзя допускать
-    # в ответ, даже если роутер её больше не выбирает.
-    assert "inclusionai/ling-3.0-flash:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-
-
-# ─────────────────── переупорядочивание _OR_LIGHT_ORDER (аудит моделей, 22.08.2026) ───────────────────
-# После исключения ling-3.0-flash (см. выше) nemotron-3-nano-30b-a3b унаследовала
-# бы место головы по одному лишь порядку — но у неё уже 3 подтверждённых
-# калибровкой инцидента порчи текста И анонсированная дата снятия провайдером
-# (24 августа 2026, через 2 дня от аудита) — намеренно понижена, а не оставлена
-# головой прямо перед вероятным исчезновением. nemotron-3.5-lightning (ни одного
-# инцидента за 5 дней в списке, тот же надёжный modельный ряд nvidia, что и
-# nemotron-3-super/-ultra в heavy) — новая голова.
-
-def test_nemotron_3_5_lightning_promoted_to_light_order_head():
-    # 08.10.2026: понижена в хвост — таймауты в проде 07.10.2026, каждая её
-    # попытка стоила до 22 секунд до живой sante. Головой стала sante
-    # (фактически отвечает в проде). Резервом перед openrouter/free, не в реестре.
-    # 22.10.2026: sante пропала из каталога — головой стал lfm-2.5-2.6b (вторая
-    # живая модель исходного порядка), lightning осталась резервом без карантина.
-    order = lumen_router_config._OR_LIGHT_ORDER
-    assert order[0] == "liquid/lfm-2.5-2.6b:free"
-    assert order[1] == "nvidia/nemotron-3.5-lightning:free"
-    assert order[-1] == "openrouter/free"
-    assert "nvidia/nemotron-3.5-lightning:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "inclusionai/ling-3.0-flash-sante:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-
-
-def test_nemotron_3_nano_30b_a3b_excluded_after_removal_date_passed():
-    # Аудит 17.09.2026: дата снятия прошла + слаг пропал из каталога — модель переехала в _OR_MODEL_HEALTH.
-    assert "nvidia/nemotron-3-nano-30b-a3b:free" in lumen_router_config._OR_MODEL_HEALTH
-    assert "nvidia/nemotron-3-nano-30b-a3b:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._OR_LIGHT_ORDER
-    assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._SCHEDULED_OR_REMOVALS
-
-
-def test_or_light_order_ends_with_generic_reserve():
-    assert lumen_router_config._OR_LIGHT_ORDER[-1] == "openrouter/free"
-
-
-# ── Новые модели OpenRouter (аудит 17.08.2026, Top Weekly free): вышли за неделю до аудита, калибровку не проходили — добавлены последними, не выше проверенных.
-
-def test_new_or_models_registered_for_leak_detection():
-    assert "nvidia/nemotron-3.5-lightning:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-    assert "dots-studio/dots-3-note-preview:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-
-
-def test_dots3_note_preview_stays_last_before_reserve_in_heavy_order():
-    # 22.08.2026: некалиброванные новички — перед dots-3-note-preview (та ближе к снятию, остаётся последней перед резервом).
-    assert lumen_router_config._OR_HEAVY_ORDER[-1] == "openrouter/free"
-    assert lumen_router_config._OR_HEAVY_ORDER[-2] == "dots-studio/dots-3-note-preview:free"
-
-
-def test_new_or_models_not_accidentally_health_excluded():
-    # Ни одна из двух новых моделей не должна была случайно попасть в реестр
-    # "нездоровых" — обе живые, просто пока некалиброванные.
-    assert "nvidia/nemotron-3.5-lightning:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "dots-studio/dots-3-note-preview:free" not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    route = lumen_router_config._or_route(["nvidia/nemotron-3.5-lightning:free", "dots-studio/dots-3-note-preview:free"])
-    assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free", "dots-studio/dots-3-note-preview:free"]
-
-
-# ── Четыре coding-модели (аудит 22.08.2026): после проверенных калибровкой, перед dots-3-note-preview (та ближе к снятию).
-
-def test_new_heavy_models_present_and_healthy():
-    new_models = (
-        "poolside/laguna-s-2.1:free",
-        "cohere/north-mini-code:free",
-        "poolside/laguna-xs-2.1:free",
-        "dots-studio/dots-3-note-preview:free",
-    )
-    for model_id in new_models:
-        assert model_id in lumen_router_config._OR_HEAVY_ORDER
-        assert model_id not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
+def test_live_munito_model_ids_are_known_to_leak_detection():
+    # Munito отвечает вместо OpenRouter с ноября 2026: без его ID в реестре бот
+    # назвал бы хоста и модель в первом же ответе про своё устройство.
+    for model_id in lumen_router_config._MUNITO_ORDER:
         assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-    # glm-5.2 пропала из живого каталога 22.10.2026 — снята (см. _OR_MODEL_HEALTH),
-    # но ID остаётся в детекте утечек.
-    assert "z-ai/glm-5.2:free" in lumen_router_config._OR_MODEL_HEALTH
-    assert "z-ai/glm-5.2:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "z-ai/glm-5.2:free" not in lumen_router_config._OR_HEAVY_ORDER
-    assert "z-ai/glm-5.2:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-
-
-def test_inkling_removed_after_forbidden_calls():
-    # Замер 22.10.2026 (Actions 39818227233): каждый вызов — HTTP 403 Forbidden.
-    # Сестринская inkling-small исключена той же историей 17.09.2026 ('only
-    # available on agentic harnesses'). В детекте утечек ID остаётся.
-    assert "thinkingmachines/inkling:free" in lumen_router_config._OR_MODEL_HEALTH
-    assert "thinkingmachines/inkling:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "thinkingmachines/inkling:free" not in lumen_router_config._OR_HEAVY_ORDER
-    assert "thinkingmachines/inkling:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-
-
-def test_new_heavy_models_ordered_before_expiring_dots3_note_preview():
-    order = lumen_router_config._OR_HEAVY_ORDER
-    dots_idx = order.index("dots-studio/dots-3-note-preview:free")
-    for model_id in ("poolside/laguna-s-2.1:free", "cohere/north-mini-code:free", "poolside/laguna-xs-2.1:free"):
-        assert order.index(model_id) < dots_idx
-
-
-def test_or_heavy_order_still_headed_by_calibrated_flagships():
-    # Уже проверенные калибровкой сильные модели остаются головой — новые
-    # некалиброванные модели добавлены строго после них, не выше.
-    # 22.10.2026: super-120b снят (404 на каждый вызов, третий инцидент) — вторая
-    # позиция перешла к laguna-s (в цепочке с 22.08, в смоук-замере 22.10 — 4/4).
-    assert lumen_router_config._OR_HEAVY_ORDER[0] == "nvidia/nemotron-3-ultra-550b-a55b:free"
-    assert lumen_router_config._OR_HEAVY_ORDER[1] == "poolside/laguna-s-2.1:free"
-
-
-# ─────────────────── анонсированные ("Going away <дата>") даты снятия моделей ───────────────────
-# НЕ то же самое, что _OR_MODEL_HEALTH — сам факт будущей даты на карточке
-# OpenRouter недостаточен, чтобы исключить модель из роутинга прямо сейчас (см.
-# принцип "не удаляй по спекуляции" в докстринге _OR_MODEL_HEALTH), но и полностью
-# игнорировать анонс нельзя (см. tencent/hy3 — истечение промо было замечено
-# только постфактум). _check_scheduled_removals_due закрывает этот пробел.
-
-def test_scheduled_removals_registry_empty_after_dots3_stayed_alive():
-    # Аудит 17.09.2026: nano-30b-a3b умер и переехал в реестр здоровья. 28.10.2026:
-    # анонс снятия dots-3-note-preview (30.09.2026) не сработал, модель жива в живом
-    # каталоге — просроченная запись убрана, иначе она шумела бы на каждом старте.
-    assert "nvidia/nemotron-3-nano-30b-a3b:free" not in lumen_router_config._SCHEDULED_OR_REMOVALS
-    assert "dots-studio/dots-3-note-preview:free" not in lumen_router_config._SCHEDULED_OR_REMOVALS
-
-
-def test_check_scheduled_removals_due_warns_after_date_passed(caplog):
-    import logging
-    from datetime import date, timedelta
-    original = dict(lumen_router_config._SCHEDULED_OR_REMOVALS)
-    lumen_router_config._SCHEDULED_OR_REMOVALS.clear()
-    lumen_router_config._SCHEDULED_OR_REMOVALS["some-provider/some-model:free"] = date.today() - timedelta(days=1)
-    try:
-        with caplog.at_level(logging.WARNING, logger="bot"):
-            lumen_router_config._check_scheduled_removals_due()
-        messages = "\n".join(r.getMessage() for r in caplog.records)
-        assert "some-provider/some-model:free" in messages
-    finally:
-        lumen_router_config._SCHEDULED_OR_REMOVALS.clear()
-        lumen_router_config._SCHEDULED_OR_REMOVALS.update(original)
-
-
-def test_check_scheduled_removals_due_silent_before_date(caplog):
-    import logging
-    from datetime import date, timedelta
-    original = dict(lumen_router_config._SCHEDULED_OR_REMOVALS)
-    lumen_router_config._SCHEDULED_OR_REMOVALS.clear()
-    lumen_router_config._SCHEDULED_OR_REMOVALS["some-provider/some-model:free"] = date.today() + timedelta(days=30)
-    try:
-        with caplog.at_level(logging.WARNING, logger="bot"):
-            lumen_router_config._check_scheduled_removals_due()
-        assert caplog.records == []
-    finally:
-        lumen_router_config._SCHEDULED_OR_REMOVALS.clear()
-        lumen_router_config._SCHEDULED_OR_REMOVALS.update(original)
-
-
-def test_check_scheduled_removals_due_silent_once_already_health_excluded(caplog):
-    # Модель, уже перешедшая в _OR_MODEL_HEALTH (подтверждена мёртвой), не должна
-    # больше давать "перепроверь" — проверка уже сделана, реестр уже отражает результат.
-    import logging
-    from datetime import date
-    original = dict(lumen_router_config._SCHEDULED_OR_REMOVALS)
-    lumen_router_config._SCHEDULED_OR_REMOVALS.clear()
-    lumen_router_config._SCHEDULED_OR_REMOVALS["inclusionai/ling-3.0-flash:free"] = date(2026, 1, 1)
-    try:
-        with caplog.at_level(logging.WARNING, logger="bot"):
-            lumen_router_config._check_scheduled_removals_due()
-        assert caplog.records == []
-    finally:
-        lumen_router_config._SCHEDULED_OR_REMOVALS.clear()
-        lumen_router_config._SCHEDULED_OR_REMOVALS.update(original)
 
 
 # ─────────────────── TEXT_MODEL_ORDER переименован, алиас сохранён ───────────────────
@@ -753,163 +497,15 @@ def test_text_model_order_alias_still_works():
     assert "nvidia/nemotron-3-super-120b-a12b:free" in lumen_router_config.TEXT_MODEL_ORDER
 
 
-# ─────────────────── GEMINI_TTS_MODELS / FISH_AUDIO_TTS_MODEL централизованы ───────────────────
+# ─────────────────── GEMINI_TTS_MODELS централизованы ───────────────────
 
 def test_gemini_tts_models_centralized_in_router_config():
     assert lumen_router_config.GEMINI_TTS_MODELS == ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
 
 
-# ─────────────────── аудит моделей, 17 сентября 2026 ───────────────────
-# Живой каталог OpenRouter через публичный /models API (24 бесплатные модели):
-# 5 слагов пропали из бесплатных (gpt-oss-20b/120b, lfm-2.5-1.2b-thinking,
-# nano-30b-a3b, nano-12b-v2-vl), 8 новых добавлены в хвосты цепочек
-# (некалиброванные — см. комментарий в lumen_router_config.py), Gemini 3.8 Flash
-# добавлен головой по дашборду AI Studio владельца.
-
-_DEAD_SEPT_2026 = (
-    "openai/gpt-oss-20b:free",
-    "openai/gpt-oss-120b:free",
-    "liquid/lfm-2.5-1.2b-thinking:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-)
-
-_NEW_SEPT_2026 = (
-    "thinkingmachines/inkling-small:free",
-    "thinkingmachines/inkling:free",
-    "nex-agi/nex-n2.5-mini:free",
-    "nex-agi/nex-n2.5-pro:free",
-    "inclusionai/ling-3.0-flash-sante:free",
-    "inclusionai/ling-3.0-flash-fin:free",
-    "inclusionai/ling-3.0-flash-vl:free",
-    "liquid/lfm-2.5-2.6b:free",
-)
-
-
-def test_sept_2026_dead_models_excluded_but_kept_for_leak_detection():
-    for model_id in _DEAD_SEPT_2026:
-        assert model_id in lumen_router_config._OR_MODEL_HEALTH
-        assert model_id in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-        assert model_id not in lumen_router_config._OR_LIGHT_ORDER
-        assert model_id not in lumen_router_config._OR_HEAVY_ORDER
-        assert model_id not in lumen_router_config._OR_VISION_ORDER
-        assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-
-
-def test_sept_2026_new_light_models_after_proven_head_before_reserve():
-    order = lumen_router_config._OR_LIGHT_ORDER
-    # 22.10.2026: sante снята по каталогу — головой стал lfm-2.5-2.6b.
-    assert order[0] == "liquid/lfm-2.5-2.6b:free"
-    assert order[-1] == "openrouter/free"
-    for model_id in (
-        "liquid/lfm-2.5-2.6b:free",
-    ):
-        assert model_id in order
-        assert model_id not in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-        assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-    # sante переехала в реестр снятых, но из детекта утечек не убрана.
-    assert "inclusionai/ling-3.0-flash-sante:free" not in order
-    assert "inclusionai/ling-3.0-flash-sante:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-
-
-def test_inkling_small_excluded_after_agentic_harness_refusal():
-    # Вечер 17.09.2026, первый прод-трафик нового кода: inkling-small ответил
-    # отказом "only available on agentic harnesses" — чат-запросы не обслуживает.
-    assert "thinkingmachines/inkling-small:free" in lumen_router_config._OR_MODEL_HEALTH
-    assert "thinkingmachines/inkling-small:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "thinkingmachines/inkling-small:free" not in lumen_router_config._OR_LIGHT_ORDER
-    # nex-mini снят 05.10.2026 (платная отсечка) — второй стала sante.
-    # 08.10.2026: sante уже голова (nemotron понижен за таймауты 07.10.2026).
-    # 22.10.2026: sante снята по каталогу — головой стал lfm-2.5-2.6b.
-    assert lumen_router_config._OR_LIGHT_ORDER[0] == "liquid/lfm-2.5-2.6b:free"
-
-
-def test_nex_mini_excluded_after_paid_tier_cutover():
-    # Прод 05.10.2026: та же платная отсечка, что у ling-3.0-flash (тест выше).
-    assert "nex-agi/nex-n2.5-mini:free" in lumen_router_config._OR_MODEL_HEALTH
-    assert "nex-agi/nex-n2.5-mini:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "nex-agi/nex-n2.5-mini:free" not in lumen_router_config._OR_LIGHT_ORDER
-    assert "nex-agi/nex-n2.5-mini:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-    route = lumen_router_config._or_route(["nex-agi/nex-n2.5-mini:free", "nvidia/nemotron-3.5-lightning:free"])
-    assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free"]
-
-
-def test_oct_2026_paid_cutover_excludes_ling_vl_fin_and_qwen():
-    # Прод 05–07.10.2026: та же платная отсечка "unavailable for free", что у
-    # nex-mini выше — три модели разом. Мёртвые вне цепочек, но ID остаются
-    # в детекте утечек (их дословно нельзя в ответ).
-    for model_id in (
-        "inclusionai/ling-3.0-flash-vl:free",
-        "inclusionai/ling-3.0-flash-fin:free",
-        "qwen/qwen3.8-27b:free",
-    ):
-        assert model_id in lumen_router_config._OR_MODEL_HEALTH
-        assert model_id in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-        assert model_id not in lumen_router_config._OR_LIGHT_ORDER
-        assert model_id not in lumen_router_config._OR_VISION_ORDER
-        assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-    route = lumen_router_config._or_route([
-        "inclusionai/ling-3.0-flash-fin:free",
-        "liquid/lfm-2.5-2.6b:free",
-    ])
-    assert [m for _, m in route] == ["liquid/lfm-2.5-2.6b:free"]
-
-
-def test_oct_22_2026_catalog_removal_excludes_sante_glm_and_nex_pro():
-    # Каталог OpenRouter 22.10.2026 (468 моделей, 18 бесплатных): sante, glm-5.2
-    # и nex-n2.5-pro пропали из бесплатных; прямой вызов sante из Actions дал
-    # HTTP 404 (eval/persona_models.py). Мёртвые вне цепочек, но ID остаются
-    # в детекте утечек — их дословно нельзя в ответ.
-    for model_id in (
-        "inclusionai/ling-3.0-flash-sante:free",
-        "z-ai/glm-5.2:free",
-        "nex-agi/nex-n2.5-pro:free",
-    ):
-        assert model_id in lumen_router_config._OR_MODEL_HEALTH
-        assert model_id in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-        assert model_id not in lumen_router_config._OR_LIGHT_ORDER
-        assert model_id not in lumen_router_config._OR_HEAVY_ORDER
-        assert model_id not in lumen_router_config._OR_VISION_ORDER
-        assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-
-
-def test_gemma_text_chain_heads_plain_text_route():
-    # 22.10.2026 (офлайн-замер eval/): Gemma 47/50 у обеих — выше 42 из журнала
-    # владельца при Groq-эре. 26B-A4B головой (первый токен 13.5с против 26.4с
-    # у 31B), Groq второй — независимый от Google провайдер.
-    chain = lumen_router_config._GEMMA_TEXT_CHAIN
-    assert chain == ["gemma-4-26b-a4b-it", "gemma-4-31b-it"]
-    for model_id in chain:
-        # Gemma выделяется из общего ряда только фейковым обменом идентичности.
-        assert lumen_router_config.GEMINI_MODELS[model_id].get("no_system") is True
-    # Свежесть и ссылки по-прежнему уходят в цепочки с настоящим Gemini.
-    assert "gemma-4-26b-a4b-it" not in lumen_router_config.GEMINI_SEARCH_CHAIN
-    assert all(lumen_router_config.GEMINI_MODELS[m].get("no_system") for m in chain)
-
-
-def test_nemotron_super_excluded_after_third_incident():
-    # 17.09.2026: super выдал "кашу" прямо в проде (второй инцидент) — понижен под
-    # ultra без инцидентов. 22.10.2026 (Actions 39818227233): третий инцидент —
-    # HTTP 404 на оба вопроса при живом слаге в каталоге; предохранитель из
-    # комментария в _OR_HEAVY_ORDER сработал, модель исключена целиком.
-    order = lumen_router_config._OR_HEAVY_ORDER
-    assert order[0] == "nvidia/nemotron-3-ultra-550b-a55b:free"
-    assert "nvidia/nemotron-3-super-120b-a12b:free" in lumen_router_config._ROUTER_EXCLUDED_OR_MODELS
-    assert "nvidia/nemotron-3-super-120b-a12b:free" not in order
-
-
-def test_sept_2026_new_heavy_and_vision_models_placed():
-    heavy = lumen_router_config._OR_HEAVY_ORDER
-    # inkling снята 22.10.2026 (403 на все вызовы замера) — вне цепочки, но в детекте утечек.
-    assert "thinkingmachines/inkling:free" not in heavy
-    assert "thinkingmachines/inkling:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-    # nex-n2.5-pro снят 22.10.2026 (пропал из живого каталога) — вне цепочки, но в детекте утечек.
-    assert "nex-agi/nex-n2.5-pro:free" not in heavy
-    assert "nex-agi/nex-n2.5-pro:free" in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
-    vision = lumen_router_config._OR_VISION_ORDER
-    assert vision[0] == "google/gemma-4-31b-it:free"
-    # ling-vl снят 08.10.2026 (платная отсечка) — вне цепочки, но в детекте утечек.
-    assert "inclusionai/ling-3.0-flash-vl:free" not in vision
+# ─────────────────── линейка Gemini 3.x в цепочках ───────────────────
+# Снятые слаги OpenRouter из аудита 17.09.2026 переехали в _RETIRED_MODEL_IDS выше:
+# роутер их больше не выбирает вовсе, поэтому здесь только позиции моделей Gemini.
 
 
 def test_gemini_3_8_flash_heads_heavy_chain_and_default():
@@ -934,12 +530,6 @@ def test_gemini_3_8_flash_heads_heavy_chain_and_default():
     assert not conf.get("quota_unconfirmed")
 
 
-def test_fish_audio_disabled_after_free_tier_gone():
-    # Зеркало снято с бесплатного каталога OpenRouter — первая попытка в inline_tts
-    # пропускается флагом, сама функция оставлена для тестов/возврата.
-    assert lumen_router_config.FISH_AUDIO_ENABLED is False
-
-
 def test_registry_and_default_chain_have_no_silent_aliases():
     # Аудит 26.09.2026: GEMINI_DEFAULT_CHAIN был АЛИАСОМ GEMINI_HEAVY_CHAIN (тот же
     # объект списка), а "openrouter/free" дублировался в реестре.
@@ -951,76 +541,60 @@ def test_registry_and_default_chain_have_no_silent_aliases():
 
 # ─────────────── исчерпавшая квота больше не тратит попытку (аудит 26.09.2026) ───────────────
 
-def test_or_route_skips_models_marked_exhausted():
+def test_munito_route_skips_models_marked_exhausted(monkeypatch):
+    # Метку 429 вешают на провайдера "munito"; без фильтра каждое сообщение
+    # платило бы попыткой модели, у которой квота кончилась ещё вчера.
     import bot
-    bot.GLOBAL_QUOTA.setdefault("openrouter", {})["probe/exhausted:free"] = {"used": 0, "exhausted_at": 123.0}
-    try:
-        route = lumen_router_config._or_route(["probe/exhausted:free", "nvidia/nemotron-3.5-lightning:free"])
-        assert [m for _, m in route] == ["nvidia/nemotron-3.5-lightning:free"]
-    finally:
-        bot.GLOBAL_QUOTA["openrouter"].pop("probe/exhausted:free", None)
+    _munito_mode(monkeypatch)
+    monkeypatch.setattr(lumen_router_config, "_MUNITO_ORDER", ["probe/exhausted", "probe/alive"])
+    bot.GLOBAL_QUOTA.setdefault("munito", {})["probe/exhausted"] = {"used": 0, "exhausted_at": 123.0}
+    assert [m for _, m in lumen_router_config._munito_route()] == ["probe/alive"]
 
 
-def test_gemini_and_groq_routes_skip_exhausted_models():
+def test_gemini_route_skips_exhausted_and_cooling_models():
+    # Короткая остывка минутного 429 (cooldown_until) считается наравне с суточной
+    # меткой: иначе маршрут тратит попытку на модель, которая откажет снова.
     import bot
     bot.GLOBAL_QUOTA.setdefault("gemini", {})["gemini-probe-dead"] = {"used": 0, "exhausted_at": 123.0}
-    bot.GLOBAL_QUOTA.setdefault("groq", {})["qwen/probe-dead"] = {"used": 0, "exhausted_at": 123.0}
-    try:
-        assert [m for _, m in lumen_router_config._gemini_route(["gemini-probe-dead", "gemini-3.8-flash"])] == ["gemini-3.8-flash"]
-        assert [m for _, m in lumen_router_config._groq_route(["qwen/probe-dead", "qwen/qwen3.8-27b"])] == ["qwen/qwen3.8-27b"]
-    finally:
-        bot.GLOBAL_QUOTA["gemini"].pop("gemini-probe-dead", None)
-        bot.GLOBAL_QUOTA["groq"].pop("qwen/probe-dead", None)
+    bot.GLOBAL_QUOTA.setdefault("gemini", {})["gemini-probe-cooling"] = {"used": 0, "cooldown_until": float("inf")}
+    route = lumen_router_config._gemini_route(["gemini-probe-dead", "gemini-probe-cooling", "gemini-3.8-flash"])
+    assert [m for _, m in route] == ["gemini-3.8-flash"]
 
 
-def test_route_never_becomes_empty_when_all_models_exhausted():
-    # Пустой маршрут = мгновенный отказ вместо внятного сообщения о лимите,
-    # поэтому последний вариант оставляем.
+def test_route_never_becomes_empty_when_every_model_is_exhausted(monkeypatch):
+    # Пустой маршрут = мгновенный отказ вместо внятного сообщения о лимите, поэтому
+    # по одному кандидату на провайдера остаётся — это и потолок лишней платы.
     import bot
-    bot.GLOBAL_QUOTA.setdefault("openrouter", {})["probe/all-dead:free"] = {"used": 0, "exhausted_at": 123.0}
-    try:
-        assert lumen_router_config._or_route(["probe/all-dead:free"]) == [("openrouter", "probe/all-dead:free")]
-    finally:
-        bot.GLOBAL_QUOTA["openrouter"].pop("probe/all-dead:free", None)
+    _munito_mode(monkeypatch)
+    for mid in lumen_router_config._MUNITO_ORDER:
+        bot.GLOBAL_QUOTA.setdefault("munito", {})[mid] = {"used": 0, "exhausted_at": 123.0}
+    for mid in lumen_router_config.GEMINI_HEAVY_CHAIN:
+        bot.GLOBAL_QUOTA.setdefault("gemini", {})[mid] = {"used": 0, "exhausted_at": 123.0}
+    route = _route_for()
+    assert route == [("munito", lumen_router_config._MUNITO_ORDER[0]),
+                     ("gemini", lumen_router_config.GEMINI_HEAVY_CHAIN[0])]
 
 
 def test_skip_exhausted_returns_single_first_allowed_variant():
     # Все мёртвы — один первый вариант, а не вся цепочка: иначе каждое сообщение
     # платило HTTP-вызовом за каждую модель цепочки при исчерпанной квоте.
     import bot
-    for mid in ("probe/dead1:free", "probe/dead2:free", "probe/dead3:free"):
-        bot.GLOBAL_QUOTA.setdefault("openrouter", {})[mid] = {"used": 0, "exhausted_at": 123.0}
-    try:
-        assert lumen_router_config._skip_exhausted("openrouter", ["probe/dead1:free", "probe/dead2:free", "probe/dead3:free"]) == ["probe/dead1:free"]
-    finally:
-        for mid in ("probe/dead1:free", "probe/dead2:free", "probe/dead3:free"):
-            bot.GLOBAL_QUOTA["openrouter"].pop(mid, None)
+    dead = ["probe/dead1", "probe/dead2", "probe/dead3"]
+    for mid in dead:
+        bot.GLOBAL_QUOTA.setdefault("munito", {})[mid] = {"used": 0, "exhausted_at": 123.0}
+    assert lumen_router_config._skip_exhausted("munito", dead) == ["probe/dead1"]
+    assert lumen_router_config._skip_exhausted("munito", []) == []
 
 
-def test_skip_exhausted_fallback_skips_registry_excluded_models():
-    # Первый вариант из реестра исключённых не возвращаем: он подтверждённо мёртв.
-    import bot
-    excluded = next(iter(lumen_router_config._ROUTER_EXCLUDED_OR_MODELS))
-    bot.GLOBAL_QUOTA.setdefault("openrouter", {})[excluded] = {"used": 0, "exhausted_at": 123.0}
-    bot.GLOBAL_QUOTA.setdefault("openrouter", {})["probe/deadX:free"] = {"used": 0, "exhausted_at": 123.0}
-    try:
-        assert lumen_router_config._skip_exhausted("openrouter", [excluded, "probe/deadX:free"]) == ["probe/deadX:free"]
-        assert lumen_router_config._skip_exhausted("openrouter", [excluded]) == []
-    finally:
-        bot.GLOBAL_QUOTA["openrouter"].pop(excluded, None)
-        bot.GLOBAL_QUOTA["openrouter"].pop("probe/deadX:free", None)
-
-
-def test_successful_usage_clears_exhausted_mark():
+def test_successful_usage_clears_exhausted_mark(monkeypatch):
     # Метка снимается успешным ответом, иначе после сброса суток или починки
     # провайдера модель навсегда выпадала бы из роутинга.
     import bot
-    bot.GLOBAL_QUOTA.setdefault("openrouter", {})["probe/recover:free"] = {"used": 3, "exhausted_at": 123.0}
-    try:
-        bot._record_quota_usage("openrouter", "probe/recover:free")
-        assert [m for _, m in lumen_router_config._or_route(["probe/recover:free"])] == ["probe/recover:free"]
-    finally:
-        bot.GLOBAL_QUOTA["openrouter"].pop("probe/recover:free", None)
+    _munito_mode(monkeypatch)
+    head = lumen_router_config._MUNITO_ORDER[0]
+    bot.GLOBAL_QUOTA.setdefault("munito", {})[head] = {"used": 3, "exhausted_at": 123.0}
+    bot._record_quota_usage("munito", head)
+    assert lumen_router_config._munito_route()[0] == ("munito", head)
 
 
 def test_all_gemini_models_declare_url_context_explicitly():
@@ -1046,33 +620,33 @@ def test_quota_exhausted_logs_broken_state_loudly(monkeypatch, caplog):
 
     monkeypatch.setattr(bot, "GLOBAL_QUOTA", _BrokenQuota())
     with caplog.at_level("WARNING", logger="bot"):
-        assert lumen_router_config._is_quota_exhausted("openrouter", "m") is False
+        assert lumen_router_config._is_quota_exhausted("munito", "m") is False
     assert "Quota state unreadable" in caplog.text
 
 
-def test_quarantine_triggers_after_three_consecutive_bad_and_skips_model(caplog):
+def test_quarantine_triggers_after_three_consecutive_bad_and_skips_model(caplog, monkeypatch):
     # Три плохих подряд — карантин до конца суток: роутер объезжает модель.
     import bot
+    _munito_mode(monkeypatch)
+    head = lumen_router_config._MUNITO_ORDER[0]
     with caplog.at_level("WARNING", logger="bot"):
         for _ in range(3):
-            bot._record_model_outcome("openrouter", "q-model:free", bad=True)
-    assert bot._is_quarantined("openrouter", "q-model:free") is True
+            bot._record_model_outcome("munito", head, bad=True)
+    assert bot._is_quarantined("munito", head) is True
     assert "[quarantine]" in caplog.text
-    assert bot._quarantine_status() == [("openrouter", "q-model:free", 3)]
-    from lumen_router_config import _OR_LIGHT_ORDER
-    route = [m for m in _OR_LIGHT_ORDER if m != "q-model:free"] + ["q-model:free"]
-    assert "q-model:free" not in lumen_router_config._skip_exhausted("openrouter", route)
+    assert bot._quarantine_status() == [("munito", head, 3)]
+    assert [m for _, m in lumen_router_config._munito_route()] == lumen_router_config._MUNITO_ORDER[1:]
 
 
 def test_quarantine_never_empties_route_and_success_resets(caplog):
     # Последняя доступная модель не карантинится де-факто: пустой маршрут не возвращаем.
     import bot
     for _ in range(5):
-        bot._record_model_outcome("groq", "only-model", bad=True)
-    assert bot._is_quarantined("groq", "only-model") is True
-    assert lumen_router_config._skip_exhausted("groq", ["only-model"]) == ["only-model"]
-    bot._record_model_outcome("groq", "only-model", bad=False)
-    assert bot._is_quarantined("groq", "only-model") is False
+        bot._record_model_outcome("munito", "only-model", bad=True)
+    assert bot._is_quarantined("munito", "only-model") is True
+    assert lumen_router_config._skip_exhausted("munito", ["only-model"]) == ["only-model"]
+    bot._record_model_outcome("munito", "only-model", bad=False)
+    assert bot._is_quarantined("munito", "only-model") is False
     assert bot._quarantine_status() == []
 
 
@@ -1081,10 +655,10 @@ def test_quarantine_resets_on_quota_day_change(monkeypatch):
     import bot
     monkeypatch.setattr(bot, "_current_quota_day", lambda: "2099-01-01")
     for _ in range(3):
-        bot._record_model_outcome("openrouter", "day-model:free", bad=True)
-    assert bot._is_quarantined("openrouter", "day-model:free") is True
+        bot._record_model_outcome("munito", "day-model", bad=True)
+    assert bot._is_quarantined("munito", "day-model") is True
     monkeypatch.setattr(bot, "_current_quota_day", lambda: "2099-01-02")
-    assert bot._is_quarantined("openrouter", "day-model:free") is False
+    assert bot._is_quarantined("munito", "day-model") is False
     assert bot._quarantine_status() == []
 
 
@@ -1093,7 +667,7 @@ def test_quarantine_threshold_reads_env(monkeypatch):
     import bot
     monkeypatch.setenv("MODEL_QUARANTINE_BAD_LIMIT", "2")
     assert lumen_router_config._quarantine_threshold() == 2
-    bot._record_model_outcome("openrouter", "env-model:free", bad=True)
-    assert bot._is_quarantined("openrouter", "env-model:free") is False
-    bot._record_model_outcome("openrouter", "env-model:free", bad=True)
-    assert bot._is_quarantined("openrouter", "env-model:free") is True
+    bot._record_model_outcome("munito", "env-model", bad=True)
+    assert bot._is_quarantined("munito", "env-model") is False
+    bot._record_model_outcome("munito", "env-model", bad=True)
+    assert bot._is_quarantined("munito", "env-model") is True
