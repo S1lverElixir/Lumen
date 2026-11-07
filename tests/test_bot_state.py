@@ -544,6 +544,55 @@ def test_load_state_clean_on_first_start_without_index_or_legacy():
             lumen_chat_state._state_load_failed = orig_failed
 
 
+def test_load_state_does_not_overwrite_chat_whose_snapshot_was_not_restored():
+    # Регрессия аудита run-2: транзиентный сбой чтения одного чата на старте оставлял
+    # его вне памяти, а первый же флаш после нового сообщения затирал полную удалённую
+    # историю однострочным снимком — потеря была необратимой и молчаливой.
+    good, broken = 999721, 999722
+    remote = {
+        lumen_chat_state.CHAT_INDEX_KEY: json.dumps([good, broken]),
+        f"lumen:chat:{good}": json.dumps({"history": []}),
+        f"lumen:chat:{broken}": json.dumps({"history": [{"role": "user", "content": "старая"}] * 5}),
+    }
+
+    def fake_read(key, path):
+        if key == f"lumen:chat:{broken}":
+            raise OSError("Upstash 500 (transient)")
+        return remote.get(key)
+
+    writes = []
+
+    def fake_write(key, path, payload):
+        writes.append(key)
+        return True
+
+    with patch("bot._storage_read_text", side_effect=fake_read), \
+         patch("bot._storage_write_text", side_effect=fake_write), \
+         patch("bot.load_global_quota"):
+        orig_failed = lumen_chat_state._state_load_failed
+        orig_unloaded = set(lumen_chat_state._chat_snapshot_unloaded)
+        bot.chat_state.pop(good, None)
+        bot.chat_state.pop(broken, None)
+        bot._dirty_chat_ids.clear()
+        try:
+            bot.load_state_from_disk()
+            assert lumen_chat_state._state_load_failed is True
+            assert broken in lumen_chat_state._chat_snapshot_unloaded
+            bot.get_state(broken)
+            bot.mark_state_dirty(broken)
+            asyncio.run(bot._flush_dirty_state_once())
+            assert f"lumen:chat:{broken}" not in writes
+            assert broken in bot._dirty_chat_ids
+        finally:
+            lumen_chat_state._state_load_failed = orig_failed
+            lumen_chat_state._chat_snapshot_unloaded.clear()
+            lumen_chat_state._chat_snapshot_unloaded.update(orig_unloaded)
+            bot.chat_state.pop(good, None)
+            bot.chat_state.pop(broken, None)
+            bot._dirty_chat_ids.discard(good)
+            bot._dirty_chat_ids.discard(broken)
+
+
 @pytest.mark.parametrize(("env_value", "expected"), [
     ("abc", 10), ("", 10), ("0", 10), ("-5", 10), ("3", 3),
 ])
