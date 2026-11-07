@@ -49,7 +49,7 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 |---|---|---|
 | `GROQ_API_KEY` | — | Groq API key. Since 05.11.2026 it is used for one thing only: Whisper transcription of voice notes and audio attachments (`whisper-large-v3-turbo`), which is far cheaper than spending Gemini quota on audio. Without it voice notes go straight to Gemini audio. |
 | `MUNITO_API_KEY` | — | Munito AI key. Since 05.11.2026 Munito is the head of every plain-text and image route, with Gemini as reserve; no key means the provider stays invisible to the router and the whole route falls back to the Gemini chains. |
-| `MUNITO_ENABLED` | on | Off-switch, not an on-switch: Munito is used while `MUNITO_API_KEY` is set and this value is not `0`/`false`/`off` (plus restart). Emptying the key on the Space has the same effect without a code change. History summarization goes with it: `_summarize_text` only knows Munito, so an overflowing history gets a plain cut instead of a summary. |
+| `MUNITO_ENABLED` | on | Off-switch, not an on-switch: Munito is used while `MUNITO_API_KEY` is set and this value is not `0`/`false`/`off` (plus restart). Emptying the key on the Space has the same effect without a code change. History summarization does not depend on it: `_summarize_text` tries Gemini Flash-Lite first and Munito only as a fallback, so switching Munito off does not turn summaries into a plain cut. |
 | `MUNITO_BASE_URL` | `https://api.munito.ai/inference/v1` | OpenAI-compatible endpoint. `api.eu.munito.ai` / `api.us.munito.ai` pin the region — note the US host serves only Qwen and OCR, no DeepSeek or GLM (checked live 05.11.2026). |
 | `MUNITO_DAILY_LIMIT` | `250` | Request budget shown in the `/stats` Munito section: the 3M tokens/day free quota divided by ~11K tokens per Lumen request. |
 | `MUNITO_REASONING_EFFORT` | `low` | `reasoning_effort` sent with every Munito request (chat and stream): `low`/`minimal` measured 05.11.2026 cut GLM's thinking tokens to zero (~0.2s instead of ~1s) and stop Qwen answering with an empty body. Cost: on a two-step distance problem GLM answered `180` at `low` and `240` at `minimal` (correct is 210) and was right on the rerun, while DeepSeek (route head) was right every time — so expect occasional slips on multi-step tasks, not systematic breakage. Empty string means the field is not sent at all — unknown parameters are rejected with `400`, so never set a value Munito does not list. |
@@ -143,7 +143,7 @@ These ceilings are fixed in code; change them only with a code edit:
 | `_TABLE_SEP_MAX_LEN` | `500` | Widest table-separator line passed to the separator regex. |
 | `_MAX_CHAT_LOCK_WAITERS` | `3` | Max messages of one chat that may wait for the per-chat lock at once; the rest get "busy" immediately so other chats are not starved. |
 | `TIKTOK_SLIDESHOW_MAX_ITEMS` | `35` | TikTok slides per post cap (Telegram sends 10 per media group). |
-| `MAX_TOTAL_MEMORY_MESSAGES` | `100` | Per-chat ceiling on stored history plus group background lines combined. |
+| `MAX_TOTAL_MEMORY_MESSAGES` | `200` | Per-chat ceiling on stored history plus group background lines combined (lumen_memory.py, lumen_chat_state.py). |
 | `_ALBUM_EXTRA_MAX_BYTES` | `100 MB` | Cap on the combined size of extra files in a photo album. |
 | `_ALBUM_FETCH_CONCURRENCY` | `3` | Parallel downloads inside one album. |
 
