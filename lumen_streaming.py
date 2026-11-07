@@ -179,7 +179,9 @@ async def _sse_pieces(
         raise
     try:
         if resp.status >= 400:
-            body = await resp.read()
+            # Тело ошибки читаем с капом: 200-OK путь ограничивает каждый read, а
+            # здесь провайдер мог вернуть многумегабайтный HTML (аудит run-2).
+            body = await resp.content.read(65536)
             raise err_cls(f"HTTP {resp.status}: {body[:300]!r}", status_code=resp.status)
         line_iter = resp.content.__aiter__()
         while True:

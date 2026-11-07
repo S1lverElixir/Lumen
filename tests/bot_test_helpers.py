@@ -236,6 +236,11 @@ class _FakeAsyncLineIter:
             raise StopAsyncIteration
         return self._lines.pop(0)
 
+    async def read(self, n: int = -1) -> bytes:
+        # Ветка HTTP-ошибки читает тело капом, а не построчно (lumen_streaming.py).
+        data = b"".join(self._lines)
+        return data if n is None or n < 0 else data[:n]
+
 
 class _FakeSSEResponse:
     def __init__(self, lines: list[bytes], status: int = 200):
