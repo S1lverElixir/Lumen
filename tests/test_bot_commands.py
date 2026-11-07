@@ -1581,7 +1581,7 @@ def test_cmd_selftest_reports_failed_head(monkeypatch):
     assert "TG-proxy: OK" in fake_tg_call.text
 
 
-def test_selftest_llm_head_munito_success_targets_head_and_counts_quota(monkeypatch):
+def test_selftest_llm_head_munito_success_targets_head_without_quota_write(monkeypatch):
     # Честный учёт: успешная проба идёт ровно в голову текстового маршрута и +1 в квоту.
     import lumen_model_speed
     import lumen_routes
@@ -1604,9 +1604,9 @@ def test_selftest_llm_head_munito_success_targets_head_and_counts_quota(monkeypa
         lumen_model_speed._latency_ema.update(ema_before)
     assert ok is True and detail == "" and elapsed >= 0
     assert seen["model"] == head
-    after = ((bot.GLOBAL_QUOTA.get("munito") or {}).get(head) or {}).get("used") or 0
-    assert after == before + 1
-    bot.GLOBAL_QUOTA["munito"][head]["used"] = before
+    # Проба — служебный вызов: в квоту не пишется и отметки об исчерпании не снимает
+    # (аудит run-2: один /selftest возвращал в строй исчерпанный провайдер для всех).
+    assert ((bot.GLOBAL_QUOTA.get("munito") or {}).get(head) or {}).get("used") in (None, before)
 
 
 def test_selftest_llm_head_munito_error_returns_false_without_quota(monkeypatch):
@@ -1861,8 +1861,9 @@ def test_banned_user_commands_send_nothing(monkeypatch):
         bot._unban_user(banned_id)
 
 
-def test_selftest_llm_head_gemini_success_counts_quota_and_outcome(monkeypatch):
-    # Проба Gemini как у остальных: успех в квоту и сброс счётчика карантина.
+def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(monkeypatch):
+    # Проба Gemini: исход в счётчик карантина сбрасывается, но квота и EMA латентности
+    # не двигаются — это служебный пинг, а не ответ пользователю.
     import lumen_model_speed
     import lumen_routes
     from lumen_router_config import GEMINI_DEFAULT_CHAIN
@@ -1887,9 +1888,9 @@ def test_selftest_llm_head_gemini_success_counts_quota_and_outcome(monkeypatch):
         lumen_model_speed._latency_ema.update(ema_before)
     assert ok is True and detail == "" and elapsed >= 0
     assert fake_models.calls == [head]
-    after = ((bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) or {}).get("used") or 0
-    assert after == before + 1
-    bot.GLOBAL_QUOTA["gemini"][head]["used"] = before
+    # Проба — служебный вызов: счётчик не двигаем, EMA латентности не кормим
+    # четырьмя токенами (аудит run-2).
+    assert ((bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) or {}).get("used") in (None, before)
     assert bot._is_quarantined("gemini", head) is False
 
 

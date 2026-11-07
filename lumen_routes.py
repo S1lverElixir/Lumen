@@ -368,7 +368,9 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
                 chat_id=chat_id, user_text=_SELFTEST_PING_TEXT,
                 extra_payload=_munito_payload_extras(),
             )
-            bot._record_quota_usage("munito", used)
+            # Пробный пинг — служебный вызов: в квоту и в снятые отметки об исчерпании
+            # он не пишется, иначе одна проверка возвращает в строй весь провайдер.
+            bot._record_quota_usage("munito", used, service=True)
             return True, "", round(time.monotonic() - start, 2)
         if provider == "gemini":
             # Квота самая дефицитная — проба минимальная: голый текст без системного
@@ -393,8 +395,9 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
             _gpt, _gct, _gtt = _usage_from_gemini_response(resp)
             _log_llm_usage(chat_id=chat_id, provider="gemini", model_id=model,
                            prompt=_gpt, completion=_gct, total=_gtt)
-            _record_model_latency(_model_speed_key("gemini", model), total_sec=time.monotonic() - start)
-            bot._record_quota_usage("gemini", model)
+            # Пинг в несколько токенов не идёт в общий EMA латентности: он сдвигал бы
+            # порядок моделей и первый таймаут для всех чатов (аудит run-2).
+            bot._record_quota_usage("gemini", model, service=True)
             return True, "", round(time.monotonic() - start, 2)
         raise ValueError(f"unknown selftest provider: {provider}")
     except Exception as exc:
