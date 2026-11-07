@@ -171,6 +171,10 @@ def _skip_exhausted(provider: str, models: list[str]) -> list[str]:
 # Только в памяти: N плохих ответов подряд (пусто или mush-каша) — и роутер
 # пропускает модель до конца суток квоты.
 _QUARANTINE: dict[tuple[str, str], dict[str, Any]] = {}
+# Окно карантина: счётчик и сам бан живут не до полуночи, а столько секунд
+# (аудит run-2: три плохих ответа из одного чата выключали модель всем до конца
+# квотных суток, потому что успехом проверить её было уже нечем).
+QUARANTINE_WINDOW_SEC = max(60, int(os.getenv("QUARANTINE_WINDOW_SEC", "") or 900))
 
 def _quarantine_threshold() -> int:
     """Сколько плохих подряд до карантина (MODEL_QUARANTINE_BAD_LIMIT, дефолт 3)."""
@@ -188,31 +192,40 @@ def _quarantine_entry(provider: str, model_id: str) -> dict[str, Any]:
     key = (provider, model_id)
     entry = _QUARANTINE.get(key)
     if entry is None or entry.get("day") != today:
-        entry = {"bad": 0, "day": today}
+        entry = {"bad": 0, "day": today, "since": time.monotonic(), "probed": False}
         _QUARANTINE[key] = entry
     return entry
 
+def _quarantine_window_over(entry: dict[str, Any]) -> bool:
+    return time.monotonic() - float(entry.get("since") or 0.0) > QUARANTINE_WINDOW_SEC
+
 def _record_model_outcome(provider: str, model_id: str, *, bad: bool) -> None:
-    """Плохой ответ +1 к счётчику (на пороге — карантин с записью в лог),
-    успешный — сбрасывает счётчик."""
+    """Плохой ответ +1 к счётчику в текущем окне (на пороге — карантин с записью
+    в лог), успешный — сбрасывает счётчик. За пределами окна счётчик начинает
+    с нуля: один чат не может копить плохое до конца суток (аудит run-2)."""
     if not bad:
         if _QUARANTINE.pop((provider, model_id), None) is not None:
             log.debug("[quarantine] %s/%s answered well, counter reset.", provider, model_id)
         return
     entry = _quarantine_entry(provider, model_id)
+    if _quarantine_window_over(entry):
+        entry.update({"bad": 0, "since": time.monotonic(), "probed": False})
     entry["bad"] = int(entry.get("bad") or 0) + 1
     if entry["bad"] == _quarantine_threshold():
         log.warning(
-            "[quarantine] %s/%s quarantined until end of quota day %s after %d consecutive bad responses (empty or garbled).",
-            provider, model_id, entry["day"], entry["bad"],
+            "[quarantine] %s/%s skipped for %ds after %d consecutive bad responses (empty or garbled).",
+            provider, model_id, QUARANTINE_WINDOW_SEC, entry["bad"],
         )
 
 def _is_quarantined(provider: str, model_id: str) -> bool:
     try:
         import bot
         entry = _QUARANTINE.get((provider, model_id))
-        return bool(entry and entry.get("day") == bot._current_quota_day()
-                    and int(entry.get("bad") or 0) >= _quarantine_threshold())
+        if not entry or entry.get("day") != bot._current_quota_day():
+            return False
+        if _quarantine_window_over(entry) or int(entry.get("bad") or 0) < _quarantine_threshold():
+            return False
+        return True
     except Exception as exc:
         # Тот же fail-open, что у _is_quota_exhausted: битое состояние не должно
         # молча выкидывать живые модели из маршрута.
