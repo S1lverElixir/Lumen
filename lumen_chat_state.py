@@ -600,6 +600,9 @@ _quota_generation = 0
 # Отказ стартовой загрузки: пока стоит, индекс и квоту не перезаписываем,
 # иначе первый флаш затрёт хорошие удалённые данные пустым снимком (аудит A5-2).
 _state_load_failed = False
+# Чаты, чей удалённый снимок НЕ восстановился: их ключи нельзя перезаписывать
+# однострочным снимком из памяти — удалённая копия полнее (аудит run-2, 08.11.2026).
+_chat_snapshot_unloaded: set[int] = set()
 FLUSH_INTERVAL_SEC = 10.0
 # Конкурентность флаша — семафором: всплеск "грязных" чатов иначе породил бы сотни параллельных HTTP к Upstash.
 def _flush_concurrency() -> int:
@@ -634,6 +637,9 @@ async def _save_chat_to_storage_limited(chat_id: int, state: dict[str, Any]) -> 
 def _save_chat_payload(chat_id: int, payload: str) -> bool:
     """Только блокирующая запись готового снапшота (см. выше) — для to_thread."""
     import bot
+    if chat_id in _chat_snapshot_unloaded:
+        log.warning("[state] Skip chat %s save: its remote snapshot was never restored, keeping the remote copy.", chat_id)
+        return False
     try:
         bot._storage_write_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id), payload)
         _note_storage_write()
@@ -822,6 +828,7 @@ def load_state_from_disk() -> None:
     global _state_load_failed
     # Новая попытка снимает старый отказ; неуспех ниже выставит его заново.
     _state_load_failed = False
+    _chat_snapshot_unloaded.clear()
     bot.load_global_quota()
 
     index_raw = None
@@ -850,6 +857,7 @@ def load_state_from_disk() -> None:
                     raw = bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
                 except Exception as exc:
                     _state_load_failed = True
+                    _chat_snapshot_unloaded.add(cid)
                     log.warning('[state] Failed to read chat %s: %s', cid, exc)
                     continue
                 if not raw:
@@ -858,6 +866,7 @@ def load_state_from_disk() -> None:
                     s = json.loads(raw)
                 except Exception as exc:
                     _state_load_failed = True
+                    _chat_snapshot_unloaded.add(cid)
                     log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
                     continue
                 try:
@@ -865,6 +874,7 @@ def load_state_from_disk() -> None:
                 except Exception as exc:
                     # Одна битая запись не обрывает восстановление остальных чатов.
                     _state_load_failed = True
+                    _chat_snapshot_unloaded.add(cid)
                     log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
                     continue
                 if cid in chat_state:
