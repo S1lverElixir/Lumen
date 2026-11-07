@@ -638,6 +638,29 @@ def test_quarantine_triggers_after_three_consecutive_bad_and_skips_model(caplog,
     assert [m for _, m in lumen_router_config._munito_route()] == lumen_router_config._MUNITO_ORDER[1:]
 
 
+def test_quarantine_needs_bad_answers_from_more_than_one_chat(monkeypatch):
+    # Аудит run-2: счётчик карантина не знал про чат, и три пустых ответа из одного
+    # чата выключали головную модель для всех остальных до конца квотных суток.
+    import bot
+    _munito_mode(monkeypatch)
+    head = lumen_router_config._MUNITO_ORDER[0]
+    lumen_router_config._QUARANTINE.clear()
+    tokens = []
+    try:
+        for _ in range(4):
+            tokens.append(bot._LOG_CHAT.set("chat=1"))
+            bot._record_model_outcome("munito", head, bad=True)
+        assert bot._is_quarantined("munito", head) is False
+        for chat in ("chat=2", "chat=3"):
+            tokens.append(bot._LOG_CHAT.set(chat))
+            bot._record_model_outcome("munito", head, bad=True)
+        assert bot._is_quarantined("munito", head) is True
+    finally:
+        for token in reversed(tokens):
+            bot._LOG_CHAT.reset(token)
+        lumen_router_config._QUARANTINE.clear()
+
+
 def test_quarantine_never_empties_route_and_success_resets(caplog):
     # Последняя доступная модель не карантинится де-факто: пустой маршрут не возвращаем.
     import bot

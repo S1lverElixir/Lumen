@@ -202,19 +202,30 @@ def _quarantine_window_over(entry: dict[str, Any]) -> bool:
 def _record_model_outcome(provider: str, model_id: str, *, bad: bool) -> None:
     """Плохой ответ +1 к счётчику в текущем окне (на пороге — карантин с записью
     в лог), успешный — сбрасывает счётчик. За пределами окна счётчик начинает
-    с нуля: один чат не может копить плохое до конца суток (аудит run-2)."""
+    с нуля, а один чат вносит не больше половины порога: раньше три пустых ответа
+    из одного чата выключали модель всем остальным (аудит run-2). Вклад лимитим
+    только когда чат известен — служебные вызовы вне контекста сообщения не считаем."""
     if not bad:
         if _QUARANTINE.pop((provider, model_id), None) is not None:
             log.debug("[quarantine] %s/%s answered well, counter reset.", provider, model_id)
         return
+    import bot
     entry = _quarantine_entry(provider, model_id)
     if _quarantine_window_over(entry):
-        entry.update({"bad": 0, "since": time.monotonic(), "probed": False})
+        entry.update({"bad": 0, "since": time.monotonic()})
+        entry.pop("by_chat", None)
+    threshold = _quarantine_threshold()
+    chat = str(bot._LOG_CHAT.get() or "")
+    if chat:
+        per_chat = entry.setdefault("by_chat", {})
+        if int(per_chat.get(chat) or 0) >= max(1, threshold // 2):
+            return
+        per_chat[chat] = int(per_chat.get(chat) or 0) + 1
     entry["bad"] = int(entry.get("bad") or 0) + 1
-    if entry["bad"] == _quarantine_threshold():
+    if entry["bad"] == threshold:
         log.warning(
-            "[quarantine] %s/%s skipped for %ds after %d consecutive bad responses (empty or garbled).",
-            provider, model_id, QUARANTINE_WINDOW_SEC, entry["bad"],
+            "[quarantine] %s/%s skipped for %ds after %d bad responses from %d chats (empty or garbled).",
+            provider, model_id, QUARANTINE_WINDOW_SEC, entry["bad"], max(1, len(entry.get("by_chat") or {})),
         )
 
 def _is_quarantined(provider: str, model_id: str) -> bool:
