@@ -192,7 +192,7 @@ def _quarantine_entry(provider: str, model_id: str) -> dict[str, Any]:
     key = (provider, model_id)
     entry = _QUARANTINE.get(key)
     if entry is None or entry.get("day") != today:
-        entry = {"bad": 0, "day": today, "since": time.monotonic(), "probed": False}
+        entry = {"bad": 0, "day": today, "since": time.monotonic()}
         _QUARANTINE[key] = entry
     return entry
 
@@ -218,7 +218,7 @@ def _record_model_outcome(provider: str, model_id: str, *, bad: bool) -> None:
     chat = str(bot._LOG_CHAT.get() or "")
     if chat:
         per_chat = entry.setdefault("by_chat", {})
-        if int(per_chat.get(chat) or 0) >= max(1, threshold // 2):
+        if int(per_chat.get(chat) or 0) >= max(1, threshold - 1):
             return
         per_chat[chat] = int(per_chat.get(chat) or 0) + 1
     entry["bad"] = int(entry.get("bad") or 0) + 1
@@ -252,7 +252,7 @@ def _quarantine_status() -> list[tuple[str, str, int]]:
         return sorted(
             (provider, model_id, int(entry.get("bad") or 0))
             for (provider, model_id), entry in _QUARANTINE.items()
-            if entry.get("day") == today and int(entry.get("bad") or 0) >= threshold
+            if entry.get("day") == today and int(entry.get("bad") or 0) >= threshold and not _quarantine_window_over(entry)
         )
     except Exception:
         return []

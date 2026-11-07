@@ -154,6 +154,11 @@ def _last_storage_write_ts() -> float | None:
 def _save_chat_to_storage(chat_id: int, state: dict[str, Any]) -> bool:
     """True/False для повтора во флаше: раньше сбой молча терял историю до рестарта."""
     import bot
+    if chat_id in _chat_snapshot_unloaded:
+        # Тот же защитный пропуск, что и в async-флаше: shutdown-путь на HF Space
+        # отрабатывает почти при каждой перезапуске (аудит run-2, ревью 08.11.2026).
+        log.debug("[state] Skip chat %s shutdown save: remote snapshot was never restored.", chat_id)
+        return False
     try:
         payload = json.dumps(_serialize_chat_state(state), ensure_ascii=False)
         bot._storage_write_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id), payload)
@@ -638,7 +643,9 @@ def _save_chat_payload(chat_id: int, payload: str) -> bool:
     """Только блокирующая запись готового снапшота (см. выше) — для to_thread."""
     import bot
     if chat_id in _chat_snapshot_unloaded:
-        log.warning("[state] Skip chat %s save: its remote snapshot was never restored, keeping the remote copy.", chat_id)
+        # Снятие защиты — только полная перезагрузка состояния (старт процесса);
+        # в пределах жизни процесса ключ бережём, очередь остаётся грязной.
+        log.debug("[state] Skip chat %s save: its remote snapshot was never restored, keeping the remote copy.", chat_id)
         return False
     try:
         bot._storage_write_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id), payload)

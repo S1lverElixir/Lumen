@@ -370,6 +370,8 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
             )
             # Пробный пинг — служебный вызов: в квоту и в снятые отметки об исчерпании
             # он не пишется, иначе одна проверка возвращает в строй весь провайдер.
+            # Известный остаток: латентность пинга всё ещё пишет цепочка
+            # (_record_model_latency внутри _chat_completion_chain) — правится флагом в ней.
             bot._record_quota_usage("munito", used, service=True)
             return True, "", round(time.monotonic() - start, 2)
         if provider == "gemini":
@@ -602,7 +604,7 @@ async def ask_gemini(
              if _is_gemini_supported_mime(mime):
                  extra_parts.append(types.Part.from_bytes(data=b, mime_type=mime))
              else:
-                 raise bot.UserFacingInputError(f"Тип вложения '{mime if mime and mime.isascii() and all(c.isalnum() or c in '._+-/' for c in mime) else 'неизвестный тип'}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
+                 raise bot.UserFacingInputError(f"Тип вложения '{mime if mime and mime.isascii() and all(c.isalnum() or c in '._+-/:;= ' for c in mime) else 'неизвестный тип'}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
     if youtube_url:
           # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))
