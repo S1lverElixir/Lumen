@@ -1167,17 +1167,6 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
     )
     # Флаг против зацикливания: дополненный текст всё ещё матчит детектор — без флага снова ушёл бы в кнопки.
     ns._pick_resolved = True
-    try:
-        # Тот же лимит лока, что и в основном пути (bot.CHAT_LOCK_TIMEOUT_SEC):
-        # третье значение в 10с отдавало «занято» на любом живом маршруте.
-        lock = await bot.acquire_chat_lock(chat.id, bot.CHAT_LOCK_TIMEOUT_SEC)
-    except asyncio.TimeoutError:
-        log.warning("[pick] Timeout waiting for lock on chat %s", chat.id)
-        with contextlib.suppress(Exception):
-            await query.answer(_lang_t(rec_lang, "pick_lock_busy"), show_alert=True)
-        return
-    try:
-        await bot._handle_message_core(ns)
-    finally:
-        with contextlib.suppress(Exception):
-            lock.release()
+    # Один помощник на все пути: он же ставит _MSG_DEADLINE и кап ожидающих,
+    # которых тут не было (аудит run-2: pick-путь держал лок без бюджета сообщения).
+    await bot._run_under_chat_lock(ns, lambda: bot._handle_message_core(ns))
