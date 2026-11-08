@@ -15,6 +15,7 @@ import json
 import logging
 import lumen_chat_state
 import lumen_limits
+import lumen_media_flow
 import pathlib
 import sentry_sdk
 import sys
@@ -2123,6 +2124,90 @@ def test_find_recent_media_by_category_none_when_no_type_match():
 def test_find_recent_media_by_category_none_for_empty_bucket():
     assert bot._find_recent_media_by_category([], "photo") is None
     assert bot._find_recent_media_by_category(None, "photo") is None
+
+
+def test_read_capped_telegram_body_enforces_cap_by_header_and_mid_stream(monkeypatch):
+    # Кап скачивания — единственная защита от чтения произвольно больших тел в RAM:
+    # Content-Length врёт/отсутствует, поэтому кап проверяется и по заголовку, и
+    # потоково. Существующие тесты проверяют только проброс _MediaTooLargeError
+    # из замоканного скачивания, сама точка принудительного капа не покрыта.
+    class _FakeContent:
+        def __init__(self, chunks):
+            self._chunks = chunks
+            self.consumed = 0
+
+        async def iter_chunked(self, _size):
+            for chunk in self._chunks:
+                self.consumed += len(chunk)
+                yield chunk
+
+    class _FakeResp:
+        def __init__(self, headers, chunks):
+            self.headers = headers
+            self.content = _FakeContent(chunks)
+
+    cap = 1000
+    monkeypatch.setattr(bot, "TELEGRAM_DOWNLOAD_MAX_BYTES", cap)
+    url = "https://proxy/fetch/file/bot<X>/doc"
+
+    # Content-Length больше капа: отказ до чтения тела.
+    resp = _FakeResp({"Content-Length": str(cap + 1)}, [b"x"])
+    with pytest.raises(bot._MediaTooLargeError) as exc:
+        asyncio.run(lumen_media_flow._read_capped_telegram_body(resp, url))
+    assert exc.value.size_bytes == cap + 1
+    assert exc.value.cap_bytes == cap
+    assert resp.content.consumed == 0
+
+    # Заголовок врёт: кап ловится посреди потока, хвост не дочитывается.
+    resp = _FakeResp({}, [b"x" * cap, b"y" * 10, b"z" * 10])
+    with pytest.raises(bot._MediaTooLargeError) as exc:
+        asyncio.run(lumen_media_flow._read_capped_telegram_body(resp, url))
+    assert exc.value.size_bytes == cap + 10
+    assert resp.content.consumed == cap + 10
+
+    # Обычный файл проходит целиком.
+    resp = _FakeResp({"Content-Length": "6"}, [b"ab", b"cd", b"ef"])
+    assert asyncio.run(lumen_media_flow._read_capped_telegram_body(resp, url)) == b"abcdef"
+
+
+def test_save_media_to_history_dedups_consecutive_and_respects_recent_cap():
+    # Медиа-история — источник "прикрепи прошлые фото": дубликат подряд не должен
+    # раздувать лог, а бакет ограничен MAX_MEDIA_RECENT_IDS с вытеснением старых.
+    # Раньше покрыта только сама запись фото (records_extra_photos), без капов.
+    def photo(fid: str) -> SimpleNamespace:
+        return SimpleNamespace(file_id=fid, mime_type="image/jpeg")
+
+    state: dict = {}
+    for _ in range(3):
+        lumen_media_flow._save_media_to_history(photo("fid1"), state, 42)
+    bucket = state["recent_media_ids"]["42"]
+    assert list(bucket) == [("fid1", "image/jpeg")]
+    lumen_media_flow._save_media_to_history(photo("fid2"), state, 42)
+    assert [f for f, _ in bucket] == ["fid1", "fid2"]
+    for i in range(lumen_chat_state.MAX_MEDIA_RECENT_IDS + 3):
+        lumen_media_flow._save_media_to_history(photo(f"g{i}"), state, 42)
+    assert len(bucket) == lumen_chat_state.MAX_MEDIA_RECENT_IDS
+    assert bucket[-1][0] == f"g{lumen_chat_state.MAX_MEDIA_RECENT_IDS + 2}"
+
+
+def test_save_media_to_history_evicts_stale_bucket_keeps_active():
+    # Бакеты на пользователя ограничены MAX_MEDIA_BUCKETS_PER_CHAT, вытеснение
+    # бьёт по давно неактивным (LRU): касание поднимает бакет в хвост, иначе
+    # у активного пользователя "пропадают" последние фото из контекста.
+    def photo(fid: str) -> SimpleNamespace:
+        return SimpleNamespace(file_id=fid, mime_type="image/jpeg")
+
+    state: dict = {}
+    cap = lumen_chat_state.MAX_MEDIA_BUCKETS_PER_CHAT
+    lumen_media_flow._save_media_to_history(photo("u1"), state, 1)
+    for uid in range(2, cap + 1):
+        lumen_media_flow._save_media_to_history(photo(f"u{uid}"), state, uid)
+    assert len(state["recent_media_ids"]) == cap
+    lumen_media_flow._save_media_to_history(photo("u1b"), state, 1)
+    lumen_media_flow._save_media_to_history(photo("new"), state, cap + 1)
+    assert len(state["recent_media_ids"]) == cap
+    assert "1" in state["recent_media_ids"]
+    assert "2" not in state["recent_media_ids"]
 
 
 def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():

@@ -324,6 +324,51 @@ def test_ipv4_session_request_timeout_matches_session_total():
         asyncio.run(sess.close())
 
 
+def test_get_http_session_reuses_cached_and_rebuilds_closed(monkeypatch):
+    # Общий пул соединений (TikTok-слайдшоу, TTS, Whisper): сессия создаётся один
+    # раз и пересоздаётся только после close — сессия на каждый вызов выжгла бы
+    # сокеты контейнера. Все существующие тесты подменяют _get_http_session
+    # целиком, реальное кэширование не покрыто.
+    from lumen_transport_calls import _get_http_session
+    monkeypatch.setattr(bot, "_http_session", None)
+
+    async def _run():
+        s1 = await _get_http_session()
+        s2 = await _get_http_session()
+        assert s1 is s2
+        await s1.close()
+        s3 = await _get_http_session()
+        assert s3 is not s1
+        assert s3.closed is False
+        await s3.close()
+
+    asyncio.run(_run())
+
+
+def test_get_http_session_connector_ipv4_limit_and_public_resolver(monkeypatch):
+    # Пины датированных решений коннектора общего пула: limit=40 — слайдшоу
+    # TikTok до 35 слайдов разом через gather (24.07.2026), AF_INET — живого
+    # IPv6 у контейнера нет, _PublicOnlyResolver режет не-публичные IP на каждом
+    # резолве — DNS-rebinding guard для всех внешних запросов этой сессии.
+    import socket
+    from lumen_tiktok import _PublicOnlyResolver
+    from lumen_transport_calls import _get_http_session
+    monkeypatch.setattr(bot, "_http_session", None)
+
+    async def _run():
+        s = await _get_http_session()
+        try:
+            assert s.connector.limit == 40
+            assert s.connector.family == socket.AF_INET
+            # Публичного атрибута у aiohttp нет, резолвер лежит в _resolver.
+            resolver = getattr(s.connector, "_resolver", None)
+            assert isinstance(resolver, _PublicOnlyResolver)
+        finally:
+            await s.close()
+
+    asyncio.run(_run())
+
+
 def test_tg_call_does_not_retry_send_after_timeout(monkeypatch):
     # Повтор отправки после таймаута (исход неизвестен) давал дубли сообщений.
     from aiogram.exceptions import TelegramNetworkError

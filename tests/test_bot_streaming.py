@@ -1144,6 +1144,43 @@ def test_send_text_pauses_between_chunks(monkeypatch):
         bot.chat_state.pop(999114, None)
 
 
+def test_send_text_keeps_reply_markup_only_on_last_chunk(monkeypatch):
+    # Клавиатура должна уйти один раз, с последним куском: reply_markup на
+    # каждом чанке дублирует кнопку в чате, поэтому из всех кусков, кроме
+    # последнего, kwarg вычищается (lumen_rich._send_text). Существующие
+    # send_text-тесты kwarg reply_markup не передают вообще.
+    from types import SimpleNamespace
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    cont_calls: list[dict] = []
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            cont_calls.append(kwargs)
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "bot", _Bot())
+    incoming = _FakeIncomingMessage(999115)
+    reply_calls: list[dict] = []
+
+    async def capture_reply(text, **kwargs):
+        reply_calls.append(kwargs)
+        return SimpleNamespace()
+
+    incoming.reply = capture_reply
+    keyboard = {"inline_keyboard": [[{"text": "ok", "callback_data": "x"}]]}
+    text = "слово " * 1600
+    try:
+        asyncio.run(bot._send_text(incoming, text, reply_markup=keyboard))
+    finally:
+        bot.chat_state.pop(999115, None)
+    assert len(bot._split_text_chunks(text, bot.TG_MAX_LEN)) >= 3
+    assert len(cont_calls) >= 2
+    # Первый кусок уходит через message.reply, продолжения — через bot.send_message.
+    assert "reply_markup" not in reply_calls[0]
+    assert "reply_markup" not in cont_calls[0]
+    assert cont_calls[-1].get("reply_markup") == keyboard
+
+
 def test_gemini_streaming_daily_429_marks_exhausted_like_text_path():
     # Стриминг опознавал суточную квоту чужим предикатом и ставил минутную
     # остывку вместо метки до утра.
