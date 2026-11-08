@@ -32,3 +32,4 @@ audit-*.md
 .DS_Store
 .idea/
 .vscode/
+.qoder/
