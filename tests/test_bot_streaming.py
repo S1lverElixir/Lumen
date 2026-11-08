@@ -267,6 +267,51 @@ def test_munito_stream_pieces_raises_on_http_error_status():
         bot.MUNITO_API_KEY = original_key
 
 
+def test_munito_stream_pieces_caps_http_error_body_read():
+    # Кап на тело ошибки: read-all буферизовал бы весь многумегабайтный ответ
+    # провайдера (аудит run-2). Проверяем сам запрошенный размер, а не длину лога:
+    # сообщение всё равно режется до 300 байт и кап не различало бы.
+    seen = []
+
+    class _Content:
+        async def read(self, n=-1):
+            seen.append(n)
+            return b"x" * 200000
+
+    class _Resp:
+        status = 500
+        content = _Content()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Session:
+        def post(self, *args, **kwargs):
+            return _Resp()
+
+    async def fake_get_http_session():
+        return _Session()
+
+    original_get_session = bot._get_http_session
+    original_key = bot.MUNITO_API_KEY
+    bot._get_http_session = fake_get_http_session
+    bot.MUNITO_API_KEY = "fake-key"
+    try:
+        async def collect():
+            async for _ in bot._munito_stream_pieces("deepseek-ai/deepseek-v4.1-flash-1017", []):
+                pass
+        with pytest.raises(bot.MunitoAPIError) as exc:
+            asyncio.run(collect())
+        assert seen == [65536]
+        assert len(str(exc.value)) < 400
+    finally:
+        bot._get_http_session = original_get_session
+        bot.MUNITO_API_KEY = original_key
+
+
 def test_munito_stream_pieces_raises_on_midstream_error_chunk():
     # РЕГРЕССИЯ (аудит стриминга): бэкенд может упасть УЖЕ ПОСЛЕ старта генерации —
     # HTTP-статус к этому моменту давно 200 (стрим открыт), и ошибка приходит не

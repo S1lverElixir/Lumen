@@ -1596,17 +1596,21 @@ def test_selftest_llm_head_munito_success_targets_head_without_quota_write(monke
 
     monkeypatch.setattr(bot, "_munito_request", fake_munito)
     before = ((bot.GLOBAL_QUOTA.get("munito") or {}).get(head) or {}).get("used") or 0
+    marks = {"used": before, "exhausted_at": 1700000000.0, "cooldown_until": 1700000100.0}
+    bot.GLOBAL_QUOTA.setdefault("munito", {})[head] = dict(marks)
     ema_before = dict(lumen_model_speed._latency_ema)
     try:
         ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("munito", chat_id=1))
+        assert lumen_model_speed._latency_ema == ema_before
+        assert bot.GLOBAL_QUOTA["munito"][head] == marks
     finally:
         lumen_model_speed._latency_ema.clear()
         lumen_model_speed._latency_ema.update(ema_before)
+        bot.GLOBAL_QUOTA.get("munito", {}).pop(head, None)
     assert ok is True and detail == "" and elapsed >= 0
     assert seen["model"] == head
-    # Проба — служебный вызов: в квоту не пишется и отметки об исчерпании не снимает
-    # (аудит run-2: один /selftest возвращал в строй исчерпанный провайдер для всех).
-    assert ((bot.GLOBAL_QUOTA.get("munito") or {}).get(head) or {}).get("used") in (None, before)
+    # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
+    assert (bot.GLOBAL_QUOTA.get("munito") or {}).get(head) in (None, marks)
 
 
 def test_selftest_llm_head_munito_error_returns_false_without_quota(monkeypatch):
@@ -1880,17 +1884,21 @@ def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(mo
     fake_models = _FakeModels()
     monkeypatch.setattr(bot, "client", SimpleNamespace(aio=SimpleNamespace(models=fake_models)))
     before = ((bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) or {}).get("used") or 0
+    marks = {"used": before, "exhausted_at": 1700000000.0, "cooldown_until": 1700000100.0}
+    bot.GLOBAL_QUOTA.setdefault("gemini", {})[head] = dict(marks)
     ema_before = dict(lumen_model_speed._latency_ema)
     try:
         ok, detail, elapsed = asyncio.run(lumen_routes.selftest_llm_head("gemini", chat_id=1))
+        assert lumen_model_speed._latency_ema == ema_before
+        assert bot.GLOBAL_QUOTA["gemini"][head] == marks
     finally:
         lumen_model_speed._latency_ema.clear()
         lumen_model_speed._latency_ema.update(ema_before)
+        bot.GLOBAL_QUOTA.get("gemini", {}).pop(head, None)
     assert ok is True and detail == "" and elapsed >= 0
     assert fake_models.calls == [head]
-    # Проба — служебный вызов: счётчик не двигаем, EMA латентности не кормим
-    # четырьмя токенами (аудит run-2).
-    assert ((bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) or {}).get("used") in (None, before)
+    # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
+    assert (bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) in (None, marks)
     assert bot._is_quarantined("gemini", head) is False
 
 

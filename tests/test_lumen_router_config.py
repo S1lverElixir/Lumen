@@ -694,3 +694,26 @@ def test_quarantine_threshold_reads_env(monkeypatch):
     assert bot._is_quarantined("munito", "env-model") is False
     bot._record_model_outcome("munito", "env-model", bad=True)
     assert bot._is_quarantined("munito", "env-model") is True
+
+
+def test_quarantine_window_expires_and_stats_agree_with_routing(monkeypatch):
+    # Окно вместо суток: после истечения модель снова в маршруте, и /stats не
+    # показывает её карантинной (ревью 08.11.2026 нашло расхождение status и is_quarantined).
+    import time
+    import bot
+    lumen_router_config._QUARANTINE.clear()
+    monkeypatch.setattr(lumen_router_config, "QUARANTINE_WINDOW_SEC", 0.5)
+    try:
+        for i in (1, 2, 3):
+            token = bot._LOG_CHAT.set(f"chat={i}")
+            try:
+                bot._record_model_outcome("munito", "window-model", bad=True)
+            finally:
+                bot._LOG_CHAT.reset(token)
+        assert bot._is_quarantined("munito", "window-model") is True
+        assert bot._quarantine_status() == [("munito", "window-model", 3)]
+        time.sleep(0.6)
+        assert bot._is_quarantined("munito", "window-model") is False
+        assert bot._quarantine_status() == []
+    finally:
+        lumen_router_config._QUARANTINE.clear()

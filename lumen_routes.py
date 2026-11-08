@@ -172,6 +172,7 @@ async def _chat_completion_chain(
     request_fn, provider: str, deadline: float | None = None,
     log_label: str | None = None, chat_id: Any = None, user_text: str | None = None,
     out: dict | None = None, extra_payload: dict | None = None,
+    record_latency: bool = True,
 ) -> tuple[str, str]:
     """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (сейчас — Munito).
 
@@ -229,7 +230,10 @@ async def _chat_completion_chain(
             _pt, _ct, _tt = _usage_from_openai_response(resp)
             _log_llm_usage(chat_id=chat_id, provider=provider, model_id=model_trial,
                            prompt=_pt, completion=_ct, total=_tt)
-            _record_model_latency(_model_speed_key(provider, model_trial), total_sec=time.monotonic() - attempt_start)
+            if record_latency:
+                # Служебная проба (selftest) не кормит общий EMA: четырьмя токенами
+                # сдвинулся бы порядок моделей для всех чатов (ревью 08.11.2026).
+                _record_model_latency(_model_speed_key(provider, model_trial), total_sec=time.monotonic() - attempt_start)
             return answer, model_trial
         except bot.RouteBudgetExceededError:
             raise
@@ -367,11 +371,11 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
                 provider="munito", deadline=start + bot.ROUTE_MODEL_TIMEOUT_SEC,
                 chat_id=chat_id, user_text=_SELFTEST_PING_TEXT,
                 extra_payload=_munito_payload_extras(),
+                record_latency=False,
             )
             # Пробный пинг — служебный вызов: в квоту и в снятые отметки об исчерпании
             # он не пишется, иначе одна проверка возвращает в строй весь провайдер.
-            # Известный остаток: латентность пинга всё ещё пишет цепочка
-            # (_record_model_latency внутри _chat_completion_chain) — правится флагом в ней.
+            # Латентность тоже не пишем: флаг record_latency=False выше.
             bot._record_quota_usage("munito", used, service=True)
             return True, "", round(time.monotonic() - start, 2)
         if provider == "gemini":
