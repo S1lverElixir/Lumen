@@ -90,6 +90,22 @@ def test_gemini_error_msg_rate_limit():
     assert msg == bot._model_error_text("rate_limit")
 
 
+def test_user_mime_label_never_becomes_markup():
+    # Клиентский mime в тексте ошибки не должен рендериться как ссылка или тег
+    # (подтверждённая находка run-2, low), но обычные типы с параметрами живы.
+    import lumen_formatting
+    import lumen_routes
+    label = lumen_routes._user_mime_label
+    assert label("[Google](https://evil.example)") == "неизвестный тип"
+    assert label("image/<b>x") == "неизвестный тип"
+    assert label("тип/файл") == "неизвестный тип"
+    assert label(None) == "неизвестный тип"
+    assert label("application/json; charset=utf-8") == "application/json; charset=utf-8"
+    assert label("application/pdf") == "application/pdf"
+    rendered = lumen_formatting._md_to_html(f"Тип вложения '{label('[Google](https://evil.example)')}' не поддерживается.")
+    assert "<a " not in rendered and "<b>" not in rendered
+
+
 def test_gemini_error_msg_value_error_passthrough():
     # Только UserFacingInputError используется в ask_gemini как готовый
     # пользовательский текст — остальной ValueError идёт общим шаблоном.

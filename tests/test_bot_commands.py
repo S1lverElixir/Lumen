@@ -1010,6 +1010,35 @@ def test_pick_callback_happy_path_runs_augmented_request(monkeypatch):
         bot._pending_picks.clear()
 
 
+def test_pick_callback_busy_chat_does_not_run_core(monkeypatch):
+    # Pick идёт через общий _run_under_chat_lock: при занятом чате ядро не
+    # запускается, ожидание ограничено, счётчик ожидающих не течёт (ревью 08.11.2026).
+    bot._pending_picks.clear()
+    bot._pending_picks["bb12cd34"] = {
+        "chat_id": 777, "user_id": 111, "scenario": "film",
+        "original": "посоветуй фильм", "expires": time.monotonic() + 300,
+        "lang": "ru",
+    }
+    q = _make_pick_query("pick:bb12cd34:2")
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+    monkeypatch.setattr(bot, "CHAT_LOCK_TIMEOUT_SEC", 0.2)
+
+    async def scenario():
+        lock = await bot.acquire_chat_lock(777, 1.0)
+        try:
+            await bot.handle_pick_callback(q)
+        finally:
+            lock.release()
+
+    try:
+        asyncio.run(scenario())
+        fake_core.assert_not_awaited()
+        assert bot._chat_lock_waiters.get(777, 0) == 0
+    finally:
+        bot._pending_picks.clear()
+
+
 def test_pick_callback_happy_path_english_template(monkeypatch):
     # Запись без языка → язык берётся из чата (дефолт en): шаблон и опции английские.
     bot._pending_picks.clear()

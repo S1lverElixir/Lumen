@@ -589,6 +589,15 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
     # Пустая строка без блокировки — не "Empty response": ask_gemini пробует следующую модель.
     return ans.strip()
 
+def _user_mime_label(mime: str | None) -> str:
+    """Подпись типа вложения для текста ошибки: клиентский mime не должен стать
+    разметкой (markdown-ссылка) в сообщении бота (аудит run-2, low). Параметры
+    типа (charset) разрешены, скобки и угловые скобки — нет."""
+    if mime and mime.isascii() and all(c.isalnum() or c in "._+-/:;= " for c in mime):
+        return mime
+    return "неизвестный тип"
+
+
 async def ask_gemini(
     chat_id: int, user_text: str, media: list[tuple[bytes, str]] | None = None,
     youtube_url: str | None = None, model_chain: list[str] | None = None,
@@ -608,7 +617,7 @@ async def ask_gemini(
              if _is_gemini_supported_mime(mime):
                  extra_parts.append(types.Part.from_bytes(data=b, mime_type=mime))
              else:
-                 raise bot.UserFacingInputError(f"Тип вложения '{mime if mime and mime.isascii() and all(c.isalnum() or c in '._+-/:;= ' for c in mime) else 'неизвестный тип'}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
+                 raise bot.UserFacingInputError(f"Тип вложения '{_user_mime_label(mime)}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
     if youtube_url:
           # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))
