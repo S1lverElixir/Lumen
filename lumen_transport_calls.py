@@ -1,7 +1,4 @@
-"""
-lumen_transport_calls.py — вызовы Telegram API: сессии, ротация прокси,
-circuit breaker, _tg_call/telegram_api_call. Состояние (сессия, breaker, очередь прокси) живёт в этом модуле, из bot.py только читается.
-"""
+"""lumen_transport_calls.py — вызовы Telegram API: ротация прокси, retry, _tg_call/telegram_api_call; класс breaker и сессии определены в lumen_telegram_transport и импортируются отсюда, здесь только их использование."""
 from __future__ import annotations
 
 import asyncio

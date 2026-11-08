@@ -1,8 +1,4 @@
-"""
-lumen_telegram_transport.py — низкоуровневый Telegram-транспорт: circuit breaker мёртвого прокси, детектор "прокси вернул мусор", TCP-коннектор, IPv4-сессия, кэш сессии.
-
-Только самодостаточное: мутирующие TELEGRAM_API_BASE_URL/bot обёртки (_tg_call и др.) живут в lumen_transport_calls.py — их вынос туда завершён, здесь только сессия и middlewares.
-"""
+"""lumen_telegram_transport.py — самодостаточный низкоуровневый Telegram-транспорт: TCP-коннектор, IPv4-сессия с кэшем, детектор "прокси вернул мусор", класс circuit breaker; мутирующие обёртки (_tg_call и др.) живут в lumen_transport_calls.py."""
 
 from __future__ import annotations
 
