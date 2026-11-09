@@ -82,6 +82,25 @@ Deno.test("resolveTarget отклоняет неразрешённый хост 
   }
 });
 
+Deno.test("resolveTarget пропускает Workers AI и только его", () => {
+  // Регрессия на релей Cloudflare (09.11.2026): путь генерации обязан проходить,
+  // остальной API аккаунта — нет, потому что Authorization пробрасывается.
+  const run = resolveTarget(
+    "/fetch/api.cloudflare.com/client/v4/accounts/abc123/ai/run/@cf/black-forest-labs/flux-1-schnell",
+    "",
+  );
+  assert(run.ok, "ожидался ok=true для пути генерации");
+  if (run.ok) {
+    assertEquals(
+      run.url,
+      "https://api.cloudflare.com/client/v4/accounts/abc123/ai/run/@cf/black-forest-labs/flux-1-schnell",
+    );
+  }
+  assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/zones", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/abc123/workers/scripts", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.cloudflare.com/", "").ok, false);
+});
+
 Deno.test("resolveTarget отклоняет некорректный формат пути с 404", () => {
   assertEquals(resolveTarget("/", "").ok, false);
   assertEquals(resolveTarget("/fetch", "").ok, false);
@@ -105,7 +124,8 @@ Deno.test("ALLOWED_HOSTS содержит ровно те хосты, что р�
   assertEquals(ALLOWED_HOSTS.has("api.telegram.org"), true);
   assertEquals(ALLOWED_HOSTS.has("www.tikwm.com"), true);
   assertEquals(ALLOWED_HOSTS.has("tikwm.com"), true);
-  assertEquals(ALLOWED_HOSTS.size, 3);
+  assertEquals(ALLOWED_HOSTS.has("api.cloudflare.com"), true);
+  assertEquals(ALLOWED_HOSTS.size, 4);
 });
 
 // ─────────────────────────── buildForwardHeaders / buildResponseHeaders ───────────────────────────

@@ -36,6 +36,7 @@
  * В HF Spaces secrets/variables:
  *   TELEGRAM_API_BASE_URL = https://<домен>/fetch/api.telegram.org
  *   TIKWM_API_BASE_URL    = https://<домен>/fetch/www.tikwm.com
+ *   CLOUDFLARE_AI_BASE_URL= https://<домен>/fetch/api.cloudflare.com/client/v4/accounts
  * bot.py дальше сам достраивает нужные пути (/bot<token>/<method>,
  * /file/bot<token>/<path>, /api/?url=...) поверх этой базы — никаких других
  * изменений в Python-коде для смены адреса прокси не требуется.
@@ -47,6 +48,9 @@ export const ALLOWED_HOSTS = new Set([
   "api.telegram.org",
   "www.tikwm.com",
   "tikwm.com",
+  // Workers AI: api.cloudflare.com молча дропает коннект с IP HF Spaces (прод
+  // 09.11.2026: TimeoutError на каждую попытку /draw), тот же класс, что TikWM выше.
+  "api.cloudflare.com",
 ]);
 
 // Кап объявленного тела запроса (аудит 26.09.2026). Telegram сам режет загрузки
@@ -140,6 +144,9 @@ export function resolveTarget(pathname: string, search: string): TargetResolutio
   if (host === "api.telegram.org" && !isTelegramBotPath(path)) {
     return { ok: false, status: 404, message: "Not found — путь Telegram обязан иметь форму /bot<token>/<метод> или /file/bot<token>/<путь>" };
   }
+  if (host === "api.cloudflare.com" && !isCloudflareAiPath(path)) {
+    return { ok: false, status: 404, message: "Not found — разрешён только путь /client/v4/accounts/<account>/ai/..." };
+  }
   return { ok: true, url: `https://${host}${path}${search}` };
 }
 
@@ -147,6 +154,13 @@ export function resolveTarget(pathname: string, search: string): TargetResolutio
 // класс чужеродного использования (релей произвольных путей при наличии секрета).
 function isTelegramBotPath(path: string): boolean {
   return /^\/bot[^/]+\/.+/.test(path) || /^\/file\/bot[^/]+\/.+/.test(path);
+}
+
+// Authorization пробрасывается наверх как есть, поэтому релей в Cloudflare закрыт
+// до ветки ai: иначе у любого, кто завладел секретом прокси, появился бы весь API
+// аккаунта (DNS, Workers, R2), а не только генерация картинок.
+function isCloudflareAiPath(path: string): boolean {
+  return /^\/client\/v4\/accounts\/[^/]+\/ai(\/|$)/.test(path);
 }
 
 export function buildForwardHeaders(reqHeaders: Headers): Headers {
