@@ -27,8 +27,10 @@ from aiogram.types import (
 )
 
 from lumen_images import (
-    POLLINATIONS_IMAGE_MODELS,
-    _pick_image_model,
+    IMAGE_PROMPT_MAX_CHARS,
+    ImageBudgetExhaustedError,
+    ImageRateLimitedError,
+    image_filename,
 )
 from lumen_lang import SUPPORTED_LANGS, LANG_NAMES, normalize_lang, pick_texts, t as _lang_t
 from lumen_limits import (
@@ -63,82 +65,139 @@ async def cmd_start(message: Message) -> None:
         parse_mode=ParseMode.HTML,
     )
 
+# Справочник провайдерских функций собирается на каждый вызов: тесты подменяют
+# bot._<провайдер>_text_to_image, а копия, снятая один раз при импорте, показала бы
+# подмену мимо (тот же класс ошибок, что с bot.X в аудите A5-8).
+def _image_provider_calls() -> dict[str, Any]:
+    import bot
+    return {name: getattr(bot, f"_{name}_text_to_image") for name in bot.image_provider_names()}
+
+
+# Семафор на каждый event loop — приём тот же, что у bot._media_semaphore: тесты
+# гоняют много коротких asyncio.run, один общий объект привязался бы к первому циклу.
+_image_semaphores: dict[Any, asyncio.Semaphore] = {}
+_draw_inflight: set[Any] = set()
+
+
+def _image_semaphore() -> asyncio.Semaphore:
+    import bot
+    loop = asyncio.get_running_loop()
+    sem = _image_semaphores.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(max(1, int(bot.IMAGE_GLOBAL_CONCURRENCY)))
+        _image_semaphores[loop] = sem
+    return sem
+
+
 async def inline_draw(message: Message, prompt: str) -> None:
     import bot
-    # Дневной лимит пользователя: атомарный резерв ДО первого await, как в озвучке.
-    # Проверка в начале, а списание после генерации, позволяли пяти параллельным
-    # /draw пробить лимит (аудит 01.11.2026).
+    cid = message.chat.id
     uid = bot._user_key_for_message(message)
-    if not bot._reserve_user_daily(uid, total=1):
+    # Общий дневной бюджет картинок — до резерва и до сети: отказ не должен ни
+    # списывать слот пользователя, ни биться в провайдера, у которого день кончился.
+    if not bot._is_owner(uid) and bot._image_budget_exhausted():
+        bot._record_stats_event("daily_limit_denials")
+        await bot._safe_reply(message, bot._t(cid, "draw_day_over", limit=bot.IMAGE_DAILY_LIMIT))
+        return
+    # Дневные лимиты пользователя: общий и отдельный на картинки. Резерв атомарный и
+    # ДО первого await — проверка в начале со списанием после генерации позволяли
+    # пяти параллельным /draw пробить лимит (аудит 01.11.2026).
+    if not bot._reserve_user_daily(uid, total=1, draw=1):
         _draw_entry = bot._user_daily_peek(uid)
         hours, mins = bot._user_daily_reset_in()
         bot._record_stats_event("daily_limit_denials")
-        await bot._safe_reply(message, bot._t(
-            message.chat.id, "user_daily_total",
-            used=(_draw_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _draw_entry),
-            hours=hours, mins=mins,
-        ))
+        if bot._user_daily_total_exhausted(uid, _draw_entry):
+            await bot._safe_reply(message, bot._t(
+                cid, "user_daily_total",
+                used=(_draw_entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", _draw_entry),
+                hours=hours, mins=mins,
+            ))
+        else:
+            await bot._safe_reply(message, bot._t(
+                cid, "user_daily_draw",
+                used=(_draw_entry or {}).get("draw", 0), limit=bot._user_daily_limit(uid, "draw", _draw_entry),
+            ))
         return
-    from lumen_status import StatusMessage
+    # Одна генерация на человека: rate limit 5/30с этого не мешал, и пять висящих
+    # /draw по 30 МБ держал в памяти один и тот же человек (аудит 09.11.2026).
+    if uid is not None and uid in _draw_inflight:
+        bot._refund_user_daily(uid, total=1, draw=1)
+        await bot._safe_reply(message, bot._t(cid, "draw_err_overloaded"))
+        return
+    if uid is not None:
+        _draw_inflight.add(uid)
     # Инициализируем ДО try: сбой самого пузыря иначе уводил бы обработчик ошибки
     # на несвязанное имя (аудит 01.11.2026).
     status_obj = None
     status = None
+    acquired = False
     try:
+        from lumen_status import StatusMessage
+        session = await bot._get_http_session()
+        deadline = time.monotonic() + bot.DRAW_TOTAL_BUDGET_SEC
+        sem = _image_semaphore()
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=max(1.0, deadline - time.monotonic()))
+        except asyncio.TimeoutError:
+            raise RuntimeError("image generation queue is full") from None
+        acquired = True
+
         status_obj = await StatusMessage.start_action(
-            message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_generating_image"),
+            message, bot._chat_lang(cid), bot._t(cid, "status_generating_image"),
         )
         status = status_obj.message if status_obj is not None else None
-        session = await bot._get_http_session()
-        # Модель — автовыбором по промпту (/imgmodel убран 19.08.2026), без состояния чата.
-        primary_model = _pick_image_model(prompt)
 
-        # Фолбэк-цепочка: подобранная модель первой, дальше остальные по порядку.
-        all_model_ids = list(POLLINATIONS_IMAGE_MODELS.keys())
-        fallback_chain = [primary_model] + [m for m in all_model_ids if m != primary_model]
-
+        # Фолбэк — по провайдерам, не по моделям: классический Pollinations игнорирует
+        # model (замер 09.11.2026), так что перебор пяти моделей звал один и тот же
+        # эндпоинт пять раз подряд.
+        calls = _image_provider_calls()
         image_bytes = None
-        last_error = None
+        last_error: Exception | None = None
         budget_exceeded = False
         rate_limited = False
-        deadline = time.monotonic() + bot.DRAW_TOTAL_BUDGET_SEC
+        budget_out = False
+        truncated = len(prompt.strip()) > IMAGE_PROMPT_MAX_CHARS
 
-        for attempt_model in fallback_chain:
+        for attempt, (provider, call) in enumerate(calls.items()):
             if time.monotonic() > deadline:
                 budget_exceeded = True
                 log.warning(
-                    '[draw] Overall time budget (%.0fs) exhausted before trying %s — stopping the fallback chain instead of trying the remaining models.',
-                    bot.DRAW_TOTAL_BUDGET_SEC, attempt_model,
+                    '[draw] Overall time budget (%.0fs) exhausted before trying %s — stopping the fallback chain.',
+                    bot.DRAW_TOTAL_BUDGET_SEC, provider,
                 )
                 break
+            if not bot._image_provider_ready(provider):
+                log.info("[draw] Provider %s on cooldown or out of daily budget — skipping.", provider)
+                continue
             try:
-                # Статус без названий моделей (см. ИДЕНТИЧНОСТЬ в system_prompt.py); на первой попытке статус и так стоит.
-                if attempt_model != primary_model:
+                # Статус без названий моделей и провайдеров (см. ИДЕНТИЧНОСТЬ в system_prompt.py);
+                # на первой попытке статус и так стоит.
+                if attempt:
                     if status_obj is not None:
                         await status_obj.set_action_key("status_taking_longer")
                     else:
-                        await bot._edit_message_quietly(status, bot._t(message.chat.id, "status_taking_longer"))
+                        await bot._edit_message_quietly(status, bot._t(cid, "status_taking_longer"))
                 # Таймаут попытки — не больше остатка бюджета и не больше 40 с:
-                # одна зависшая модель не должна съедать все 120 с и лишать
-                # шанса резервные (аудит 29.10.2026).
+                # один зависший провайдер не должен съедать все 120 с (аудит 29.10.2026).
                 attempt_timeout = max(1.0, min(40.0, deadline - time.monotonic()))
-                image_bytes = await bot._pollinations_text_to_image(session, attempt_model, prompt, timeout_sec=attempt_timeout)
+                image_bytes = await call(session, prompt, timeout_sec=attempt_timeout)
+                bot._note_image_success(provider)
                 break
+            except ImageRateLimitedError as exc:
+                # Пауза именно на этого провайдера — следующий ещё может сработать
+                # (раньше 429 одного сервиса останавливал всю цепочку из пяти моделей).
+                bot._note_image_rate_limited(provider, retry_after_sec=exc.retry_after_sec)
+                rate_limited = True
+                last_error = exc
+                log.warning("[draw] Provider %s rate limited (%s) — trying next.", provider, exc)
+            except ImageBudgetExhaustedError as exc:
+                bot._note_image_budget_exhausted(provider)
+                budget_out = True
+                last_error = exc
+                log.warning("[draw] Provider %s daily budget exhausted (%s) — trying next.", provider, exc)
             except Exception as exc:
                 last_error = exc
-                txt = bot._error_text(exc).lower()
-                # 429 — перегрузка ВСЕГО сервиса (прод 17.09.2026: все 5 моделей подряд), остаток цепочки не гоняем.
-                if "429" in txt or "rate" in txt or "too many" in txt:
-                    log.warning("[draw] Service rate-limited (429) on model %s — stopping the fallback chain.", attempt_model)
-                    rate_limited = True
-                    break
-                # Пробуем следующую только при сетевых/серверных ошибках
-                if any(kw in txt for kw in ("cannot connect", "ssl:", "no address", "503", "502", "timeout", "host")):
-                    log.warning("[draw] Model %s failed (%s), trying next fallback", attempt_model, type(exc).__name__)
-                    continue
-                # При других ошибках (400, 404 и т.д.) тоже пробуем следующую
-                log.warning("[draw] Model %s error: %s, trying next", attempt_model, exc)
-                continue
+                log.warning("[draw] Provider %s failed (%s: %s) — trying next.", provider, type(exc).__name__, exc)
 
         if image_bytes:
             if status_obj is not None:
@@ -148,10 +207,12 @@ async def inline_draw(message: Message, prompt: str) -> None:
             # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_photo.
             # _tg_call отдаёт None вместо исключения — внешний except ждёт исключение,
             # поэтому отсутствие результата превращаем в ошибку сервиса здесь.
+            caption = bot._t(cid, "draw_truncated", limit=IMAGE_PROMPT_MAX_CHARS) if truncated else None
             sent = await bot._tg_call(
                 bot.bot.send_photo,
-                chat_id=message.chat.id,
-                photo=BufferedInputFile(image_bytes, filename="generated.jpg"),
+                chat_id=cid,
+                photo=BufferedInputFile(image_bytes, filename=image_filename(image_bytes) or "generated.jpg"),
+                caption=caption,
                 reply_to_message_id=message.message_id,
                 call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
             )
@@ -163,26 +224,27 @@ async def inline_draw(message: Message, prompt: str) -> None:
             bot._record_stats_event("messages_received")
             bot._record_stats_event("answers_sent")
         else:
-            if rate_limited:
-                raise RuntimeError("image generation service overloaded with requests") from last_error
             if budget_exceeded:
                 raise RuntimeError("image generation total time budget exceeded") from last_error
-            raise last_error or RuntimeError("all image generation models unavailable")
+            if rate_limited:
+                raise RuntimeError("image generation service overloaded with requests") from last_error
+            if budget_out:
+                raise RuntimeError("image generation daily budget exhausted") from last_error
+            raise last_error or RuntimeError("all image generation providers unavailable")
 
     except asyncio.CancelledError:
         if status_obj is not None:
             await status_obj.stop()
-        bot._refund_user_daily(uid, total=1)
+        bot._refund_user_daily(uid, total=1, draw=1)
         raise
     except Exception as exc:
-        log.exception("Pollinations image generation failed:")
+        log.exception("Image generation failed:")
         txt = bot._error_text(exc).strip()
-        cid = message.chat.id
         if any(kw in txt.lower() for kw in ("cannot connect", "ssl:", "no address", "connection", "timeout", "host")):
             user_err = bot._t(cid, "draw_err_unavailable")
-        elif "overloaded" in txt.lower():
+        elif any(kw in txt.lower() for kw in ("overloaded", "queue is full")):
             user_err = bot._t(cid, "draw_err_overloaded")
-        elif "all image generation" in txt.lower():
+        elif any(kw in txt.lower() for kw in ("all image generation", "daily budget")):
             user_err = bot._t(cid, "draw_err_gone")
         elif "time budget" in txt.lower():
             user_err = bot._t(cid, "draw_err_budget")
@@ -196,7 +258,12 @@ async def inline_draw(message: Message, prompt: str) -> None:
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
         # Картинки нет — дневной слот возвращаем (резерв списан заранее).
-        bot._refund_user_daily(uid, total=1)
+        bot._refund_user_daily(uid, total=1, draw=1)
+    finally:
+        if acquired:
+            sem.release()
+        if uid is not None:
+            _draw_inflight.discard(uid)
 
 
 async def cmd_draw(message: Message) -> None:

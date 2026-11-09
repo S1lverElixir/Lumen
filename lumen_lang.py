@@ -410,6 +410,30 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Дневной лимит озвучки исчерпан ({used}/{limit}). Смогу озвучить завтра.",
         "uk": "Денний ліміт озвучення вичерпано ({used}/{limit}). Зможу озвучити завтра.",
     },
+    "user_daily_draw": {
+        "be": "Дзённы ліміт малюнкаў вычарпаны ({used}/{limit}). Змагу намаляваць заўтра.",
+        "en": "Daily image limit reached ({used}/{limit}). I'll be able to draw again tomorrow.",
+        "es": "Límite diario de imágenes agotado ({used}/{limit}). Podré dibujar mañana.",
+        "kk": "Күндік сурет лимиті таусылды ({used}/{limit}). Ертең сала аламын.",
+        "ru": "Дневной лимит картинок исчерпан ({used}/{limit}). Смогу нарисовать завтра.",
+        "uk": "Денний ліміт зображень вичерпано ({used}/{limit}). Зможу намалювати завтра.",
+    },
+    "draw_day_over": {
+        "be": "Малюнкі на сёння скончыліся — агульны ліміт {limit}. Паспрабуй заўтра, звычайныя пытанні працуюць.",
+        "en": "No images left for today — shared limit {limit}. Try tomorrow; ordinary questions still work.",
+        "es": "Las imágenes de hoy se acabaron — límite común {limit}. Inténtalo mañana; las preguntas normales siguen funcionando.",
+        "kk": "Бүгінгі суреттер таусылды — жалпы лимит {limit}. Ертең көріңіз; кәдімгі сұрақтар жұмыс істейді.",
+        "ru": "Картинки на сегодня закончились — общий лимит {limit}. Попробуй завтра, обычные вопросы работают.",
+        "uk": "Зображень на сьогодні не лишилось — спільний ліміт {limit}. Спробуй завтра, звичайні питання працюють.",
+    },
+    "draw_truncated": {
+        "be": "Апісанне даўжэйшае за {limit} сімвалаў — узяў пачатак.",
+        "en": "Description was longer than {limit} characters — I used the beginning.",
+        "es": "La descripción superaba {limit} caracteres — usé el principio.",
+        "kk": "Сипаттама {limit} таңбадан ұзақ — басын алдым.",
+        "ru": "Описание длиннее {limit} символов — взял начало.",
+        "uk": "Опис довший за {limit} символів — узяв початок.",
+    },
     "fallback_no_search": {
         "be": "Адказваю без пошуку ў інтэрнэце (дзённы ліміт вычарпаны) — даныя могуць быць не самымі свежымі.",
         "en": "Answering without web search (daily limit reached) — the details may not be fully up to date.",
@@ -1037,6 +1061,9 @@ PACK_PT: dict[str, str] = {
     "user_daily_total": "Limite diário de mensagens esgotado ({used}/{limit}). Novas estarão disponíveis em {hours} h {mins} min.",
     "user_daily_gemini": "Limite diário de solicitações complexas esgotado ({used}/{limit}). Poderei abrir links, vídeos e YouTube amanhã. Mas faça sua pergunta normal — responderei.",
     "user_daily_tts": "Limite diário de voz esgotado ({used}/{limit}). Poderei dar voz de novo amanhã.",
+    "user_daily_draw": "Limite diário de imagens esgotado ({used}/{limit}). Poderei desenhar de novo amanhã.",
+    "draw_day_over": "As imagens de hoje acabaram — limite geral de {limit}. Tenta amanhã; perguntas normais funcionam.",
+    "draw_truncated": "Descrição maior que {limit} caracteres — usei o começo.",
     "fallback_no_search": "Respondendo sem busca na web (limite diário esgotado) — os dados podem não estar totalmente atualizados.",
 }
 
@@ -1149,6 +1176,9 @@ PACK_AR: dict[str, str] = {
     "user_daily_total": "تم استنفاد الحد اليومي للرسائل ({used}/{limit}). ستتوفر رسائل جديدة بعد {hours} س {mins} د.",
     "user_daily_gemini": "تم استنفاد الحد اليومي للطلبات المعقدة ({used}/{limit}). سأتمكن من فتح الروابط والفيديو وYouTube غدًا. أما سؤالك العادي فاطرحه — وسأجيب.",
     "user_daily_tts": "تم استنفاد الحد اليومي للتحويل إلى صوت ({used}/{limit}). سأتمكن من التحويل غدًا.",
+    "user_daily_draw": "تم استنفاد الحد اليومي للصور ({used}/{limit}). سأتمكن من الرسم غدًا.",
+    "draw_day_over": "نفدت صور اليوم — الحد العام {limit}. حاول غدًا، والأسئلة العادية تعمل.",
+    "draw_truncated": "الوصف أطول من {limit} حرفًا — أخذت بدايته.",
     "fallback_no_search": "أجيب دون بحث في الإنترنت (الحد اليومي مستنفد) — قد لا تكون البيانات محدثة تمامًا.",
 }
 
@@ -1261,6 +1291,9 @@ PACK_TR: dict[str, str] = {
     "user_daily_total": "Günlük mesaj limiti doldu ({used}/{limit}). Yenileri {hours} sa {mins} dk sonra kullanılabilir.",
     "user_daily_gemini": "Günlük karmaşık istek limiti doldu ({used}/{limit}). Bağlantı, video ve YouTube'u yarın açabilirim. Sıradan sorunu sor — yanıtlarım.",
     "user_daily_tts": "Günlük seslendirme limiti doldu ({used}/{limit}). Yarın seslendirebilirim.",
+    "user_daily_draw": "Günlük çizim limiti doldu ({used}/{limit}). Yarın tekrar çizebilirim.",
+    "draw_day_over": "Bugünkü çizim hakkı bitti (genel limit {limit}). Yarın dene; normal sorular çalışıyor.",
+    "draw_truncated": "Açıklama {limit} karakterden uzun — başını aldım.",
     "fallback_no_search": "İnternette arama yapmadan yanıtlıyorum (günlük limit doldu) — bilgiler güncel olmayabilir.",
 }
 
@@ -1373,6 +1406,9 @@ PACK_DE: dict[str, str] = {
     "user_daily_total": "Tageslimit für Nachrichten erreicht ({used}/{limit}). Neue gibt es in {hours} Std. {mins} Min.",
     "user_daily_gemini": "Tageslimit für komplexe Anfragen erreicht ({used}/{limit}). Links, Videos und YouTube kann ich morgen öffnen. Eine normale Frage aber gern — ich antworte.",
     "user_daily_tts": "Tageslimit für Vertonung erreicht ({used}/{limit}). Morgen kann ich wieder vertonen.",
+    "user_daily_draw": "Tageslimit für Bilder erreicht ({used}/{limit}). Morgen kann ich wieder zeichnen.",
+    "draw_day_over": "Die Bildgenerierungen für heute sind aufgebraucht (gemeinsames Limit {limit}). Versuch es morgen — normale Fragen funktionieren weiter.",
+    "draw_truncated": "Beschreibung länger als {limit} Zeichen — ich habe den Anfang genommen.",
     "fallback_no_search": "Antwort ohne Websuche (Tageslimit erreicht) — die Angaben sind vielleicht nicht ganz aktuell.",
 }
 
@@ -1485,6 +1521,9 @@ PACK_FR: dict[str, str] = {
     "user_daily_total": "Limite quotidienne de messages atteinte ({used}/{limit}). Les prochains seront disponibles dans {hours} h {mins} min.",
     "user_daily_gemini": "Limite quotidienne de requêtes complexes atteinte ({used}/{limit}). Je pourrai ouvrir liens, vidéos et YouTube demain. Mais pose ta question ordinaire — je répondrai.",
     "user_daily_tts": "Limite quotidienne de voix atteinte ({used}/{limit}). Je pourrai remettre en voix demain.",
+    "user_daily_draw": "Limite quotidienne d'images atteinte ({used}/{limit}). Je pourrai dessiner demain.",
+    "draw_day_over": "Plus d'images pour aujourd'hui (limite commune de {limit}). Réessaie demain ; les questions normales fonctionnent.",
+    "draw_truncated": "Description plus longue que {limit} caractères — j'ai pris le début.",
     "fallback_no_search": "Réponse sans recherche web (limite quotidienne atteinte) — les données ne sont peut-être plus à jour.",
 }
 
@@ -1597,6 +1636,9 @@ PACK_IT: dict[str, str] = {
     "user_daily_total": "Limite giornaliero di messaggi raggiunto ({used}/{limit}). Nuovi disponibili tra {hours} h {mins} min.",
     "user_daily_gemini": "Limite giornaliero di richieste complesse raggiunto ({used}/{limit}). Link, video e YouTube potrò aprirli domani. Ma fai pure la tua domanda normale — risponderò.",
     "user_daily_tts": "Limite giornaliero di voce raggiunto ({used}/{limit}). Potrò dare voce di nuovo domani.",
+    "user_daily_draw": "Limite giornaliero di immagini raggiunto ({used}/{limit}). Potrò disegnare domani.",
+    "draw_day_over": "Generazioni di immagini esaurite per oggi (limite comune {limit}). Riprova domani; le domande normali funzionano.",
+    "draw_truncated": "Descrizione più lunga di {limit} caratteri — ho preso l'inizio.",
     "fallback_no_search": "Risposta senza ricerca web (limite giornaliero raggiunto) — i dati potrebbero non essere aggiornatissimi.",
 }
 
@@ -1709,6 +1751,9 @@ PACK_HI: dict[str, str] = {
     "user_daily_total": "दैनिक संदेश सीमा पूरी ({used}/{limit})। नए संदेश {hours} घंटे {mins} मिनट में मिलेंगे।",
     "user_daily_gemini": "जटिल अनुरोधों की दैनिक सीमा पूरी ({used}/{limit})। लिंक, वीडियो और YouTube कल खोल पाऊंगा। साधारण सवाल पूछो — जवाब दूंगा।",
     "user_daily_tts": "दैनिक वॉयस सीमा पूरी ({used}/{limit})। कल फिर से सुना पाऊंगा।",
+    "user_daily_draw": "दैनिक इमेज सीमा पूरी ({used}/{limit})। कल फिर बना पाऊंगा।",
+    "draw_day_over": "आज के लिए इमेज खत्म (साझा सीमा {limit})। कल कोशिश करो; आम सवाल चलते हैं।",
+    "draw_truncated": "विवरण {limit} अक्षर से लंबा था — शुरुआत ली।",
     "fallback_no_search": "वेब खोज के बिना जवाब (दैनिक सीमा पूरी) — जानकारी ताज़ा न हो सके।",
 }
 
@@ -1821,6 +1866,9 @@ PACK_ID: dict[str, str] = {
     "user_daily_total": "Batas harian pesan tercapai ({used}/{limit}). Pesan baru tersedia dalam {hours} jam {mins} mnt.",
     "user_daily_gemini": "Batas harian permintaan kompleks tercapai ({used}/{limit}). Link, video dan YouTube bisa kubuka besok. Pertanyaan biasa silakan — akan kujawab.",
     "user_daily_tts": "Batas harian suara tercapai ({used}/{limit}). Besok bisa bersuara lagi.",
+    "user_daily_draw": "Batas harian gambar tercapai ({used}/{limit}). Besok bisa menggambar lagi.",
+    "draw_day_over": "Kuota gambar hari ini habis (batas bersama {limit}). Coba besok; pertanyaan biasa tetap jalan.",
+    "draw_truncated": "Deskripsi lebih panjang dari {limit} karakter — bagian awal yang dipakai.",
     "fallback_no_search": "Menjawab tanpa pencarian web (batas harian tercapai) — datanya mungkin tidak terbaru.",
 }
 
@@ -1933,6 +1981,9 @@ PACK_MS: dict[str, str] = {
     "user_daily_total": "Had harian mesej tercapai ({used}/{limit}). Mesej baharu tersedia dalam {hours} jam {mins} minit.",
     "user_daily_gemini": "Had harian permintaan kompleks tercapai ({used}/{limit}). Pautan, video dan YouTube boleh kubuka esok. Soalan biasa silakan — akan kujawab.",
     "user_daily_tts": "Had harian suara tercapai ({used}/{limit}). Esok boleh bersuara lagi.",
+    "user_daily_draw": "Had harian gambar tercapai ({used}/{limit}). Esok boleh melukis lagi.",
+    "draw_day_over": "Kuota gambar hari ini habis (had bersama {limit}). Cuba esok; soalan biasa masih jalan.",
+    "draw_truncated": "Deskripsi lebih panjang daripada {limit} aksara — ambil bahagian awal.",
     "fallback_no_search": "Menjawab tanpa carian web (had harian tercapai) — datanya mungkin tidak terkini.",
 }
 
@@ -2045,6 +2096,9 @@ PACK_VI: dict[str, str] = {
     "user_daily_total": "Đã hết hạn mức tin nhắn trong ngày ({used}/{limit}). Tin mới sẽ có sau {hours} giờ {mins} phút.",
     "user_daily_gemini": "Đã hết hạn mức yêu cầu phức tạp trong ngày ({used}/{limit}). Link, video và YouTube để mai mình mở. Cứ hỏi bình thường — mình trả lời.",
     "user_daily_tts": "Đã hết hạn mức lồng tiếng trong ngày ({used}/{limit}). Mai mình lồng tiếng tiếp được.",
+    "user_daily_draw": "Đã hết hạn mức ảnh trong ngày ({used}/{limit}). Mai vẽ tiếp được.",
+    "draw_day_over": "Suất ảnh hôm nay đã dùng hết (hạn chung {limit}). Thử lại mai; câu hỏi thường vẫn chạy.",
+    "draw_truncated": "Mô tả dài hơn {limit} ký tự — mình lấy phần đầu.",
     "fallback_no_search": "Trả lời không kèm tìm kiếm web (đã hết hạn mức ngày) — thông tin có thể chưa mới nhất.",
 }
 
@@ -2157,6 +2211,9 @@ PACK_TH: dict[str, str] = {
     "user_daily_total": "โควต้ารายวันหมดแล้ว ({used}/{limit}) จะใช้ได้อีกใน {hours} ชม. {mins} นาที",
     "user_daily_gemini": "โควต้าคำขอซับซ้อนรายวันหมดแล้ว ({used}/{limit}) ลิงก์ วิดีโอ และ YouTube เปิดได้พรุ่งนี้ ถามธรรมดามาได้เลย — จะตอบให้",
     "user_daily_tts": "โควต้าเสียงรายวันหมดแล้ว ({used}/{limit}) พรุ่งนี้พากย์เสียงได้ใหม่",
+    "user_daily_draw": "โควต้าภาพรายวันหมดแล้ว ({used}/{limit}) พรุ่งนี้วาดได้ใหม่",
+    "draw_day_over": "โควต้าภาพวันนี้ใช้ครบแล้ว (จำกัดรวม {limit}) ลองใหม่พรุ่งนี้ คำถามทั่วไปยังได้",
+    "draw_truncated": "คำบรรยายยาวกว่า {limit} ตัวอักษร จึงใช้เฉพาะตอนต้น",
     "fallback_no_search": "ตอบโดยไม่ค้นเว็บ (โควต้ารายวันหมด) — ข้อมูลอาจไม่ใหม่ที่สุด",
 }
 
@@ -2269,6 +2326,9 @@ PACK_FA: dict[str, str] = {
     "user_daily_total": "سقف روزانه پیام‌ها تمام شد ({used}/{limit}). پیام‌های جدید بعد از {hours} ساعت و {mins} دقیقه.",
     "user_daily_gemini": "سقف روزانه درخواست‌های پیچیده تمام شد ({used}/{limit}). لینک، ویدیو و YouTube را فردا باز می‌کنم. سؤال عادی بپرس — جواب می‌دهم.",
     "user_daily_tts": "سقف روزانه صوتی تمام شد ({used}/{limit}). فردا دوباره می‌توانم بخوانم.",
+    "user_daily_draw": "سقف روزانه تصویر تمام شد ({used}/{limit}). فردا دوباره می‌توانم بکشم.",
+    "draw_day_over": "سهم تصویر امروز تمام شد (سقف مشترک {limit}). فردا تلاش کن؛ سوال‌های معمولی کار می‌کنند.",
+    "draw_truncated": "توضیح بلندتر از {limit} نویسه بود — ابتدای آن را برداشتم.",
     "fallback_no_search": "بدون جست‌وجوی اینترنتی جواب می‌دهم (سقف روزانه تمام شد) — اطلاعات ممکن است به‌روز نباشند.",
 }
 
@@ -2381,6 +2441,9 @@ PACK_UR: dict[str, str] = {
     "user_daily_total": "روزانہ پیغامات کی حد پوری ({used}/{limit})۔ نئے پیغامات {hours} گھنٹے {mins} منٹ بعد ملیں گے۔",
     "user_daily_gemini": "پیچیدہ درخواستوں کی روزانہ حد پوری ({used}/{limit})۔ لنکس، ویڈیو اور YouTube کل کھول سکوں گا۔ عام سوال پوچھو — جواب دوں گا۔",
     "user_daily_tts": "روزانہ وائس کی حد پوری ({used}/{limit})۔ کل پھر سنا سکوں گا۔",
+    "user_daily_draw": "روزانہ امیج کی حد پوری ({used}/{limit})۔ کل پھر بنا سکوں گا۔",
+    "draw_day_over": "آج کے امیج ختم (مشترکہ حد {limit})۔ کل کوشش کریں؛ عام سوالات جاری ہیں۔",
+    "draw_truncated": "تفصیل {limit} حروف سے لمبی تھی — شروع لیا۔",
     "fallback_no_search": "ویب تلاش کے بغیر جواب (روزانہ حد پوری) — معلومات تازہ نہ ہو سکتی ہیں۔",
 }
 
@@ -2493,6 +2556,9 @@ PACK_UZ: dict[str, str] = {
     "user_daily_total": "Kunlik xabar limiti tugadi ({used}/{limit}). Yangilari {hours} soat {mins} daqiqadan keyin bo'ladi.",
     "user_daily_gemini": "Murakkab so'rovlarning kunlik limiti tugadi ({used}/{limit}). Havola, video va YouTube'ni ertaga ochaman. Oddiy savolingni ber — javob beraman.",
     "user_daily_tts": "Kunlik ovozlash limiti tugadi ({used}/{limit}). Ertaga yana ovozlay olaman.",
+    "user_daily_draw": "Kunlik rasm limiti tugadi ({used}/{limit}). Ertaga yana chiza olaman.",
+    "draw_day_over": "Bugungi rasm uchun joy qolmadi (umumiy limit {limit}). Ertaga urinib ko'ring; oddiy savollar ishlaydi.",
+    "draw_truncated": "Tavsif {limit} belgidan uzun — boshini oldim.",
     "fallback_no_search": "Internetdan izlamay javob beraman (kunlik limit tugadi) — ma'lumotlar eskirgan bo'lishi mumkin.",
 }
 
@@ -2605,6 +2671,9 @@ PACK_BN: dict[str, str] = {
     "user_daily_total": "দৈনিক বার্তা সীমা শেষ ({used}/{limit})। নতুন বার্তা {hours} ঘণ্টা {mins} মিনিট পরে পাওয়া যাবে।",
     "user_daily_gemini": "জটিল অনুরোধের দৈনিক সীমা শেষ ({used}/{limit})। লিংক, ভিডিও আর YouTube কাল খুলতে পারব। সাধারণ প্রশ্ন করো — উত্তর দেব।",
     "user_daily_tts": "দৈনিক ভয়েস সীমা শেষ ({used}/{limit})। কাল আবার শোনাতে পারব।",
+    "user_daily_draw": "দৈনিক ছবির সীমা শেষ ({used}/{limit})। কাল আবার আঁকতে পারব।",
+    "draw_day_over": "আজকের ছবির কোটা শেষ (সাধারণ সীমা {limit})। কাল চেষ্টা করো; সাধারণ প্রশ্ন চলছে।",
+    "draw_truncated": "বিবরণ {limit} অক্ষরের বেশি লম্বা — শুরুটা নিয়েছি।",
     "fallback_no_search": "ওয়েব অনুসন্ধান ছাড়াই উত্তর (দৈনিক সীমা শেষ) — তথ্য হালনাগাদ নাও হতে পারে।",
 }
 
@@ -2717,6 +2786,9 @@ PACK_FIL: dict[str, str] = {
     "user_daily_total": "Naabot na ang daily limit ng mensahe ({used}/{limit}). May bago ulit sa {hours} oras {mins} minuto.",
     "user_daily_gemini": "Naabot na ang daily limit ng complex request ({used}/{limit}). Bukas ko na mabubuksan ang links, videos at YouTube. Pero magtanong ka lang — sasagutin ko.",
     "user_daily_tts": "Naabot na ang daily limit ng boses ({used}/{limit}). Bukas pwede ulit.",
+    "user_daily_draw": "Naabot na ang daily limit ng larawan ({used}/{limit}). Bukas pwede ulit gumuhit.",
+    "draw_day_over": "Ubos na ang larawan ngayong araw (shared limit {limit}). Subukan bukas; ordinaryong tanong ay gumagana pa rin.",
+    "draw_truncated": "Mas mahaba ang deskripsyon sa {limit} character — kinuha ang simula.",
     "fallback_no_search": "Sumasagot nang walang web search (naabot na ang daily limit) — baka hindi pinakabago ang datos.",
 }
 
@@ -2829,6 +2901,9 @@ PACK_PL: dict[str, str] = {
     "user_daily_total": "Dzienny limit wiadomości wyczerpany ({used}/{limit}). Nowe będą za {hours} godz. {mins} min.",
     "user_daily_gemini": "Dzienny limit złożonych zapytań wyczerpany ({used}/{limit}). Linki, wideo i YouTube otworzę jutro. Zwykłe pytanie śmiało — odpowiem.",
     "user_daily_tts": "Dzienny limit głosu wyczerpany ({used}/{limit}). Jutro znów będę mógł udźwiękowić.",
+    "user_daily_draw": "Dzienny limit obrazków wyczerpany ({used}/{limit}). Jutro znów będę mógł narysować.",
+    "draw_day_over": "Na dziś limit generacji obrazów wyczerpany (wspólny limit {limit}). Spróbuj jutro — zwykłe pytania działają dalej.",
+    "draw_truncated": "Opis dłuższy niż {limit} znaków — wziąłem początek.",
     "fallback_no_search": "Odpowiadam bez wyszukiwania w internecie (limit dzienny wyczerpany) — dane mogą być nieaktualne.",
 }
 
@@ -2941,6 +3016,9 @@ PACK_NL: dict[str, str] = {
     "user_daily_total": "Daglimiet voor berichten bereikt ({used}/{limit}). Nieuwe over {hours} u {mins} min.",
     "user_daily_gemini": "Daglimiet voor complexe verzoeken bereikt ({used}/{limit}). Links, video's en YouTube kan ik morgen openen. Een gewone vraag mag — ik antwoord.",
     "user_daily_tts": "Daglimiet voor spraak bereikt ({used}/{limit}). Morgen kan ik weer inspreken.",
+    "user_daily_draw": "Daglimiet voor afbeeldingen bereikt ({used}/{limit}). Morgen kan ik weer tekenen.",
+    "draw_day_over": "De beeldlimiet voor vandaag is op (gemeenschappelijk limiet {limit}). Probeer morgen; gewone vragen werken nog.",
+    "draw_truncated": "Beschrijving langer dan {limit} tekens — ik heb het begin genomen.",
     "fallback_no_search": "Antwoord zonder webzoekopdracht (daglimiet bereikt) — de gegevens zijn misschien niet helemaal actueel.",
 }
 
@@ -3053,6 +3131,9 @@ PACK_ZU: dict[str, str] = {
     "user_daily_total": "Umkhawulo wansuku zonke wemilayezo ufinyelelwe ({used}/{limit}). Emisha izotholakala ngemuva kwamahora angu-{hours} namaminithi angu-{mins}.",
     "user_daily_gemini": "Umkhawulo wansuku zonke wezicelo ezinzima ufinyelelwe ({used}/{limit}). Izixhumanisi, amavidiyo ne-YouTube ngizovavula kusasa. Buza umbuzo ojwayelekile — ngizowuphendula.",
     "user_daily_tts": "Umkhawulo wansuku zonke wezwi ufinyelelwe ({used}/{limit}). Ngizokwazi ukukhuluma futhi kusasa.",
+    "user_daily_draw": "Umkhawulo wansuku zonke wezithombe ufinyelelwe ({used}/{limit}). Ngizokwazi ukudweba futhi kusasa.",
+    "draw_day_over": "Izithombe zanamuhla ziphelile (umkhawulo ohlanganyelwe {limit}). Zama kusasa; imibuzo evamile iyaqhubeka.",
+    "draw_truncated": "Incazelo ide kunenhlamvu ezingu-{limit} — ngithathe ekuqaleni.",
     "fallback_no_search": "Ngiphendula ngaphandle kokusesha ku-inthanethi (umkhawulo wansuku zonke ufinyelelwe) — imininingwane kungenzeka ingaseshi.",
 }
 

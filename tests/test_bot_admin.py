@@ -317,7 +317,7 @@ def test_export_state_returns_chats_and_quota_with_valid_key():
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     chat_id = 999411
     bot.chat_state[chat_id] = {
-        "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}],
+        "history": [{"role": "user", "content": "hi"}],
         "quota": {}, "recent_media_ids": {}, "last_activity": 0.0,
     }
     try:

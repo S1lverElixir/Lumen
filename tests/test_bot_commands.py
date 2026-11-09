@@ -10,6 +10,7 @@ import bot
 import contextlib
 import lumen_chat_state
 import lumen_commands
+import lumen_images
 import lumen_limits
 import pytest
 import time
@@ -486,7 +487,7 @@ def test_draw_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypat
     async def fake_safe_reply(msg, text, **kwargs):
         replied.append(text)
 
-    async def failing_generate(session, model_id, prompt, timeout_sec=None):
+    async def failing_generate(session, prompt, timeout_sec=None):
         raise RuntimeError("all image generation models unavailable")
 
     async def fake_get_http_session():
@@ -541,23 +542,6 @@ def test_draw_trigger_this_with_reply_draws_replied_message(rate_guard_setup):
     message.reply_to_message = SimpleNamespace(text="закат над морем", caption=None)
     asyncio.run(bot._handle_message_core(message))
     bot.inline_draw.assert_awaited_once_with(message, "закат над морем")
-
-
-@pytest.mark.parametrize(("prompt", "expected"), [
-    ("нарисуй девушку в стиле аниме", "flux-anime"),
-    ("draw a chibi character", "flux-anime"),
-    ("нарисуй дракона в фэнтезийном замке", "dreamshaper"),
-    ("concept art of an elf wizard", "dreamshaper"),
-    ("сделай фотореалистичный портрет кота", "flux-realism"),
-    ("realistic photo of a mountain", "flux-realism"),
-    ("быстрый набросок логотипа", "turbo"),
-    ("космическая станция на орбите Земли", bot.DEFAULT_POLLINATIONS_IMAGE_MODEL),
-    ("", bot.DEFAULT_POLLINATIONS_IMAGE_MODEL),
-    # Стилевой сигнал важнее просьбы "побыстрее" (порядок проверок в _pick_image_model).
-    ("быстро нарисуй аниме-девушку", "flux-anime"),
-])
-def test_pick_image_model(prompt, expected):
-    assert bot._pick_image_model(prompt) == expected
 
 
 def test_imgmodel_command_and_callback_removed():
@@ -643,12 +627,24 @@ def test_cmd_start_group_notice_only_in_groups(monkeypatch, chat_type, is_group)
         bot.chat_state.pop(9101, None)
 
 
-def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
-    chat_id = 999430
-    captured_model = []
+def _one_image_provider(monkeypatch, call):
+    """Цепочка из одного провайдера: список читает конфигурацию lumen_images, а в
+    тестах ключей нет — полагаться на неё значит тестировать не то."""
+    monkeypatch.setattr(bot, "image_provider_names", lambda: ("pollinations",))
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", call)
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
-        captured_model.append(model_id)
+
+def _two_image_providers(monkeypatch, cloudflare, pollinations):
+    monkeypatch.setattr(bot, "image_provider_names", lambda: ("cloudflare", "pollinations"))
+    monkeypatch.setattr(bot, "_cloudflare_text_to_image", cloudflare)
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", pollinations)
+
+
+def test_inline_draw_does_not_touch_chat_state(monkeypatch):
+    # Состояние чата картинке не нужно вообще: ни ключ модели, ни что-то ещё.
+    chat_id = 999430
+
+    async def fake_pollinations_text_to_image(session, prompt, timeout_sec=None):
         return b"\x89PNG fake bytes"
 
     incoming = _FakeIncomingMessage(chat_id)
@@ -658,18 +654,13 @@ def test_inline_draw_picks_model_from_prompt_without_touching_chat_state():
         async def send_photo(self, **kwargs):
             return SimpleNamespace()
 
-    original_hf = bot._pollinations_text_to_image
+    _one_image_provider(monkeypatch, fake_pollinations_text_to_image)
     original_bot_obj = bot.bot
-    bot._pollinations_text_to_image = fake_pollinations_text_to_image
     bot.bot = _FakePhotoBot()
     try:
         asyncio.run(bot.inline_draw(incoming, "нарисуй девушку в стиле аниме на пляже"))
-        assert captured_model == ["flux-anime"]
-        # get_state не должен был получить ключ image_model — авто-роутинг не
-        # завязан на состояние чата вообще.
         assert "image_model" not in bot.get_state(chat_id)
     finally:
-        bot._pollinations_text_to_image = original_hf
         bot.bot = original_bot_obj
         bot.chat_state.pop(chat_id, None)
 
@@ -679,7 +670,7 @@ def test_inline_draw_caps_single_attempt_timeout(monkeypatch):
     # лишала шанса резервные. Таймаут одной попытки ограничен 40 с.
     captured = {}
 
-    async def fake_image(session, model_id, prompt, timeout_sec=None):
+    async def fake_image(session, prompt, timeout_sec=None):
         captured["timeout"] = timeout_sec
         return b"\x89PNG fake bytes"
 
@@ -711,7 +702,7 @@ def test_inline_draw_refuses_when_user_total_limit_exhausted(monkeypatch):
     bot._record_user_daily(777021)
     bot._record_user_daily(777021)
 
-    async def fail_generate(session, model_id, prompt, timeout_sec=None):
+    async def fail_generate(session, prompt, timeout_sec=None):
         raise AssertionError("generation must not run for an exhausted user")
 
     monkeypatch.setattr(bot, "_pollinations_text_to_image", fail_generate)
@@ -738,7 +729,7 @@ def test_inline_draw_records_user_daily_on_success(monkeypatch):
     incoming.from_user = SimpleNamespace(id=777022)
     monkeypatch.setattr(bot, "OWNER_ID", 1)
 
-    async def fake_generate(session, model_id, prompt, timeout_sec=None):
+    async def fake_generate(session, prompt, timeout_sec=None):
         return b"\x89PNG fake bytes"
 
     class _FakePhotoBot:
@@ -755,52 +746,49 @@ def test_inline_draw_records_user_daily_on_success(monkeypatch):
         bot.chat_state.pop(999492, None)
 
 
-def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded():
-    # Регрессия на находку код-ревью (28 августа 2026): раньше у /draw не было
-    # общего бюджета времени на всю фолбэк-цепочку — при недоступности сервиса
-    # генерации бот перебирал бы все 5 моделей POLLINATIONS_IMAGE_MODELS, тратя реальное
-    # время пользователя без единого предупреждения. Патчим DRAW_TOTAL_BUDGET_SEC
-    # на крошечное значение и делаем первую попытку заведомо дольше него —
-    # вторая попытка не должна была вообще начаться.
+def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded(monkeypatch):
+    # Регрессия на находку код-ревью (28 августа 2026): без общего бюджета времени
+    # цепочка провайдеров тянулась минутами. Патчим DRAW_TOTAL_BUDGET_SEC на
+    # крошечное значение и делаем первую попытку заведомо дольше него — вторая
+    # попытка не должна начаться.
     chat_id = 999432
     attempts = []
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
-        attempts.append(model_id)
-        await asyncio.sleep(0.05)  # дольше урезанного DRAW_TOTAL_BUDGET_SEC ниже
+    async def slow_cloudflare(session, prompt, timeout_sec=None):
+        attempts.append("cloudflare")
+        await asyncio.sleep(0.05)  # дольше урезанного бюджета ниже
         raise RuntimeError("503 Service Unavailable")
 
+    async def never_pollinations(session, prompt, timeout_sec=None):
+        attempts.append("pollinations")
+        return b"\x89PNG fake bytes"
+
+    _two_image_providers(monkeypatch, slow_cloudflare, never_pollinations)
+    monkeypatch.setattr(bot, "DRAW_TOTAL_BUDGET_SEC", 0.03)
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
-
-    original_hf = bot._pollinations_text_to_image
-    original_budget = bot.DRAW_TOTAL_BUDGET_SEC
-    bot._pollinations_text_to_image = fake_pollinations_text_to_image
-    bot.DRAW_TOTAL_BUDGET_SEC = 0.01
-    try:
-        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
-        # Ровно ОДНА попытка — бюджет исчерпался до второй, а не перебор всех 5 моделей.
-        assert len(attempts) == 1
-        assert "too long" in incoming.sent[0].edits[-1][0].lower()
-    finally:
-        bot._pollinations_text_to_image = original_hf
-        bot.DRAW_TOTAL_BUDGET_SEC = original_budget
+    asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    # Ровно ОДНА попытка: бюджет исчерпался до второго провайдера.
+    assert attempts == ["cloudflare"]
+    assert "too long" in incoming.sent[0].edits[-1][0].lower()
 
 
-def test_inline_draw_falls_back_when_auto_picked_model_fails():
-    # Закрывает пробел, найденный при код-ревью: _pick_image_model выбирает модель
-    # по содержимому промпта, но до сих пор не было теста на то, что именно ЭТА
-    # (авто-подобранная, не дефолтная) модель корректно участвует в существующей
-    # fallback-цепочке при сбое — а не только счастливый путь без единой ошибки.
+def test_inline_draw_falls_back_to_next_provider(monkeypatch):
+    # Фолбэк теперь по провайдерам: перебор пяти моделей ничего не выбирал
+    # (Pollinations игнорирует model, замер 09.11.2026), а Cloudflare и
+    # Pollinations — действительно разные сервисы.
     chat_id = 999431
     attempts = []
 
-    async def fake_pollinations_text_to_image(session, model_id, prompt, timeout_sec=None):
-        attempts.append(model_id)
-        if model_id == "flux-anime":
-            raise RuntimeError("503 Service Unavailable")
+    async def failing_cloudflare(session, prompt, timeout_sec=None):
+        attempts.append("cloudflare")
+        raise RuntimeError("503 Service Unavailable")
+
+    async def ok_pollinations(session, prompt, timeout_sec=None):
+        attempts.append("pollinations")
         return b"\x89PNG fallback bytes"
 
+    _two_image_providers(monkeypatch, failing_cloudflare, ok_pollinations)
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
     captured_photo = {}
@@ -810,55 +798,185 @@ def test_inline_draw_falls_back_when_auto_picked_model_fails():
             captured_photo.update(kwargs)
             return SimpleNamespace()
 
-    original_hf = bot._pollinations_text_to_image
-    original_bot_obj = bot.bot
-    bot._pollinations_text_to_image = fake_pollinations_text_to_image
-    bot.bot = _FakePhotoBot()
-    try:
-        asyncio.run(bot.inline_draw(incoming, "нарисуй девушку в стиле аниме на пляже"))
-        # Авто-подобранная модель (flux-anime) пробуется ПЕРВОЙ, несмотря на сбой.
-        assert attempts[0] == "flux-anime"
-        # Реально отправленное изображение — от следующей модели по порядку
-        # POLLINATIONS_IMAGE_MODELS, а не от auto-pick, провалившегося с ошибкой.
-        assert len(attempts) >= 2
-        assert captured_photo["photo"].data == b"\x89PNG fallback bytes"
-        # Подпись с названием модели убрана (сентябрь 2026): бот не раскрывает
-        # внутреннюю реализацию — ни названий, ни "основная недоступна".
-        assert "caption" not in captured_photo
-    finally:
-        bot._pollinations_text_to_image = original_hf
-        bot.bot = original_bot_obj
-        bot.chat_state.pop(chat_id, None)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    assert attempts == ["cloudflare", "pollinations"]
+    assert captured_photo["photo"].data == b"\x89PNG fallback bytes"
+    # Имя файла по магическим байтам ответа, а не всегда .jpg.
+    assert captured_photo["photo"].filename == "generated.png"
+    # Внутренняя реализация не раскрывается: на коротком промпте подписи нет.
+    assert captured_photo.get("caption") is None
 
 
-def test_inline_draw_stops_chain_on_service_rate_limit():
-    # Реальный прод-инцидент 17.09.2026: ВСЕ 5 моделей вернули HTTP 429 подряд —
-    # лимит всего сервиса, а не одной модели. Гонять остаток цепочки бессмысленно:
-    # останавливаемся на первой же 429 и честно просим подождать (а не
-    # "переформулируйте описание" — при перегрузке это неверный совет).
-    chat_id = 999432
+def test_inline_draw_rate_limit_does_not_skip_other_provider(monkeypatch):
+    # Перегрузка одного провайдера больше не обрывает цепочку (так было, пока все
+    # пять моделей жили на одном сервисе): он уходит в паузу, второй пробуют.
+    chat_id = 999436
     attempts = []
 
-    async def fake_pollinations_text_to_image_always_429(session, model_id, prompt, timeout_sec=None):
-        attempts.append(model_id)
-        raise RuntimeError("Pollinations.ai HTTP 429")
+    async def limited_cloudflare(session, prompt, timeout_sec=None):
+        attempts.append("cloudflare")
+        raise lumen_images.ImageRateLimitedError("Cloudflare HTTP 429", retry_after_sec=35.0)
 
+    async def ok_pollinations(session, prompt, timeout_sec=None):
+        attempts.append("pollinations")
+        return b"\x89PNG fallback bytes"
+
+    _two_image_providers(monkeypatch, limited_cloudflare, ok_pollinations)
+    monkeypatch.setattr(bot, "IMAGE_PROVIDER_COOLDOWN_SEC", 60)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    assert attempts == ["cloudflare", "pollinations"]
+    # Пауза — на этого провайдера и не меньше его Retry-After.
+    assert bot._image_provider_ready("cloudflare") is False
+    assert bot.GLOBAL_QUOTA["image"]["cloudflare"]["cooldown_until"] > time.time() + 30
+    assert bot._image_provider_ready("pollinations") is True
+
+
+def test_inline_draw_service_rate_limit_says_overloaded(monkeypatch):
+    # Прод-инцидент 17.09.2026 и замер 09.11.2026 (Pollinations 402 FREE_LIMIT —
+    # раньше вообще не попадал ни в одну ветку): при перегрузке человек ждёт минуту,
+    # а не «переформулируй описание».
+    chat_id = 999432
+
+    async def always_limited(session, prompt, timeout_sec=None):
+        raise lumen_images.ImageRateLimitedError("Pollinations HTTP 402 FREE_LIMIT", retry_after_sec=35.0)
+
+    _one_image_provider(monkeypatch, always_limited)
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 2
+    asyncio.run(bot.inline_draw(incoming, "космическая станция"))
+    # Финальный текст статуса — то, что реально увидит человек.
+    assert incoming.sent[0].edits[-1][0] == bot._t(chat_id, "draw_err_overloaded")
+    # Картинки нет — дневной слот возвращён.
+    assert bot._user_daily_peek(chat_id)["draw"] == 0
 
-    original_hf = bot._pollinations_text_to_image
-    bot._pollinations_text_to_image = fake_pollinations_text_to_image_always_429
-    try:
-        asyncio.run(bot.inline_draw(incoming, "космическая станция"))
-        # 429 от сервиса обрывает ЦЕПОЧКУ: вторая модель не тратит попытку.
-        assert attempts == [bot._pick_image_model("космическая станция")]
-        # Проверяем ФИНАЛЬНЫЙ текст статуса (то, что реально увидит человек), а не
-        # "хоть где-то в правках есть слово" — раньше тест проходил на любой правке.
-        final_status_text = incoming.sent[0].edits[-1][0]
-        assert final_status_text == bot._t(chat_id, "draw_err_overloaded")
-    finally:
-        bot._pollinations_text_to_image = original_hf
-        bot.chat_state.pop(chat_id, None)
+
+def test_inline_draw_global_budget_refuses_before_provider(monkeypatch):
+    # Общий дневной бюджет обязан остановить ДО сети: без счётчика каждый новый
+    # человек бился бы в провайдера, у которого день кончился (аудит 09.11.2026).
+    chat_id = 999437
+    monkeypatch.setattr(bot, "IMAGE_DAILY_LIMIT", 2)
+    bot._note_image_success("pollinations")
+    bot._note_image_success("pollinations")
+
+    async def never_called(session, prompt, timeout_sec=None):
+        raise AssertionError("генерация не должна запускаться при выбранном общем бюджете")
+
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    _one_image_provider(monkeypatch, never_called)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    assert replies == [bot._t(chat_id, "draw_day_over", limit=2)]
+    # Отказ не списал дневной слот пользователя.
+    assert bot._user_daily_peek(chat_id) is None
+
+
+def test_inline_draw_user_draw_limit_refuses(monkeypatch):
+    # Отдельный лимит картинок: исчерпанный draw при живом total — отказ текстом про
+    # картинки, а не про сообщения.
+    chat_id = 999438
+    uid = 777038
+    monkeypatch.setattr(bot, "OWNER_ID", 1)
+    monkeypatch.setattr(bot, "DAILY_USER_DRAW_LIMIT", 1)
+    bot._reserve_user_daily(uid, total=1, draw=1)
+
+    async def never_called(session, prompt, timeout_sec=None):
+        raise AssertionError("генерация не должна запускаться при выбранном лимите пользователя")
+
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    _one_image_provider(monkeypatch, never_called)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    assert replies == [bot._t(chat_id, "user_daily_draw", used=1, limit=1)]
+
+
+def test_inline_draw_one_generation_at_a_time_per_user(monkeypatch):
+    # Rate limit 5/30с не мешал одному человеку держать пять висящих генераций по
+    # 30 МБ каждая (аудит 09.11.2026).
+    chat_id = 999439
+    uid = 777039
+    gate = asyncio.Event()
+    calls = []
+
+    async def slow_generate(session, prompt, timeout_sec=None):
+        calls.append(prompt)
+        await gate.wait()
+        return b"\x89PNG fake bytes"
+
+    async def fake_get_http_session():
+        return SimpleNamespace()
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    _one_image_provider(monkeypatch, slow_generate)
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    refused = AsyncMock()
+    monkeypatch.setattr(bot, "_safe_reply", refused)
+    first = _FakeIncomingMessage(chat_id)
+    first.message_id = 1
+    first.from_user = SimpleNamespace(id=uid)
+    second = _FakeIncomingMessage(chat_id)
+    second.message_id = 2
+    second.from_user = SimpleNamespace(id=uid)
+
+    async def scenario():
+        task_first = asyncio.create_task(bot.inline_draw(first, "нарисуй кота"))
+        await asyncio.sleep(0)
+        await bot.inline_draw(second, "нарисуй пса")
+        gate.set()
+        await task_first
+
+    asyncio.run(scenario())
+    assert calls == ["нарисуй кота"]
+    assert refused.await_args.args[1] == bot._t(chat_id, "draw_err_overloaded")
+    # Отказанная попытка не оставила лишнего слота в дневном лимите.
+    assert bot._user_daily_entry(uid)["draw"] == 1
+
+
+def test_inline_draw_truncated_prompt_says_so(monkeypatch):
+    # Молчаливое обрезание промпта до лимита провайдера выглядело как «бот понял
+    # наоборот»: человек обязан увидеть, что описание укоротили.
+    chat_id = 999440
+    captured = {}
+
+    async def ok(session, prompt, timeout_sec=None):
+        return b"\x89PNG fake bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace()
+
+    _one_image_provider(monkeypatch, ok)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    asyncio.run(bot.inline_draw(incoming, "кот " + "д" * lumen_images.IMAGE_PROMPT_MAX_CHARS))
+    assert captured.get("caption") == bot._t(chat_id, "draw_truncated", limit=lumen_images.IMAGE_PROMPT_MAX_CHARS)
 
 
 def test_draw_command_rejects_exhausted_quota(rate_guard_setup, monkeypatch):
@@ -1360,7 +1478,7 @@ def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
     incoming.message_id = 1
     calls = []
 
-    async def fake_pollinations(session, model_id, prompt, timeout_sec=None):
+    async def fake_pollinations(session, prompt, timeout_sec=None):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
@@ -1390,7 +1508,7 @@ def test_inline_draw_send_failure_reports_service_error(monkeypatch):
     incoming.message_id = 1
     replied = []
 
-    async def fake_pollinations(session, model_id, prompt, timeout_sec=None):
+    async def fake_pollinations(session, prompt, timeout_sec=None):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):

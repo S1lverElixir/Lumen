@@ -308,7 +308,7 @@ def test_save_chat_to_storage_returns_true_on_success(tmp_path):
     # ниже): функция теперь ДОЛЖНА сигнализировать успех/неудачу вызывающему коду,
     # а не просто логировать исключение и возвращать None в обоих случаях.
     chat_id = 999601
-    state = {"history": [{"role": "user", "content": "привет"}], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
+    state = {"history": [{"role": "user", "content": "привет"}], "quota": {}, "recent_media_ids": {}}
     original_chats_dir = lumen_chat_state._CHATS_DIR
     lumen_chat_state._CHATS_DIR = tmp_path
     try:
@@ -319,7 +319,7 @@ def test_save_chat_to_storage_returns_true_on_success(tmp_path):
 
 
 def test_save_chat_to_storage_returns_false_on_failure():
-    state = {"history": [], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
+    state = {"history": [], "quota": {}, "recent_media_ids": {}}
     with patch("bot._storage_write_text", side_effect=RuntimeError("сбой хранилища")):
         assert bot._save_chat_to_storage(999602, state) is False
 
@@ -350,8 +350,8 @@ def test_flush_dirty_state_once_requeues_failed_saves():
     # заново. Теперь чат, для которого сохранение не удалось, должен остаться в
     # _dirty_chat_ids и попасть в следующий цикл.
     ok_chat, fail_chat = 999701, 999702
-    bot.chat_state[ok_chat] = {"history": [{"role": "user", "content": "ok"}], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
-    bot.chat_state[fail_chat] = {"history": [{"role": "user", "content": "fail"}], "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "quota": {}, "recent_media_ids": {}}
+    bot.chat_state[ok_chat] = {"history": [{"role": "user", "content": "ok"}], "quota": {}, "recent_media_ids": {}}
+    bot.chat_state[fail_chat] = {"history": [{"role": "user", "content": "fail"}], "quota": {}, "recent_media_ids": {}}
     bot._dirty_chat_ids.clear()
     bot._dirty_chat_ids.update({ok_chat, fail_chat})
     # Флаги живут в lumen_chat_state (P2) — ребиндим там же, где их читает
@@ -2381,7 +2381,7 @@ def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
 
 
 def test_serialize_chat_state_stamps_current_schema_version():
-    state = {"image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [], "quota": {}, "recent_media_ids": {}}
+    state = {"history": [], "quota": {}, "recent_media_ids": {}}
     snapshot = bot._serialize_chat_state(state)
     assert snapshot["schema_version"] == bot.CHAT_STATE_SCHEMA_VERSION
 
@@ -2391,7 +2391,7 @@ def test_restore_single_chat_accepts_legacy_record_without_schema_version():
     # восстановление не должно падать и должно вести себя так же, как раньше.
     cid = 999905
     try:
-        bot._restore_single_chat(cid, {"image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}]})
+        bot._restore_single_chat(cid, {"history": [{"role": "user", "content": "hi"}]})
         assert bot.chat_state[cid]["history"] == [{"role": "user", "content": "hi"}]
     finally:
         bot.chat_state.pop(cid, None)
@@ -2401,7 +2401,7 @@ def test_restore_single_chat_accepts_current_schema_version_record():
     cid = 999906
     try:
         snapshot = bot._serialize_chat_state({
-            "image_model": bot.DEFAULT_POLLINATIONS_IMAGE_MODEL, "history": [{"role": "user", "content": "hi"}],
+            "history": [{"role": "user", "content": "hi"}],
             "quota": {}, "recent_media_ids": {},
         })
         bot._restore_single_chat(cid, snapshot)
@@ -3533,7 +3533,7 @@ def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
         lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._reset_quota_if_new_day()
-        assert bot.GLOBAL_QUOTA["user_daily"] == {"222": {"total": 0, "gemini": 0, "tts": 0, "bonus": 10}}
+        assert bot.GLOBAL_QUOTA["user_daily"] == {"222": {"total": 0, "gemini": 0, "tts": 0, "draw": 0, "bonus": 10}}
         assert bot._user_daily_total_exhausted(111) is False
     finally:
         bot.GLOBAL_QUOTA.pop("user_daily", None)
@@ -3543,17 +3543,17 @@ def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
 
 @pytest.mark.parametrize("incoming,expected", [
     (
-        {"user_daily": {"777": {"total": 29, "gemini": 5, "tts": 1, "bonus": 0}}},
-        {"777": {"total": 29, "gemini": 5, "tts": 1, "bonus": 0}},
+        {"user_daily": {"777": {"total": 29, "gemini": 5, "tts": 1, "draw": 3, "bonus": 0}}},
+        {"777": {"total": 29, "gemini": 5, "tts": 1, "draw": 3, "bonus": 0}},
     ),
     ({}, {}),
     (
         {"user_daily": {"bad": "мусор", "ok": {"total": 2}}},
-        {"ok": {"total": 2, "gemini": 0, "tts": 0, "bonus": 0}},
+        {"ok": {"total": 2, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0}},
     ),
     (
         {"user_daily": {"neg": {"total": -5, "bonus": 3}}},
-        {"neg": {"total": 0, "gemini": 0, "tts": 0, "bonus": 3}},
+        {"neg": {"total": 0, "gemini": 0, "tts": 0, "draw": 0, "bonus": 3}},
     ),
 ])
 def test_load_global_quota_restores_user_daily(incoming, expected):
