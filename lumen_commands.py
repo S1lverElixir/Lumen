@@ -78,6 +78,51 @@ def _image_provider_calls() -> dict[str, Any]:
 _image_semaphores: dict[Any, asyncio.Semaphore] = {}
 _draw_inflight: set[Any] = set()
 
+# Промпт переводит голова Munito: перевод — служебный вызов, как саммари истории.
+_DRAW_TRANSLATE_SYSTEM = (
+    "Translate the user's image description into English for a text-to-image model. "
+    "Keep every visual detail, count and style; translate literally, do not add anything. "
+    "Reply with only the English description, no quotes, no explanations."
+)
+
+
+async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
+    """Промт с не-латиницей переводим на английский: Pollinations/sana превращает
+    кириллицу в '?' ещё при разборе URL (пруф 09.11.2026: метаданные готового JPEG),
+    модель рисует случайное. Сбой/таймаут перевода — оригинал, как раньше."""
+    import bot
+    from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
+    if prompt.isascii() or not _munito_active():
+        return prompt
+    remaining = deadline - time.monotonic()
+    if remaining < 1.0:
+        return prompt
+    model = _MUNITO_ORDER[0]
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _DRAW_TRANSLATE_SYSTEM},
+            {"role": "user", "content": prompt[:IMAGE_PROMPT_MAX_CHARS]},
+        ],
+        "temperature": 0.1, "max_tokens": 400, "stream": False,
+        **_munito_payload_extras(),
+    }
+    try:
+        resp = await bot._munito_request(
+            "chat/completions", "POST", json_body=payload,
+            deadline=time.monotonic() + min(bot.DRAW_TRANSLATE_TIMEOUT_SEC, remaining),
+        )
+        choices = resp.get("choices") or []
+        answer = bot._or_extract_text(choices[0].get("message") or "").strip() if choices else ""
+        # Перевод длиннее капа — модель ушла в рассуждения вместо описания.
+        if answer and len(answer) <= IMAGE_PROMPT_MAX_CHARS:
+            bot._record_quota_usage("munito", model, service=True)
+            return answer
+        log.warning("[draw] Prompt translation unusable (len=%d) — keeping original.", len(answer))
+    except Exception as exc:
+        log.warning("[draw] Prompt translation failed (%s) — keeping original.", exc)
+    return prompt
+
 
 def _image_semaphore() -> asyncio.Semaphore:
     import bot
@@ -150,6 +195,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
             message, bot._chat_lang(cid), bot._t(cid, "status_generating_image"),
         )
         status = status_obj.message if status_obj is not None else None
+
+        # Перевод до фолбэка: оба провайдера обязаны получить один и тот же текст,
+        # и латиница не платит за служебный вызов вообще.
+        prompt = await bot._translate_draw_prompt(prompt, deadline)
 
         # Фолбэк — по провайдерам, не по моделям: классический Pollinations игнорирует
         # model (замер 09.11.2026), так что перебор пяти моделей звал один и тот же

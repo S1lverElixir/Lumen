@@ -229,18 +229,11 @@ async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str,
         f"/ai/run/{urllib.parse.quote(CLOUDFLARE_IMAGE_MODEL, safe='/@')}"
     )
     text = prompt[:IMAGE_PROMPT_MAX_CHARS]
-    # Схема модели (замер 09.11.2026: wrangler ai models schema) знает у
-    # flux-1-schnell только prompt и steps, а страница модели в примерах шлёт ещё и
-    # seed. Если провайдер зарезолвует лишее 400-м — повторяем голым prompt, иначе
-    # одна догадка о формате роняет всю фичу.
-    status, retry_after, data = await _cloudflare_request(session, url, {"prompt": text, "seed": _random_seed()}, timeout_sec)
+    # Только prompt: прод 09.11.2026 — схема flux-1-schnell отвергает seed (5006
+    # "Additional or unevaluated properties '/seed' not allowed"), каждая генерация
+    # платила лишний круг «отказ → повтор». Разнообразие даёт внутренний рандом модели.
+    status, retry_after, data = await _cloudflare_request(session, url, {"prompt": text}, timeout_sec)
     detail = _error_strings(data)
-    # Узкий список: "invalid input" ловил бы и отказ по содержанию, и мы бы
-    # второй раз платили за тот же промпт впустую.
-    if status == 400 and any(word in detail.lower() for word in ("seed", "extra", "unknown field", "not supported")):
-        log.warning("[image] Cloudflare rejected payload fields (%s) — retrying with prompt only.", detail[:160])
-        status, retry_after, data = await _cloudflare_request(session, url, {"prompt": text}, timeout_sec)
-        detail = _error_strings(data)
     if status == 200 and not isinstance(data, dict):
         raise ImageProviderError("Cloudflare вернул JSON не-объектом")
     if status == 402:
