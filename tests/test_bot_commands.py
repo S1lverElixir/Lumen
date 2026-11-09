@@ -957,6 +957,39 @@ def test_inline_draw_one_generation_at_a_time_per_user(monkeypatch):
     assert bot._user_daily_entry(uid)["draw"] == 1
 
 
+def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
+    # Сгенерированная картинка обязана попадать в recent_media_ids: по слову
+    # «картинка» её ищёт _resolve_incoming_media, а не только по реплаю.
+    from aiogram.types import PhotoSize
+
+    chat_id = 999445
+    uid = 777045
+
+    async def ok(session, prompt, timeout_sec=None):
+        return b"\x89PNG fake bytes"
+
+    sent_photo = SimpleNamespace(
+        photo=[PhotoSize(file_id="gen-file-id", file_unique_id="gen-unique", width=1024, height=1024, file_size=1234)]
+    )
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return sent_photo
+
+    _one_image_provider(monkeypatch, ok)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        bucket = bot.get_state(chat_id)["recent_media_ids"][str(uid)]
+        # Mime берётся из PhotoSize, поэтому категория "photo" при поиске совпадёт.
+        assert list(bucket)[-1] == ("gen-file-id", "image/jpeg")
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_inline_draw_send_failure_keeps_the_draw_slot(monkeypatch):
     # Генерация уже списала общий дневной бюджет, а отправка упала: возвращать
     # личный слот в этом случае значит дать одному человеку бесконечные бесплатные

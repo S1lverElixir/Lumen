@@ -231,6 +231,15 @@ async def inline_draw(message: Message, prompt: str) -> None:
             )
             if sent is None:
                 raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
+            # Свой сгенерированный файл — в медиа-историю тем же путём, что и
+            # присланное: без этого «покажи ту картинку» и «что на ней» находили
+            # только реплай, а словесная ссылка на картинку проваливалась
+            # (аудит 09.11.2026). Файл_id отдан Telegram, поэтому повторного
+            # закачивания нет.
+            _drawn_source = bot._msg_media_source(sent)
+            if _drawn_source is not None:
+                with contextlib.suppress(Exception):
+                    bot._save_media_to_history(_drawn_source, bot.get_state(cid), uid)
             # Суточный счётчик уже списан резервом выше; в /stats картинка — и
             # полученное сообщение, и отправленный ответ (иначе «ответов» было
             # больше, чем «сообщений» — аудит 01.11.2026).
