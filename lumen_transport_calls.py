@@ -76,7 +76,10 @@ async def _get_http_session() -> aiohttp.ClientSession:
             ),
             middlewares=proxy_auth_middlewares(
                 proxy_secret=bot.LUMEN_PROXY_SECRET,
-                proxy_base_urls=(*bot._TELEGRAM_PROXY_CANDIDATES, *bot._tikwm_proxy_candidates()),
+                proxy_base_urls=(
+                    *bot._TELEGRAM_PROXY_CANDIDATES, *bot._tikwm_proxy_candidates(),
+                    *bot._cloudflare_proxy_candidates(),
+                ),
             ),
         )
     return bot._http_session

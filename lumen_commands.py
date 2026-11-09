@@ -189,9 +189,11 @@ async def inline_draw(message: Message, prompt: str) -> None:
                         await status_obj.set_action_key("status_taking_longer")
                     else:
                         await bot._edit_message_quietly(status, bot._t(cid, "status_taking_longer"))
-                # Таймаут попытки — не больше остатка бюджета и не больше 40 с:
-                # один зависший провайдер не должен съедать все 120 с (аудит 29.10.2026).
-                attempt_timeout = max(1.0, min(40.0, deadline - time.monotonic()))
+                attempt_started = time.monotonic()
+                # Таймаут попытки — не больше остатка бюджета и не больше
+                # IMAGE_ATTEMPT_TIMEOUT_SEC: один зависший провайдер не должен
+                # съедать весь бюджет (аудит 29.10.2026).
+                attempt_timeout = max(1.0, min(bot.IMAGE_ATTEMPT_TIMEOUT_SEC, deadline - time.monotonic()))
                 image_bytes = await call(session, prompt, timeout_sec=attempt_timeout)
                 bot._note_image_success(provider)
                 generated = True
@@ -210,7 +212,22 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 log.warning("[draw] Provider %s daily budget exhausted (%s) — trying next.", provider, exc)
             except Exception as exc:
                 last_error = exc
-                log.warning("[draw] Provider %s failed (%s: %s) — trying next.", provider, type(exc).__name__, exc)
+                elapsed = time.monotonic() - attempt_started
+                txt = bot._error_text(exc).lower()
+                # Висящий хост — это тоже «не трогать минуту»: без паузы каждый
+                # следующий человек платил бы полные IMAGE_ATTEMPT_TIMEOUT_SEC
+                # (прод 09.11.2026).
+                unreachable = isinstance(exc, (asyncio.TimeoutError, OSError)) or any(
+                    kw in txt for kw in ("timeout", "cannot connect", "ssl:", "no address", "connection", "dns")
+                )
+                if unreachable:
+                    bot._note_image_rate_limited(provider)
+                    rate_limited = True
+                log.warning(
+                    "[draw] Provider %s failed after %.1fs (%s: %s) — %s.",
+                    provider, elapsed, type(exc).__name__, exc,
+                    "parked on cooldown" if unreachable else "trying next",
+                )
 
         if image_bytes:
             if status_obj is not None:

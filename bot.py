@@ -274,6 +274,25 @@ def _tikwm_proxy_candidates() -> list[str]:
     candidates = [TIKWM_API_BASE_URL] + [u for u in _TIKWM_API_BASE_URL_FALLBACKS if u != TIKWM_API_BASE_URL]
     return candidates
 
+def _cloudflare_proxy_candidates() -> list[str]:
+    """Базовый URL Workers AI попадает в скоупы прокси только если он реально прокси:
+    прямому api.cloudflare.com секрет прокси слать нельзя. Мусорный или прямой URL —
+    пустой список, а не падение общей сессии (её создаёт middleware с валидацией)."""
+    base = os.getenv("CLOUDFLARE_AI_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        return []
+    from urllib.parse import urlsplit
+    try:
+        parsed = urlsplit(base)
+    except ValueError:
+        return []
+    if (
+        parsed.scheme != "https" or not parsed.hostname or parsed.hostname == "api.cloudflare.com"
+        or parsed.username is not None or parsed.password is not None or parsed.query or parsed.fragment
+    ):
+        return []
+    return [base]
+
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
 
 def _env_number(name: str, default: float | int, *, cast: type = float, min_value: float | None = None) -> float | int:
@@ -465,6 +484,10 @@ MESSAGE_TOTAL_BUDGET_SEC = _env_number("MESSAGE_TOTAL_BUDGET_SEC", 90, min_value
 HISTORY_SUMMARY_BUDGET_SEC = _env_number("HISTORY_SUMMARY_BUDGET_SEC", 30, min_value=1)
 # Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
 DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
+# Таймаут одной попытки провайдера картинок: 40с были рассчитаны на «модель думает»,
+# а недоступный хост вешал ровно столько на каждого человека до перехода на резерв
+# (прод 09.11.2026: Cloudflare молча дропал коннект из контейнера, 46с до картинки).
+IMAGE_ATTEMPT_TIMEOUT_SEC = _env_number("IMAGE_ATTEMPT_TIMEOUT_SEC", 20, min_value=1)
 # Глобальный дневной бюджет картинок: 10 000 бесплатных Neuron Cloudflare в сутки —
 # это ~170 картинок flux-1-schnell при дефолтных 4 шагах, берём 150 с запасом на
 # резервного провайдера и на 8-шаговую quality-ветку (аудит 09.11.2026). Без счётчика

@@ -680,15 +680,54 @@ def test_inline_draw_caps_single_attempt_timeout(monkeypatch):
 
     monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_image)
     monkeypatch.setattr(bot, "DRAW_TOTAL_BUDGET_SEC", 120)
+    monkeypatch.setattr(bot, "IMAGE_ATTEMPT_TIMEOUT_SEC", 7)
     monkeypatch.setattr(bot, "bot", _FakePhotoBot())
     incoming = _FakeIncomingMessage(999431)
     incoming.message_id = 1
     try:
         asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
         assert captured["timeout"] is not None
-        assert captured["timeout"] <= 40
+        # Потолок попытки читается из env, а не зашит: висящий хост не должен
+        # стоить человеку весь DRAW_TOTAL_BUDGET_SEC (прод 09.11.2026).
+        assert captured["timeout"] <= 7
     finally:
         bot.chat_state.pop(999431, None)
+
+
+def test_inline_draw_parks_unreachable_provider(monkeypatch):
+    # Молча недоступный хост (Cloudflare из контейнера HF) после network-ошибки
+    # обязан уходить в паузу: без неё каждый следующий человек платил бы полный
+    # таймаут попытки до перехода на резерв.
+    chat_id = 999446
+    attempts = []
+
+    async def hanging_cloudflare(session, prompt, timeout_sec=None):
+        attempts.append("cloudflare")
+        raise asyncio.TimeoutError()
+
+    async def ok_pollinations(session, prompt, timeout_sec=None):
+        attempts.append("pollinations")
+        return b"\x89PNG fallback bytes"
+
+    _two_image_providers(monkeypatch, hanging_cloudflare, ok_pollinations)
+    monkeypatch.setattr(bot, "IMAGE_PROVIDER_COOLDOWN_SEC", 60)
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    first = _FakeIncomingMessage(chat_id)
+    first.message_id = 1
+    asyncio.run(bot.inline_draw(first, "нарисуй кота"))
+    assert attempts == ["cloudflare", "pollinations"]
+    assert bot._image_provider_ready("cloudflare") is False
+
+    attempts.clear()
+    second = _FakeIncomingMessage(chat_id)
+    second.message_id = 2
+    asyncio.run(bot.inline_draw(second, "нарисуй пса"))
+    assert attempts == ["pollinations"]
 
 
 def test_inline_draw_refuses_when_user_total_limit_exhausted(monkeypatch):
