@@ -16,6 +16,7 @@ import logging
 import lumen_chat_state
 import lumen_limits
 import lumen_media_flow
+import lumen_quotas as lq
 import pathlib
 import sentry_sdk
 import sys
@@ -642,12 +643,12 @@ def test_startup_load_failure_blocks_quota_overwrite():
     # квоту пустым снимком; теперь флаг отказа запрещает перезапись.
     import lumen_chat_state as lcs
     real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
-    orig_throttle = lcs._last_quota_check_monotonic
+    orig_throttle = lq._last_quota_check_monotonic
     orig_quota_dirty = lcs._quota_dirty
     lcs._state_load_failed = False
     try:
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
-        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         with patch("bot._storage_read_text", side_effect=RuntimeError("Upstash down")):
             bot.load_global_quota()
         assert lcs._state_load_failed is True
@@ -664,7 +665,7 @@ def test_startup_load_failure_blocks_quota_overwrite():
     finally:
         bot.GLOBAL_QUOTA.clear()
         bot.GLOBAL_QUOTA.update(real_quota)
-        lcs._last_quota_check_monotonic = orig_throttle
+        lq._last_quota_check_monotonic = orig_throttle
         lcs._quota_dirty = orig_quota_dirty
         lcs._index_dirty = False
         lcs._state_load_failed = False
@@ -678,11 +679,11 @@ def test_startup_load_failure_blocks_index_overwrite_but_not_new_chats(caplog):
     import lumen_chat_state as lcs
     new_id = 999713
     real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
-    orig_throttle = lcs._last_quota_check_monotonic
+    orig_throttle = lq._last_quota_check_monotonic
     lcs._state_load_failed = False
     try:
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
-        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._dirty_chat_ids.clear()
         bot._pending_chat_deletions.clear()
         with patch("bot._storage_read_text", side_effect=RuntimeError("Upstash down")):
@@ -708,7 +709,7 @@ def test_startup_load_failure_blocks_index_overwrite_but_not_new_chats(caplog):
         lcs._dirty_chat_ids.discard(new_id)
         bot.GLOBAL_QUOTA.clear()
         bot.GLOBAL_QUOTA.update(real_quota)
-        lcs._last_quota_check_monotonic = orig_throttle
+        lq._last_quota_check_monotonic = orig_throttle
         lcs._index_dirty = False
         lcs._quota_dirty = False
         lcs._state_load_failed = False
@@ -719,7 +720,7 @@ def test_successful_startup_load_keeps_index_and_quota_writes():
     # защита не превращается в вечный запрет записи.
     import lumen_chat_state as lcs
     real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
-    orig_throttle = lcs._last_quota_check_monotonic
+    orig_throttle = lq._last_quota_check_monotonic
     lcs._state_load_failed = False
     try:
         payload = json.dumps({"gemini": {}, "munito": {}, "quota_day": bot._current_quota_day()})
@@ -748,7 +749,7 @@ def test_successful_startup_load_keeps_index_and_quota_writes():
         bot.chat_state.pop(4243, None)
         bot.GLOBAL_QUOTA.clear()
         bot.GLOBAL_QUOTA.update(real_quota)
-        lcs._last_quota_check_monotonic = orig_throttle
+        lq._last_quota_check_monotonic = orig_throttle
         lcs._index_dirty = False
         lcs._quota_dirty = False
         lcs._state_load_failed = False
@@ -2221,14 +2222,14 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         "munito": dict(bot.GLOBAL_QUOTA.get("munito", {})),
         "quota_day": bot.GLOBAL_QUOTA.get("quota_day"),
     }
-    original_throttle = lumen_chat_state._last_quota_check_monotonic
+    original_throttle = lq._last_quota_check_monotonic
     try:
         bot.GLOBAL_QUOTA["gemini"] = {"gemini-2.5-flash": {"used": 106, "remaining": 0, "limit": 1500, "exhausted_at": 12345.0, "cooldown_until": time.time() + 600.0}}
         bot.GLOBAL_QUOTA["munito"] = {"deepseek-ai/deepseek-v4.1-flash-1017": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None, "cooldown_until": None}}
         # groq остаётся только там, где он реально нужен — Whisper в транскрибации.
         bot.GLOBAL_QUOTA["groq"] = {"whisper-large-v3-turbo": {"used": 9, "exhausted_at": 12345.0}}
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"  # заведомо "вчерашний" день
-        lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
 
         bot._reset_quota_if_new_day()
 
@@ -2246,24 +2247,24 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         bot.GLOBAL_QUOTA["munito"] = original_quota["munito"]
         bot.GLOBAL_QUOTA.pop("groq", None)
         bot.GLOBAL_QUOTA["quota_day"] = original_quota["quota_day"]
-        lumen_chat_state._last_quota_check_monotonic = original_throttle
+        lq._last_quota_check_monotonic = original_throttle
 
 
 def test_reset_quota_if_new_day_is_noop_within_same_day():
     original_quota_day = bot.GLOBAL_QUOTA.get("quota_day")
-    original_throttle = lumen_chat_state._last_quota_check_monotonic
+    original_throttle = lq._last_quota_check_monotonic
     try:
         bot.GLOBAL_QUOTA["gemini"]["test-model-999"] = {"used": 7, "remaining": None, "limit": None, "exhausted_at": None}
         bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
         # См. комментарий в test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover
         # выше про то, почему буквальный 0.0 не годится как "точно давно".
-        lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._reset_quota_if_new_day()
         assert bot.GLOBAL_QUOTA["gemini"]["test-model-999"]["used"] == 7
     finally:
         bot.GLOBAL_QUOTA["gemini"].pop("test-model-999", None)
         bot.GLOBAL_QUOTA["quota_day"] = original_quota_day
-        lumen_chat_state._last_quota_check_monotonic = original_throttle
+        lq._last_quota_check_monotonic = original_throttle
 
 
 def test_reset_quota_if_new_day_throttles_repeated_calls():
@@ -2275,11 +2276,11 @@ def test_reset_quota_if_new_day_throttles_repeated_calls():
     #
     # См. комментарий в test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover
     # про то, почему сброс делается относительно time.monotonic(), а не в буквальный 0.0.
-    original_throttle = lumen_chat_state._last_quota_check_monotonic
+    original_throttle = lq._last_quota_check_monotonic
     calls = []
     original_fn = bot._current_quota_day
     try:
-        lumen_chat_state._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._current_quota_day = lambda: (calls.append(1), original_fn())[1]
         bot._reset_quota_if_new_day()
         bot._reset_quota_if_new_day()
@@ -2287,7 +2288,7 @@ def test_reset_quota_if_new_day_throttles_repeated_calls():
         assert len(calls) == 1
     finally:
         bot._current_quota_day = original_fn
-        lumen_chat_state._last_quota_check_monotonic = original_throttle
+        lq._last_quota_check_monotonic = original_throttle
 
 
 def test_last_activity_uses_wall_clock_and_survives_serialization():
@@ -2321,15 +2322,14 @@ def test_stats_counters_reset_on_new_day():
     # Что защищает: обнуление суточных счётчиков /stats в полночь PT вместе с
     # остальной квотой. Регрессия: счётчики не сброшены — вчерашние цифры
     # показываются как сегодняшние. Сброс провайдеров покрыт соседним тестом.
-    import lumen_chat_state as lcs
-    orig_throttle = lcs._last_quota_check_monotonic
+    orig_throttle = lq._last_quota_check_monotonic
     had_stats = "stats" in bot.GLOBAL_QUOTA
     old_stats = dict(bot.GLOBAL_QUOTA.get("stats") or {})
     old_day = bot.GLOBAL_QUOTA.get("quota_day")
     try:
         bot.GLOBAL_QUOTA["stats"] = {"messages_received": 9, "answers_sent": 8, "all_failed": 1, "fallbacks": 2, "daily_limit_denials": 3}
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
-        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._reset_quota_if_new_day()
         assert bot._stats_entry() == {"messages_received": 0, "answers_sent": 0, "all_failed": 0, "fallbacks": 0, "daily_limit_denials": 0, "model_attempts": 0, "model_failures": 0}
     finally:
@@ -2338,7 +2338,7 @@ def test_stats_counters_reset_on_new_day():
         else:
             bot.GLOBAL_QUOTA.pop("stats", None)
         bot.GLOBAL_QUOTA["quota_day"] = old_day
-        lcs._last_quota_check_monotonic = orig_throttle
+        lq._last_quota_check_monotonic = orig_throttle
 
 
 def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
@@ -2347,7 +2347,7 @@ def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
     # с groq до внешнего аудита) — /stats обнуляется каждым деплоем. Старый тест
     # покрывает только восстановление groq.
     import lumen_chat_state as lcs
-    orig_throttle = lcs._last_quota_check_monotonic
+    orig_throttle = lq._last_quota_check_monotonic
     real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
     try:
         bot.GLOBAL_QUOTA["munito"] = {"m1": {"used": 5, "exhausted_at": None, "cooldown_until": None}}
@@ -2364,7 +2364,7 @@ def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
         assert "m1" in captured["quota"]
         # "Рестарт": чистим память и грузим из захваченного снимка.
         bot.GLOBAL_QUOTA.clear()
-        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: captured["quota"])
         bot.load_global_quota()
         assert bot.GLOBAL_QUOTA["munito"]["m1"]["used"] == 5
@@ -2376,7 +2376,7 @@ def test_quota_and_stats_counters_survive_restart_roundtrip(monkeypatch):
     finally:
         bot.GLOBAL_QUOTA.clear()
         bot.GLOBAL_QUOTA.update(real_quota)
-        lcs._last_quota_check_monotonic = orig_throttle
+        lq._last_quota_check_monotonic = orig_throttle
         lcs._state_load_failed = False
 
 
@@ -2737,18 +2737,18 @@ def test_maybe_alert_gemini_exhausted_throttled():
     # on_day_rollover выше: time.monotonic() не гарантированно "далеко за" какой-то
     # абсолютной точкой (в свежем процессе может быть близко к нулю) — "давно" нужно
     # выражать относительно текущего time.monotonic(), а не буквальным 0.0.
-    original_last = lumen_chat_state._last_gemini_exhausted_alert_monotonic
+    original_last = lq._last_gemini_exhausted_alert_monotonic
     original_owner, original_bot = bot.OWNER_ID, bot.bot
     bot.OWNER_ID = 12345
     fake = _FakeOwnerBot()
     bot.bot = fake
-    lumen_chat_state._last_gemini_exhausted_alert_monotonic = time.monotonic() - bot.GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC - 10.0
+    lq._last_gemini_exhausted_alert_monotonic = time.monotonic() - bot.GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC - 10.0
     try:
         asyncio.run(bot._maybe_alert_gemini_exhausted())
         asyncio.run(bot._maybe_alert_gemini_exhausted())
         assert len(fake.sent) == 1  # второй вызов сразу же — троттлинг не пускает повтор
     finally:
-        lumen_chat_state._last_gemini_exhausted_alert_monotonic = original_last
+        lq._last_gemini_exhausted_alert_monotonic = original_last
         bot.OWNER_ID, bot.bot = original_owner, original_bot
 
 
@@ -3523,7 +3523,7 @@ def test_user_daily_peek_does_not_create_entry():
 def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
     # Новое: те же сутки, что у квоты; bonus переживает полночь (задел под оплату).
     import lumen_chat_state as lcs
-    orig_throttle = lcs._last_quota_check_monotonic
+    orig_throttle = lq._last_quota_check_monotonic
     orig_dirty = lcs._quota_dirty
     try:
         bot.GLOBAL_QUOTA["user_daily"] = {
@@ -3531,13 +3531,13 @@ def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
             "222": {"total": 30, "gemini": 5, "tts": 5, "bonus": 10},
         }
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
-        lcs._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
+        lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         bot._reset_quota_if_new_day()
         assert bot.GLOBAL_QUOTA["user_daily"] == {"222": {"total": 0, "gemini": 0, "tts": 0, "bonus": 10}}
         assert bot._user_daily_total_exhausted(111) is False
     finally:
         bot.GLOBAL_QUOTA.pop("user_daily", None)
-        lcs._last_quota_check_monotonic = orig_throttle
+        lq._last_quota_check_monotonic = orig_throttle
         lcs._quota_dirty = orig_dirty
 
 
