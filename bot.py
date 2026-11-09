@@ -488,6 +488,9 @@ DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
 # а недоступный хост вешал ровно столько на каждого человека до перехода на резерв
 # (прод 09.11.2026: Cloudflare молча дропал коннект из контейнера, 46с до картинки).
 IMAGE_ATTEMPT_TIMEOUT_SEC = _env_number("IMAGE_ATTEMPT_TIMEOUT_SEC", 20, min_value=1)
+# Перевод не-латинского промпта на английский перед генерацией: sana теряет кириллицу
+# в '?' (пруф 09.11.2026). Сбой перевода не роняет картинку — уходит оригинал.
+DRAW_TRANSLATE_TIMEOUT_SEC = _env_number("DRAW_TRANSLATE_TIMEOUT_SEC", 12, min_value=1)
 # Глобальный дневной бюджет картинок: 10 000 бесплатных Neuron Cloudflare в сутки —
 # это ~170 картинок flux-1-schnell при дефолтных 4 шагах, берём 150 с запасом на
 # резервного провайдера и на 8-шаговую quality-ветку (аудит 09.11.2026). Без счётчика
@@ -1052,6 +1055,7 @@ __all__ = [
     "match_pick_request",
     "clean_mention",
     "inline_draw",
+    "_translate_draw_prompt",
     "inline_tts",
     "_send_pick_question",
     "DEFAULT_GEMINI_MODEL",
@@ -1282,6 +1286,7 @@ def message_mentions_bot(message: Message) -> bool:
 from lumen_commands import (
     cmd_start,
     inline_draw,
+    _translate_draw_prompt,
     cmd_draw,
     _gemini_tts_bytes,
     inline_tts,

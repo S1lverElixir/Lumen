@@ -1130,6 +1130,74 @@ def test_inline_draw_truncated_prompt_says_so(monkeypatch):
     assert captured.get("caption") == bot._t(chat_id, "draw_truncated", limit=lumen_images.IMAGE_PROMPT_MAX_CHARS)
 
 
+def test_translate_draw_prompt_translates_non_ascii(monkeypatch):
+    # Пруф 09.11.2026: sana превращает кириллицу в '?' при разборе URL и рисует
+    # случайное. Не-латинский промт обязан уйти переводом, латиница — без вызова.
+    calls = []
+
+    async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
+        calls.append(json_body)
+        return {"choices": [{"message": {"content": "one apple"}}]}
+
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    deadline = time.monotonic() + 60
+    assert asyncio.run(bot._translate_draw_prompt("яблоко одно", deadline)) == "one apple"
+    assert len(calls) == 1
+    assert calls[0]["messages"][1]["content"] == "яблоко одно"
+    assert asyncio.run(bot._translate_draw_prompt("one apple", deadline)) == "one apple"
+    assert len(calls) == 1
+
+
+def test_translate_draw_prompt_keeps_original_on_failure(monkeypatch):
+    # Сбой перевода не роняет картинку: уходит оригинал. Пустой ответ и ответ
+    # длиннее капа — тоже оригинал (модель ушла в рассуждения вместо описания).
+    async def failing_munito(*args, **kwargs):
+        raise RuntimeError("munito down")
+
+    async def empty_munito(*args, **kwargs):
+        return {"choices": [{"message": {"content": ""}}]}
+
+    async def long_munito(*args, **kwargs):
+        return {"choices": [{"message": {"content": "x" * (lumen_images.IMAGE_PROMPT_MAX_CHARS + 1)}}]}
+
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    deadline = time.monotonic() + 60
+    for fake in (failing_munito, empty_munito, long_munito):
+        monkeypatch.setattr(bot, "_munito_request", fake)
+        assert asyncio.run(bot._translate_draw_prompt("кот", deadline)) == "кот"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
+    assert asyncio.run(bot._translate_draw_prompt("кот", deadline)) == "кот"
+    assert asyncio.run(bot._translate_draw_prompt("кот", time.monotonic() - 1)) == "кот"
+
+
+def test_inline_draw_sends_translated_prompt_to_provider(monkeypatch):
+    # Регрессия прода 09.11.2026: кириллица умирала в '?' по дороге в sana, человек
+    # получал случайную картинку. Провайдер обязан получить перевод, а не оригинал.
+    chat_id = 999441
+    captured = {}
+
+    async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": [{"message": {"content": "one apple"}}]}
+
+    async def ok(session, prompt, timeout_sec=None):
+        captured["prompt"] = prompt
+        return b"\x89PNG fake bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    _one_image_provider(monkeypatch, ok)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    asyncio.run(bot.inline_draw(incoming, "яблоко одно"))
+    assert captured["prompt"] == "one apple"
+
+
 def test_draw_command_rejects_exhausted_quota(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "/draw кот"
