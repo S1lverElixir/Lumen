@@ -203,14 +203,17 @@ def _cf_ok_session(captured=None):
         {"success": True, "result": {"image": base64.b64encode(JPEG).decode()}}).encode(),)), captured)
 
 
-def test_cloudflare_posts_prompt_and_seed(cf_configured):
+def test_cloudflare_posts_prompt_only(cf_configured):
+    # Прод 09.11.2026: схема flux-1-schnell отвергает seed (5006), лишний круг
+    # «отказ → повтор» на каждой генерации. В пайлоаде только prompt, один запрос.
     captured = {}
-    asyncio.run(cf_configured._cloudflare_text_to_image(_cf_ok_session(captured), "кот"))
+    session = _cf_ok_session(captured)
+    asyncio.run(cf_configured._cloudflare_text_to_image(session, "кот"))
     assert captured["method"] == "POST"
     assert captured["url"] == "https://api.cloudflare.com/client/v4/accounts/acct-id/ai/run/@cf/black-forest-labs/flux-1-schnell"
     assert captured["headers"]["Authorization"] == "Bearer cf-token"
-    assert captured["payload"]["prompt"] == "кот"
-    assert captured["payload"]["seed"] > 0
+    assert captured["payload"] == {"prompt": "кот"}
+    assert len(session.calls) == 1
 
 
 def test_cloudflare_rejects_unconfigured_without_request(cf_configured, monkeypatch):
@@ -259,23 +262,6 @@ def test_error_detail_shares_the_body_cap():
     # проверка проходила бы и на «читаем всегда».
     assert asyncio.run(lumen_images._error_detail(
         _FakeResp(status=500, chunks=(b'{"error":{"code":"BOOM_MESSAGE"}}',)))) == ""
-
-
-def test_cloudflare_retries_without_seed_when_payload_rejected(cf_configured):
-    # Схема модели знает только prompt/steps, страница модели в примерах шлёт и seed.
-    # Если Cloudflare отвергнет лишее 400-м, повтор голым prompt обязан спасти фичу,
-    # а не оставить пользователя с «ошибкой генерации» на каждый /draw.
-    rejected = _FakeResp(status=400, chunks=(json.dumps({"success": False, "errors": [
-        {"code": 10000, "message": "Invalid input: seed is not a supported parameter"}]}).encode(),))
-    ok = _FakeResp(status=200, chunks=(json.dumps(
-        {"success": True, "result": {"image": base64.b64encode(JPEG).decode()}}).encode(),))
-    captured = {}
-    session = _FakeSession([rejected, ok], captured)
-    body = asyncio.run(cf_configured._cloudflare_text_to_image(session, "кот"))
-    assert body[:3] == b"\xff\xd8\xff"
-    assert len(session.calls) == 2
-    assert "seed" in session.calls[0]["payload"]
-    assert "seed" not in session.calls[1]["payload"]
 
 
 def test_cloudflare_error_shapes(cf_configured):
