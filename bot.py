@@ -474,6 +474,9 @@ IMAGE_DAILY_LIMIT = _env_number("IMAGE_DAILY_LIMIT", 150, cast=int, min_value=1)
 # семафор: раньше параллельные /draw из разных чатов складывали в RAM до 30 МБ каждый
 # без предела (аудит 09.11.2026, тот же класс, что MEDIA_GLOBAL_CONCURRENCY).
 IMAGE_GLOBAL_CONCURRENCY = _env_number("IMAGE_GLOBAL_CONCURRENCY", 2, min_value=1)
+# Сколько ждать свободный слот генерации: весь DRAW_TOTAL_BUDGET_SEC на очередь
+# тратить нельзя — человек отказывается от картинки раньше, чем её нарисует очередь.
+IMAGE_QUEUE_TIMEOUT_SEC = _env_number("IMAGE_QUEUE_TIMEOUT_SEC", 10, min_value=1)
 # Пауза на провайдера после его 429/402 FREE_LIMIT: Pollinations отдаёт Retry-After
 # ~35с, дефолт 60с с запасом. Без паузы следующий человек повторял бы те же попытки.
 IMAGE_PROVIDER_COOLDOWN_SEC = _env_number("IMAGE_PROVIDER_COOLDOWN_SEC", 60, min_value=1)

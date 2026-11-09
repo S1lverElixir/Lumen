@@ -19,6 +19,7 @@ import aiohttp
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+import lumen_images
 from lumen_state_storage import _serialize_chat_state
 
 log = logging.getLogger("bot")
@@ -249,7 +250,7 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         _log_denied(request, "GET /diag")
         return _forbidden()
     import bot
-    from urllib.parse import urlsplit
+    from urllib.parse import quote, urlsplit
     bot_token = bot.BOT_TOKEN
     tikwm_base = bot.TIKWM_API_BASE_URL
     # Прямой хост TikWM секрет не получает: он нужен только прокси.
@@ -274,7 +275,15 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         # /api/ — тот же путь, что у реальных запросов: корень прокси мог
         # отвечать 200, пока сам API-путь сломан (ревью 28.10.2026).
         "tikwm": (tikwm_base + "/api/") if tikwm_via_proxy else "https://www.tikwm.com",
-        "pollinations": "https://image.pollinations.ai",
+        # /models вместо корня эндпоинта: корень отвечал 200 и при мёртвой генерации,
+        # диагностика врала зелёным (аудит 09.11.2026).
+        "pollinations_models": "https://image.pollinations.ai/models",
+        # Список моделей аккаунта с токеном — тот же путь, что у реальных генераций;
+        # без настройки Cloudflare остаётся просто проверка, что хост доступен.
+        "cloudflare_ai": (
+            f"{lumen_images.CLOUDFLARE_AI_BASE_URL}/{quote(lumen_images.CLOUDFLARE_ACCOUNT_ID, safe='')}/ai/models"
+            if lumen_images.cloudflare_configured() else "https://api.cloudflare.com"
+        ),
         "upstash": bot.UPSTASH_REDIS_REST_URL if bot.USE_UPSTASH else "https://upstash.com",
     }
     results: dict[str, Any] = {}
@@ -292,8 +301,10 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         headers = None
         if name == "configured_tg_proxy" and bot.TELEGRAM_API_BASE_URL != "https://api.telegram.org":
             headers = proxy_headers
-        elif name == "tikwm" and tikwm_via_proxy:
-            headers = proxy_headers
+        elif name == "cloudflare_ai" and lumen_images.cloudflare_configured():
+            # Токен только в заголовке и только на сам Cloudflare: в URL его нет,
+            # поэтому error-ветка probe_url его не выдаёт.
+            headers = {"Authorization": f"Bearer {lumen_images.CLOUDFLARE_API_TOKEN}"}
         return name, await probe_url(
             session, url, timeout_sec=6.0, redact=bot_token or "", headers=headers,
         )

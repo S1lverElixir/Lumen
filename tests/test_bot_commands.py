@@ -957,6 +957,50 @@ def test_inline_draw_one_generation_at_a_time_per_user(monkeypatch):
     assert bot._user_daily_entry(uid)["draw"] == 1
 
 
+def test_inline_draw_queue_wait_is_bounded(monkeypatch):
+    # Слоты генерации заняты другим чатом — второй не должен висеть в очереди весь
+    # DRAW_TOTAL_BUDGET_SEC, он честно получает «перегружен» через IMAGE_QUEUE_TIMEOUT_SEC.
+    gate = asyncio.Event()
+    started = []
+
+    async def slow_generate(session, prompt, timeout_sec=None):
+        started.append(prompt)
+        await gate.wait()
+        return b"\x89PNG fake bytes"
+
+    async def fake_get_http_session():
+        return SimpleNamespace()
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    _one_image_provider(monkeypatch, slow_generate)
+    monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    monkeypatch.setattr(bot, "IMAGE_GLOBAL_CONCURRENCY", 1)
+    monkeypatch.setattr(bot, "IMAGE_QUEUE_TIMEOUT_SEC", 0.05)
+    first = _FakeIncomingMessage(999441)
+    first.message_id = 1
+    first.from_user = SimpleNamespace(id=777041)
+    second = _FakeIncomingMessage(999442)
+    second.message_id = 1
+    second.from_user = SimpleNamespace(id=777042)
+    refused = AsyncMock()
+    monkeypatch.setattr(bot, "_safe_reply", refused)
+
+    async def scenario():
+        task = asyncio.create_task(bot.inline_draw(first, "нарисуй кота"))
+        await asyncio.sleep(0)
+        await bot.inline_draw(second, "нарисуй пса")
+        gate.set()
+        await task
+
+    asyncio.run(scenario())
+    assert started == ["нарисуй кота"]
+    assert refused.await_args.args[1] == bot._t(999442, "draw_err_overloaded")
+
+
 def test_inline_draw_truncated_prompt_says_so(monkeypatch):
     # Молчаливое обрезание промпта до лимита провайдера выглядело как «бот понял
     # наоборот»: человек обязан увидеть, что описание укоротили.

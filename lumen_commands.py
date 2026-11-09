@@ -137,7 +137,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
         deadline = time.monotonic() + bot.DRAW_TOTAL_BUDGET_SEC
         sem = _image_semaphore()
         try:
-            await asyncio.wait_for(sem.acquire(), timeout=max(1.0, deadline - time.monotonic()))
+            await asyncio.wait_for(
+                sem.acquire(),
+                timeout=min(bot.IMAGE_QUEUE_TIMEOUT_SEC, max(1.0, deadline - time.monotonic())),
+            )
         except asyncio.TimeoutError:
             raise RuntimeError("image generation queue is full") from None
         acquired = True
@@ -773,6 +776,20 @@ async def cmd_stats(message: Message) -> None:
         f"{_quota_section(bot.GLOBAL_QUOTA.get('munito', {}), bot.MUNITO_DAILY_LIMIT)}\n\n"
         if _munito_active() else ""
     )
+    _image_states = []
+    for _provider in bot.image_provider_names():
+        _e = bot._quota_entry("image", _provider)
+        if _e.get("exhausted_at"):
+            _state = "бюджет выбран до завтра"
+        elif _e.get("cooldown_until") and float(_e["cooldown_until"]) > time.time():
+            _state = f"пауза ещё {max(0, int(float(_e['cooldown_until']) - time.time()))}с"
+        else:
+            _state = "готов"
+        _image_states.append(f"  • {_provider}: {_state} ({int(_e.get('used') or 0)})")
+    image_block = (
+        f"<b>Картинки — {bot._image_usage_total()}/{bot.IMAGE_DAILY_LIMIT} за сутки:</b>\n"
+        + "\n".join(_image_states) + "\n\n"
+    )
     _quarantined_now = bot._quarantine_status()
     if _quarantined_now:
         quarantine_text = "\n".join(
@@ -807,6 +824,7 @@ async def cmd_stats(message: Message) -> None:
         f"пустых: {_day_stats.get('model_failures', 0)}\n\n"
         f"<b>Gemini — запросов по моделям (лимит провайдера справочно):</b>\n{gemini_text}\n\n"
         f"{munito_block}"
+        f"{image_block}"
         f"<b>Карантин моделей:</b>\n{quarantine_text}\n\n"
         f"Вебхук: {webhook_text}\n"
         f"Память: {_process_memory_text()}\n"

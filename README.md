@@ -46,7 +46,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 - **Claude-style live status.** In private chats search and media requests show a sparkle timeline ("Searching the web", found sources, a thinking timer) and finish with a collapsed "Thought for Ns" block; simple answers get a subtle italic thought line. Private answers are plain messages, without Telegram reply quotes.
 - **Defenses against prompt injection and identity leaks.** A deterministic input filter plus output scrubbers keep the bot from revealing which model or provider actually answered.
 - **TikTok downloads** (usually without watermarks; a watermarked copy is the last resort): video, slideshows (including "live" photo slides), and original sound.
-- **Image generation** through Pollinations.ai. The model is picked from the prompt itself (anime, fantasy, realism, quick sketch, or a general default).
+- **Image generation** through Cloudflare Workers AI (FLUX schnell), with Pollinations.ai as the fallback. Both are free tiers; every request carries a random seed and the safety filter on.
 - **Text-to-speech** through Gemini TTS.
 - `/draw` and `/tts` also work as plain phrases at the start of a message ("draw a cat," "read this out loud"), no slash required.
 - **Clarifying buttons** for short taste requests without details ("посоветуй фильм" → genre buttons instead of a guess).
@@ -102,7 +102,7 @@ All endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/admin_k
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /diag` | Checks outbound network reachability (Telegram, Gemini, Groq, Munito, TikWM, Pollinations, etc.) from inside the container. |
+| `GET /diag` | Checks outbound network reachability (Telegram, Gemini, Groq, Munito, TikWM, Cloudflare AI, Pollinations, etc.) from inside the container. |
 | `GET /webhook_url` | Shows the computed webhook URL and a ready-to-open registration link. |
 | `GET /export_state` | Dumps all chat histories and quota counters as JSON, for manual backup. |
 | `GET /devtrace?n=200` | Tails the dev trace (requests, answers, passive background) as JSON, for prompt debugging. Needs `DEV_TRACE=1`. |
