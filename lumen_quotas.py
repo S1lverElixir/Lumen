@@ -22,7 +22,8 @@ GLOBAL_QUOTA: dict[str, Any] = {
 }
 # Единственный список провайдеров с суточными счётчиками: новый провайдер обязан
 # быть тут, иначе его счётчик не сбрасывается на новых сутках и не грузится из снапшота.
-_QUOTA_PROVIDERS = ("gemini", "groq", "munito")
+# "image" — картинки (Cloudflare/Pollinations), ключ словаря = имя провайдера.
+_QUOTA_PROVIDERS = ("gemini", "groq", "munito", "image")
 
 # Дата пересчитывается не чаще раза в минуту: ZoneInfo на каждое обращение дорого.
 _QUOTA_CHECK_THROTTLE_SEC = 60.0
@@ -84,6 +85,7 @@ def _reset_quota_if_new_day() -> None:
                 entry["total"] = 0
                 entry["gemini"] = 0
                 entry["tts"] = 0
+                entry["draw"] = 0
                 kept[uid] = entry
         GLOBAL_QUOTA[USER_DAILY_KEY] = kept
     # Суточные счётчики /stats — те же сутки: в ноль вместе с остальным.
@@ -128,6 +130,7 @@ def load_global_quota() -> None:
                             "total": max(0, int(entry.get("total") or 0)),
                             "gemini": max(0, int(entry.get("gemini") or 0)),
                             "tts": max(0, int(entry.get("tts") or 0)),
+                            "draw": max(0, int(entry.get("draw") or 0)),
                             "bonus": max(0, int(entry.get("bonus") or 0)),
                         }
                     except (TypeError, ValueError):
@@ -224,6 +227,67 @@ def _record_quota_usage(provider: str, model_id: str, *, service: bool = False) 
     e["cooldown_until"] = None
     bot.mark_quota_dirty()
 
+# ── Дневной бюджет и пауза картиночных провайдеров ──
+# Тот же QuotaEntry, что у текстовых моделей: used на успехе, exhausted_at до завтра,
+# cooldown_until на короткую перегрузку. Отдельного хранилища не заводим.
+IMAGE_QUOTA_PROVIDER = "image"
+
+
+def _image_usage_total() -> int:
+    import bot
+    bot._reset_quota_if_new_day()
+    sub = GLOBAL_QUOTA.get(IMAGE_QUOTA_PROVIDER)
+    if not isinstance(sub, dict):
+        return 0
+    total = 0
+    for entry in sub.values():
+        if isinstance(entry, dict):
+            try:
+                total += max(0, int(entry.get("used") or 0))
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def _image_budget_exhausted() -> bool:
+    """Общий дневной бюджет картинок: отказ до обращения к провайдеру, а не после.
+    Владелец без лимита — ему нужен живой прогон фичи в диагностике."""
+    import bot
+    return _image_usage_total() >= bot.IMAGE_DAILY_LIMIT
+
+
+def _image_provider_ready(provider: str) -> bool:
+    """False — провайдер сейчас трогать нельзя: выбитый дневной бюджет до завтра или
+    свежая перегрузка (cooldown)."""
+    import bot
+    entry = bot._quota_entry(IMAGE_QUOTA_PROVIDER, provider)
+    now = time.time()
+    if entry.get("exhausted_at"):
+        return False
+    cooldown = entry.get("cooldown_until")
+    return not (cooldown and now < float(cooldown))
+
+
+def _note_image_success(provider: str) -> None:
+    """И used++, и снятие обеих меток — делает _record_quota_usage."""
+    import bot
+    bot._record_quota_usage(IMAGE_QUOTA_PROVIDER, provider)
+
+
+def _note_image_rate_limited(provider: str, *, retry_after_sec: float | None = None) -> None:
+    """Пауза на провайдера: Retry-After сервиса, но не меньше IMAGE_PROVIDER_COOLDOWN_SEC."""
+    import bot
+    entry = bot._quota_entry(IMAGE_QUOTA_PROVIDER, provider)
+    wait = max(float(bot.IMAGE_PROVIDER_COOLDOWN_SEC), float(retry_after_sec or 0.0))
+    entry["cooldown_until"] = time.time() + wait
+    bot.mark_quota_dirty()
+
+
+def _note_image_budget_exhausted(provider: str) -> None:
+    import bot
+    bot._mark_quota_exhausted(IMAGE_QUOTA_PROVIDER, provider)
+
+
 # ── Суточные счётчики для /stats (получено/отвечено/отказы) ──
 # Лежат внутри GLOBAL_QUOTA: тот же файл/ключ и тот же флаш, отдельной записи
 # на каждое сообщение нет. Границы суток — те же (quota_day, PT).
@@ -289,7 +353,7 @@ def _user_daily_entry(user_id: int | None) -> dict[str, Any]:
     else:
         # Недавнее использование — в конец: вытеснение ниже сносит давно молчавших.
         bucket[key] = bucket.pop(key)
-    for field in ("total", "gemini", "tts", "bonus"):
+    for field in ("total", "gemini", "tts", "draw", "bonus"):
         try:
             entry[field] = max(0, int(entry.get(field) or 0))
         except (TypeError, ValueError):
@@ -320,6 +384,7 @@ def _user_daily_limit(user_id: int | None, kind: str, entry: dict[str, Any] | No
         "total": bot.DAILY_USER_MESSAGE_LIMIT,
         "gemini": bot.DAILY_USER_GEMINI_LIMIT,
         "tts": bot.DAILY_USER_TTS_LIMIT,
+        "draw": bot.DAILY_USER_DRAW_LIMIT,
     }[kind]
     try:
         if entry is None:
@@ -376,6 +441,21 @@ def _user_daily_tts_exhausted(user_id: int | None, entry: dict[str, Any] | None 
     return used >= _user_daily_limit(user_id, "tts", entry)
 
 
+def _user_daily_draw_exhausted(user_id: int | None, entry: dict[str, Any] | None = None) -> bool:
+    import bot
+    if user_id is None or bot._is_owner(user_id):
+        return False
+    if entry is None:
+        entry = _user_daily_peek(user_id)
+    if entry is None:
+        return False
+    try:
+        used = int(entry.get("draw") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    return used >= _user_daily_limit(user_id, "draw", entry)
+
+
 def _record_user_daily(user_id: int | None, *, gemini: bool = False, tts: bool = False) -> None:
     """Учёт ответа модели: total всегда, gemini/tts — по факту провайдера.
     Только успехи: отказы по лимиту и неудачные вызовы сюда не доходят."""
@@ -391,7 +471,7 @@ def _record_user_daily(user_id: int | None, *, gemini: bool = False, tts: bool =
     bot.mark_quota_dirty()
 
 
-def _reserve_user_daily(user_id: int | None, *, total: int = 0, tts: int = 0) -> bool:
+def _reserve_user_daily(user_id: int | None, *, total: int = 0, tts: int = 0, draw: int = 0) -> bool:
     """Атомарно резервирует счётчики ДО первого await: параллельные /tts иначе
     читали 0 и обходили дневной лимит (аудит 28.10.2026). Возвращает False,
     если резерв не влезает; счётчики в этом случае не меняются."""
@@ -401,28 +481,35 @@ def _reserve_user_daily(user_id: int | None, *, total: int = 0, tts: int = 0) ->
     entry = _user_daily_entry(user_id)
     used_total = int(entry.get("total") or 0)
     used_tts = int(entry.get("tts") or 0)
+    used_draw = int(entry.get("draw") or 0)
     if used_total + total > _user_daily_limit(user_id, "total", entry):
         return False
     if used_tts + tts > _user_daily_limit(user_id, "tts", entry):
         return False
+    if used_draw + draw > _user_daily_limit(user_id, "draw", entry):
+        return False
     entry["total"] = used_total + total
     if tts:
         entry["tts"] = used_tts + tts
+    if draw:
+        entry["draw"] = used_draw + draw
     bot.mark_quota_dirty()
     return True
 
 
-def _refund_user_daily(user_id: int | None, *, total: int = 0, tts: int = 0) -> None:
+def _refund_user_daily(user_id: int | None, *, total: int = 0, tts: int = 0, draw: int = 0) -> None:
     """Возвращает неиспользованный резерв (синтез/отправка не удались)."""
     import bot
     if user_id is None or bot._is_owner(user_id):
         return
-    if not total and not tts:
+    if not total and not tts and not draw:
         return
     entry = _user_daily_entry(user_id)
     entry["total"] = max(0, int(entry.get("total") or 0) - total)
     if tts:
         entry["tts"] = max(0, int(entry.get("tts") or 0) - tts)
+    if draw:
+        entry["draw"] = max(0, int(entry.get("draw") or 0) - draw)
     bot.mark_quota_dirty()
 
 

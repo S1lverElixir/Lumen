@@ -20,8 +20,11 @@ os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
 # разработчика и тест сходит в живой API (сеть, чужая квота, нестабильность).
 # MUNITO_ENABLED/MUNITO_KEEP_FALLBACKS гасятся вместе с ключом: режим эксперимента
 # читается из окружения при импорте роутера и не должен зависеть от локального .env.
+# Ключи Cloudflare в списке обязаны: lumen_images читает их при импорте, и локальный
+# .env иначе уводил бы тесты на живой Workers AI (сеть, чужая квота, нестабильность).
 for _provider_key in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY", "SENTRY_DSN",
-                      "MUNITO_API_KEY", "MUNITO_ENABLED", "MUNITO_KEEP_FALLBACKS", "MUNITO_REASONING_EFFORT"):
+                      "MUNITO_API_KEY", "MUNITO_ENABLED", "MUNITO_KEEP_FALLBACKS", "MUNITO_REASONING_EFFORT",
+                      "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"):
     os.environ[_provider_key] = ""
 
 import copy

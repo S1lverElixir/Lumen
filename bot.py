@@ -1,7 +1,7 @@
 """
 Lumen — телеграм-бот на Munito с резервом в Gemini, webhook-режим.
 История диалога — 100 сообщений, TikTok через TikWM без водяных знаков,
-генерация картинок через Pollinations, озвучка через Gemini TTS.
+генерация картинок через Cloudflare Workers AI с резервом в Pollinations, озвучка через Gemini TTS.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ _SECRET_NAMES = (
     "GROQ_API_KEY", "ADMIN_SECRET_SEED",
     "MUNITO_API_KEY",
     "_ADMIN_SECRET_SEED", "WEBHOOK_SECRET", "ADMIN_PANEL_KEY",
-    "UPSTASH_REDIS_REST_TOKEN", "LUMEN_PROXY_SECRET",
+    "UPSTASH_REDIS_REST_TOKEN", "LUMEN_PROXY_SECRET", "CLOUDFLARE_API_TOKEN",
 )
 
 
@@ -420,10 +420,13 @@ TTS_SYNTH_TIMEOUT_SEC = _env_number("TTS_SYNTH_TIMEOUT_SEC", 60, min_value=1)
 # 30 ffmpeg + 10 probe), типичные 5 чанков укладываются с запасом.
 TTS_TOTAL_BUDGET_SEC = _env_number("TTS_TOTAL_BUDGET_SEC", 240, min_value=30)
 # Дневные лимиты на пользователя (по user_id): всего сообщений, из них через
-# Gemini (ссылки/YouTube/медиа/свежесть с поиском) и отдельно озвучка /tts.
+# Gemini (ссылки/YouTube/медиа/свежесть с поиском), отдельно озвучка /tts и картинки
+# /draw. 5, а не 3: генерация итеративна («не то, перерисуй»), а бережёт бюджет не эта
+# цифра, а IMAGE_DAILY_LIMIT ниже (аудит 09.11.2026).
 DAILY_USER_MESSAGE_LIMIT = _env_number("DAILY_USER_MESSAGE_LIMIT", 30, cast=int, min_value=1)
 DAILY_USER_GEMINI_LIMIT = _env_number("DAILY_USER_GEMINI_LIMIT", 5, cast=int, min_value=1)
 DAILY_USER_TTS_LIMIT = _env_number("DAILY_USER_TTS_LIMIT", 5, cast=int, min_value=1)
+DAILY_USER_DRAW_LIMIT = _env_number("DAILY_USER_DRAW_LIMIT", 5, cast=int, min_value=1)
 
 
 def _parse_gemini_daily_limits(raw: str) -> dict[str, int]:
@@ -462,6 +465,18 @@ MESSAGE_TOTAL_BUDGET_SEC = _env_number("MESSAGE_TOTAL_BUDGET_SEC", 90, min_value
 HISTORY_SUMMARY_BUDGET_SEC = _env_number("HISTORY_SUMMARY_BUDGET_SEC", 30, min_value=1)
 # Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
 DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
+# Глобальный дневной бюджет картинок: 10 000 бесплатных Neuron Cloudflare в сутки —
+# это ~170 картинок flux-1-schnell при дефолтных 4 шагах, берём 150 с запасом на
+# резервного провайдера и на 8-шаговую quality-ветку (аудит 09.11.2026). Без счётчика
+# каждый новый человек бился бы в провайдера, у которого день кончился.
+IMAGE_DAILY_LIMIT = _env_number("IMAGE_DAILY_LIMIT", 150, cast=int, min_value=1)
+# Картинка — самый дорогой по памяти и по бюджету вызов в боте, поэтому общий
+# семафор: раньше параллельные /draw из разных чатов складывали в RAM до 30 МБ каждый
+# без предела (аудит 09.11.2026, тот же класс, что MEDIA_GLOBAL_CONCURRENCY).
+IMAGE_GLOBAL_CONCURRENCY = _env_number("IMAGE_GLOBAL_CONCURRENCY", 2, min_value=1)
+# Пауза на провайдера после его 429/402 FREE_LIMIT: Pollinations отдаёт Retry-After
+# ~35с, дефолт 60с с запасом. Без паузы следующий человек повторял бы те же попытки.
+IMAGE_PROVIDER_COOLDOWN_SEC = _env_number("IMAGE_PROVIDER_COOLDOWN_SEC", 60, min_value=1)
 # CHAT_LOCK_TIMEOUT_SEC — сколько ждём лок чата, прежде чем ответить «занято».
 # Обратная сторона: пока ждём, юзер видит тишину. Поэтому держим НЕ выше хардкода
 # ожидания пользователя, а лок при этом остаётся защищаемым: работа под локом
@@ -565,6 +580,12 @@ from lumen_chat_state import (
     _record_quota_usage,
     _stats_entry,
     _record_stats_event,
+    _image_usage_total,
+    _image_budget_exhausted,
+    _image_provider_ready,
+    _note_image_success,
+    _note_image_rate_limited,
+    _note_image_budget_exhausted,
     _last_storage_write_ts,
     USER_DAILY_KEY,
     _user_daily_entry,
@@ -573,6 +594,7 @@ from lumen_chat_state import (
     _user_daily_total_exhausted,
     _user_daily_gemini_exhausted,
     _user_daily_tts_exhausted,
+    _user_daily_draw_exhausted,
     _record_user_daily,
     _reserve_user_daily,
     _refund_user_daily,
@@ -921,6 +943,7 @@ __all__ = [
     "_user_daily_total_exhausted",
     "_user_daily_gemini_exhausted",
     "_user_daily_tts_exhausted",
+    "_user_daily_draw_exhausted",
     "_record_user_daily",
     "_reserve_user_daily",
     "_refund_user_daily",
@@ -928,8 +951,10 @@ __all__ = [
     "_user_daily_reset_in",
     # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
     "GEMINI_TTS_MODELS",
-    "_pick_image_model",
+    "_cloudflare_text_to_image",
     "_pollinations_text_to_image",
+    "image_provider_names",
+    "image_filename",
     "_gemini_tts_bytes",
     "chat_state",
     "GLOBAL_QUOTA",
@@ -943,6 +968,13 @@ __all__ = [
     "_mark_quota_exhausted",
     "_mark_rate_limited",
     "_record_quota_usage",
+    "_image_usage_total",
+    "_image_budget_exhausted",
+    "_image_provider_ready",
+    "_note_image_success",
+    "_note_image_rate_limited",
+    "_note_image_budget_exhausted",
+    "_user_daily_draw_exhausted",
     "_trim_history",
     "_note_sender",
     "_resolve_nick",
@@ -1035,18 +1067,22 @@ GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC = 3600.0
 
 
 
-# генерация изображений (pollinations)
+# генерация изображений (Cloudflare Workers AI + резерв Pollinations)
 #
 # Генерация картинок — в lumen_images.py (чистые функции, сессию передаёт вызывающий код).
 from lumen_images import (
-    DEFAULT_POLLINATIONS_IMAGE_MODEL,
-    _pick_image_model,
+    ImageBudgetExhaustedError,
+    ImageProviderError,
+    ImageRateLimitedError,
+    _cloudflare_text_to_image,
     _pollinations_text_to_image,
+    image_filename,
+    image_provider_names,
 )
 
-# Нужен только тестам как `bot.DEFAULT_POLLINATIONS_IMAGE_MODEL` (см. пояснение
+# Имена провайдеров и ошибок нужны только тестам как `bot.X` (см. пояснение
 # про __all__ у первого блока в начале файла).
-__all__ += ["DEFAULT_POLLINATIONS_IMAGE_MODEL"]
+__all__ += ["ImageProviderError", "ImageRateLimitedError", "ImageBudgetExhaustedError"]
 
 # Чистые утилиты медиа — в lumen_media.py; сетевая часть остаётся здесь
 # (ей нужны сессия, BOT_TOKEN и bot.get_file).
