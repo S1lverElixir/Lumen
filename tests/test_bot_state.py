@@ -2220,6 +2220,7 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
     original_quota = {
         "gemini": dict(bot.GLOBAL_QUOTA.get("gemini", {})),
         "munito": dict(bot.GLOBAL_QUOTA.get("munito", {})),
+        "image": dict(bot.GLOBAL_QUOTA.get("image", {})),
         "quota_day": bot.GLOBAL_QUOTA.get("quota_day"),
     }
     original_throttle = lq._last_quota_check_monotonic
@@ -2228,6 +2229,9 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         bot.GLOBAL_QUOTA["munito"] = {"deepseek-ai/deepseek-v4.1-flash-1017": {"used": 50, "remaining": None, "limit": None, "exhausted_at": None, "cooldown_until": None}}
         # groq остаётся только там, где он реально нужен — Whisper в транскрибации.
         bot.GLOBAL_QUOTA["groq"] = {"whisper-large-v3-turbo": {"used": 9, "exhausted_at": 12345.0}}
+        # Картиночный счётчик обязан сбрасываться вместе с остальными: выпасть из
+        # _QUOTA_PROVIDERS значит залить «бюджет выбран» до конца жизни процесса.
+        bot.GLOBAL_QUOTA["image"] = {"cloudflare": {"used": 150, "exhausted_at": 12345.0, "cooldown_until": time.time() + 600.0}}
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"  # заведомо "вчерашний" день
         lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
 
@@ -2238,6 +2242,9 @@ def test_reset_quota_if_new_day_clears_used_and_exhausted_on_day_rollover():
         assert bot.GLOBAL_QUOTA["gemini"]["gemini-2.5-flash"]["cooldown_until"] is None
         assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["used"] == 0
         assert bot.GLOBAL_QUOTA["munito"]["deepseek-ai/deepseek-v4.1-flash-1017"]["cooldown_until"] is None
+        assert bot.GLOBAL_QUOTA["image"]["cloudflare"]["used"] == 0
+        assert bot.GLOBAL_QUOTA["image"]["cloudflare"]["exhausted_at"] is None
+        assert bot.GLOBAL_QUOTA["image"]["cloudflare"]["cooldown_until"] is None
         # Groq сбрасывается вместе с остальными (внешний аудит: провайдер забыли в цикле сброса/загрузки).
         assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["used"] == 0
         assert bot.GLOBAL_QUOTA["groq"]["whisper-large-v3-turbo"]["exhausted_at"] is None
@@ -3558,7 +3565,7 @@ def test_user_daily_rollover_zeroes_counters_but_keeps_bonus():
 ])
 def test_load_global_quota_restores_user_daily(incoming, expected):
     # Новое: счётчики переживают рестарт; битые записи отбрасываются, а не роняют загрузку.
-    full = {"gemini": {}, "munito": {}, "groq": {}, "quota_day": bot._current_quota_day()}
+    full = {"gemini": {}, "munito": {}, "groq": {}, "image": {}, "quota_day": bot._current_quota_day()}
     full.update(incoming)
     real = json.loads(json.dumps(bot.GLOBAL_QUOTA))
     try:

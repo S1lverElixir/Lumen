@@ -11,6 +11,8 @@ import json
 import os
 import secrets
 import urllib.parse
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
@@ -34,6 +36,7 @@ IMAGE_PROMPT_MAX_CHARS = 600
 # Читаем потоково с капом: бесконтрольный resp.read() складывал в память тело
 # любого размера от чужого сервиса.
 IMAGE_MAX_BYTES = 30 * 1024 * 1024
+IMAGE_URL_ENCODED_MAX_CHARS = 4000
 # Ответы обоих провайдеров — JPEG; PNG/WebP допускаем, GIF нет: sendPhoto анимацию
 # не принимает, а статичный GIF такие API не отдают (аудит 09.11.2026).
 _IMAGE_SIGNATURES = ((b"\xff\xd8\xff", ".jpg"), (b"\x89PNG", ".png"), (b"RIFF", ".webp"))
@@ -106,11 +109,24 @@ def _error_strings(payload: Any) -> str:
 
 
 def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
-    try:
-        value = float((resp.headers.get("Retry-After") or "").strip())
-    except ValueError:
+    """Retry-After бывает и секундами, и HTTP-date (RFC 9110). Голое float() на дате
+    давало None, и 402 без кода FREE_LIMIT ложно становился «бюджет выбран до завтра»."""
+    raw = (resp.headers.get("Retry-After") or "").strip()
+    if not raw:
         return None
-    return value if value >= 0 else None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
 async def _read_capped_image(resp: aiohttp.ClientResponse) -> bytes | None:
@@ -131,6 +147,33 @@ async def _read_capped_image(resp: aiohttp.ClientResponse) -> bytes | None:
             return None
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+async def _error_detail(resp: aiohttp.ClientResponse) -> str:
+    """Текст ошибки провайдера под тем же капом, что и картинка: error-ветка не
+    обязана лить в память чужое тело без предела (аудит 09.11.2026)."""
+    if int(resp.status) not in (402, 429):
+        return ""
+    with contextlib.suppress(Exception):
+        body = await _read_capped_image(resp)
+        if body is not None:
+            return _error_strings(json.loads(body.decode("utf-8", "replace")))
+    return ""
+
+
+def _encoded_prompt(prompt: str) -> str:
+    """Промпт уходит в путь URL, поэтому каппировать надо по длине ПОСЛЕ
+    percent-encoding: 600 эмодзи это ~7200 символов, и CDN отвечает 414. Отсечка
+    посимвольная, чтобы не разорвать %-последовательность."""
+    pieces: list[str] = []
+    used = 0
+    for ch in prompt[:IMAGE_PROMPT_MAX_CHARS]:
+        piece = urllib.parse.quote(ch, safe="")
+        if used + len(piece) > IMAGE_URL_ENCODED_MAX_CHARS:
+            break
+        pieces.append(piece)
+        used += len(piece)
+    return "".join(pieces)
 
 
 def _timeout(total_sec: float | None) -> aiohttp.ClientTimeout:
@@ -175,8 +218,8 @@ async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str,
         data: Any = None
         with contextlib.suppress(ValueError, TypeError):
             data = json.loads(body)
-        if status == 200 and data is None:
-            raise ImageProviderError("Cloudflare вернул не-JSON")
+        if status == 200 and not isinstance(data, dict):
+            raise ImageProviderError("Cloudflare вернул JSON не-объектом")
         detail = _error_strings(data)
         if status == 402:
             raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 402 {detail})")
@@ -206,12 +249,13 @@ async def _pollinations_text_to_image(session: aiohttp.ClientSession, prompt: st
     """Классический эндпоинт без ключа — только резерв. Замер 09.11.2026: 1 картинка в
     45 секунд на IP (HTTP 402 FREE_LIMIT с Retry-After), модель всегда sana, nologo
     игнорируется, поэтому водяной знак остаётся."""
-    encoded = urllib.parse.quote(prompt[:IMAGE_PROMPT_MAX_CHARS], safe="")
+    encoded = _encoded_prompt(prompt)
     # safe=true: без него фильтр NSFW выключен (так в их доках), а бот публичный.
     url = (
         f"{POLLINATIONS_IMAGE_URL}/{encoded}"
         f"?width=1024&height=1024&model={urllib.parse.quote(POLLINATIONS_IMAGE_MODEL, safe='')}"
-        f"&nologo=true&enhance=false&safe=true&seed={_random_seed()}&referrer={IMAGE_APP_REFERRER}"
+        f"&nologo=true&enhance=false&safe=true&seed={_random_seed()}"
+        f"&referrer={urllib.parse.quote(IMAGE_APP_REFERRER, safe='')}"
     )
     async with session.get(url, timeout=_timeout(timeout_sec)) as resp:
         status = int(resp.status)
@@ -222,10 +266,7 @@ async def _pollinations_text_to_image(session: aiohttp.ClientSession, prompt: st
                 raise ImageProviderError("Pollinations вернул изображение больше капа")
             return _take_image_bytes(body, ctype, "Pollinations")
         retry_after = _retry_after_sec(resp)
-        detail = ""
-        if status in (402, 429):
-            with contextlib.suppress(Exception):
-                detail = _error_strings(json.loads(await resp.text()))
+        detail = await _error_detail(resp)
         if status == 429:
             raise ImageRateLimitedError(f"Pollinations HTTP 429 {detail}".strip(), retry_after_sec=retry_after)
         if status == 402:

@@ -957,6 +957,34 @@ def test_inline_draw_one_generation_at_a_time_per_user(monkeypatch):
     assert bot._user_daily_entry(uid)["draw"] == 1
 
 
+def test_inline_draw_send_failure_keeps_the_draw_slot(monkeypatch):
+    # Генерация уже списала общий дневной бюджет, а отправка упала: возвращать
+    # личный слот в этом случае значит дать одному человеку бесконечные бесплатные
+    # попытки за чужой счёт (ревью 09.11.2026).
+    chat_id = 999444
+    uid = 777044
+
+    async def ok(session, prompt, timeout_sec=None):
+        return b"\x89PNG fake bytes"
+
+    async def fake_tg_call(method, *args, **kwargs):
+        return None
+
+    async def fake_edit_quietly(msg, text, **kwargs):
+        return True
+
+    _one_image_provider(monkeypatch, ok)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit_quietly)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_photo=AsyncMock()))
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    assert bot._user_daily_entry(uid)["draw"] == 1
+    assert bot._image_usage_total() == 1
+
+
 def test_inline_draw_queue_wait_is_bounded(monkeypatch):
     # Слоты генерации заняты другим чатом — второй не должен висеть в очереди весь
     # DRAW_TOTAL_BUDGET_SEC, он честно получает «перегружен» через IMAGE_QUEUE_TIMEOUT_SEC.
@@ -989,15 +1017,22 @@ def test_inline_draw_queue_wait_is_bounded(monkeypatch):
     refused = AsyncMock()
     monkeypatch.setattr(bot, "_safe_reply", refused)
 
+    third = _FakeIncomingMessage(999443)
+    third.message_id = 1
+    third.from_user = SimpleNamespace(id=777043)
+
     async def scenario():
         task = asyncio.create_task(bot.inline_draw(first, "нарисуй кота"))
         await asyncio.sleep(0)
         await bot.inline_draw(second, "нарисуй пса")
         gate.set()
         await task
+        # Третий проходит только если слот реально освобождён в finally: безусловный
+        # release дал бы двойной пермит, а забытый — вечную «перегрузку».
+        await bot.inline_draw(third, "нарисуй лису")
 
     asyncio.run(scenario())
-    assert started == ["нарисуй кота"]
+    assert started == ["нарисуй кота", "нарисуй лису"]
     assert refused.await_args.args[1] == bot._t(999442, "draw_err_overloaded")
 
 

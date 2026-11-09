@@ -131,6 +131,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
     status_obj = None
     status = None
     acquired = False
+    generated = False
     try:
         from lumen_status import StatusMessage
         session = await bot._get_http_session()
@@ -169,8 +170,16 @@ async def inline_draw(message: Message, prompt: str) -> None:
                     bot.DRAW_TOTAL_BUDGET_SEC, provider,
                 )
                 break
-            if not bot._image_provider_ready(provider):
-                log.info("[draw] Provider %s on cooldown or out of daily budget — skipping.", provider)
+            # Пропуск по паузе/бюджету обязан повлиять и на текст отказа: без этого
+            # «оба провайдера на минуте» выглядело как «сервисы умерли до завтра».
+            blocked = bot._image_provider_block_reason(provider)
+            if blocked == "cooldown":
+                rate_limited = True
+                log.info("[draw] Provider %s still on cooldown — skipping.", provider)
+                continue
+            if blocked == "budget":
+                budget_out = True
+                log.info("[draw] Provider %s out of daily budget — skipping.", provider)
                 continue
             try:
                 # Статус без названий моделей и провайдеров (см. ИДЕНТИЧНОСТЬ в system_prompt.py);
@@ -185,6 +194,7 @@ async def inline_draw(message: Message, prompt: str) -> None:
                 attempt_timeout = max(1.0, min(40.0, deadline - time.monotonic()))
                 image_bytes = await call(session, prompt, timeout_sec=attempt_timeout)
                 bot._note_image_success(provider)
+                generated = True
                 break
             except ImageRateLimitedError as exc:
                 # Пауза именно на этого провайдера — следующий ещё может сработать
@@ -236,9 +246,11 @@ async def inline_draw(message: Message, prompt: str) -> None:
             raise last_error or RuntimeError("all image generation providers unavailable")
 
     except asyncio.CancelledError:
+        # Возврат слота ДО правки статуса: отмена во время await stop() иначе
+        # съедала слот до полуночи (ревью 09.11.2026).
+        bot._refund_user_daily(uid, total=1, draw=0 if generated else 1)
         if status_obj is not None:
             await status_obj.stop()
-        bot._refund_user_daily(uid, total=1, draw=1)
         raise
     except Exception as exc:
         log.exception("Image generation failed:")
@@ -260,8 +272,10 @@ async def inline_draw(message: Message, prompt: str) -> None:
             await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
-        # Картинки нет — дневной слот возвращаем (резерв списан заранее).
-        bot._refund_user_daily(uid, total=1, draw=1)
+        # Картинки нет — дневной слот возвращаем (резерв списан заранее). Исключение:
+        # генерация уже состоялась и списала общий бюджет, тогда слот не возвращаем,
+        # иначе упавшая отправка превращалась бы в бесконечные бесплатные попытки.
+        bot._refund_user_daily(uid, total=1, draw=0 if generated else 1)
     finally:
         if acquired:
             sem.release()
@@ -778,14 +792,9 @@ async def cmd_stats(message: Message) -> None:
     )
     _image_states = []
     for _provider in bot.image_provider_names():
-        _e = bot._quota_entry("image", _provider)
-        if _e.get("exhausted_at"):
-            _state = "бюджет выбран до завтра"
-        elif _e.get("cooldown_until") and float(_e["cooldown_until"]) > time.time():
-            _state = f"пауза ещё {max(0, int(float(_e['cooldown_until']) - time.time()))}с"
-        else:
-            _state = "готов"
-        _image_states.append(f"  • {_provider}: {_state} ({int(_e.get('used') or 0)})")
+        _blocked = bot._image_provider_block_reason(_provider)
+        _state = {"budget": "бюджет выбран до завтра", "cooldown": "пауза после перегрузки"}.get(_blocked or "", "готов")
+        _image_states.append(f"  • {_provider}: {_state}")
     image_block = (
         f"<b>Картинки — {bot._image_usage_total()}/{bot.IMAGE_DAILY_LIMIT} за сутки:</b>\n"
         + "\n".join(_image_states) + "\n\n"

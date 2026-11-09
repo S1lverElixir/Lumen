@@ -215,6 +215,45 @@ def test_cloudflare_rejects_unconfigured_without_request(cf_configured, monkeypa
     assert captured == {}
 
 
+def test_cloudflare_rejects_non_object_json(cf_configured):
+    # Валидный JSON, но не объект: [ и 0 проходили дальше как dict и давали
+    # AttributeError вместо классифицированной ошибки провайдера.
+    for payload in (b"[]", b"0", b'"image"'):
+        with pytest.raises(lumen_images.ImageProviderError):
+            asyncio.run(cf_configured._cloudflare_text_to_image(_FakeSession(_FakeResp(
+                status=200, chunks=(payload,))), "кот"))
+
+
+def test_retry_after_accepts_http_date():
+    # Retry-After по RFC бывает датой, а не секундами. Голое float() давало None, и
+    # 402 без кода FREE_LIMIT ложно становился «бюджет выбран до завтра».
+    from email.utils import format_datetime
+    from datetime import datetime, timedelta, timezone
+
+    when = datetime.now(timezone.utc) + timedelta(seconds=40)
+    resp = _FakeResp(status=402, headers={"Retry-After": format_datetime(when)},
+                    chunks=(b'{"error":{"code":"RATE","message":"slow down"}}',))
+    with pytest.raises(lumen_images.ImageRateLimitedError) as exc:
+        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "кот"))
+    assert 20 <= exc.value.retry_after_sec <= 60
+
+
+def test_error_detail_shares_the_body_cap():
+    # Ошибочная ветка читала resp.text() без капа: чужой сервис заливал в память
+    # тело любого размера ровно тем путём, который правка закрывала.
+    async def detail(chunks):
+        resp = _FakeResp(status=402, headers={"Content-Type": "application/json"}, chunks=chunks)
+        return await lumen_images._error_detail(resp)
+
+    small = b'{"error":{"code":"FREE_LIMIT","message":"1 image every 45 seconds per IP"}}'
+    assert "FREE_LIMIT" in asyncio.run(detail((small,)))
+    assert asyncio.run(detail((b'{"error":{"code":"FREE_LIMIT","message":"' + b"x" * 5000 + b'"}',))) == ""
+    # Не-ошибочный статус не читается вообще: тело здесь валидный JSON, иначе
+    # проверка проходила бы и на «читаем всегда».
+    assert asyncio.run(lumen_images._error_detail(
+        _FakeResp(status=500, chunks=(b'{"error":{"code":"BOOM_MESSAGE"}}',)))) == ""
+
+
 def test_cloudflare_error_shapes(cf_configured):
     # 429 с текстом про дневный бюджет — это «до завтра», а не «подожди минуту»:
     # путаница стоила бы каждому следующему человеку пустых попыток подряд.

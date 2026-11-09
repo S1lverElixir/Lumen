@@ -256,16 +256,23 @@ def _image_budget_exhausted() -> bool:
     return _image_usage_total() >= bot.IMAGE_DAILY_LIMIT
 
 
-def _image_provider_ready(provider: str) -> bool:
-    """False — провайдер сейчас трогать нельзя: выбитый дневной бюджет до завтра или
-    свежая перегрузка (cooldown)."""
+def _image_provider_block_reason(provider: str) -> str | None:
+    """None — трогать можно. "budget" — выбитый дневной бюджет (до следующих суток),
+    "cooldown" — свежая перегрузка. Значения из снапшота могут быть мусором после
+    битой записи, поэтому каждое приводится в try/except, а не голым float()."""
     import bot
     entry = bot._quota_entry(IMAGE_QUOTA_PROVIDER, provider)
-    now = time.time()
-    if entry.get("exhausted_at"):
-        return False
-    cooldown = entry.get("cooldown_until")
-    return not (cooldown and now < float(cooldown))
+    try:
+        if entry.get("exhausted_at"):
+            return "budget"
+        cooldown = entry.get("cooldown_until")
+        return "cooldown" if cooldown and time.time() < float(cooldown) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _image_provider_ready(provider: str) -> bool:
+    return _image_provider_block_reason(provider) is None
 
 
 def _note_image_success(provider: str) -> None:
@@ -439,21 +446,6 @@ def _user_daily_tts_exhausted(user_id: int | None, entry: dict[str, Any] | None 
     except (TypeError, ValueError):
         used = 0
     return used >= _user_daily_limit(user_id, "tts", entry)
-
-
-def _user_daily_draw_exhausted(user_id: int | None, entry: dict[str, Any] | None = None) -> bool:
-    import bot
-    if user_id is None or bot._is_owner(user_id):
-        return False
-    if entry is None:
-        entry = _user_daily_peek(user_id)
-    if entry is None:
-        return False
-    try:
-        used = int(entry.get("draw") or 0)
-    except (TypeError, ValueError):
-        used = 0
-    return used >= _user_daily_limit(user_id, "draw", entry)
 
 
 def _record_user_daily(user_id: int | None, *, gemini: bool = False, tts: bool = False) -> None:
