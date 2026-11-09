@@ -91,10 +91,11 @@ Hugging Face Spaces' outbound IPs are blocked by Telegram's Bot API entirely, an
 ```bash
 TELEGRAM_API_BASE_URL=https://<proxy-domain>/fetch/api.telegram.org
 TIKWM_API_BASE_URL=https://<proxy-domain>/fetch/www.tikwm.com
+CLOUDFLARE_AI_BASE_URL=https://<proxy-domain>/fetch/api.cloudflare.com/client/v4/accounts
 LUMEN_PROXY_SECRET=<случайная строка от 32 символов: без неё прокси отвечает 503, а бот падает на старте>
 ```
 
-The proxy only forwards to an explicit host allowlist (`api.telegram.org`, `www.tikwm.com`, `tikwm.com`). See `proxy/proxy.ts` for the implementation and `proxy/proxy_test.ts` for its tests.
+The proxy only forwards to an explicit host allowlist (`api.telegram.org`, `www.tikwm.com`, `tikwm.com`, and `api.cloudflare.com` — the latter restricted to `/client/v4/accounts/<id>/ai/...`, because the image API token rides along in `Authorization`). `api.cloudflare.com` is here for the same reason as TikWM: Hugging Face egress to it silently hangs (prod 09.11.2026). See `proxy/proxy.ts` for the implementation and `proxy/proxy_test.ts` for its tests; changing this file needs a separate manual redeploy on Deno Deploy.
 
 ## Diagnostics
 

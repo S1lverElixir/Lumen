@@ -72,10 +72,11 @@ Lumen — единый сервис FastAPI + aiogram. Telegram присылае
 ```bash
 TELEGRAM_API_BASE_URL=https://<proxy-domain>/fetch/api.telegram.org
 TIKWM_API_BASE_URL=https://<proxy-domain>/fetch/www.tikwm.com
+CLOUDFLARE_AI_BASE_URL=https://<proxy-domain>/fetch/api.cloudflare.com/client/v4/accounts
 LUMEN_PROXY_SECRET=<случайная строка от 32 символов: без неё прокси отвечает 503, а бот падает на старте>
 ```
 
-Прокси пропускает запросы только к явному списку хостов (`api.telegram.org`, `www.tikwm.com`, `tikwm.com`). Реализация — в `proxy/proxy.ts`, тесты — в `proxy/proxy_test.ts`.
+Прокси пропускает запросы только к явному списку хостов (`api.telegram.org`, `www.tikwm.com`, `tikwm.com` и `api.cloudflare.com` — последнему только путь `/client/v4/accounts/<id>/ai/...`, потому что токен генерации едет в `Authorization`). Cloudflare здесь по той же причине, что и TikWM: исходящие с Hugging Face к этому хосту молча виснут (прод 09.11.2026). Реализация — в `proxy/proxy.ts`, тесты — в `proxy/proxy_test.ts`; этот файл деплоится на Deno Deploy отдельно и вручную.
 
 ## Диагностика
 
