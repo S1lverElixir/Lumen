@@ -235,7 +235,9 @@ async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str,
     # одна догадка о формате роняет всю фичу.
     status, retry_after, data = await _cloudflare_request(session, url, {"prompt": text, "seed": _random_seed()}, timeout_sec)
     detail = _error_strings(data)
-    if status == 400 and any(word in detail.lower() for word in ("seed", "extra", "unknown", "not supported", "invalid input")):
+    # Узкий список: "invalid input" ловил бы и отказ по содержанию, и мы бы
+    # второй раз платили за тот же промпт впустую.
+    if status == 400 and any(word in detail.lower() for word in ("seed", "extra", "unknown field", "not supported")):
         log.warning("[image] Cloudflare rejected payload fields (%s) — retrying with prompt only.", detail[:160])
         status, retry_after, data = await _cloudflare_request(session, url, {"prompt": text}, timeout_sec)
         detail = _error_strings(data)

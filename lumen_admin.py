@@ -306,7 +306,8 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
             headers = proxy_headers
         elif name == "cloudflare_ai" and lumen_images.cloudflare_configured():
             # Токен только в заголовке и только на сам Cloudflare: в URL его нет,
-            # поэтому error-ветка probe_url его не выдаёт.
+            # поэтому error-ветка probe_url его не выдаёт. 403 здесь — не мёртвый
+            # хост, а токен без права на каталог моделей: генерация при этом жива.
             headers = {"Authorization": f"Bearer {lumen_images.CLOUDFLARE_API_TOKEN}"}
         return name, await probe_url(
             session, url, timeout_sec=6.0, redact=bot_token or "", headers=headers,
