@@ -15,6 +15,8 @@ import base64
 import json
 import urllib.parse
 
+from typing import Any
+
 import lumen_images
 import pytest
 
@@ -53,19 +55,24 @@ class _FakeResp:
 
 class _FakeSession:
     """Логирует и URL, и тело запроса: половина находок аудита — это параметры,
-    которые молча перестали передаваться (seed, safe, nologo)."""
+    которые молча перестали передаваться (seed, safe, nologo). Список ответов
+    выдаётся по порядку — для ветки «первый запрос отвергли, повтор другой пайлоад»."""
 
     def __init__(self, resp, captured=None):
-        self.resp = resp
+        self.resps = list(resp) if isinstance(resp, (list, tuple)) else [resp]
         self.captured = captured if captured is not None else {}
+        self.calls: list[dict[str, Any]] = []
+
+    def _take(self, method, url, payload, timeout, headers):
+        self.calls.append({"method": method, "url": url, "payload": payload, "timeout": timeout, "headers": headers})
+        self.captured.update(method=method, url=url, payload=payload, timeout=timeout, headers=headers)
+        return self.resps.pop(0) if len(self.resps) > 1 else self.resps[0]
 
     def get(self, url, timeout=None, headers=None):
-        self.captured.update(method="GET", url=url, timeout=timeout, headers=headers)
-        return self.resp
+        return self._take("GET", url, None, timeout, headers)
 
     def post(self, url, *, json=None, timeout=None, headers=None):
-        self.captured.update(method="POST", url=url, payload=json, timeout=timeout, headers=headers)
-        return self.resp
+        return self._take("POST", url, json, timeout, headers)
 
 
 def _image_resp():
@@ -252,6 +259,23 @@ def test_error_detail_shares_the_body_cap():
     # проверка проходила бы и на «читаем всегда».
     assert asyncio.run(lumen_images._error_detail(
         _FakeResp(status=500, chunks=(b'{"error":{"code":"BOOM_MESSAGE"}}',)))) == ""
+
+
+def test_cloudflare_retries_without_seed_when_payload_rejected(cf_configured):
+    # Схема модели знает только prompt/steps, страница модели в примерах шлёт и seed.
+    # Если Cloudflare отвергнет лишее 400-м, повтор голым prompt обязан спасти фичу,
+    # а не оставить пользователя с «ошибкой генерации» на каждый /draw.
+    rejected = _FakeResp(status=400, chunks=(json.dumps({"success": False, "errors": [
+        {"code": 10000, "message": "Invalid input: seed is not a supported parameter"}]}).encode(),))
+    ok = _FakeResp(status=200, chunks=(json.dumps(
+        {"success": True, "result": {"image": base64.b64encode(JPEG).decode()}}).encode(),))
+    captured = {}
+    session = _FakeSession([rejected, ok], captured)
+    body = asyncio.run(cf_configured._cloudflare_text_to_image(session, "кот"))
+    assert body[:3] == b"\xff\xd8\xff"
+    assert len(session.calls) == 2
+    assert "seed" in session.calls[0]["payload"]
+    assert "seed" not in session.calls[1]["payload"]
 
 
 def test_cloudflare_error_shapes(cf_configured):

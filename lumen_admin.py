@@ -280,8 +280,11 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         "pollinations_models": "https://image.pollinations.ai/models",
         # Список моделей аккаунта с токеном — тот же путь, что у реальных генераций;
         # без настройки Cloudflare остаётся просто проверка, что хост доступен.
+        # /ai/models/search — реальный путь каталога (его сам wrangler и зовёт);
+        # голый /ai/models отдаёт 404 и красил бы живой аккаунт.
         "cloudflare_ai": (
-            f"{lumen_images.CLOUDFLARE_AI_BASE_URL}/{quote(lumen_images.CLOUDFLARE_ACCOUNT_ID, safe='')}/ai/models"
+            f"{lumen_images.CLOUDFLARE_AI_BASE_URL}/{quote(lumen_images.CLOUDFLARE_ACCOUNT_ID, safe='')}"
+            "/ai/models/search?limit=1"
             if lumen_images.cloudflare_configured() else "https://api.cloudflare.com"
         ),
         "upstash": bot.UPSTASH_REDIS_REST_URL if bot.USE_UPSTASH else "https://upstash.com",

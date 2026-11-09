@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import logging
 import os
 import secrets
 import urllib.parse
@@ -16,6 +17,8 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 import aiohttp
+
+log = logging.getLogger("bot")
 
 # Замер 09.11.2026 живьём: image.pollinations.ai игнорирует model (всегда sana, каталог
 # /models = ["sana"]) и nologo (водяной знак остаётся на ответе), поэтому стилевой
@@ -192,10 +195,31 @@ def _take_image_bytes(body: bytes, ctype: str, provider: str) -> bytes:
     raise ImageProviderError(f"{provider} вернул не-изображение: {ctype}")
 
 
+async def _cloudflare_request(
+    session: aiohttp.ClientSession, url: str, payload: dict[str, Any], timeout_sec: float | None,
+) -> tuple[int, float | None, Any]:
+    """Один POST, дочитанный и закрытый: (статус, retry_after, разобранный JSON).
+    Тело ошибки читается тем же капом, что и картинка; разбираем и на ошибках —
+    дневный бюджет Cloudflare сообщает текстом в errors при HTTP 429."""
+    async with session.post(
+        url, json=payload, timeout=_timeout(timeout_sec),
+        headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+    ) as resp:
+        status = int(resp.status)
+        retry_after = _retry_after_sec(resp)
+        body = await _read_capped_image(resp)
+        if body is None:
+            raise ImageProviderError("Cloudflare вернул тело больше капа")
+        data: Any = None
+        with contextlib.suppress(ValueError, TypeError):
+            data = json.loads(body)
+        return status, retry_after, data
+
+
 async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str, *, timeout_sec: float | None = None) -> bytes:
-    """POST на Workers AI. Только prompt и seed: 1024x1024 и 4 шага — дефолты модели,
-    большего документация не обещает. При дефолтах это 4*4.8 + 4*9.6 = 57.6 Neuron,
-    то есть ~170 картинок из 10 000 бесплатных Neuron в сутки."""
+    """POST на Workers AI. Размер и шаги не просим: 1024x1024 и 4 шага — дефолты
+    модели, при них 4*4.8 + 4*9.6 = 57.6 Neuron, то есть ~170 картинок из 10 000
+    бесплатных Neuron в сутки."""
     if not cloudflare_configured():
         raise ImageProviderError("Cloudflare не настроен: нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN")
     # safe="/@": Cloudflare ждёт модель в пути как `@cf/имя/модель`, голый quote()
@@ -204,45 +228,39 @@ async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str,
         f"{CLOUDFLARE_AI_BASE_URL}/{urllib.parse.quote(CLOUDFLARE_ACCOUNT_ID, safe='')}"
         f"/ai/run/{urllib.parse.quote(CLOUDFLARE_IMAGE_MODEL, safe='/@')}"
     )
-    payload = {"prompt": prompt[:IMAGE_PROMPT_MAX_CHARS], "seed": _random_seed()}
-    async with session.post(
-        url, json=payload, timeout=_timeout(timeout_sec),
-        headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
-    ) as resp:
-        status = int(resp.status)
-        body = await _read_capped_image(resp)
-        if body is None:
-            raise ImageProviderError("Cloudflare вернул тело больше капа")
-        # Разбираем и на ошибках тоже: дневный бюджет Cloudflare сообщает текстом в
-        # errors при HTTP 429, а не отдельным статусом.
-        data: Any = None
-        with contextlib.suppress(ValueError, TypeError):
-            data = json.loads(body)
-        if status == 200 and not isinstance(data, dict):
-            raise ImageProviderError("Cloudflare вернул JSON не-объектом")
+    text = prompt[:IMAGE_PROMPT_MAX_CHARS]
+    # Схема модели (замер 09.11.2026: wrangler ai models schema) знает у
+    # flux-1-schnell только prompt и steps, а страница модели в примерах шлёт ещё и
+    # seed. Если провайдер зарезолвует лишее 400-м — повторяем голым prompt, иначе
+    # одна догадка о формате роняет всю фичу.
+    status, retry_after, data = await _cloudflare_request(session, url, {"prompt": text, "seed": _random_seed()}, timeout_sec)
+    detail = _error_strings(data)
+    if status == 400 and any(word in detail.lower() for word in ("seed", "extra", "unknown", "not supported", "invalid input")):
+        log.warning("[image] Cloudflare rejected payload fields (%s) — retrying with prompt only.", detail[:160])
+        status, retry_after, data = await _cloudflare_request(session, url, {"prompt": text}, timeout_sec)
         detail = _error_strings(data)
-        if status == 402:
-            raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 402 {detail})")
-        if status == 429:
-            # Теми же 429 Cloudflare отвечает и на выбитый дневной бюджет Neuron.
-            if any(word in detail.lower() for word in ("allocation", "free tier", "daily")):
-                raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 429 {detail})")
-            raise ImageRateLimitedError(
-                f"Cloudflare HTTP 429 {detail}".strip(), retry_after_sec=_retry_after_sec(resp),
-            )
-        if status != 200:
-            raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
-        if not data.get("success", True):
-            raise ImageProviderError(f"Cloudflare: {detail}")
-        result = data.get("result")
-        image_b64 = result.get("image") if isinstance(result, dict) else None
-        if not isinstance(image_b64, str) or not image_b64:
-            raise ImageProviderError("Cloudflare: в ответе нет поля result.image")
-        try:
-            image = base64.b64decode(image_b64)
-        except (ValueError, TypeError):
-            raise ImageProviderError("Cloudflare: result.image не декодируется из base64") from None
-        return _take_image_bytes(image, "image/jpeg", "Cloudflare")
+    if status == 200 and not isinstance(data, dict):
+        raise ImageProviderError("Cloudflare вернул JSON не-объектом")
+    if status == 402:
+        raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 402 {detail})")
+    if status == 429:
+        # Теми же 429 Cloudflare отвечает и на выбитый дневной бюджет Neuron.
+        if any(word in detail.lower() for word in ("allocation", "free tier", "daily")):
+            raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 429 {detail})")
+        raise ImageRateLimitedError(f"Cloudflare HTTP 429 {detail}".strip(), retry_after_sec=retry_after)
+    if status != 200:
+        raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
+    if not data.get("success", True):
+        raise ImageProviderError(f"Cloudflare: {detail}")
+    result = data.get("result")
+    image_b64 = result.get("image") if isinstance(result, dict) else None
+    if not isinstance(image_b64, str) or not image_b64:
+        raise ImageProviderError("Cloudflare: в ответе нет поля result.image")
+    try:
+        image = base64.b64decode(image_b64)
+    except (ValueError, TypeError):
+        raise ImageProviderError("Cloudflare: result.image не декодируется из base64") from None
+    return _take_image_bytes(image, "image/jpeg", "Cloudflare")
 
 
 async def _pollinations_text_to_image(session: aiohttp.ClientSession, prompt: str, *, timeout_sec: float | None = None) -> bytes:
