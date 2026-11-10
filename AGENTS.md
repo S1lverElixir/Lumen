@@ -40,11 +40,14 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   history), `/devtrace` (user texts and answers), `/webhook_url`, `/diag`. Never paste their output
   anywhere. The daily `state-backup.yml` already calls `/export_state` on a schedule; that is the
   owner's plumbing, not a command for you.
-- Reading is allowed where the platform hides values: `hf spaces logs SilverElixir/Lumen`,
-  `hf spaces variables list SilverElixir/Lumen` and `gh secret list` give logs and names only,
-  never values. Prefix `hf` with `NO_PROXY` cleared for that one command (`NO_PROXY= hf ...` in Git
-  Bash, `$env:NO_PROXY=''` in PowerShell): the owner's global value contains `[::1]`, which kills
-  any httpx-based tool with `InvalidURL: Invalid port` (found 09.11.2026).
+- Reading is allowed where the platform keeps secrets out of reach: `hf spaces logs
+  SilverElixir/Lumen` for runtime logs, `hf spaces secrets list SilverElixir/Lumen` and
+  `gh secret list` for secret names (their values are never returned by either API), and
+  `hf spaces variables list` for ordinary variables, whose values it does print — so treat that
+  output as public configuration, not as a safe place to look for a key. Prefix `hf` with
+  `NO_PROXY` cleared for that one command (`NO_PROXY= hf ...` in Git Bash, `$env:NO_PROXY=''` in
+  PowerShell): the owner's global value contains `[::1]`, which kills any httpx-based tool with
+  `InvalidURL: Invalid port` (found 09.11.2026).
 - Found a leaked secret? Tell the owner to rotate it. Do not rewrite git history without asking.
 
 ## Commands
