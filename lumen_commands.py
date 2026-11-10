@@ -117,6 +117,55 @@ _DRAW_EDIT_SYSTEM = (
 )
 
 
+# Просьба без названия артефакта («хочу увидеть кота на луне») и местоименная
+# («нарисуй это») разрешаются одним коротким вопросом по истории этого чата;
+# NONE означает «обычный текст», картинка не рисуется (паритет 10.11.2026).
+_DRAW_CONTEXT_SYSTEM = (
+    "Decide what the user wants drawn. You receive the recent conversation and the "
+    "current request. If they clearly ask for a picture — on their own or together "
+    "with the conversation — output ONE English description of that picture, 30-60 "
+    "words, keeping the subject, counts, colors and any text to render in double "
+    "quotes. Use only what the conversation actually says; never invent a new "
+    "subject. If the request is a question, a task that is not a picture, or there "
+    "is not enough to describe one, output exactly NONE. No explanations."
+)
+
+
+def _draw_context_snippet(state: dict, limit: int = 1400) -> str:
+    """Последние реплики этого чата одним текстом — только для разрешения
+    картинки, наружу из модуля рисования они не идут."""
+    import lumen_memory
+    history = (state or {}).get("history") or []
+    lines = []
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        text = lumen_memory.format_entry(entry)
+        if text:
+            lines.append(text)
+        if sum(len(x) for x in lines) > limit:
+            break
+    return "\n".join(reversed(lines[-8:]))[-limit:]
+
+
+async def resolve_draw_request(message, request: str, state: dict, deadline: float) -> str:
+    """Описание кадра по просьбе без артефактного слова или по местоимению."""
+    import bot
+    context = _draw_context_snippet(state)
+    user_text = (
+        f"Recent conversation:\n{context[-1200:] if context else '(empty)'}\n\n"
+        f"Current request: {request[:IMAGE_PROMPT_MAX_CHARS]}"
+    )
+    answer = await _draw_llm_description(
+        _DRAW_CONTEXT_SYSTEM, user_text, deadline,
+        timeout_sec=bot.DRAW_CONTEXT_TIMEOUT_SEC, temperature=0.2, max_tokens=400,
+    )
+    if not answer:
+        return ""
+    prepared = _clip_prompt_text(_draw_prompt_ascii(answer))
+    return prepared if len(prepared) >= 20 else ""
+
+
 # Лапки и тире из перевода ломали резерв: sana принимает только ASCII, а guard
 # в провайдере не различает кириллицу и типографику (ревью 10.11.2026).
 _DRAW_TRANSLATE_ASCII = str.maketrans({
@@ -145,41 +194,62 @@ def _clip_prompt_text(text: str) -> str:
     return (cut[:sp] if sp > 40 else cut).strip()
 
 
-async def _prepare_draw_prompt(prompt: str, deadline: float, *, edit: bool = False) -> str:
-    """Описание для провайдера: генерацию переписываем в законченный кадр по-
-    английски, правку только переводим, оставляя инструкцию. Пустой ответ, сбой
-    или нехватка бюджета — исходная формулировка, генерация не отменяется."""
+async def _draw_llm_description(
+    system: str, user_text: str, deadline: float, *, timeout_sec: float,
+    temperature: float, max_tokens: int,
+) -> str:
+    """Один короткий запрос к Munito за описанием картинки: "" — модель
+    недоступна, ответ не годится или бюджета не осталось."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
-    if not _munito_active():
-        return prompt
+    if not _munito_active() or not user_text.strip():
+        return ""
     remaining = deadline - time.monotonic()
     if remaining < 1.5:
-        return prompt
+        return ""
     model = _MUNITO_ORDER[0]
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _DRAW_EDIT_SYSTEM if edit else _DRAW_PROMPT_SYSTEM},
-            {"role": "user", "content": prompt[:IMAGE_PROMPT_MAX_CHARS]},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_text[:2 * IMAGE_PROMPT_MAX_CHARS]},
         ],
-        "temperature": 0.4, "max_tokens": 500, "stream": False,
+        "temperature": temperature, "max_tokens": max_tokens, "stream": False,
         **_munito_payload_extras(),
     }
     try:
         resp = await bot._munito_request(
             "chat/completions", "POST", json_body=payload,
-            deadline=time.monotonic() + min(bot.DRAW_PROMPT_PREP_TIMEOUT_SEC, remaining),
+            deadline=time.monotonic() + min(timeout_sec, remaining),
         )
         choices = resp.get("choices") or []
         answer = bot._or_extract_text(choices[0].get("message") or "").strip() if choices else ""
-        prepared = _clip_prompt_text(_draw_prompt_ascii(answer)) if answer else ""
-        if len(prepared) >= 20:
-            bot._record_quota_usage("munito", model, service=True)
-            return prepared
-        log.warning("[draw] Prompt rewrite unusable (len=%d, edit=%s) — keeping original.", len(answer), edit)
     except Exception as exc:
-        log.warning("[draw] Prompt rewrite failed (%s) — keeping original.", exc)
+        log.warning("[draw] Description call failed (%s).", exc)
+        return ""
+    if not answer or answer.upper().startswith("NONE"):
+        return ""
+    if len(answer) > 3 * IMAGE_PROMPT_MAX_CHARS:
+        log.warning("[draw] Description too long (len=%d) — ignored.", len(answer))
+        return ""
+    bot._record_quota_usage("munito", model, service=True)
+    return answer
+
+
+async def _prepare_draw_prompt(prompt: str, deadline: float, *, edit: bool = False) -> str:
+    """Описание для провайдера: генерацию переписываем в законченный кадр по-
+    английски, правку только переводим, оставляя инструкцию. Пустой ответ, сбой
+    или нехватка бюджета — исходная формулировка, генерация не отменяется."""
+    import bot
+    answer = await _draw_llm_description(
+        _DRAW_EDIT_SYSTEM if edit else _DRAW_PROMPT_SYSTEM, prompt, deadline,
+        timeout_sec=bot.DRAW_PROMPT_PREP_TIMEOUT_SEC, temperature=0.4, max_tokens=500,
+    )
+    prepared = _clip_prompt_text(_draw_prompt_ascii(answer)) if answer else ""
+    if len(prepared) >= 20:
+        return prepared
+    if answer:
+        log.warning("[draw] Prompt rewrite unusable (len=%d, edit=%s) — keeping original.", len(answer), edit)
     return prompt
 
 

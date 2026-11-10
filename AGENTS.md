@@ -49,9 +49,10 @@ production on 10.11.2026, so change a fact and update this file in the same comm
 
 ## Commands
 - Setup, once per session: `pip install -r requirements.txt -r requirements-dev.txt`
-- Gate: `pyflakes bot.py lumen_*.py system_prompt.py tests/*.py` then `pytest -q`. About 1300 tests,
-  under 30 seconds. CI runs these two plus the three deno proxy checks and `pip-audit` on every
-  push, so the extra ones are your job locally only when you touch those files.
+- Gate: `pyflakes bot.py lumen_*.py system_prompt.py tests/*.py` then `pytest -q`. The suite is
+  over a thousand tests and takes under a minute. CI runs these two plus the three deno proxy
+  checks and `pip-audit` on every push, so the extra ones are your job locally only when you touch
+  those files.
 - Globs do not expand in PowerShell (opencode sessions), so there run
   `pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name })`
   then `pytest -q`, and read or search with the file tools rather than `cat` and `grep`. Never wrap
@@ -102,7 +103,7 @@ routing change). If nothing is unverified or risky, say so in one phrase instead
 
 ## Where things live
 - `bot.py` is the entry point and composition root (env, logging, Dispatcher, main) and re-exports
-  over 200 names from the `lumen_*.py` modules: a grep for a symbol hits `bot.py` first, the
+  over 250 names from the `lumen_*.py` modules: a grep for a symbol hits `bot.py` first, the
   definition is in the module. `lumen_admin.py` holds the FastAPI app and admin endpoints; the rest
   is in the 30 `lumen_*.py` files, each opening with a one-line docstring. A name ending in `_flow`
   or `_calls` is the Telegram-touching half of the plain module next to it.
@@ -129,8 +130,9 @@ Gemini as the unconditional automatic reserve.
 ## Gotchas
 - A model leaves routing only with dated evidence (production log errors or provider docs), written
   as a comment next to the chain it came out of: `_MUNITO_ORDER` or the `GEMINI_*_CHAIN` lists in
-  `lumen_router_config.py`. Transient failures are not exclusions: `503`/`429` set a cooldown that
-  survives a restart, repeated empty answers set an in-memory quarantine that a restart clears.
+  `lumen_router_config.py`. Transient failures are not exclusions: `503`/`429` set a cooldown stored
+  inside the quota state, so it outlives a restart only when Upstash is configured, and repeated
+  empty answers set an in-memory quarantine that a restart always clears.
   The old `_OR_MODEL_HEALTH` registry went away with OpenRouter on 05.11.2026 and has no successor:
   do not look for it or rebuild it. Never remove a model on a guess, and remember that file is
   protected: the change goes through an approved plan.
@@ -176,8 +178,9 @@ Gemini as the unconditional automatic reserve.
 ## Tests
 - State before adding a test: what behavior it protects, which real regression would make it fail,
   why an existing test does not catch it. No answer means no test.
-- There is no pytest-asyncio: tests are plain `def test_*` that call `asyncio.run(scenario())`
-  inside. An `async def test_*` is collected, never awaited, and passes without testing anything.
+- There is no pytest-asyncio, and pytest 9 fails an `async def test_*` outright ("async def
+  functions are not natively supported"). Every async path is driven from a plain `def test_*` that
+  calls `asyncio.run(scenario())`: follow the shape the whole suite already uses.
 - `tests/conftest.py` stubs `BOT_TOKEN`, `GEMINI_API_KEY`, `BOT_LOG_PATH` and blanks ten more
   provider and experiment variables, so a local `.env` cannot send a test to a live API. Because
   those keys stay empty, tests only see the Gemini and Pollinations branches: to exercise Munito or

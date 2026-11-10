@@ -162,6 +162,38 @@ _IMAGE_LED_RE = re.compile(
 )
 
 
+# Местоименная просьба: «нарисуй это», «изобрази то, что я описал». Без
+# разрешения по истории в модель уходило слово «это» — и рисовался мусор.
+_DRAW_ANAPHORA_RE = re.compile(
+    r"^(?:это|то|это\s+красиво|то\s+же\s+самое|такую\s+же|такой\s+же|такое\s+же|такое|"
+    r"the\s+same|this|that|it)\b"
+    r"|\b(?:то|это),?\s+что\s+я\b"
+    r"|\b(?:this|that)\s+(?:you\s+)?described\b",
+    re.IGNORECASE,
+)
+# Просьба нарисовать без названия артефакта: «хочу увидеть кота на луне»,
+# «imagine a city on the moon». Одна эта фраза картинку не заказывает — она
+# только оправдывает один короткий вопрос модели.
+_DRAW_VISUAL_SIGNAL_RE = re.compile(
+    r"\b(?:увидеть|увидим|представь|представь\s+себе|визуализируй|нарисуй\s+нам)\b"
+    r"|\b(?:imagine|visualise|visualize|picture\s+this)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_anaphoric_draw_request(content: str) -> bool:
+    """Тело просьбы — одно указание на то, что уже обсуждалось."""
+    return bool(_DRAW_ANAPHORA_RE.search((content or "").strip()))
+
+
+def _has_visual_signal(text_lower: str) -> bool:
+    """Вопрос («как представить себе...»), команда и ссылка на сайт — не просьба
+    рисовать: сигнал считаем только у чистого утвердительного текста."""
+    if _DRAW_BLOCK_LEAD_RE.search(text_lower) or text_lower.startswith("/"):
+        return False
+    return bool(_DRAW_VISUAL_SIGNAL_RE.search(text_lower))
+
+
 def _strip_trigger_fillers(text_lower: str) -> tuple[str, int]:
     """(текст без обвязки, длина снятого префикса): «ну нарисуй кота» и
     «мне, пожалуйста, нарисуй кота» — та же просьба, что «нарисуй кота».

@@ -492,6 +492,7 @@ IMAGE_ATTEMPT_TIMEOUT_SEC = _env_number("IMAGE_ATTEMPT_TIMEOUT_SEC", 20, min_val
 # в '?' (пруф 09.11.2026). Сбой перевода не роняет картинку — уходит оригинал.
 DRAW_TRANSLATE_TIMEOUT_SEC = _env_number("DRAW_TRANSLATE_TIMEOUT_SEC", 12, min_value=1)
 DRAW_PROMPT_PREP_TIMEOUT_SEC = _env_number("DRAW_PROMPT_PREP_TIMEOUT_SEC", 8, min_value=1)
+DRAW_CONTEXT_TIMEOUT_SEC = _env_number("DRAW_CONTEXT_TIMEOUT_SEC", 6, min_value=1)
 # Глобальный дневной бюджет картинок: 10 000 бесплатных Neuron Cloudflare в сутки.
 # flux-2-klein-4b стоит 104 Neuron за картинку 1024x1024 (~96 в день), правка
 # добавляет ~21 Neuron за входной мегапиксель, поэтому 80 с запасом: иначе к
@@ -1070,6 +1071,7 @@ __all__ = [
     "clean_mention",
     "inline_draw",
     "_translate_draw_prompt",
+    "resolve_draw_request",
     "handle_draw_more_callback",
     "inline_draw_variants",
     "inline_tts",
@@ -1308,6 +1310,7 @@ from lumen_commands import (
     cmd_start,
     inline_draw,
     _translate_draw_prompt,
+    resolve_draw_request,
     cmd_draw,
     handle_draw_more_callback,
     inline_draw_variants,

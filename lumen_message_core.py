@@ -27,6 +27,8 @@ from lumen_message_parse import (
     _detect_image_variants,
     _is_new_artifact_request,
     _match_draw_intent,
+    _has_visual_signal,
+    _is_anaphoric_draw_request,
     _match_trigger_with_fillers,
     _strip_trigger_fillers,
     _split_image_variants,
@@ -852,8 +854,32 @@ async def _handle_message_core(
             await bot.inline_draw(message, _prompt_text, reference=reference)
             return
 
+    _ctx_deadline = time.monotonic() + max(
+        1.0, min(bot.DRAW_TOTAL_BUDGET_SEC, bot._msg_remaining_sec() or bot.DRAW_TOTAL_BUDGET_SEC),
+    )
+
     if matched_draw_trigger:
         prompt_content = _strip_trigger_content(_prompt_text, matched_draw_trigger, message)
+        # «нарисуй это» раньше уезжало модели словом «это» и рисовало мусор:
+        # указание разрешаем по истории чата, а если разрешить нечем — честно
+        # просим описание (паритет 10.11.2026).
+        if not prompt_content or _is_anaphoric_draw_request(prompt_content):
+            # С приложенным или отреплаченным фото «это» — про него, а не про
+            # слова из истории: иначе просьба рисовать по чужой картинке
+            # превращалась в генерацию с нуля (ревью паритета 10.11.2026).
+            if _explicit_media:
+                _anaphora_refs = await bot._resolve_edit_references(
+                    message, state, is_private=is_private, implicit=False,
+                )
+                if _anaphora_refs:
+                    await bot.inline_draw(message, clean_prompt, reference=_anaphora_refs)
+                    return
+            prompt_content = await bot.resolve_draw_request(
+                message, _prompt_text, state, _ctx_deadline,
+            )
+            if not prompt_content:
+                await bot._safe_reply(message, bot._t(message.chat.id, "draw_empty"))
+                return
         if prompt_content:
             # «Нарисуй X в стиле этого фото»: стиль переносим с приложенного фото
             # (как в ChatGPT), а не игнорируем его. Без фото — обычная генерация.
@@ -890,6 +916,18 @@ async def _handle_message_core(
             _i_count, _i_prompt = _split_image_variants(_intent_prompt)
             await bot.inline_draw_variants(
                 message, _i_prompt or _intent_prompt, variants=_i_count,
+            )
+            return
+
+    # Просьба нарисовать без названия артефакта: «хочу увидеть кота на луне»,
+    # «imagine a city on the moon». Решает один короткий вопрос по контексту;
+    # NONE — и сообщение идёт текстовой модели, как шло раньше.
+    if not is_continuation and not _explicit_media and _has_visual_signal(lower_prompt):
+        _resolved = await bot.resolve_draw_request(message, clean_prompt, state, _ctx_deadline)
+        if _resolved:
+            _r_count, _r_prompt = _split_image_variants(_resolved)
+            await bot.inline_draw_variants(
+                message, _r_prompt or _resolved, variants=_r_count,
             )
             return
 

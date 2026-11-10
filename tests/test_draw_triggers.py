@@ -6,6 +6,7 @@
 местоимением правки или перепутать «сделай картинку» с «сделай эту картинку».
 """
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -219,3 +220,95 @@ def test_core_keeps_service_request_as_text(rate_guard_setup):
     message.text = "покажи картинку из прошлого запроса"
     asyncio.run(bot._handle_message_core(message))
     bot.inline_draw.assert_not_awaited()
+
+
+# ── Разбор просьбы без названия артефакта и местоименной («нарисуй это»).
+# Без этих тестов шаг обращения к модели мог выпасть из пути, а «нарисуй это»
+# снова уезжало провайдеру словом «это» и рисовало мусор (паритет 10.11.2026).
+_RESOLVED = "A ginger cat sitting on the moon above a blue sea, soft light, wide shot."
+
+
+def _ctx_env(monkeypatch, rate_guard_setup, text, answer):
+    message = rate_guard_setup()
+    message.text = text
+    calls = []
+
+    def _sys(msgs):
+        first = (msgs or [{}])[0]
+        return first.get("content", "") if isinstance(first, dict) else str(getattr(first, "content", ""))
+
+    def _usr(msgs):
+        second = (msgs or [{}, {}])[1]
+        return second.get("content", "") if isinstance(second, dict) else str(getattr(second, "content", ""))
+
+    async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
+        if "Decide what the user wants drawn" in _sys(json_body.get("messages") if isinstance(json_body, dict) else None):
+            calls.append(_usr(json_body["messages"]))
+        return {"choices": [{"message": {"content": answer}}]}
+
+    state = {"history": [
+        {"role": "user", "sender": "SilverElixir", "content": "кот рыжий сидит на луне"},
+        {"role": "assistant", "content": "интересный образ"},
+    ]}
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    message._ctx_calls = calls
+    return message
+
+
+def test_anaphoric_draw_resolves_from_history(rate_guard_setup, monkeypatch):
+    message = _ctx_env(monkeypatch, rate_guard_setup, "нарисуй это", _RESOLVED)
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once()
+    assert bot.inline_draw.await_args.args[1] == _RESOLVED
+    # История чата ушла в вопрос модели — иначе разрешать было бы нечем.
+    assert "кот рыжий сидит на луне" in message._ctx_calls[0]
+
+
+def test_anaphoric_draw_without_context_asks_for_description(rate_guard_setup, monkeypatch):
+    message = _ctx_env(monkeypatch, rate_guard_setup, "нарисуй это", "NONE")
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_not_awaited()
+    bot._safe_reply.assert_awaited_once()
+    assert "/draw" in bot._safe_reply.await_args.args[1]
+
+
+def test_scene_request_without_artifact_word_draws_resolved_text(rate_guard_setup, monkeypatch):
+    message = _ctx_env(monkeypatch, rate_guard_setup, "хочу увидеть кота на луне", _RESOLVED)
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once()
+    assert bot.inline_draw.await_args.args[1] == _RESOLVED
+
+
+def test_scene_request_answered_none_stays_text(rate_guard_setup, monkeypatch):
+    message = _ctx_env(monkeypatch, rate_guard_setup, "хочу увидеть кота на луне", "NONE")
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_not_awaited()
+
+
+def test_question_about_imagining_does_not_call_the_model(rate_guard_setup, monkeypatch):
+    # «как представить себе кота» — это вопрос, а не заказ: лишний вызов модели
+    # и тем более картинка тут были бы багом.
+    message = _ctx_env(monkeypatch, rate_guard_setup, "как представить себе кота на луне", _RESOLVED)
+    asyncio.run(bot._handle_message_core(message))
+    assert message._ctx_calls == []
+    bot.inline_draw.assert_not_awaited()
+
+
+def test_anaphoric_draw_with_photo_edits_that_photo(rate_guard_setup, monkeypatch):
+    # С приложенным фото «нарисуй это» правит фото, а не рисует по словам из
+    # истории: иначе вложение молча игнорировалось.
+    message = _ctx_env(monkeypatch, rate_guard_setup, "нарисуй это", _RESOLVED)
+    photo = SimpleNamespace(file_id="f1", file_unique_id="u1", width=10, height=10, file_size=10)
+    message.photo = [photo]
+    ref = (b"\xff\xd8jpeg", "image/jpeg")
+
+    async def fake_refs(msg, state, *, is_private, implicit):
+        return [ref]
+
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_refs)
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once()
+    assert bot.inline_draw.await_args.kwargs.get("reference") == [ref]
+    assert message._ctx_calls == []
