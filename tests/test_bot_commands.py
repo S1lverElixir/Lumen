@@ -3248,8 +3248,8 @@ def test_inline_draw_strips_more_button_from_previous_photo(monkeypatch):
         assert len(strips) == 1, "у первой генерации снимать клавиатуру не с чего"
         assert strips[0]["chat_id"] == chat_id
         assert strips[0]["message_id"] == 4242
-        # None aiogram выбрасывает из запроса, и вживую кнопка оставалась на месте:
-        # снимать надо пустой клавиатурой (ревью 10.11.2026).
+        # Снятие — явная пустая клавиатура: None aiogram вообще не отправляет поле,
+        # и работало бы молчаливое «нет поля = нет кнопок» (ревью 10.11.2026).
         assert isinstance(strips[0]["reply_markup"], InlineKeyboardMarkup)
         assert strips[0]["reply_markup"].inline_keyboard == []
     finally:

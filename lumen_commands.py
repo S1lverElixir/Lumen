@@ -397,9 +397,9 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                 raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
             # Как в ChatGPT: «повторить» есть только у последней картинки. Снимаем
             # клавиатуру с предыдущей уже после успешной отправки, иначе сбой отправки
-            # оставлял чат без единой рабочей кнопки (ревью 10.11.2026). Пустой
-            # клавиатурой, а не None: aiogram выкидывает falsy-поля из запроса, и с
-            # None Telegram кнопку не убирал (тот же приём, что в lang/pick).
+            # оставлял чат без единой рабочей кнопки (ревью 10.11.2026). Клавиатура
+            # пустая, а не None: aiogram выбрасывает falsy-поля, и снятие держалось
+            # бы на молчаливом «нет поля = нет кнопок» (тот же приём, что в lang/pick).
             if reference is None and _prev_drawn and _markup_editor is not None:
                 await bot._tg_call(
                     _markup_editor,
