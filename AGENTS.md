@@ -184,8 +184,9 @@ Gemini as the unconditional automatic reserve for everything it answers.
 - Comments in Russian, except structural headers carrying identifiers or commands. Say why (reason,
   incident date, tradeoff), 2-3 lines max, never restate the code. Comment only where something is
   non-obvious: magic numbers, regexes, workarounds, ordering constraints, surprising behavior.
-- Keep dated regression markers short: `(prod ДД.ММ.ГГГГ: ...)`, `(audit ...)`, `(review ...)`.
-  Long write-ups belong in `docs/`.
+- Keep dated regression markers short: `(prod ДД.ММ.ГГГГ: what happened)`, or just the date when
+  the sentence already says what happened; `(audit ...)`, `(review ...)` the same way. Long
+  write-ups belong in `docs/`.
 - Banned in code, comments and docs: paraphrasing the code, filler ("Важно", "Здесь мы",
   "Следует отметить"), emojis, dash spam, commented-out code. A module docstring is one line saying
   what the module does, with no extraction history ("вынесено из bot.py").
