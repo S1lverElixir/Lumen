@@ -45,8 +45,8 @@ DRAW_TRIGGER_PREFIXES = [
     "нарисуй мне", "нарисуй", "нарисуйте", "изобрази картинку", "изобрази", "нарисуй-ка",
     "сгенери картинку", "сгенери изображение", "можешь нарисовать", "можешь нарисовать мне",
     "ты можешь нарисовать", "можешь нарисовать мне", "сможешь нарисовать", "можете нарисовать",
-    "не мог бы ты нарисовать", "мог бы ты нарисовать", "can you draw", "can you generate",
-    "can you create", "could you draw", "please draw", "please generate", "i want you to draw",
+    "не мог бы ты нарисовать", "мог бы ты нарисовать", "can you draw",
+    "could you draw", "please draw", "i want you to draw",
     # EN: /start обещает "draw a cat" — чиним (найдено внешним аудитом: был только русский).
     "generate an image", "generate me an image", "create an image", "draw a picture",
     "draw me", "draw an", "draw a", "paint me", "paint", "sketch",
@@ -149,8 +149,18 @@ _IMAGE_ARTIFACT_RE = re.compile(
 )
 # Глагол просьбы: он превращает название артефакта в заказ.
 _IMAGE_REQUEST_VERB_RE = re.compile(
-    r"(?:^|[\s,.!?])(?:хочу|хочешь|хотелось|нужен|нужна|нужно|надо|дай|сделай|создай|"
-    r"придумай|накидай|давай|увидеть|want|need|give|make|create|design|generate|produce|see)\b",
+    r"(?:^|[\s,.!?])(?:хочу|хочешь|хотелось|хотел\s+бы|нужен|нужна|нужно|надо|можно|"
+    r"дай|давай|сдела\w*|созда\w*|придума\w*|накида\w*|сгенери\w*|нарис\w*|увид\w*|получи\w*|"
+    r"want|need|give|get|make|create|draw|design|generate|render|produce|see|please)\b"
+    r"|(?:can|could|will)\s+you\b",
+    re.IGNORECASE,
+)
+# Артефакт в роли детали: «книга с красивой обложкой», «дом с большим
+# макетом». Заказать рисование так не просят (ревью 10.11.2026).
+_IMAGE_PART_RE = re.compile(
+    r"\w+\s+(?:с|со|with)\s+(?:\w+\s+){0,2}"
+    r"(?:обложк|превью|логотип|иконк|стикер|макет|постер|плакат|баннер|эмблем|"
+    r"иллюстрац|картинк|изображени|аватар|stickers?|logos?|banner|poster|cover)\w*",
     re.IGNORECASE,
 )
 # Указание на уже существующий кадр: тогда это правка, а не новая генерация.
@@ -160,16 +170,22 @@ _IMAGE_EXISTING_RE = re.compile(
     re.IGNORECASE,
 )
 # Императив рисования в любом месте фразы: «кот в шляпе, нарисуй».
+# generate/render/сгенерируй здесь не нужны: «сгенерируй отчёт» и «generate a
+    # summary» — текстовые задачи (ревью 10.11.2026). Они остаются только в
+    # префиксах с артефактным словом («generate an image», «сгенери картинку»).
 _DRAW_IMPERATIVE_ANYWHERE_RE = re.compile(
-    r"(?<![A-Za-zА-Яа-яЁё])(нарисуй-ка|нарисуй|нарисуйте|изобрази|сгенерируй|"
-    r"draw|sketch|illustrate|render|paint|generate)\b",
+    r"(?<![A-Za-zА-Яа-яЁё])(нарисуй-ка|нарисуй|нарисуйте|изобрази|"
+    r"draw|sketch|illustrate|render|paint)\b",
     re.IGNORECASE,
 )
 # Фраза, начинающаяся с артефакта: «picture of a cat», «логотип для кофейни».
+# Только «артефакт + предлог сюжета»: «picture of a cat», «логотип для
+    # кофейни». Голое слово («картинка не загружается») — не заказ (ревью 10.11.2026).
 _IMAGE_LED_RE = re.compile(
     r"^(?:картинка|картинку|картину|изображение|иллюстрация|иллюстрацию|постер|плакат|"
     r"баннер|логотип|эмблема|маскот|аватар|аватарка|обложка|обои|стикер|"
-    r"image|picture|photo|illustration|poster|logo|banner|avatar|wallpaper|sticker|mockup)\b",
+    r"image|picture|photo|illustration|poster|logo|banner|avatar|wallpaper|sticker|mockup)"
+    r"\s+(?:of|for|with|с|со|для|на|в|про)\b",
     re.IGNORECASE,
 )
 
@@ -194,14 +210,21 @@ _DRAW_VISUAL_SIGNAL_RE = re.compile(
 
 
 def _is_anaphoric_draw_request(content: str) -> bool:
-    """Тело просьбы — одно указание на то, что уже обсуждалось."""
-    return bool(_DRAW_ANAPHORA_RE.search((content or "").strip()))
+    """Тело просьбы — указание на то, что уже обсуждалось. Ищем от начала:
+    «кота, это что я люблю» — конкретный сюжет, а не местоимение (ревью 10.11.2026)."""
+    text = (content or "").strip()
+    return bool(_DRAW_ANAPHORA_RE.match(text))
 
 
 def _has_visual_signal(text_lower: str) -> bool:
     """Вопрос («как представить себе...»), команда и ссылка на сайт — не просьба
     рисовать: сигнал считаем только у чистого утвердительного текста."""
     if _DRAW_BLOCK_LEAD_RE.search(text_lower) or text_lower.startswith("/"):
+        return False
+    # «представь краткое содержание https://…» — чтение сайта, а не кадр;
+    # вопрос про картинку — тоже не заказ (ревью 10.11.2026).
+    if ("?" in text_lower or "？" in text_lower
+            or "http://" in text_lower or "https://" in text_lower):
         return False
     return bool(_DRAW_VISUAL_SIGNAL_RE.search(text_lower))
 
@@ -222,7 +245,10 @@ def _match_trigger_with_fillers(text_lower: str, core_lower: str, prefixes) -> t
     hit = _match_trigger_prefix(text_lower, prefixes)
     if hit:
         return hit, 0
-    return _match_trigger_prefix(core_lower, prefixes), (len(text_lower) - len(core_lower))
+    # Без найденного триггера срез не отдаём: иначе «please draw a cat» терял
+    # «please draw» дважды, и в модель уходило «in a hat» (ревью 10.11.2026).
+    hit = _match_trigger_prefix(core_lower, prefixes)
+    return hit, (len(text_lower) - len(core_lower)) if hit else 0
 
 
 def _is_new_artifact_request(text: str) -> bool:
@@ -230,31 +256,38 @@ def _is_new_artifact_request(text: str) -> bool:
     правка: указание на существующий кадр перевешивает слабый глагол."""
     if _DRAW_BLOCK_LEAD_RE.search(text) or not _IMAGE_ARTIFACT_RE.search(text):
         return False
-    return not _IMAGE_EXISTING_RE.search(text)
+    # «посоветуй книгу с красивой обложкой» — не заказ: артефактное слово само
+    # по себе рисует только вместе с глаголом просьбы (ревью 10.11.2026).
+    if not _IMAGE_REQUEST_VERB_RE.search(text):
+        return False
+    # Слово-артефакт должно быть именно заказом, а не деталью чужого предмета.
+    return not (_IMAGE_EXISTING_RE.search(text) or _IMAGE_PART_RE.search(text))
 
 
 def _match_draw_intent(text_lower: str, text_original: str) -> tuple[str, str]:
     """(вид, описание): "draw" — просьба нарисовать без триггера в начале фразы.
     Пустой вид — обычные маршруты (текст, правка, повтор) не трогаем."""
-    if _DRAW_BLOCK_LEAD_RE.search(text_lower):
-        return "", ""
     core_start = len(_DRAW_FILLER_RE.match(text_lower).group(0))
     core = text_lower[core_start:]
+    # «ну покажи картинку» — показ, а не генерация: лид проверяем после обвязки.
+    # Вопрос («какой логотип лучше выбрать?») заказом не считаем (ревью 10.11.2026).
+    if _DRAW_BLOCK_LEAD_RE.search(core) or "?" in core or "？" in core:
+        return "", ""
+
     if _match_trigger_prefix(core, DRAW_TRIGGER_PREFIXES):
         # Обычный префиксный путь: он уже обработан выше по коду, здесь не дублируем.
         return "", ""
     if _is_new_artifact_request(text_lower):
         return "draw", text_original.strip()
-    m = _DRAW_IMPERATIVE_ANYWHERE_RE.search(core)
+    m = _DRAW_IMPERATIVE_ANYWHERE_RE.search(text_original[core_start:])
     if m:
-        rest = re.sub(r"\s{2,}", " ", (core[:m.start()] + " " + core[m.end():])).strip(" ,.!?:;-")
+        rest = re.sub(
+            r"\s{2,}", " ",
+            (text_original[core_start:core_start + m.start()] + " "
+             + text_original[core_start + m.end():]),
+        ).strip(" ,.!?:;-")
         if rest:
-            content = re.sub(
-                r"\s{2,}", " ",
-                (text_original[:core_start + m.start()] + " "
-                 + text_original[core_start + m.end():]),
-            ).strip(" ,.!?:;-")
-            return "draw", content or rest
+            return "draw", rest
     if _IMAGE_LED_RE.match(core):
         return "draw", text_original.strip()
     return "", ""

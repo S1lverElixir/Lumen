@@ -29,6 +29,7 @@ from lumen_message_parse import (
     _detect_image_variants,
     _is_new_artifact_request,
     _match_draw_intent,
+    _DRAW_FILLER_RE,
     _has_visual_signal,
     _is_anaphoric_draw_request,
     _match_trigger_with_fillers,
@@ -37,7 +38,6 @@ from lumen_message_parse import (
     _wants_style_reference,
     _NO_MEDIA_NOTE,
     _find_recent_media_by_category,
-    _match_trigger_prefix,
     _media_reference_category,
     _strip_reply_marker,
     extract_url,
@@ -736,21 +736,41 @@ async def _handle_message_core(
         clean_prompt = continued_prompt
         lower_prompt = clean_prompt.lower().strip()
 
+    # Длина обвязки по оригиналу: lower() турецкой İ даёт два символа, и срез
+    # по нижнему регистру резал живые буквы (ревью 10.11.2026).
+    _filler_cut = len(_DRAW_FILLER_RE.match(clean_prompt).group(0))
+
     # Возврат к предыдущей версии картинки: раньше повтора и правки, иначе
     # «верни предыдущий вариант» рисовал бы новый кадр вместо готового.
     if not is_continuation:
         _revert_core = _strip_trigger_fillers(lower_prompt)[0]
-        _revert_hit = _match_trigger_with_fillers(lower_prompt, _revert_core, REVERT_TRIGGER_PREFIXES)[0]
-        _redo_hit = _match_trigger_with_fillers(lower_prompt, _revert_core, REDO_TRIGGER_PREFIXES)[0]
-        if _revert_hit or _redo_hit:
-            await bot.revert_draw_version(message, state, redo=bool(_redo_hit and not _revert_hit))
-            return
+        _revert_hit, _revert_cut = _match_trigger_with_fillers(
+            lower_prompt, _revert_core, REVERT_TRIGGER_PREFIXES,
+        )
+        _redo_hit, _redo_cut = _match_trigger_with_fillers(
+            lower_prompt, _revert_core, REDO_TRIGGER_PREFIXES,
+        )
+        if (_revert_hit or _redo_hit) and state.get("draw_versions"):
+            # «верни предыдущий вариант перевода» — про текст, а не про кадр:
+            # буквы после триггера уводят запрос обычной модели (ревью 10.11.2026).
+            _rv_trigger = _revert_hit if _revert_hit else _redo_hit
+            _rv_body = clean_prompt[_filler_cut if (_revert_cut or _redo_cut) else 0:]
+            _rv_rest = _strip_trigger_content(
+                _rv_body, _rv_trigger, message, reply_fallback=False,
+            )
+            if not re.search(r"\w", _rv_rest, re.UNICODE):
+                await bot.revert_draw_version(
+                    message, state, redo=bool(_redo_hit and not _revert_hit),
+                )
+                return
 
     # «Ещё вариант»: повтор последней генерации тем же описанием. Только свежая
     # своя генерация — иначе «ещё раз» это обычный текст (шутка, повтор ответа).
-    if not is_continuation and (
-        matched_repeat := _match_trigger_prefix(lower_prompt, REPEAT_TRIGGER_PREFIXES)
-    ):
+    _repeat_hit, _repeat_cut = _match_trigger_with_fillers(
+        lower_prompt, _strip_trigger_fillers(lower_prompt)[0], REPEAT_TRIGGER_PREFIXES,
+    )
+    if not is_continuation and _repeat_hit:
+        matched_repeat = _repeat_hit
         _last_prompt = state.get("last_draw_prompt")
         _has_draw_ctx = isinstance(_last_prompt, str) and bool(_last_prompt.strip())
         # «ещё вариант кота в шляпе» называет новый сюжет: повторять старое
@@ -758,7 +778,8 @@ async def _handle_message_core(
         # где картинку не просили, — ошибка маршрута: «другой вариант перевода
         # письма» и «regenerate the summary» остаются текстом (ревью 10.11.2026).
         _repeat_rest = _strip_trigger_content(
-            clean_prompt, matched_repeat, message, reply_fallback=False,
+            clean_prompt[_filler_cut if _repeat_cut else 0:], matched_repeat,
+            message, reply_fallback=False,
         )
         # Хвост без букв — не новый сюжет: «ещё вариант...» отдавало модели «...»
         # и рисовало месиво вместо кота (live 10.11.2026 16:49).
@@ -793,9 +814,9 @@ async def _handle_message_core(
     matched_tts_trigger, _tts_cut = _match_trigger_with_fillers(
         lower_prompt, _prompt_core, TTS_TRIGGER_PREFIXES,
     )
-    # Тело фразы без обвязки: триггер вырезаем из него, чтобы не терять регистр
-    # и кавычки в описании.
-    _body_cut = max(_draw_cut, _edit_cut, _tts_cut)
+    # Тело фразы: обвязку снимаем только когда триггер найден после неё, иначе
+    # теряются буквы («ещё вариант» сам начинается с обвязочного слова).
+    _body_cut = _filler_cut if (_draw_cut or _edit_cut or _tts_cut) else 0
     _prompt_text = clean_prompt[_body_cut:] if _body_cut else clean_prompt
 
     # «Сделай/нарисуй 2 варианта кота» — это серия генераций, а не правка:
@@ -831,7 +852,7 @@ async def _handle_message_core(
 
     # Правка картинки: глагол + реальный референс. Без картинки текст уходит
     # обычной модели ("измени мир" — не рисование), поэтому триггер тут мягкий.
-    if matched_edit_trigger and not is_continuation and not _new_artifact:
+    if matched_edit_trigger and not is_continuation and not (_new_artifact and not _explicit_media):
         try:
             reference = await bot._resolve_edit_references(
                 message, state,
@@ -875,6 +896,7 @@ async def _handle_message_core(
         # «нарисуй это» раньше уезжало модели словом «это» и рисовало мусор:
         # указание разрешаем по истории чата, а если разрешить нечем — честно
         # просим описание (паритет 10.11.2026).
+        _from_resolver = False
         if not prompt_content or _is_anaphoric_draw_request(prompt_content):
             # С приложенным или отреплаченным фото «это» — про него, а не про
             # слова из истории: иначе просьба рисовать по чужой картинке
@@ -889,6 +911,7 @@ async def _handle_message_core(
             prompt_content = await bot.resolve_draw_request(
                 message, _prompt_text, state, _ctx_deadline,
             )
+            _from_resolver = bool(prompt_content)
             if not prompt_content:
                 await bot._safe_reply(message, bot._t(message.chat.id, "draw_empty"))
                 return
@@ -909,12 +932,23 @@ async def _handle_message_core(
                     return
                 except Exception as exc:
                     log.warning("[draw] Style reference resolve failed, generating as usual: %s", exc)
-            _draw_variants, _draw_prompt = _split_image_variants(prompt_content)
+            if _from_resolver:
+                # Число вариантов — из фразы человека: «3 variants» в описании,
+                # которое вернула модель, сделало бы серию из чужого текста
+                # (ревью 10.11.2026). Само описание и есть промпт: повтор «ещё
+                # вариант» должен находить сюжет, а не слово «это», и писать его
+                # заново не нужно.
+                _draw_variants = _split_image_variants(_prompt_text)[0]
+                _draw_kwargs = {"prepared": prompt_content}
+                _draw_prompt = ""
+            else:
+                _draw_variants, _draw_prompt = _split_image_variants(prompt_content)
+                _draw_kwargs = {}
             if _style_refs:
                 _draw_variants = 1
             await bot.inline_draw_variants(
                 message, _draw_prompt or prompt_content, variants=_draw_variants,
-                reference=_style_refs,
+                reference=_style_refs, **_draw_kwargs,
             )
             return
 
@@ -922,7 +956,7 @@ async def _handle_message_core(
     # «нужен логотип кофейни», «кот в шляпе, нарисуй», «picture of a cat»
     # (паритет с ChatGPT, 10.11.2026). Вопрос и служебные глаголы отсекает
     # _match_draw_intent, поэтому сюда не попадают «как нарисовать» и «покажи».
-    if not is_continuation:
+    if not is_continuation and not _explicit_media:
         _intent, _intent_prompt = _match_draw_intent(lower_prompt, clean_prompt)
         if _intent == "draw" and _intent_prompt:
             _i_count, _i_prompt = _split_image_variants(_intent_prompt)
@@ -937,9 +971,11 @@ async def _handle_message_core(
     if not is_continuation and not _explicit_media and _has_visual_signal(lower_prompt):
         _resolved = await bot.resolve_draw_request(message, clean_prompt, state, _ctx_deadline)
         if _resolved:
-            _r_count, _r_prompt = _split_image_variants(_resolved)
+            # И здесь число вариантов — человеческое: модель могла написать
+            # «A ginger cat, 3 variants» (ревью 10.11.2026).
+            _r_count, _r_prompt = _split_image_variants(clean_prompt)
             await bot.inline_draw_variants(
-                message, _r_prompt or _resolved, variants=_r_count,
+                message, _resolved, variants=_r_count, prepared=_resolved,
             )
             return
 
