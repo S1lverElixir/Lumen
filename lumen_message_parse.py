@@ -72,6 +72,27 @@ REPEAT_TRIGGER_PREFIXES = [
     "другую картинку",
     "another version", "another variant", "regenerate",
 ]
+# «Нарисуй 2 варианта» как в ChatGPT: число вариантов из промпта, 2-4.
+# Ищем только рядом со словом варианта/картинки/изображения, а не любое число.
+_VARIANTS_RE = re.compile(
+    r"(?<!\d)([2-4])\s*(?:вариант\w*|картинк\w*|изображени\w*|верси\w*|versions?|variants?)(?!\w)",
+    re.IGNORECASE,
+)
+_VARIANTS_WORDS: dict[str, int] = {"два": 2, "три": 3, "четыре": 4, "two": 2, "three": 3, "four": 4}
+
+
+def _detect_image_variants(text: str) -> int:
+    """Сколько вариантов просили: 1 — обычная генерация, 2-4 — несколько."""
+    low = (text or "").lower()
+    m = _VARIANTS_RE.search(low)
+    if m:
+        return int(m.group(1))
+    for word, num in _VARIANTS_WORDS.items():
+        if re.search(r"(?<!\w)" + word + r"\s+(?:вариант\w*|картинк\w*|изображени\w*|versions?|variants?)", low):
+            return num
+    return 1
+
+
 # "хочу картинку" не триггер: путается с показом/редактурой. Длинные фразы выше коротких, иначе вернётся первое совпадение.
 TTS_TRIGGER_PREFIXES = [
     "озвучьте", "озвучь текст", "озвучь мне", "озвуч текст", "озвучь", "озвуч",

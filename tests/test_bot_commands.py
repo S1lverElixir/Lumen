@@ -541,7 +541,7 @@ def test_draw_trigger_this_with_reply_draws_replied_message(rate_guard_setup):
     message.text = "нарисуй это"
     message.reply_to_message = SimpleNamespace(text="закат над морем", caption=None)
     asyncio.run(bot._handle_message_core(message))
-    bot.inline_draw.assert_awaited_once_with(message, "закат над морем")
+    bot.inline_draw.assert_awaited_once_with(message, "закат над морем", reference=None)
 
 
 def test_imgmodel_command_and_callback_removed():
@@ -1570,6 +1570,61 @@ def test_repeat_variant_redraws_last_prompt(rate_guard_setup, monkeypatch):
     bot.inline_draw.assert_awaited_once_with(message, "красное яблоко на белом столе 16:9")
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("нарисуй 2 варианта кота", 2),
+    ("кот", 1),
+    ("три варианта маяка", 3),
+    ("make 4 variants of a cat", 4),
+    ("5 вариантов не поддерживаем", 1),
+])
+def test_detect_image_variants(text, expected):
+    from lumen_message_parse import _detect_image_variants
+    assert _detect_image_variants(text) == expected
+
+
+def test_inline_draw_variants_stops_after_failure(monkeypatch):
+    # Серия вариантов тратит слоты только на реальные картинки: сбой/отказ
+    # останавливает её, а не добивает лимит пустыми попытками.
+    calls = []
+    results = [True, True, False, True]
+
+    async def fake_inline(message, prompt, *, reference=None):
+        calls.append(prompt)
+        return results.pop(0)
+
+    monkeypatch.setattr(bot, "inline_draw", fake_inline)
+    incoming = _FakeIncomingMessage(999450)
+    asyncio.run(bot.inline_draw_variants(incoming, "кот", variants=4))
+    assert calls == ["кот", "кот", "кот"]
+
+
+def test_inline_draw_variants_caps_at_four(monkeypatch):
+    calls = []
+
+    async def fake_inline(message, prompt, *, reference=None):
+        calls.append(prompt)
+        return True
+
+    monkeypatch.setattr(bot, "inline_draw", fake_inline)
+    incoming = _FakeIncomingMessage(999451)
+    asyncio.run(bot.inline_draw_variants(incoming, "кот", variants=9))
+    assert len(calls) == 4
+
+
+def test_draw_trigger_passes_variant_count(rate_guard_setup, monkeypatch):
+    # «нарисуй 2 варианта кота» — обёртка получает 2 и текст без глагола.
+    message = rate_guard_setup()
+    captured = {}
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        captured.update(prompt=prompt, variants=variants, reference=reference)
+
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "нарисуй 2 варианта кота"
+    asyncio.run(bot._handle_message_core(message))
+    assert captured == {"prompt": "2 варианта кота", "variants": 2, "reference": None}
+
+
 def test_draw_more_words_with_new_subject_generate_it(rate_guard_setup, monkeypatch):
     # «нарисуй ещё кота» — новая картинка кота, а не повтор прошлого промпта:
     # repeat-список длинных фраз не содержит (ревью 10.11.2026).
@@ -1582,7 +1637,7 @@ def test_draw_more_words_with_new_subject_generate_it(rate_guard_setup, monkeypa
     monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
     message.text = "нарисуй ещё кота"
     asyncio.run(bot._handle_message_core(message))
-    bot.inline_draw.assert_awaited_once_with(message, "ещё кота")
+    bot.inline_draw.assert_awaited_once_with(message, "ещё кота", reference=None)
 
 
 def test_edit_reference_too_large_replies_media_too_big(rate_guard_setup, monkeypatch):
@@ -1674,7 +1729,10 @@ def test_natural_language_trigger_consumes_one_slot(rate_guard_setup, text, hand
     message = rate_guard_setup()
     message.text = text
     asyncio.run(bot._handle_message_core(message))
-    getattr(bot, handler).assert_awaited_once_with(message, content)
+    if handler == "inline_draw":
+        getattr(bot, handler).assert_awaited_once_with(message, content, reference=None)
+    else:
+        getattr(bot, handler).assert_awaited_once_with(message, content)
     assert len(lumen_limits.user_rate_limits[456]) == 1
 
 

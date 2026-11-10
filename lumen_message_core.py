@@ -24,6 +24,7 @@ from lumen_message_parse import (
     EDIT_TRIGGER_PREFIXES,
     REPEAT_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
+    _detect_image_variants,
     _NO_MEDIA_NOTE,
     _find_recent_media_by_category,
     _match_trigger_prefix,
@@ -765,7 +766,10 @@ async def _handle_message_core(
     if matched_draw_trigger:
         prompt_content = _strip_trigger_content(clean_prompt, matched_draw_trigger, message)
         if prompt_content:
-            await bot.inline_draw(message, prompt_content)
+            # «нарисуй 2 варианта» — Nintendo-стиль: несколько генераций подряд.
+            await bot.inline_draw_variants(
+                message, prompt_content, variants=_detect_image_variants(clean_prompt),
+            )
             return
 
     if matched_tts_trigger:

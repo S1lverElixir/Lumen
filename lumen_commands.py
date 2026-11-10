@@ -33,7 +33,7 @@ from lumen_images import (
     image_filename,
 )
 from lumen_lang import SUPPORTED_LANGS, LANG_NAMES, normalize_lang, pick_texts, t as _lang_t
-from lumen_message_parse import EDIT_TRIGGER_PREFIXES, _match_trigger_prefix
+from lumen_message_parse import EDIT_TRIGGER_PREFIXES, _detect_image_variants, _match_trigger_prefix
 from lumen_limits import (
     PICK_TTL_SEC,
     _purge_expired_picks,
@@ -135,7 +135,8 @@ def _image_semaphore() -> asyncio.Semaphore:
     return sem
 
 
-async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, str] | None = None) -> None:
+async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, str] | None = None) -> bool:
+    """Одна картинка (или правка). Возвращает True, если фото реально ушло в чат."""
     import bot
     cid = message.chat.id
     uid = bot._user_key_for_message(message)
@@ -144,7 +145,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
     if not bot._is_owner(uid) and bot._image_budget_exhausted():
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(cid, "draw_day_over", limit=bot.IMAGE_DAILY_LIMIT))
-        return
+        return False
     # Дневные лимиты пользователя: общий и отдельный на картинки. Резерв атомарный и
     # ДО первого await — проверка в начале со списанием после генерации позволяли
     # пяти параллельным /draw пробить лимит (аудит 01.11.2026).
@@ -163,13 +164,13 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                 cid, "user_daily_draw",
                 used=(_draw_entry or {}).get("draw", 0), limit=bot._user_daily_limit(uid, "draw", _draw_entry),
             ))
-        return
+        return False
     # Одна генерация на человека: rate limit 5/30с этого не мешал, и пять висящих
     # /draw по 30 МБ держал в памяти один и тот же человек (аудит 09.11.2026).
     if uid is not None and uid in _draw_inflight:
         bot._refund_user_daily(uid, total=1, draw=1)
         await bot._safe_reply(message, bot._t(cid, "draw_err_overloaded"))
-        return
+        return False
     if uid is not None:
         _draw_inflight.add(uid)
     # Инициализируем ДО try: сбой самого пузыря иначе уводил бы обработчик ошибки
@@ -369,6 +370,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             # больше, чем «сообщений» — аудит 01.11.2026).
             bot._record_stats_event("messages_received")
             bot._record_stats_event("answers_sent")
+            return True
         else:
             if budget_exceeded:
                 raise RuntimeError("image generation total time budget exceeded") from last_error
@@ -409,11 +411,27 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         # генерация уже состоялась и списала общий бюджет, тогда слот не возвращаем,
         # иначе упавшая отправка превращалась бы в бесконечные бесплатные попытки.
         bot._refund_user_daily(uid, total=1, draw=0 if generated else 1)
+        return False
     finally:
         if acquired:
             sem.release()
         if uid is not None:
             _draw_inflight.discard(uid)
+
+
+async def inline_draw_variants(
+    message: Message, prompt: str, *, variants: int = 1,
+    reference: tuple[bytes, str] | None = None,
+) -> None:
+    """Несколько вариантов подряд, как в генераторе ChatGPT: каждый вариант —
+    своя генерация и свой дневной слот. Отказ/сбой останавливает серию, чтобы
+    не тратить лимиты в пустоту."""
+    import bot
+    count = max(1, min(int(variants or 1), 4))
+    for _index in range(count):
+        ok = await bot.inline_draw(message, prompt, reference=reference)
+        if not ok:
+            break
 
 
 async def handle_draw_more_callback(query: CallbackQuery) -> None:
@@ -503,7 +521,10 @@ async def cmd_draw(message: Message) -> None:
             return
         except Exception as exc:
             log.warning("[draw] Edit reference resolve failed (cmd_draw): %s", exc)
-    await bot.inline_draw(message, prompt, reference=reference)
+    await bot.inline_draw_variants(
+        message, prompt, variants=_detect_image_variants(prompt),
+        reference=reference,
+    )
 
 
 
