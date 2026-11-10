@@ -393,7 +393,9 @@ def keep_sandbox(sandbox: Path, kept: Path, base_status: list[str]) -> dict:
 def run_agent(sandbox: Path, prompt: str, model: str, transcript: Path, timeout: int) -> tuple[str, str]:
     """Гоняет агента в песочнице. Возвращает (последнее сообщение, путь к логу)."""
     cli = find_cli()
-    args = [cli, "run", "--standalone", "--auto", "--model", model, "--format", "json", prompt]
+    # --standalone в argv был до 10.11.2026: CLI 1.19.5 на неизвестный флаг печатает usage и
+    # выходит с кодом 0, прогон молча превращался в solved=False.
+    args = [cli, "run", "--auto", "--model", model, "--format", "json", prompt]
     with transcript.open("w", encoding="utf-8", errors="replace") as out:
         proc = subprocess.Popen(
             args,
