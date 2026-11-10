@@ -105,6 +105,7 @@ def test_cloudflare_is_primary_only_when_configured(monkeypatch):
     ("квадрат", (1024, 1024)),
     ("кот", (1024, 1024)),
     ("широкий спектр", (1024, 1024)),
+    ("встреча в 13:45", (1024, 1024)),
 ])
 def test_detect_image_size(prompt, expected):
     # Пропорции как в генераторе ChatGPT; "широкий спектр" не должен стать 16:9.

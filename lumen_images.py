@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import secrets
 import urllib.parse
 from datetime import datetime, timezone
@@ -229,10 +230,14 @@ _SIZE_WORDS: tuple[tuple[str, str], ...] = (
 
 def detect_image_size(prompt: str) -> tuple[int, int]:
     """Размер из маркера в промпте; по умолчанию 1024x1024. Ищем только явные
-    форматы/слова пропорций, чтобы "широкий спектр" не стал 16:9."""
+    форматы/слова пропорций, чтобы "широкий спектр" не стал 16:9. Форматы ищем
+    с границами цифр: иначе "13:45" содержит "3:4" (найдено ревью 10.11.2026)."""
     low = (prompt or "").lower()
     for token, key in _SIZE_WORDS:
-        if token in low:
+        if token.isascii() and any(c.isdigit() for c in token) and ":" in token:
+            if re.search(r"(?<!\d)" + re.escape(token) + r"(?!\d)", low):
+                return _SIZES[key]
+        elif token in low:
             return _SIZES[key]
     return _SIZES["1:1"]
 
