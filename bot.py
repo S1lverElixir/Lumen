@@ -491,11 +491,13 @@ IMAGE_ATTEMPT_TIMEOUT_SEC = _env_number("IMAGE_ATTEMPT_TIMEOUT_SEC", 20, min_val
 # Перевод не-латинского промпта на английский перед генерацией: sana теряет кириллицу
 # в '?' (пруф 09.11.2026). Сбой перевода не роняет картинку — уходит оригинал.
 DRAW_TRANSLATE_TIMEOUT_SEC = _env_number("DRAW_TRANSLATE_TIMEOUT_SEC", 12, min_value=1)
-# Глобальный дневной бюджет картинок: 10 000 бесплатных Neuron Cloudflare в сутки —
-# это ~170 картинок flux-1-schnell при дефолтных 4 шагах, берём 150 с запасом на
-# резервного провайдера и на 8-шаговую quality-ветку (аудит 09.11.2026). Без счётчика
-# каждый новый человек бился бы в провайдера, у которого день кончился.
-IMAGE_DAILY_LIMIT = _env_number("IMAGE_DAILY_LIMIT", 150, cast=int, min_value=1)
+# Глобальный дневной бюджет картинок: 10 000 бесплатных Neuron Cloudflare в сутки.
+# flux-2-klein-4b стоит 104 Neuron за картинку 1024x1024 (~96 в день), правка
+# добавляет ~21 Neuron за входной мегапиксель, поэтому 80 с запасом: иначе к
+# ~97-й генерации Cloudflare отдаёт 429 про исчерпанный allocation, а человек
+# видит «сервис недоступен» (замер 10.11.2026). Без счётчика каждый новый
+# человек бился бы в провайдера, у которого день кончился.
+IMAGE_DAILY_LIMIT = _env_number("IMAGE_DAILY_LIMIT", 80, cast=int, min_value=1)
 # Картинка — самый дорогой по памяти и по бюджету вызов в боте, поэтому общий
 # семафор: раньше параллельные /draw из разных чатов складывали в RAM до 30 МБ каждый
 # без предела (аудит 09.11.2026, тот же класс, что MEDIA_GLOBAL_CONCURRENCY).
@@ -714,6 +716,7 @@ from lumen_media_flow import (
     _save_media_to_history,
     _download_message_attachment,
     _fetch_media,
+    _resolve_edit_reference,
 )
 
 # разбор ошибок
@@ -980,6 +983,7 @@ __all__ = [
     # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
     "GEMINI_TTS_MODELS",
     "_cloudflare_text_to_image",
+    "_cloudflare_edit_to_image",
     "_pollinations_text_to_image",
     "image_provider_names",
     "image_filename",
@@ -1037,6 +1041,7 @@ __all__ = [
     "_MediaTooLargeError",
     "_save_media_to_history",
     "_download_message_attachment",
+    "_resolve_edit_reference",
     "_fetch_media",
     "_sanitize_mime_type",
     "_mime_suffix",
@@ -1103,6 +1108,7 @@ from lumen_images import (
     ImageBudgetExhaustedError,
     ImageProviderError,
     ImageRateLimitedError,
+    _cloudflare_edit_to_image,
     _cloudflare_text_to_image,
     _pollinations_text_to_image,
     image_filename,

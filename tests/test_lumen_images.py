@@ -56,23 +56,25 @@ class _FakeResp:
 class _FakeSession:
     """Логирует и URL, и тело запроса: половина находок аудита — это параметры,
     которые молча перестали передаваться (seed, safe, nologo). Список ответов
-    выдаётся по порядку — для ветки «первый запрос отвергли, повтор другой пайлоад»."""
+    выдаётся по порядку — для ветки «первый запрос отвергли, повтор другой пейлоад»."""
 
     def __init__(self, resp, captured=None):
         self.resps = list(resp) if isinstance(resp, (list, tuple)) else [resp]
         self.captured = captured if captured is not None else {}
         self.calls: list[dict[str, Any]] = []
 
-    def _take(self, method, url, payload, timeout, headers):
-        self.calls.append({"method": method, "url": url, "payload": payload, "timeout": timeout, "headers": headers})
-        self.captured.update(method=method, url=url, payload=payload, timeout=timeout, headers=headers)
+    def _take(self, method, url, payload, timeout, headers, data=None):
+        self.calls.append({"method": method, "url": url, "payload": payload, "timeout": timeout,
+                           "headers": headers, "data": data})
+        self.captured.update(method=method, url=url, payload=payload, timeout=timeout,
+                             headers=headers, data=data)
         return self.resps.pop(0) if len(self.resps) > 1 else self.resps[0]
 
     def get(self, url, timeout=None, headers=None):
         return self._take("GET", url, None, timeout, headers)
 
-    def post(self, url, *, json=None, timeout=None, headers=None):
-        return self._take("POST", url, json, timeout, headers)
+    def post(self, url, *, json=None, data=None, timeout=None, headers=None):
+        return self._take("POST", url, json, timeout, headers, data)
 
 
 def _image_resp():
@@ -191,10 +193,22 @@ def test_image_filename_follows_magic_bytes():
 # ─────────────────────────── Cloudflare ───────────────────────────
 
 
+class _FakeForm:
+    """Собирает поля multipart-формы: реальный aiohttp.FormData кодирует тело
+    в рантайме, а контракт (имена полей, референс) проверяем здесь."""
+
+    def __init__(self):
+        self.fields = []
+
+    def add_field(self, name, value, **kwargs):
+        self.fields.append((name, value, kwargs))
+
+
 @pytest.fixture
 def cf_configured(monkeypatch):
     monkeypatch.setattr(lumen_images, "CLOUDFLARE_ACCOUNT_ID", "acct-id")
     monkeypatch.setattr(lumen_images, "CLOUDFLARE_API_TOKEN", "cf-token")
+    monkeypatch.setattr(lumen_images.aiohttp, "FormData", _FakeForm)
     return lumen_images
 
 
@@ -203,17 +217,44 @@ def _cf_ok_session(captured=None):
         {"success": True, "result": {"image": base64.b64encode(JPEG).decode()}}).encode(),)), captured)
 
 
-def test_cloudflare_posts_prompt_only(cf_configured):
-    # Прод 09.11.2026: схема flux-1-schnell отвергает seed (5006), лишний круг
-    # «отказ → повтор» на каждой генерации. В пайлоаде только prompt, один запрос.
+def test_cloudflare_generation_is_multipart_with_prompt(cf_configured):
+    # Замер 10.11.2026: flux-2-klein принимает только multipart; seed и размер
+    # уходят полями формы, а не JSON.
     captured = {}
     session = _cf_ok_session(captured)
     asyncio.run(cf_configured._cloudflare_text_to_image(session, "кот"))
     assert captured["method"] == "POST"
-    assert captured["url"] == "https://api.cloudflare.com/client/v4/accounts/acct-id/ai/run/@cf/black-forest-labs/flux-1-schnell"
+    assert "/ai/run/@cf/black-forest-labs/flux-2-klein-4b" in captured["url"]
     assert captured["headers"]["Authorization"] == "Bearer cf-token"
-    assert captured["payload"] == {"prompt": "кот"}
+    fields = {name: value for name, value, _ in captured["data"].fields}
+    assert fields["prompt"] == "кот"
+    assert fields["width"] == "1024" and fields["height"] == "1024"
+    assert int(fields["seed"]) > 0
+    assert "input_image_0" not in fields
     assert len(session.calls) == 1
+
+
+def test_cloudflare_edit_sends_reference_as_input_image(cf_configured):
+    # Правка одной моделью: референс обязан уехать полем input_image_0 с
+    # сигнатурным content-type, иначе Cloudflare проигнорирует картинку.
+    captured = {}
+    jpeg = JPEG
+    asyncio.run(cf_configured._cloudflare_edit_to_image(_cf_ok_session(captured), "make it green", jpeg))
+    fields = {name: (value, kw) for name, value, kw in captured["data"].fields}
+    assert fields["prompt"][0] == "make it green"
+    assert fields["input_image_0"][0] == jpeg
+    assert fields["input_image_0"][1]["content_type"] == "image/jpeg"
+
+
+def test_cloudflare_moderation_rejection_is_not_retryable(cf_configured):
+    # Замер 10.11.2026: NSFW-промт получает 400 code 3030 "output has been
+    # flagged". Это не перегрузка: политика не должна включать cooldown.
+    body = json.dumps({"success": False, "errors": [
+        {"code": 3030, "message": "AiError: Your output has been flagged. Please choose another prompt / input image combination"}]}).encode()
+    with pytest.raises(lumen_images.ImageProviderError) as exc:
+        asyncio.run(cf_configured._cloudflare_text_to_image(_FakeSession(_FakeResp(
+            status=400, chunks=(body,))), "кот"))
+    assert not isinstance(exc.value, (lumen_images.ImageRateLimitedError, lumen_images.ImageBudgetExhaustedError))
 
 
 def test_cloudflare_rejects_unconfigured_without_request(cf_configured, monkeypatch):

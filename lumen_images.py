@@ -26,7 +26,12 @@ log = logging.getLogger("bot")
 POLLINATIONS_IMAGE_URL = "https://image.pollinations.ai/prompt"
 POLLINATIONS_IMAGE_MODEL = (os.getenv("POLLINATIONS_IMAGE_MODEL", "").strip() or "sana")
 CLOUDFLARE_AI_BASE_URL = (os.getenv("CLOUDFLARE_AI_BASE_URL", "").strip() or "https://api.cloudflare.com/client/v4/accounts").rstrip("/")
-CLOUDFLARE_IMAGE_MODEL = (os.getenv("CLOUDFLARE_IMAGE_MODEL", "").strip() or "@cf/black-forest-labs/flux-1-schnell")
+# Замер 10.11.2026 живьём: flux-2-klein-4b рисует и правит ОДНОЙ моделью (input_image_0),
+# принимает русский промпт напрямую и вход 1024x1024 без ужатия; ~104 Neuron за
+# картинку 1024x1024 против 1364 у klein-9b. flux-1-schnell остаётся только
+# переменной на случай отката, генерация через него по умолчанию не идёт.
+CLOUDFLARE_IMAGE_MODEL = (os.getenv("CLOUDFLARE_IMAGE_MODEL", "").strip() or "@cf/black-forest-labs/flux-2-klein-4b")
+CLOUDFLARE_EDIT_MODEL = (os.getenv("CLOUDFLARE_EDIT_MODEL", "").strip() or CLOUDFLARE_IMAGE_MODEL)
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
 # Имя приложения для Pollinations: их privacy-страница пишет, что анонимный трафик
@@ -195,14 +200,35 @@ def _take_image_bytes(body: bytes, ctype: str, provider: str) -> bytes:
     raise ImageProviderError(f"{provider} вернул не-изображение: {ctype}")
 
 
+def _image_content_type(data: bytes) -> str:
+    """Тип референса по магическим байтам: имя файла у FormData условное."""
+    if data.startswith(b"\x89PNG"):
+        return "image/png"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _cloudflare_model_url(model: str) -> str:
+    # safe="/@": Cloudflare ждёт модель в пути как `@cf/имя/модель`, голый quote()
+    # превратил бы слэш в %2F и получил бы 404 на заведомо существующую модель.
+    return (
+        f"{CLOUDFLARE_AI_BASE_URL}/{urllib.parse.quote(CLOUDFLARE_ACCOUNT_ID, safe='')}"
+        f"/ai/run/{urllib.parse.quote(model, safe='/@')}"
+    )
+
+
 async def _cloudflare_request(
-    session: aiohttp.ClientSession, url: str, payload: dict[str, Any], timeout_sec: float | None,
+    session: aiohttp.ClientSession, url: str, *, form: aiohttp.FormData,
+    timeout_sec: float | None,
 ) -> tuple[int, float | None, Any]:
-    """Один POST, дочитанный и закрытый: (статус, retry_after, разобранный JSON).
+    """Один multipart-POST, дочитанный и закрытый: (статус, retry_after, JSON).
     Тело ошибки читается тем же капом, что и картинка; разбираем и на ошибках —
-    дневный бюджет Cloudflare сообщает текстом в errors при HTTP 429."""
+    дневный бюджет Cloudflare сообщает текстом в errors при HTTP 429.
+    Замер 10.11.2026: flux-2-klein принимает ТОЛЬКО multipart, JSON-тело
+    отвергает 5006 "required properties at '/' are 'multipart'"."""
     async with session.post(
-        url, json=payload, timeout=_timeout(timeout_sec),
+        url, data=form, timeout=_timeout(timeout_sec),
         headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
     ) as resp:
         status = int(resp.status)
@@ -216,23 +242,8 @@ async def _cloudflare_request(
         return status, retry_after, data
 
 
-async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str, *, timeout_sec: float | None = None) -> bytes:
-    """POST на Workers AI. Размер и шаги не просим: 1024x1024 и 4 шага — дефолты
-    модели, при них 4*4.8 + 4*9.6 = 57.6 Neuron, то есть ~170 картинок из 10 000
-    бесплатных Neuron в сутки."""
-    if not cloudflare_configured():
-        raise ImageProviderError("Cloudflare не настроен: нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN")
-    # safe="/@": Cloudflare ждёт модель в пути как `@cf/имя/модель`, голый quote()
-    # превратил бы слэш в %2F и получил бы 404 на заведомо существующую модель.
-    url = (
-        f"{CLOUDFLARE_AI_BASE_URL}/{urllib.parse.quote(CLOUDFLARE_ACCOUNT_ID, safe='')}"
-        f"/ai/run/{urllib.parse.quote(CLOUDFLARE_IMAGE_MODEL, safe='/@')}"
-    )
-    text = prompt[:IMAGE_PROMPT_MAX_CHARS]
-    # Только prompt: прод 09.11.2026 — схема flux-1-schnell отвергает seed (5006
-    # "Additional or unevaluated properties '/seed' not allowed"), каждая генерация
-    # платила лишний круг «отказ → повтор». Разнообразие даёт внутренний рандом модели.
-    status, retry_after, data = await _cloudflare_request(session, url, {"prompt": text}, timeout_sec)
+def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) -> bytes:
+    """Общая расшифровка ответа flux-2-klein: успех, бюджет, темп, модерация."""
     detail = _error_strings(data)
     if status == 200 and not isinstance(data, dict):
         raise ImageProviderError("Cloudflare вернул JSON не-объектом")
@@ -243,6 +254,11 @@ async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str,
         if any(word in detail.lower() for word in ("allocation", "free tier", "daily")):
             raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 429 {detail})")
         raise ImageRateLimitedError(f"Cloudflare HTTP 429 {detail}".strip(), retry_after_sec=retry_after)
+    if status == 400 and any(word in detail.lower() for word in ("flagged", "moderation")):
+        # Фильтр содержания (замер 10.11.2026: код 3030 "Your output has been
+        # flagged"): это не сетевой сбой, повтор и резерв не помогут — человеку
+        # честнее «ошибка генерации, переформулируй».
+        raise ImageProviderError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
     if status != 200:
         raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
     if not data.get("success", True):
@@ -256,6 +272,50 @@ async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str,
     except (ValueError, TypeError):
         raise ImageProviderError("Cloudflare: result.image не декодируется из base64") from None
     return _take_image_bytes(image, "image/jpeg", "Cloudflare")
+
+
+def _cloudflare_form(prompt: str, *, reference: bytes | None = None) -> aiohttp.FormData:
+    """Тело запроса klein: prompt/width/height/seed и референс для правки.
+    1024x1024 — дефолт и дешёвая единица бюджета (4*26.05 = 104 Neuron за картинку)."""
+    form = aiohttp.FormData()
+    form.add_field("prompt", prompt[:IMAGE_PROMPT_MAX_CHARS])
+    form.add_field("width", "1024")
+    form.add_field("height", "1024")
+    form.add_field("seed", str(_random_seed()))
+    if reference:
+        form.add_field(
+            "input_image_0", reference,
+            filename="reference" + (".png" if reference.startswith(b"\x89PNG") else ".jpg"),
+            content_type=_image_content_type(reference),
+        )
+    return form
+
+
+async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str, *, timeout_sec: float | None = None) -> bytes:
+    """Генерация с нуля через Workers AI (multipart)."""
+    if not cloudflare_configured():
+        raise ImageProviderError("Cloudflare не настроен: нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN")
+    status, retry_after, data = await _cloudflare_request(
+        session, _cloudflare_model_url(CLOUDFLARE_IMAGE_MODEL),
+        form=_cloudflare_form(prompt), timeout_sec=timeout_sec,
+    )
+    return _cloudflare_image_result(status, retry_after, data)
+
+
+async def _cloudflare_edit_to_image(
+    session: aiohttp.ClientSession, prompt: str, reference: bytes, *, timeout_sec: float | None = None,
+) -> bytes:
+    """Правка готовой картинки: референс уходит полем input_image_0 (замер
+    10.11.2026: красное яблоко -> зелёное, вход 1024x1024 принимается как есть)."""
+    if not cloudflare_configured():
+        raise ImageProviderError("Cloudflare не настроен: нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN")
+    if not reference:
+        raise ImageProviderError("Cloudflare edit: пустой референс")
+    status, retry_after, data = await _cloudflare_request(
+        session, _cloudflare_model_url(CLOUDFLARE_EDIT_MODEL),
+        form=_cloudflare_form(prompt, reference=reference), timeout_sec=timeout_sec,
+    )
+    return _cloudflare_image_result(status, retry_after, data)
 
 
 async def _pollinations_text_to_image(session: aiohttp.ClientSession, prompt: str, *, timeout_sec: float | None = None) -> bytes:

@@ -111,6 +111,54 @@ def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | No
     if not recent or recent[-1][0] != file_id:
         recent.append((file_id, mime or "application/octet-stream"))
 
+async def _resolve_edit_reference(
+    message: Any, state: dict[str, Any], *, is_private: bool, implicit: bool,
+) -> tuple[bytes, str] | None:
+    """Картинка для правки: 1) вложение сообщения, 2) реплай на фото, 3) для
+    сильных глаголов ("измени") — последнее фото автора в чате. Референс
+    сохраняем в медиа-историю: следующее "покажи фото" должно его находить."""
+    import bot
+    import lumen_memory
+    from lumen_media import _media_file_id_and_mime, _msg_media_source
+
+    def _is_image(src: Any) -> bool:
+        _, mime, _ = _media_file_id_and_mime(src)
+        return (mime or "").startswith("image/")
+
+    sender = getattr(message, "from_user", None)
+    sender_id = sender.id if sender is not None else None
+
+    src = _msg_media_source(message)
+    if src is not None and _is_image(src):
+        res = await bot._download_message_attachment(src)
+        if res:
+            data, mime, _ = res
+            if (mime or "").startswith("image/"):
+                bot._save_media_to_history(src, state, sender_id)
+                return data, mime
+
+    reply = getattr(message, "reply_to_message", None)
+    if reply is not None:
+        reply_src = _msg_media_source(reply)
+        if reply_src is not None and _is_image(reply_src):
+            fid, mime, _ = _media_file_id_and_mime(reply_src)
+            fetched = await bot._fetch_media(fid, mime) if fid else None
+            if fetched:
+                bot._save_media_to_history(reply_src, state, sender_id)
+                return fetched
+
+    if implicit:
+        found = lumen_memory.last_media_for_user(
+            state, "photo", sender_id=sender_id, private=is_private,
+        )
+        if found:
+            _entry, ref = found
+            fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
+            if fetched:
+                return fetched
+    return None
+
+
 async def _download_message_attachment(source: Any) -> tuple[bytes, str, str] | None:
     """Байты вложения сразу в память: временный файл на диске (запись и обратное
     чтение до 20МБ) был лишним кругом на каждое вложение."""

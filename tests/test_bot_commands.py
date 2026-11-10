@@ -1198,6 +1198,115 @@ def test_inline_draw_sends_translated_prompt_to_provider(monkeypatch):
     assert captured["prompt"] == "one apple"
 
 
+def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
+    # Правка не должна уходить в цепочку генерации: референс понимает только
+    # Cloudflare klein, а промпт переводится в режиме инструкции правки.
+    chat_id = 999442
+    captured = {}
+
+    async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
+        captured["system"] = json_body["messages"][0]["content"]
+        captured["user"] = json_body["messages"][1]["content"]
+        return {"choices": [{"message": {"content": "make the sky blue"}}]}
+
+    async def fake_edit(session, prompt, reference, timeout_sec=None):
+        captured["edit"] = (prompt, reference)
+        return b"PNG edited bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    async def must_not_generate(session, prompt, timeout_sec=None):
+        raise AssertionError("edit must not fall back to text-to-image providers")
+
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    monkeypatch.setattr(bot, "_cloudflare_edit_to_image", fake_edit)
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", must_not_generate)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    reference = (b"ref bytes", "image/jpeg")
+    asyncio.run(bot.inline_draw(incoming, "сделай небо синим", reference=reference))
+    assert captured["edit"] == ("make the sky blue", reference[0])
+    assert captured["user"] == "сделай небо синим"
+    # Отдельный системный промпт правки: сохранить остальное и не перерисовать сцену.
+    assert "image-edit instruction" in captured["system"]
+
+
+def test_edit_trigger_with_reply_photo_routes_to_edit(rate_guard_setup, monkeypatch):
+    # Reply на фото + глагол правки: уходит в inline_draw с референсом, а не в LLM.
+    message = rate_guard_setup()
+    reference = (b"ref bytes", "image/jpeg")
+
+    async def fake_resolve(*args, **kwargs):
+        return reference
+
+    monkeypatch.setattr(bot, "_resolve_edit_reference", fake_resolve)
+    message.text = "измени фон на синий"
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once_with(message, "измени фон на синий", reference=reference)
+
+
+def test_edit_word_without_image_goes_to_llm(rate_guard_setup, monkeypatch):
+    # "измени мир" без картинки — обычный текст: рисование не запускается.
+    message = rate_guard_setup()
+
+    async def no_reference(*args, **kwargs):
+        return None
+
+    async def fake_route(*args, **kwargs):
+        return "обычный ответ", False
+
+    monkeypatch.setattr(bot, "_resolve_edit_reference", no_reference)
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    message.text = "измени мир к лучшему"
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_not_awaited()
+
+
+def test_draw_command_edits_photo_when_prompt_is_edit_verb(rate_guard_setup, monkeypatch):
+    # "/draw сделай фон синим" реплаем на фото — правка, а не новая картинка.
+    message = rate_guard_setup()
+    reference = (b"ref bytes", "image/jpeg")
+
+    async def fake_resolve(*args, **kwargs):
+        return reference
+
+    monkeypatch.setattr(bot, "_resolve_edit_reference", fake_resolve)
+    message.text = "/draw сделай фон синим"
+    asyncio.run(bot.cmd_draw(message))
+    bot.inline_draw.assert_awaited_once_with(message, "сделай фон синим", reference=reference)
+
+
+def test_resolve_edit_reference_prefers_reply_photo_over_last_media(monkeypatch):
+    # Референс реплая важнее «последнего фото»: человек прямо указал картинку.
+    from lumen_media_flow import _resolve_edit_reference
+
+    reply_photo = SimpleNamespace(file_id="reply-fid", mime_type="image/jpeg")
+    reply = SimpleNamespace(photo=None, document=reply_photo)
+    message = SimpleNamespace(
+        photo=None, document=None, video=None, animation=None, video_note=None,
+        voice=None, audio=None, sticker=None,
+        reply_to_message=reply, from_user=SimpleNamespace(id=7),
+    )
+    state = {}
+    fetched = []
+
+    async def fake_fetch(fid, mime):
+        fetched.append((fid, mime))
+        return b"img-bytes", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(bot, "_save_media_to_history", lambda *a, **k: None)
+    got = asyncio.run(_resolve_edit_reference(
+        message, state, is_private=True, implicit=True,
+    ))
+    assert got == (b"img-bytes", "image/jpeg")
+    assert fetched == [("reply-fid", "image/jpeg")]
+
+
 def test_draw_command_rejects_exhausted_quota(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "/draw кот"
@@ -1226,7 +1335,7 @@ def test_mixed_commands_share_rate_quota_and_reject_before_work(rate_guard_setup
         await bot._handle_message_core(message)
 
     asyncio.run(run())
-    bot.inline_draw.assert_awaited_once_with(message, "кот")
+    bot.inline_draw.assert_awaited_once_with(message, "кот", reference=None)
     bot.inline_tts.assert_awaited_once_with(message, "привет")
     media.assert_not_awaited()
     assert bot._tg_call.await_count == 3

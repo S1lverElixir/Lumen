@@ -33,6 +33,7 @@ from lumen_images import (
     image_filename,
 )
 from lumen_lang import SUPPORTED_LANGS, LANG_NAMES, normalize_lang, pick_texts, t as _lang_t
+from lumen_message_parse import EDIT_TRIGGER_PREFIXES, _match_trigger_prefix
 from lumen_limits import (
     PICK_TTL_SEC,
     _purge_expired_picks,
@@ -84,9 +85,17 @@ _DRAW_TRANSLATE_SYSTEM = (
     "Keep every visual detail, count and style; translate literally, do not add anything. "
     "Reply with only the English description, no quotes, no explanations."
 )
+# Правка: модель должна понять, что менять, а что сохранить, иначе klein
+# перерисовывает сцену с нуля.
+_DRAW_EDIT_TRANSLATE_SYSTEM = (
+    "Translate the user's image-edit instruction into English for an image editing model. "
+    "Keep the requested change exact and say nothing beyond it; the model keeps the rest "
+    "of the scene unchanged by default. Keep any text to render and the requested style verbatim. "
+    "Reply with only the English instruction, no quotes, no explanations."
+)
 
 
-async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
+async def _translate_draw_prompt(prompt: str, deadline: float, *, edit: bool = False) -> str:
     """Промт с не-латиницей переводим на английский: Pollinations/sana превращает
     кириллицу в '?' ещё при разборе URL (пруф 09.11.2026: метаданные готового JPEG),
     модель рисует случайное. Сбой/таймаут перевода — оригинал, как раньше."""
@@ -101,7 +110,7 @@ async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _DRAW_TRANSLATE_SYSTEM},
+            {"role": "system", "content": _DRAW_EDIT_TRANSLATE_SYSTEM if edit else _DRAW_TRANSLATE_SYSTEM},
             {"role": "user", "content": prompt[:IMAGE_PROMPT_MAX_CHARS]},
         ],
         "temperature": 0.1, "max_tokens": 400, "stream": False,
@@ -134,7 +143,7 @@ def _image_semaphore() -> asyncio.Semaphore:
     return sem
 
 
-async def inline_draw(message: Message, prompt: str) -> None:
+async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, str] | None = None) -> None:
     import bot
     cid = message.chat.id
     uid = bot._user_key_for_message(message)
@@ -198,12 +207,24 @@ async def inline_draw(message: Message, prompt: str) -> None:
 
         # Перевод до фолбэка: оба провайдера обязаны получить один и тот же текст,
         # и латиница не платит за служебный вызов вообще.
-        prompt = await bot._translate_draw_prompt(prompt, deadline)
+        prompt = await bot._translate_draw_prompt(prompt, deadline, edit=reference is not None)
 
-        # Фолбэк — по провайдерам, не по моделям: классический Pollinations игнорирует
-        # model (замер 09.11.2026), так что перебор пяти моделей звал один и тот же
-        # эндпоинт пять раз подряд.
-        calls = _image_provider_calls()
+        # Правка идёт одной моделью: референс понимает только Cloudflare klein,
+        # у Pollinations/sana правки нет вовсе. Генерация — прежней цепочкой.
+        if reference is not None:
+            reference_bytes = reference[0]
+
+            async def _edit_call(session, text, timeout_sec=None):
+                return await bot._cloudflare_edit_to_image(
+                    session, text, reference_bytes, timeout_sec=timeout_sec,
+                )
+
+            calls = {"cloudflare": _edit_call}
+        else:
+            # Фолбэк — по провайдерам, не по моделям: классический Pollinations игнорирует
+            # model (замер 09.11.2026), так что перебор пяти моделей звал один и тот же
+            # эндпоинт пять раз подряд.
+            calls = _image_provider_calls()
         image_bytes = None
         last_error: Exception | None = None
         budget_exceeded = False
@@ -362,13 +383,21 @@ async def cmd_draw(message: Message) -> None:
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
         return
-    prompt = message.text.partition(" ")[2].strip() if message.text else ""
+    # Подпись к фото тоже команда: "/draw сделай синим" в реплае/подписи — правка.
+    text = message.text or message.caption or ""
+    prompt = text.partition(" ")[2].strip()
     if not prompt:
         await bot._safe_reply(message, bot._t(message.chat.id, "draw_empty"))
         return
     if await bot._reject_rate_limited_message(message):
         return
-    await bot.inline_draw(message, prompt)
+    reference = None
+    if _match_trigger_prefix(prompt.lower(), EDIT_TRIGGER_PREFIXES):
+        reference = await bot._resolve_edit_reference(
+            message, bot.get_state(message.chat.id),
+            is_private=message.chat.type == ChatType.PRIVATE, implicit=False,
+        )
+    await bot.inline_draw(message, prompt, reference=reference)
 
 
 

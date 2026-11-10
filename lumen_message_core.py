@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
+    EDIT_TRIGGER_IMPLICIT,
+    EDIT_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
     _NO_MEDIA_NOTE,
     _find_recent_media_by_category,
@@ -717,6 +719,21 @@ async def _handle_message_core(
     if is_continuation:
         clean_prompt = continued_prompt
         lower_prompt = clean_prompt.lower().strip()
+
+    # Правка картинки: глагол + реальный референс. Без картинки текст уходит
+    # обычной модели ("измени мир" — не рисование), поэтому триггер тут мягкий.
+    matched_edit_trigger = _match_trigger_prefix(lower_prompt, EDIT_TRIGGER_PREFIXES)
+    if matched_edit_trigger and not is_continuation:
+        reference = await bot._resolve_edit_reference(
+            message, state,
+            is_private=is_private,
+            implicit=matched_edit_trigger in EDIT_TRIGGER_IMPLICIT,
+        )
+        if reference is not None:
+            # Промпт правки идёт целиком, с глаголом: "измени фон на синий"
+            # без "измени" превратилось бы в "фон на синий" и потеряло действие.
+            await bot.inline_draw(message, clean_prompt, reference=reference)
+            return
 
     matched_draw_trigger = _match_trigger_prefix(lower_prompt, DRAW_TRIGGER_PREFIXES)
     matched_tts_trigger = _match_trigger_prefix(lower_prompt, TTS_TRIGGER_PREFIXES)
