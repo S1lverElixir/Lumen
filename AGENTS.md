@@ -251,3 +251,6 @@ it drifts, and `docs/` stays the truth.
   behavior go to `docs/`, mechanics into comments.
 - Add a rule once the same mistake has repeated, drop a rule that no longer changes behavior, and
   re-run every command you edited here before committing it.
+- Keep it a single file. Qoder Desktop loads the root `AGENTS.md`; nested per-directory `AGENTS.md`
+  and `.qoder/rules` activation triggers are documented for Qoder CLI only, so a rule moved out of
+  here stops being seen in this app. Verified against docs.qoder.com on 10.11.2026.
