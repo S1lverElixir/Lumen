@@ -6,7 +6,9 @@
 местоимением правки или перепутать «сделай картинку» с «сделай эту картинку».
 """
 import asyncio
+import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,7 +20,6 @@ from lumen_message_parse import (
     _is_new_artifact_request,
     _match_draw_intent,
     _match_trigger_with_fillers,
-    _strip_trigger_fillers,
 )
 
 DRAW_INTENTS = [
@@ -116,8 +117,7 @@ NOT_DRAW_INTENTS = [
 
 def _intent(text):
     low = text.lower().strip()
-    core = _strip_trigger_fillers(low)[0]
-    if _match_trigger_with_fillers(low, core, DRAW_TRIGGER_PREFIXES)[0]:
+    if _match_trigger_with_fillers(low, DRAW_TRIGGER_PREFIXES)[0]:
         return "draw"
     kind, _content = _match_draw_intent(low, text)
     return kind
@@ -147,8 +147,7 @@ def test_non_draw_phrases_are_not_draw(text):
 ])
 def test_edit_phrases_stay_edit(text):
     low = text.lower().strip()
-    core = _strip_trigger_fillers(low)[0]
-    assert _match_trigger_with_fillers(low, core, EDIT_TRIGGER_PREFIXES)[0], text
+    assert _match_trigger_with_fillers(low, EDIT_TRIGGER_PREFIXES)[0], text
     assert _intent(text) != "draw", text
 
 
@@ -157,8 +156,7 @@ def test_edit_phrases_stay_edit(text):
 ])
 def test_repeat_phrases_stay_repeat(text):
     low = text.lower().strip()
-    core = _strip_trigger_fillers(low)[0]
-    assert _match_trigger_with_fillers(low, core, REPEAT_TRIGGER_PREFIXES)[0], text
+    assert _match_trigger_with_fillers(low, REPEAT_TRIGGER_PREFIXES)[0], text
 
 
 def test_new_artifact_vs_existing_image():
@@ -283,8 +281,14 @@ def test_scene_request_without_artifact_word_draws_resolved_text(rate_guard_setu
 
 def test_scene_request_answered_none_stays_text(rate_guard_setup, monkeypatch):
     message = _ctx_env(monkeypatch, rate_guard_setup, "хочу увидеть кота на луне", "NONE")
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", run_route)
     asyncio.run(bot._handle_message_core(message))
     bot.inline_draw.assert_not_awaited()
+    # Ветка вызывалась реально (иначе «не рисуем» тривиально верно) и сообщение
+    # доехало до текстовой модели (ревью покрытия 10.11.2026).
+    assert len(message._ctx_calls) == 1
+    run_route.assert_awaited()
 
 
 def test_question_about_imagining_does_not_call_the_model(rate_guard_setup, monkeypatch):
@@ -312,3 +316,86 @@ def test_anaphoric_draw_with_photo_edits_that_photo(rate_guard_setup, monkeypatc
     bot.inline_draw.assert_awaited_once()
     assert bot.inline_draw.await_args.kwargs.get("reference") == [ref]
     assert message._ctx_calls == []
+
+
+# ── Маршруты по находкам слепого ревью (10.11.2026): обвязка, местоимение,
+# заказ артефакта поверх правки, число вариантов из фразы человека.
+def test_core_polite_prefix_keeps_the_subject(rate_guard_setup, monkeypatch):
+    # «please draw a cat in a cat» теряло «please draw» дважды: до модели
+    # доходило «in a hat» (ревью 10.11.2026).
+    message = rate_guard_setup()
+    message.text = "please draw a cat in a hat"
+    prompts = []
+
+    async def fake_draw(msg, prompt, **kwargs):
+        prompts.append(prompt)
+        return True
+
+    monkeypatch.setattr(bot, "inline_draw", fake_draw)
+    asyncio.run(bot._handle_message_core(message))
+    assert prompts == ["a cat in a hat"], prompts
+
+
+def test_core_repeat_after_filler_repeats_the_subject(rate_guard_setup, monkeypatch):
+    # «ну ещё вариант кота»: хвост повтора режется из тела без обвязки,
+    # иначе сдвиг на «ну » съедал буквы сюжета (ревью 10.11.2026).
+    message = rate_guard_setup()
+    message.text = "ну ещё вариант кота"
+    state = {"last_draw_prompt": "A ginger cat.", "last_drawn_at": time.time(), "last_drawn_user": 456}
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    drawn = []
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None, prepared=None):
+        drawn.append((prompt, variants))
+        return None
+
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    asyncio.run(bot._handle_message_core(message))
+    assert drawn == [("кота", 1)], drawn
+
+
+def test_core_artifact_word_over_photo_is_an_edit(rate_guard_setup, monkeypatch):
+    # «сделай картинку ярче» с отреплайченным фото — правка: заказ артефакта
+    # не имеет права уводить её в новую генерацию (ревью 10.11.2026).
+    message = rate_guard_setup()
+    message.text = "сделай картинку ярче"
+    message.reply_to_message = SimpleNamespace(
+        message_id=7, photo=[SimpleNamespace(file_id="fid7", file_unique_id="u7", width=8, height=8, file_size=8)],
+        text=None, caption=None, from_user=SimpleNamespace(id=456),
+    )
+    resolved = []
+
+    async def fake_refs(msg, state, *, is_private, implicit):
+        resolved.append(implicit)
+        return (b"\xff\xd8jpeg", "image/jpeg")
+
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_refs)
+    drawn = []
+
+    async def fake_draw(msg, prompt, **kwargs):
+        drawn.append((prompt, kwargs.get("reference")))
+        return True
+
+    monkeypatch.setattr(bot, "inline_draw", fake_draw)
+    asyncio.run(bot._handle_message_core(message))
+    assert resolved, "правки не было: ветка ушла в генерацию"
+    assert drawn and drawn[0][1] is not None, drawn
+
+
+def test_core_variants_count_comes_from_human_phrase(rate_guard_setup, monkeypatch):
+    # Резолвер мог вернуть «A ginger cat, 3 variants»: серия из чужого текста
+    # стоила бы человеку три слота, тогда как человек просил один кадр
+    # (ревью 10.11.2026).
+    message = _ctx_env(monkeypatch, rate_guard_setup, "нарисуй это",
+                       "A ginger cat on the moon, 3 variants, photorealistic.")
+    asyncio.run(bot._handle_message_core(message))
+    assert bot.inline_draw.await_count == 1, bot.inline_draw.await_args_list
+    assert bot.inline_draw.await_args.args[1].startswith("A ginger cat")
+
+
+def test_core_variants_count_survives_anaphora(rate_guard_setup, monkeypatch):
+    # А когда о вариантах попросил сам человек, их терять нельзя.
+    message = _ctx_env(monkeypatch, rate_guard_setup, "нарисуй это, 3 варианта",
+                       "A ginger cat on the moon, photorealistic.")
+    asyncio.run(bot._handle_message_core(message))
+    assert bot.inline_draw.await_count == 3, bot.inline_draw.await_args_list

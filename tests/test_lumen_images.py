@@ -133,6 +133,22 @@ def test_cloudflare_is_primary_only_when_configured(monkeypatch):
     # Одиночные прилагательные описывают сюжет, а не кадр.
     ("wide smile", (1024, 1024)),
     ("tall hat on the table", (1024, 1024)),
+    # Формат по артефакту ищем границами слов: «imposter» и «posterior view»
+    # не постеры, «a cat telling stories» и «fisherman with reels» описывают
+    # сюжет, а не кадр (ревью 10.11.2026).
+    ("imposter among us", (1024, 1024)),
+    ("posterior view of a car", (1024, 1024)),
+    ("a cat telling stories", (1024, 1024)),
+    ("a building with 5 stories", (1024, 1024)),
+    ("fisherman with reels", (1024, 1024)),
+    ("instagram stories with a cat", (768, 1344)),
+    ("banner for a shop", (1344, 768)),
+    # Латинические варианты маркеров, которых не было: 4x5 и 5x4 молча
+    # становились квадратом, «wallpaper for desktop» — тоже (ревью 10.11.2026).
+    ("logo 4x5", (896, 1120)),
+    ("аватарка 5x4", (1120, 896)),
+    ("wallpaper for desktop", (1344, 768)),
+    ("portrait format cat", (896, 1120)),
 ])
 def test_detect_image_size(prompt, expected):
     # Пропорции как в генераторе ChatGPT; "широкий спектр" не должен стать 16:9.

@@ -215,3 +215,149 @@ def test_core_routes_redo(rate_guard_setup, monkeypatch):
     monkeypatch.setattr(bot, "revert_draw_version", fake_revert)
     asyncio.run(bot._handle_message_core(message))
     assert reverted == [True]
+
+
+def test_versions_survive_serialize_and_restore():
+    # РЕГРЕССИЯ (ревью 10.11.2026): сериализатор писал только last_draw*,
+    # поэтому после первого же деплоя «верни предыдущий вариант» отвечал
+    # «версий нет», хотя картинки в чате остались.
+    import lumen_chat_state
+    import lumen_state_storage
+    cid = 999560
+    state = _versions_state(3)
+    state["draw_redo"] = [{"file_id": "fidR", "mime": "image/jpeg", "prompt": "кот R", "user": 456, "ts": 1.0}]
+    snapshot = lumen_state_storage._serialize_chat_state(state)
+    assert [v["file_id"] for v in snapshot["draw_versions"]] == ["fid0", "fid1", "fid2"]
+    lumen_chat_state.chat_state.pop(cid, None)
+    lumen_chat_state._restore_single_chat(cid, snapshot)
+    restored = lumen_chat_state.chat_state[cid]
+    assert [v["file_id"] for v in restored["draw_versions"]] == ["fid0", "fid1", "fid2"]
+    assert [v["file_id"] for v in restored["draw_redo"]] == ["fidR"]
+    lumen_chat_state.chat_state.pop(cid, None)
+
+
+def test_restore_drops_broken_version_entries():
+    # Снимок мог прийти из старой версии схемы или битым: в lists() не должно
+    # оказаться не-словарей, иначе revert упадёт на target["file_id"].
+    import lumen_chat_state
+    cid = 999561
+    lumen_chat_state.chat_state.pop(cid, None)
+    lumen_chat_state._restore_single_chat(cid, {
+        "draw_versions": [{"file_id": "ok"}, "мусор", {"prompt": "без file_id"}, 7],
+        "draw_redo": None,
+    })
+    restored = lumen_chat_state.chat_state[cid]
+    assert [v["file_id"] for v in restored["draw_versions"]] == ["ok"]
+    assert restored["draw_redo"] == []
+    lumen_chat_state.chat_state.pop(cid, None)
+
+
+def test_revert_keeps_author_of_the_restored_version(revert_env, monkeypatch):
+    # Владелец контекста — автор кадра: иначе возврат чужой версии владельцем
+    # передавал слабые глаголы правки не тому человеку (ревью 10.11.2026).
+    message, _sent = revert_env
+    monkeypatch.setattr(bot, "_is_owner", lambda uid: True)
+    state = _versions_state(3, user=456)
+    state["last_drawn_user"] = 777
+    asyncio.run(bot.revert_draw_version(message, state))
+    assert state["last_drawn_user"] == 456
+
+
+def test_redo_without_undo_stack_answers_no_versions(revert_env):
+    # Redo при пустой отменённой стопке не должен выдавать картинку из
+    # history-корзинки или падать: человек слыжит честный ответ (ревью 10.11.2026).
+    message, sent = revert_env
+    state = _versions_state(2)
+    assert asyncio.run(bot.revert_draw_version(message, state, redo=True)) is False
+    assert not sent
+    assert bot._safe_reply.await_args is not None
+
+
+def test_failed_redo_send_keeps_the_lists(revert_env, monkeypatch):
+    # Неудачная пересылка redo не должна съедать версию: списки остаются как были.
+    message, _sent = revert_env
+
+    async def failing_tg_call(method, *args, **kwargs):
+        return None
+
+    state = _versions_state(3)
+    assert asyncio.run(bot.revert_draw_version(message, state)) is True
+    monkeypatch.setattr(bot, "_tg_call", failing_tg_call)
+    before_versions = [v["file_id"] for v in state["draw_versions"]]
+    before_redo = [v["file_id"] for v in state["draw_redo"]]
+    assert asyncio.run(bot.revert_draw_version(message, state, redo=True)) is False
+    assert [v["file_id"] for v in state["draw_versions"]] == before_versions
+    assert [v["file_id"] for v in state["draw_redo"]] == before_redo
+
+
+def test_revert_consumes_no_daily_slot(revert_env, monkeypatch):
+    # Обещание из docstring: возврат не платит ни слотом человека, ни бюджетом
+    # провайдера. Без проверки его могли бы начать списывать при рефакторе.
+    message, _sent = revert_env
+    state = _versions_state(3)
+    calls = []
+    monkeypatch.setattr(bot, "_reserve_user_daily", lambda *a, **k: calls.append("reserve"))
+    monkeypatch.setattr(bot, "_image_budget_exhausted", lambda: calls.append("budget") or False)
+    bot.GLOBAL_QUOTA.setdefault("user_daily", {}).pop("456", None)
+    asyncio.run(bot.revert_draw_version(message, state))
+    assert calls == []
+    assert "456" not in bot.GLOBAL_QUOTA.get("user_daily", {})
+
+
+def test_revert_with_trailing_words_goes_to_text(rate_guard_setup, monkeypatch):
+    # «верни предыдущий вариант перевода» — про текст. Резолвер версий обязан
+    # уступить, иначе буква после триггера превращала текстовую просьбу в
+    # пересылку картинки (ревью 10.11.2026).
+    message = rate_guard_setup()
+    message.text = "верни предыдущий вариант перевода"
+    state = _versions_state(3)
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+    reverted = []
+
+    async def fake_revert(msg, st, *, redo=False):
+        reverted.append(redo)
+        return True
+
+    monkeypatch.setattr(bot, "revert_draw_version", fake_revert)
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert reverted == []
+    run_route.assert_awaited()
+
+
+def test_revert_without_versions_does_not_swallow_the_message(rate_guard_setup, monkeypatch):
+    # В чате, где ничего не рисовали, «верни предыдущий» — обычная просьба
+    # модели: ветка версий не имеет права отвечать «версий нет».
+    message = rate_guard_setup()
+    message.text = "верни предыдущий"
+    reverted = []
+
+    async def fake_revert(msg, st, *, redo=False):
+        reverted.append(redo)
+        return True
+
+    monkeypatch.setattr(bot, "revert_draw_version", fake_revert)
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert reverted == []
+    run_route.assert_awaited()
+
+
+def test_core_revert_does_not_also_run_the_text_route(rate_guard_setup, monkeypatch):
+    # Ревью покрытия: без return после revert сообщение уезжало ещё и модели,
+    # то есть один «верни» тратил ответ текстового провайдера.
+    message = rate_guard_setup()
+    message.text = "верни предыдущий вариант"
+    state = _versions_state(3)
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+
+    async def fake_revert(msg, st, *, redo=False):
+        return True
+
+    monkeypatch.setattr(bot, "revert_draw_version", fake_revert)
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    run_route.assert_not_awaited()
