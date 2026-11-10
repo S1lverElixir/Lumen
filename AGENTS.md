@@ -32,9 +32,11 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   `git commit -a`; stage the exact paths you changed and re-check `git status` before committing.
   Commit your own files promptly: another session's broad commit absorbs your uncommitted work into
   its message, which happened to this file on 10.11.2026.
-- Work on a branch `agent/<short-topic>`, never on main. Commit there yourself, small logical
-  steps, one line saying what and why, in the language of the recent git log (Russian). The owner
-  merges. Never push, merge to main, deploy to the Space, or message the live bot on your own.
+- Work on a branch `agent/<short-topic>`, never on main; the branch comes from the owner or from a
+  separate `git worktree`, so never move the shared checkout yourself and ask if it sits on `main`.
+  Commit there yourself, in small logical steps, one line saying what and why, in the language of
+  the recent git log (Russian). The owner merges. Never push, merge to main, deploy to the Space,
+  or message the live bot on your own.
 
 ## Secrets and privacy
 - Never read or print `.env` or any key value. Some free model tiers train on prompts.
@@ -93,9 +95,10 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   are reachable only through the allowlist in `proxy/proxy.ts`. Adding a provider without an
   allowlist entry times out in production while every local test passes: change the allowlist,
   deploy the proxy, then ask the owner to confirm with `/diag`. The relay itself has limits no
-  local run shows: it kills an upstream at 60 s (`504`), refuses bodies over 100 MB (`413`) and
-  never follows a redirect, deliberately (`redirect: "error"`) — so a timeout above 60 s, a large
-  upload or a provider behind a 302 fails only on the Space.
+  local run shows: it kills an upstream at 60 s (`504`), refuses a request body over 100 MB
+  (`413`) but cuts an oversized reply mid-stream, and never follows a redirect, deliberately
+  (`redirect: "error"`) — so a timeout above 60 s, a large upload or a provider behind a 302
+  fails only on the Space.
 - What ships is not what is in the repo: `.dockerignore` keeps `tests/`, `docs/`, `proxy/` and
   `.github/` out of the image, so a runtime path reading one of those passes tests and fails in
   production. The image rebuilds from scratch every deploy, which is why `requirements.txt` pins
@@ -108,9 +111,10 @@ or a routing change). If nothing is unverified or risky, say so in one line.
 
 ## Where things live
 - `bot.py` is the entry point and composition root (env, logging, Dispatcher, main) and re-exports
-  over 250 names from the `lumen_*.py` modules: a grep for a symbol hits `bot.py` first, the
-  definition is in the module. `lumen_admin.py` holds the FastAPI app and admin endpoints; the rest
-  is in the 30 `lumen_*.py` files, each opening with a one-line docstring. A name ending in `_flow`
+  over 250 names from the `lumen_*.py` modules (226 of them in `__all__`): a grep for a symbol
+  hits `bot.py` first, the definition is in the module. `lumen_admin.py` holds the FastAPI app and
+  the admin endpoints; the rest is in the 30 `lumen_*.py` files, each opening with a one-line
+  docstring. A name ending in `_flow`
   or `_calls` is the Telegram-touching half of the plain module next to it.
 - `lumen_lang.py` is over 300 KB of fixed UI strings in 25 languages. Never read it whole; grep a
   narrow pattern. Any new user-visible string must be added in all 25 languages or the
@@ -156,7 +160,8 @@ Gemini as the unconditional automatic reserve for everything it answers.
 - `python bot.py` makes the module `__main__` while tests import it as `bot`; the alias at the top
   of `bot.py` (`sys.modules.setdefault("bot", ...)`) keeps them one module, and every `import bot`
   in `lumen_*.py` is function-level on purpose. Hoisting one, or dropping the alias, gives two
-  instances with separate state and a permanent 503 with the whole suite green (prod 09.2026).
+  instances with separate state and a permanent 503 with the whole suite green; the comment above
+  that alias in `bot.py` records the incident.
 - Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`): it
   is the only place that sets the message deadline (`MESSAGE_TOTAL_BUDGET_SEC`), the `chat=` label
   in logs, the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the honest busy reply, so a path outside it
@@ -168,10 +173,11 @@ Gemini as the unconditional automatic reserve for everything it answers.
   new writer must honor that flag (audit A5-2, 28.10.2026).
 - `unittest.mock.patch` only replaces the name in the namespace that reads it: patch
   `lumen_router_config.X`, not `bot.X`.
-- The working tree is CRLF (`core.autocrlf=true`, no `.gitattributes`), so multi-line edits often
-  fail to match because of `\r`. Edit single lines, and never reflow a whole file to LF as a side
-  effect. Source files are UTF-8 with Cyrillic, and `col_offset` in an AST is a byte offset: a
-  script that patches by offset must work on bytes.
+- With `core.autocrlf=true` and no `.gitattributes`, almost the whole working tree is CRLF
+  (two tracked files are not), so multi-line edits often fail to match because of the CR
+  character. Edit single lines, and never reflow a whole file to LF as a side effect. Source
+  files are UTF-8 with Cyrillic, and `col_offset` in an AST is a byte offset: a script that
+  patches by offset must work on bytes.
 
 ## Code style
 - Targeted edits on existing files. Never rewrite a file from scratch unless a split was approved.
@@ -197,10 +203,11 @@ Gemini as the unconditional automatic reserve for everything it answers.
   those keys stay empty, tests only see the Gemini and Pollinations branches: to exercise Munito or
   Cloudflare a fixture must set the key itself — a fake value for one test, never a real key in a
   test or a fixture. When a module starts reading a new key at import time, add it to that list.
-- Sleeps and network calls go through a module-level seam read through `bot.` at call time
-  (`_typing_sleep`, `_get_http_session`, `lumen_tiktok._sleep`), which `conftest.py` replaces for
-  the whole suite: a direct `asyncio.sleep` slows every test, and a seam imported by value is never
-  replaced, so the test passes without waiting or calling anything.
+- Waits go through a module-level seam read at call time, and `conftest.py` replaces two of them
+  for the whole suite: `bot._typing_sleep` and `lumen_tiktok._sleep`, each read from its own module.
+  A direct `asyncio.sleep` therefore slows every test in the run. Network has the same seam shape
+  (`bot._get_http_session`) but is patched per test, not suite-wide, so new code that reaches out
+  is tested by patching that name in the module that reads it.
 - Reuse the shared fakes in `tests/bot_test_helpers.py` instead of writing new ones, and extend an
   existing parametrized test rather than add a near-duplicate.
 - A bug-fix test must fail on the old code and pass on the fixed one; run it both ways.
