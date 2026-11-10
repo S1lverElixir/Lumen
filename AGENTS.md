@@ -63,11 +63,11 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   external imports), `deno check proxy/proxy.ts`, `deno lint proxy/proxy.ts`.
 - `pip-audit -r requirements.txt` is not part of the local baseline: it needs network and goes red
   on any new CVE in a pinned version. Run it when you touched `requirements.txt` or when asked.
-  It also blocks deployment: a fresh CVE in an untouched pin makes CI red and stops the Space sync
-  even when your code is clean. Report it, never "fix" it by re-pinning. CI reruns on a weekly
-  schedule too, so a quiet repo still gets checked.
+  It gates production too: a fresh CVE in a pin you never touched makes CI red and stops the Space
+  sync. Report it, never "fix" it by re-pinning; CI reruns weekly, so a quiet repo still gets
+  checked.
 - Do not start the bot locally; it needs live tokens and a webhook. Live checks after a deploy
-  (`/diag` plus the main commands) are the owner's job.
+  (`/diag` plus the main commands) are the owner's.
 - Run the gate before changing anything (green baseline) and after each batch. If it is red before
   your changes, stop and report which checks fail; do not carry on with the task or fix unrelated
   failures unless the owner says to. A missing dev dependency is the exception: install it.
@@ -91,10 +91,9 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   never follows a redirect, deliberately (`redirect: "error"`) — so a timeout above 60 s, a large
   upload or a provider behind a 302 fails only on the Space.
 - What ships is not what is in the repo: `.dockerignore` keeps `tests/`, `docs/`, `proxy/` and
-  `.github/` out of the image, so a runtime path that reads one of those passes the tests and fails
-  in production. The image is rebuilt from scratch on every deploy, which is why
-  `requirements.txt` pins with `==` (see its header): bumping a version is a deliberate decision
-  followed by a manual smoke test, never a side effect.
+  `.github/` out of the image, so a runtime path reading one of those passes tests and fails in
+  production. The image rebuilds from scratch every deploy, which is why `requirements.txt` pins
+  with `==` (see its header): a version bump is a decision plus a smoke test, never a side effect.
 
 ## Report
 In this order, no padding: what changed and why; changed files; gate result (plus proxy gate if
@@ -125,10 +124,9 @@ Gemini as the unconditional automatic reserve.
   built from DuckDuckGo, Bing and Google News; the order and merge rules are in
   `docs/ARCHITECTURE.md`.
 - Limits are derived, not picked: a daily cap sits under the provider's real free-tier budget with
-  headroom, and per-user caps follow the existing family (one number for messages, one per heavy
-  feature). The global cap is what protects a shared provider, so a reflexively small number is not
-  safety. Put the arithmetic in the plan before changing one; `docs/ENVIRONMENT.md` documents the
-  reasoning behind the current values.
+  headroom, and per-user caps follow the existing family (one for messages, one per heavy feature).
+  The global cap is what protects a shared provider, so a reflexively small number is not safety.
+  Put the arithmetic in the plan; `docs/ENVIRONMENT.md` records the reasoning behind the values.
 - User-facing text must never name a provider or a model, including in an error message. The leak
   filter in `lumen_security.py` and the persona in `system_prompt.py` are the source of truth.
 
@@ -149,11 +147,10 @@ Gemini as the unconditional automatic reserve.
   on the Munito head); Gemini SSE has only ever been exercised by hand through the smoke bot, and
   no failover path is covered at all. Before touching streaming code, follow the manual smoke
   checklist in `docs/ARCHITECTURE.md` and list in the report which points the owner must run.
-- Running `python bot.py` makes the module `__main__` while tests import it as `bot`; the alias at
-  the top of `bot.py` (`sys.modules.setdefault("bot", ...)`) keeps them one module, and every
-  `import bot` inside `lumen_*.py` is function-level on purpose. Hoisting one to the top of a file,
-  or dropping the alias, gives two instances with separate state and a permanent 503 while the
-  whole suite stays green (прод сентябрь 2026).
+- `python bot.py` makes the module `__main__` while tests import it as `bot`; the alias at the top
+  of `bot.py` (`sys.modules.setdefault("bot", ...)`) keeps them one module, and every `import bot`
+  in `lumen_*.py` is function-level on purpose. Hoisting one, or dropping the alias, gives two
+  instances with separate state and a permanent 503 with the whole suite green (прод 09.2026).
 - Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`):
   outside it a request skips the message budget, the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the
   busy reply, and `/draw` outside the lock left two live buttons over one photo (review 10.11.2026).
