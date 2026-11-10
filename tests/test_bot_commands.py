@@ -1270,7 +1270,7 @@ def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
     chat_id = 999442
     captured = {}
 
-    async def fake_edit(session, prompt, reference, timeout_sec=None):
+    async def fake_edit(session, prompt, reference, timeout_sec=None, **kwargs):
         captured["edit"] = (prompt, reference)
         return b"PNG edited bytes"
 
@@ -1430,6 +1430,28 @@ def test_resolve_edit_reference_weak_verb_uses_fresh_generation_only(monkeypatch
         "last_drawn_user": 8,
     }
     assert asyncio.run(_resolve_edit_reference(_edit_ref_message(), foreign, is_private=True, implicit=False)) is None
+
+
+def test_inline_draw_edit_keeps_reference_orientation(monkeypatch):
+    # 16:9 референс правится в 16:9: квадрат обрезал края кадра (прод 10.11.2026).
+    chat_id = 999449
+    captured = {}
+
+    async def fake_edit(session, prompt, reference, timeout_sec=None, width=1024, height=1024):
+        captured["size"] = (width, height)
+        return b"PNG bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "image_dimensions", lambda data: (1280, 720))
+    monkeypatch.setattr(bot, "_cloudflare_edit_to_image", fake_edit)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    asyncio.run(bot.inline_draw(incoming, "сделай небо ночным", reference=(b"ref", "image/jpeg")))
+    assert captured["size"] == (1344, 768)
 
 
 def test_repeat_variant_redraws_last_prompt(rate_guard_setup, monkeypatch):

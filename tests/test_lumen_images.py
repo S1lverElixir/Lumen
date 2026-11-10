@@ -111,6 +111,34 @@ def test_detect_image_size(prompt, expected):
     assert lumen_images.detect_image_size(prompt) == expected
 
 
+def _jpeg_header(width, height):
+    """Минимальный JPEG-заголовок: APP0, затем SOF0 с размерами — достаточно
+    для парсера размеров без сторонних библиотек."""
+    return (
+        bytes([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]) + bytes(14)
+        + bytes([0xFF, 0xC0, 0x00, 0x11, 0x08])
+        + height.to_bytes(2, "big") + width.to_bytes(2, "big") + bytes(9)
+    )
+
+
+def test_image_dimensions_reads_headers_without_pillow():
+    assert lumen_images.image_dimensions(_jpeg_header(800, 450)) == (800, 450)
+    png = (
+        bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        + bytes([0x00, 0x00, 0x00, 0x0D]) + b"IHDR"
+        + (640).to_bytes(4, "big") + (480).to_bytes(4, "big")
+    )
+    assert lumen_images.image_dimensions(png) == (640, 480)
+    assert lumen_images.image_dimensions(b"not an image") is None
+
+
+def test_size_for_reference_follows_orientation():
+    assert lumen_images.size_for_reference((1280, 720)) == (1344, 768)
+    assert lumen_images.size_for_reference((720, 1280)) == (768, 1344)
+    assert lumen_images.size_for_reference((800, 800)) == (1024, 1024)
+    assert lumen_images.size_for_reference(None) == (1024, 1024)
+
+
 def test_cloudflare_generation_passes_requested_size(cf_configured):
     captured = {}
     asyncio.run(cf_configured._cloudflare_text_to_image(

@@ -237,6 +237,65 @@ def detect_image_size(prompt: str) -> tuple[int, int]:
     return _SIZES["1:1"]
 
 
+def image_dimensions(data: bytes) -> tuple[int, int] | None:
+    """Ширина/высота по заголовку файла, без Pillow: правка должна сохранять
+    пропорции референса (замер 10.11.2026: 16:9 фото выходило квадратом)."""
+    try:
+        if data.startswith(b"\xff\xd8"):
+            i = 2
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                length = int.from_bytes(data[i + 2:i + 4], "big")
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    h = int.from_bytes(data[i + 5:i + 7], "big")
+                    w = int.from_bytes(data[i + 7:i + 9], "big")
+                    return (w, h) if w and h else None
+                if length < 2:
+                    return None
+                i += 2 + length
+            return None
+        if data.startswith(b"\x89PNG") and len(data) >= 24:
+            w = int.from_bytes(data[16:20], "big")
+            h = int.from_bytes(data[20:24], "big")
+            return (w, h) if w and h else None
+        if data.startswith(b"RIFF") and data[8:12] == b"WEBP" and len(data) >= 30:
+            if data[12:16] == b"VP8X":
+                w = 1 + int.from_bytes(data[24:27], "little")
+                h = 1 + int.from_bytes(data[27:30], "little")
+                return (w, h)
+            if data[12:16] == b"VP8 ":
+                w = int.from_bytes(data[26:28], "little") & 0x3FFF
+                h = int.from_bytes(data[28:30], "little") & 0x3FFF
+                return (w, h) if w and h else None
+            if data[12:16] == b"VP8L" and len(data) >= 25:
+                bits = int.from_bytes(data[21:25], "little")
+                return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    except Exception:
+        return None
+    return None
+
+
+def size_for_reference(dimensions: tuple[int, int] | None) -> tuple[int, int]:
+    """Выходной размер правки: рамка референса, при явной ориентации — та же
+    пропорция; неизвестные размеры дают квадрат."""
+    if not dimensions:
+        return (1024, 1024)
+    w, h = dimensions
+    if not w or not h:
+        return (1024, 1024)
+    if w >= h * 1.25:
+        return _SIZES["16:9"]
+    if h >= w * 1.25:
+        return _SIZES["9:16"]
+    return (1024, 1024)
+
+
 def _image_content_type(data: bytes) -> str:
     """Тип референса по магическим байтам: имя файла у FormData условное."""
     if data.startswith(b"\x89PNG"):
@@ -347,7 +406,8 @@ async def _cloudflare_text_to_image(
 
 
 async def _cloudflare_edit_to_image(
-    session: aiohttp.ClientSession, prompt: str, reference: bytes, *, timeout_sec: float | None = None,
+    session: aiohttp.ClientSession, prompt: str, reference: bytes, *,
+    timeout_sec: float | None = None, width: int = 1024, height: int = 1024,
 ) -> bytes:
     """Правка готовой картинки: референс уходит полем input_image_0 (замер
     10.11.2026: красное яблоко -> зелёное, вход 1024x1024 принимается как есть)."""
@@ -357,7 +417,8 @@ async def _cloudflare_edit_to_image(
         raise ImageProviderError("Cloudflare edit: пустой референс")
     status, retry_after, data = await _cloudflare_request(
         session, _cloudflare_model_url(CLOUDFLARE_EDIT_MODEL),
-        form=_cloudflare_form(prompt, reference=reference), timeout_sec=timeout_sec,
+        form=_cloudflare_form(prompt, reference=reference, width=width, height=height),
+        timeout_sec=timeout_sec,
     )
     return _cloudflare_image_result(status, retry_after, data)
 

@@ -210,10 +210,14 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         # у Pollinations/sana правки нет вовсе. Генерация — прежней цепочкой.
         if reference is not None:
             reference_bytes = reference[0]
+            # Кадр правки повторяет ориентацию референса: 16:9 фото иначе
+            # возвращалось квадратом и теряло края (прод 10.11.2026).
+            width, height = bot.size_for_reference(bot.image_dimensions(reference_bytes))
 
-            async def _edit_call(session, text, timeout_sec=None):
+            async def _edit_call(session, text, timeout_sec=None, _w=width, _h=height):
                 return await bot._cloudflare_edit_to_image(
                     session, text, reference_bytes, timeout_sec=timeout_sec,
+                    width=_w, height=_h,
                 )
 
             calls = {"cloudflare": _edit_call}

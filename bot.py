@@ -990,6 +990,8 @@ __all__ = [
     "_cloudflare_edit_to_image",
     "_pollinations_text_to_image",
     "detect_image_size",
+    "image_dimensions",
+    "size_for_reference",
     "image_provider_names",
     "image_filename",
     "_gemini_tts_bytes",
@@ -1118,8 +1120,10 @@ from lumen_images import (
     _cloudflare_text_to_image,
     _pollinations_text_to_image,
     detect_image_size,
+    image_dimensions,
     image_filename,
     image_provider_names,
+    size_for_reference,
 )
 
 # Имена провайдеров и ошибок нужны только тестам как `bot.X` (см. пояснение
