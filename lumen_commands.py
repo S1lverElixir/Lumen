@@ -366,7 +366,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             # уже другой сюжет и тратил слоты (ревью 10.11.2026).
             _prev_drawn = bot.get_state(cid).get("last_drawn_message_id")
             _markup_editor = getattr(bot.bot, "edit_message_reply_markup", None)
-            if _prev_drawn and _markup_editor is not None and _prev_drawn != getattr(message, "message_id", None):
+            if _prev_drawn and _markup_editor is not None:
                 await bot._tg_call(
                     _markup_editor,
                     chat_id=cid, message_id=_prev_drawn, reply_markup=None,
@@ -402,7 +402,11 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                     # относятся только к свежей генерации (прод 10.11.2026).
                     _state["last_drawn_at"] = time.time()
                     _state["last_drawn_user"] = uid
-                    _state["last_drawn_message_id"] = getattr(message, "message_id", None)
+                    # id ОТПРАВЛЕННОГО фото, а не запроса: тап приходит с фото, и
+                    # запись id сообщения пользователя делала каждый тап «старым»
+                    # (ревью 10.11.2026). Telegram может не отдать message_id —
+                    # тогда None, и страховка молчит, а не ломает кнопку.
+                    _state["last_drawn_message_id"] = getattr(sent, "message_id", None)
                     # «Ещё вариант» повторяет исходное описание (пропорции
                     # берутся из него же); правка его не перезаписывает.
                     if reference is None:
