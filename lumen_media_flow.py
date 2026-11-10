@@ -156,6 +156,22 @@ async def _resolve_edit_reference(
             fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
             if fetched:
                 return fetched
+        # Своя сгенерированная картинка в общий лог не пишется как media (только
+        # файл в корзинку), поэтому без этого пути "измени" после /draw не находил
+        # картинку и уходил в текстовую модель (прод 10.11.2026).
+        from lumen_message_parse import _find_recent_media_by_category
+
+        buckets = state.get("recent_media_ids") if isinstance(state, dict) else None
+        if isinstance(buckets, dict):
+            own_bucket = buckets.get(str(sender_id)) if sender_id is not None else None
+            candidates = [own_bucket] if own_bucket else (list(buckets.values()) if is_private else [])
+            for bucket in candidates:
+                fid_mime = _find_recent_media_by_category(bucket, "photo")
+                if not fid_mime:
+                    continue
+                fetched = await bot._fetch_media(fid_mime[0], fid_mime[1])
+                if fetched:
+                    return fetched
     return None
 
 

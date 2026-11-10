@@ -1307,6 +1307,47 @@ def test_resolve_edit_reference_prefers_reply_photo_over_last_media(monkeypatch)
     assert fetched == [("reply-fid", "image/jpeg")]
 
 
+def test_resolve_edit_reference_finds_generated_image_in_bucket(monkeypatch):
+    # Прод 10.11.2026: "измени" после /draw уходил в текстовую модель, потому что
+    # сгенерированная картинка живёт только в recent_media_ids, не в общем логе.
+    from lumen_media_flow import _resolve_edit_reference
+
+    message = SimpleNamespace(
+        photo=None, document=None, video=None, animation=None, video_note=None,
+        voice=None, audio=None, sticker=None, reply_to_message=None,
+        from_user=SimpleNamespace(id=7),
+    )
+    state = {"recent_media_ids": {"7": [("gen-fid", "image/jpeg")]}}
+    fetched = []
+
+    async def fake_fetch(fid, mime):
+        fetched.append((fid, mime))
+        return b"img-bytes", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    got = asyncio.run(_resolve_edit_reference(message, state, is_private=True, implicit=True))
+    assert got == (b"img-bytes", "image/jpeg")
+    assert fetched == [("gen-fid", "image/jpeg")]
+
+
+def test_resolve_edit_reference_ignores_bucket_when_not_implicit(monkeypatch):
+    # Слабый глагол ("сделай") без вложения/реплая не должен цеплять чужое фото.
+    from lumen_media_flow import _resolve_edit_reference
+
+    message = SimpleNamespace(
+        photo=None, document=None, video=None, animation=None, video_note=None,
+        voice=None, audio=None, sticker=None, reply_to_message=None,
+        from_user=SimpleNamespace(id=7),
+    )
+    state = {"recent_media_ids": {"7": [("gen-fid", "image/jpeg")]}}
+
+    async def must_not_fetch(*args, **kwargs):
+        raise AssertionError("non-implicit edit must not fetch a reference")
+
+    monkeypatch.setattr(bot, "_fetch_media", must_not_fetch)
+    assert asyncio.run(_resolve_edit_reference(message, state, is_private=True, implicit=False)) is None
+
+
 def test_draw_command_rejects_exhausted_quota(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "/draw кот"
