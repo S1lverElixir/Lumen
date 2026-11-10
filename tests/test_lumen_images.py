@@ -320,6 +320,9 @@ def test_cloudflare_moderation_rejection_is_not_retryable(cf_configured):
         asyncio.run(cf_configured._cloudflare_text_to_image(_FakeSession(_FakeResp(
             status=400, chunks=(body,))), "кот"))
     assert not isinstance(exc.value, (lumen_images.ImageRateLimitedError, lumen_images.ImageBudgetExhaustedError))
+    # Ветка модерации обязана сработать именно она, а не общий 400: иначе
+    # «Provider failed» поведёт себя как временный сбой (ревью 10.11.2026).
+    assert "модерации" in str(exc.value)
 
 
 def test_cloudflare_rejects_unconfigured_without_request(cf_configured, monkeypatch):
