@@ -1,76 +1,185 @@
-# AGENTS.md: instructions for sessions on the Lumen repo
+# AGENTS.md — Lumen: instructions for AI sessions in this repo
 
-## Owner and communication
-- The owner does not write code (the bot was built with AI help). Reply in Russian, in plain words, short: what changed, why, result. Go deeper only when asked. Explain any technical term in a phrase.
-- No emojis or heavy markdown in replies to the owner.
-- Start every conversational reply with "SilverElixir," (a canary: when it disappears, the owner restarts the session). Never put it in code, file contents, commit messages, or reports.
-- Explicit instructions in the owner's task override this file, except Approvals and Secrets: push, merge, deploy, contact with the live bot and access to secrets need direct confirmation of that specific action.
-- If a requirement is ambiguous, ask one short question instead of guessing. If the answer changes little, pick the simpler option and state the assumption in the report.
+Lumen is a Telegram bot with a persona styled after Claude that never names the model behind it:
+one FastAPI + aiogram webhook process on a Hugging Face Space (Docker, Python 3.13,
+`CMD ["python", "-u", "bot.py"]`), plus a small Deno pass-through proxy for the hosts that block
+Hugging Face egress. The Claude look is a goal, not a coincidence: keep the answer layout, the live
+status bubble and the plain tone in anything a user reads.
+This file holds what an agent cannot get from the code: the owner's rules, the commands, the traps.
+How any feature works is in `docs/`. Every fact below was checked against the repo and production
+on 10.11.2026; a commit that changes a fact here updates this file in the same commit.
 
-## Approvals
-- Small requested fixes: do them right away.
-- Large changes (new dependencies, behavior changes, restructuring, streaming or security layers): short plan first, wait for approval.
-- Protected files: system_prompt.py, lumen_security.py, lumen_router_config.py, .github/workflows/*, Dockerfile. Change them only after a plan is approved, even for a one-line fix.
-- Work on a branch named agent/<short-topic>, never on main. Commit there yourself in small logical steps, one-line message saying what and why, in the language of the recent git log. The owner merges.
-- Never push, merge into main, deploy to the HF Space, or contact the live bot without explicit confirmation.
+## Owner and replies
+- The owner does not write code; the bot was built with AI help. Reply in Russian, in plain words,
+  short: what changed, why, result. Go deeper only when asked. Explain any technical term in a
+  phrase. No emojis, no heavy markdown.
+- Start every conversational reply with "SilverElixir," (a canary: when it disappears, the owner
+  restarts the session). Never put it in code, file contents, commit messages, or reports.
+- The owner's task overrides this file, except Approvals and Secrets: push, merge, deploy, talking
+  to the live bot and reading secrets each need confirmation of that specific action.
+- Ambiguous requirement: ask one short question instead of guessing. If the answer changes little,
+  take the simpler option and state the assumption you used.
 
-## Secrets
-- Never read or print .env files or key values. Some free model tiers are trained on prompts.
-- Never call the live admin endpoints (/admin_keys, /export_state, /diag, /webhook_url). /admin_keys returns the service keys, /export_state dumps all chat histories (private user data). Do not paste their output anywhere.
-- If you find a leaked secret, tell the owner to rotate it. Do not rewrite git history without asking.
+## Approvals and git
+- Small requested fixes: do them right away. Large changes (a new dependency, behavior change,
+  restructuring, streaming or security layers): short plan first, wait for approval.
+- Protected files, approval needed even for a one-line fix: `system_prompt.py`, `lumen_security.py`,
+  `lumen_router_config.py`, `.github/workflows/*`, `Dockerfile`. The same list is machine-enforced
+  as `ask` in `opencode.json`; change this file and `opencode.json` together.
+- Work on a branch `agent/<short-topic>`, never on main. Commit there yourself, small logical
+  steps, one line saying what and why, in the language of the recent git log (Russian). The owner
+  merges. Never push, merge to main, deploy to the Space, or message the live bot on your own.
 
-## What this repo is
-- Lumen: a Telegram bot (persona styled after Claude) running as a single FastAPI + aiogram webhook service on a Hugging Face Space (Docker, Python 3.13, entry: python -u bot.py). LLM backbone since 05.11.2026: Munito AI (OpenAI-compatible endpoint, open models) for all plain text and images, with Google Gemini as the unconditional automatic reserve. Gemini-only paths: reading a site by URL, YouTube analysis, video and audio input, TTS output. Groq has one remaining role: Whisper transcription of voice notes. Every fresh query also gets external DuckDuckGo/Google News snippets for all providers, since no Munito model has web search.
-- bot.py is the entry point and composition root (env, logging, Dispatcher, main). Domain logic lives in lumen_*.py; list the directory to find the module you need.
-- Model routing lives in lumen_router_config.py, injection and leak defenses in lumen_security.py.
-- Tests need no real secrets: conftest.py stubs BOT_TOKEN, GEMINI_API_KEY and BOT_LOG_PATH. Do not add real keys to tests or fixtures.
+## Secrets and privacy
+- Never read or print `.env` or any key value. Some free model tiers train on prompts.
+- Never call the live admin endpoints: `/admin_keys` (service keys), `/export_state` (every chat
+  history), `/devtrace` (user texts and answers), `/webhook_url`, `/diag`. Never paste their output
+  anywhere. The daily `state-backup.yml` already calls `/export_state` on a schedule; that is the
+  owner's plumbing, not a command for you.
+- Reading is allowed where the platform hides values: `NO_PROXY= hf spaces logs SilverElixir/Lumen`
+  and `NO_PROXY= hf spaces variables list SilverElixir/Lumen` give runtime logs and secret names,
+  `gh secret list` gives repo secret names. Values are never returned by either API. Clearing
+  `NO_PROXY` is mandatory: the owner's global value contains `[::1]`, which kills any httpx-based
+  tool with `InvalidURL: Invalid port` (found 09.11.2026).
+- Found a leaked secret? Tell the owner to rotate it. Do not rewrite git history without asking.
 
-## Commands (verified against CI, .github/workflows/ci.yml)
-- Setup, once per session: pip install -r requirements.txt -r requirements-dev.txt
-- Gate: pyflakes bot.py lumen_*.py system_prompt.py tests/*.py; pytest -q
-- Gate on Windows (the line above is the CI form for Linux; globs do not expand here): pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name }); pytest -q
-- Shell on the dev machine is PowerShell: ls, cat, grep, tail and other unix commands do not exist, and globs like lumen_*.py do not expand for commands. Read and search with the read/glob/grep tools; in the shell use PowerShell (Get-Content, Get-ChildItem, Select-String, Select-Object -Last N). Do not wrap commands in bash -lc to get linux globs.
-- Proxy gate, required when proxy/ is touched, otherwise skip: deno test proxy/proxy_test.ts (no external imports, works offline; see proxy_test.ts header); deno check proxy/proxy.ts; deno lint proxy/proxy.ts
-- Dependency audit: pip-audit -r requirements.txt. CI runs it too, but it needs network and goes red when a new CVE appears in the pinned versions. Run it only when touching requirements.txt or when the owner asks; it is not part of the baseline.
-- Single test file: pytest tests/<file>.py -v; single test: pytest tests/<file>.py::<test_name> -v
-- Do not start the bot locally. It needs live tokens and webhooks. Verification is the gate; live checks (/diag + main commands) are done by the owner after deploy.
-- Run the gate before changing anything (green baseline) and after each batch of changes.
-- If the gate is red before your changes, stop and report which checks fail. Do not start the task and do not fix unrelated failures unless the owner says to continue. A missing dev dependency is the exception: install it.
-- Done means: the gate was actually run and is green, and the final report is written. Never say "done" or "tests pass" otherwise.
+## Commands
+- Setup, once per session: `pip install -r requirements.txt -r requirements-dev.txt`
+- Gate: `pyflakes bot.py lumen_*.py system_prompt.py tests/*.py` then `pytest -q`. About 1200 tests,
+  around 30 seconds. This is what CI runs; CI also always runs the three deno proxy checks and
+  `pip-audit`, whether or not you touched them.
+- Globs do not expand in PowerShell (opencode sessions), so there run
+  `pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name })`
+  then `pytest -q`, and read or search with the file tools instead of `cat` and `grep`. In Qoder
+  the Bash tool is Git Bash, where the first form works as written.
+- One file: `pytest tests/<file>.py -v`. One test: `pytest tests/<file>.py::<name> -v`.
+- Proxy gate, run it whenever you change `proxy/`: `deno test proxy/proxy_test.ts` (offline, no
+  external imports), `deno check proxy/proxy.ts`, `deno lint proxy/proxy.ts`.
+- `pip-audit -r requirements.txt` is not part of the local baseline: it needs network and goes red
+  on any new CVE in a pinned version. Run it when you touched `requirements.txt` or when asked.
+  It also blocks deployment: a fresh CVE in an untouched pin makes CI red and stops the Space sync
+  even when your code is clean. Report it, never "fix" it by re-pinning. CI reruns on a weekly
+  schedule too, so a quiet repo still gets checked.
+- Do not start the bot locally; it needs live tokens and a webhook. Live checks after a deploy
+  (`/diag` plus the main commands) are the owner's job.
+- Run the gate before changing anything (green baseline) and after each batch. If it is red before
+  your changes, stop and report which checks fail. A missing dev dependency is the exception.
+- Done means: you ran the gate and it is green, and the report is written. Never say "done" or
+  "tests pass" otherwise.
 
-## Final report
-- Short, in this order: what changed and why; changed files; gate result (and proxy gate if run); what was not verified; risks or things the owner must check by hand (for example a smoke test after a version bump or a routing change).
-- If nothing is unverified or risky, say so in one phrase instead of padding.
+## Report
+Short, in this order: what changed and why; changed files; gate result (plus proxy gate if run);
+what was not verified; what the owner must check by hand (a smoke test after a version bump or a
+routing change). If nothing is unverified or risky, say so in one phrase instead of padding.
+
+## Where things live
+- `bot.py` is the entry point and composition root (env, logging, Dispatcher, main), and it
+  re-exports about 300 names from the `lumen_*.py` modules: a grep for any symbol hits `bot.py`
+  first, but the definition is in the module. `lumen_admin.py` holds the FastAPI app and the admin
+  endpoints; the other domain logic is in the 31 `lumen_*.py` files, each opening with a one-line
+  docstring. A name ending in `_flow` or `_calls` is the Telegram-touching half of the plain module
+  next to it, which holds the mechanics.
+- `lumen_lang.py` is over 300 KB of fixed UI strings in 25 languages. Never read it whole; grep a
+  narrow pattern. Any new user-visible string must be added in all 25 languages or the
+  completeness test fails.
+
+## Providers, in one screen
+- Text and image input: Munito AI (`_MUNITO_ORDER`) with Google Gemini appended as an unconditional
+  reserve. Reading a site by URL, YouTube, video, audio input and TTS: Gemini only. Voice notes are
+  transcribed by Groq Whisper first, the only thing Groq is still used for.
+- `/draw` is a different provider: Cloudflare Workers AI (`@cf/black-forest-labs/flux-2-klein-4b`)
+  does both generation and edits, Pollinations (`sana`) is the reserve and only generates. Fallback
+  is by provider, not by model. A moderation refusal is terminal for the chain and still costs the
+  person their personal slot.
+- Freshness: every provider also gets an external snippet block from DuckDuckGo, Bing and Google
+  News (news queries merge DuckDuckGo with Google News; otherwise DuckDuckGo, then Bing, then
+  News), because no Munito model has web search.
+- User-facing text must never name a provider or a model, including in an error message. The leak
+  filter in `lumen_security.py` and the persona in `system_prompt.py` are the source of truth.
 
 ## Gotchas
-- Every push to main that passes CI auto-deploys to the live HF Space (.github/workflows/sync-to-hf.yml waits for the CI workflow, then pushes the checked commit with a lease). A direct Space hotfix makes the sync fail loudly instead of being overwritten. A green CI run is a deploy.
-- The Telegram proxy (proxy.ts, Deno Deploy) is deployed separately from the HF Space. Pushing a change to it does not update the running proxy: after any proxy change, it must be redeployed on Deno Deploy (`deno deploy` needs its own auth; there are two apps, main and backup, and both need the same file).
-- Deploying the proxy needs a bundle whose root contains `proxy/proxy.ts` (that is the app's entrypoint): `deno deploy . --prod --org silverelixir --app lumen-proxy` from a directory holding `proxy/`. Uploading the `proxy` directory itself as the root fails at build (`REVISION_FAILED`), and Deno keeps the previous production revision, so the running proxy is unaffected. Two apps exist (`lumen-proxy`, `lumen-proxy-backup`) and both must get the same file.
-- Space runtime logs and secret names are readable locally through the `hf` CLI session: `NO_PROXY= hf spaces logs SilverElixir/Lumen` and `NO_PROXY= hf spaces variables list SilverElixir/Lumen`. Secret VALUES are never returned by the API. The `NO_PROXY=` prefix is required: the owner's global NO_PROXY contains `[::1]`, which crashes any httpx2-based tool with `InvalidURL: Invalid port` (found 09.11.2026).- Automated streaming tests use mocked clients; live Gemini SSE has been exercised manually through the smoke bot, while Munito SSE has only ever been measured from the owner's machine by the eval scripts, never from the deployed container. There is no controlled integration test for either. Before touching streaming code, read the manual smoke-test checklist in docs/ARCHITECTURE.md and list in the report which of its points the owner must run by hand.
-- Versions in requirements.txt are pinned with == (HF rebuilds the image from scratch on every deploy; see the file header comment). Bumping a version is a deliberate decision followed by a manual smoke test (/diag + main commands), not a side effect.
-- A model leaves the routing only with dated evidence (production log errors or provider docs), written in a comment next to the chain list it came out of: `_MUNITO_ORDER` or the `GEMINI_*_CHAIN` lists in lumen_router_config.py. The old `_OR_MODEL_HEALTH` registry was deleted with OpenRouter on 05.11.2026 and has no successor: temporary failures are handled by the 429/503 cooldown and the in-memory quarantine counter, not by editing lists. Never remove a model on a guess.
-- unittest.mock.patch only changes the namespace it targets: patch the module that reads the name (for example lumen_router_config.X), not bot.X.
-- Source files contain Cyrillic. Scripts that edit by AST col_offset must work on bytes, because col_offset is a UTF-8 byte offset.
+- A green CI run on main is a deploy: `sync-to-hf.yml` waits for CI, then pushes exactly the tested
+  commit to the Space with a lease. A hotfix made directly on the Space makes the sync fail loudly
+  instead of being overwritten.
+- The proxy has its own deploy (`deploy-proxy.yml`), and it can miss a change silently: it deploys
+  only when the diff of the commit CI tested touches `proxy/`. On 09.11.2026 a `proxy/proxy.ts`
+  change reached main, a second push cancelled its CI run, the deploy step then saw no proxy diff,
+  and both Deno apps kept the old revision. After any proxy change, check that the deploy steps of
+  that run really executed; if they were skipped, deploy by hand (recipe: `docs/ARCHITECTURE.md`,
+  section "Deploy paths").
+- Container egress is blocked or hangs toward every external host: Telegram Bot API, TikWM,
+  `api.cloudflare.com`. They are reachable only through the allowlist in `proxy/proxy.ts`. Adding a
+  provider whose host is not on that list produces timeouts in production that no local test can
+  reproduce: change the allowlist, deploy the proxy, then confirm with `/diag`.
+- What ships is not what is in the repo: `.dockerignore` keeps `tests/`, `docs/`, `proxy/`,
+  `AGENTS.md` and `.github/` out of the image, so a runtime path that reads one of those works in
+  the tests and fails in production. Versions in `requirements.txt` are pinned for the same reason
+  (the Space rebuilds the image from scratch; see its header): bumping one is a deliberate decision
+  followed by a manual smoke test, never a side effect.
+- A model leaves routing only with dated evidence (production log errors or provider docs), written
+  as a comment next to the chain it came out of: `_MUNITO_ORDER` or the `GEMINI_*_CHAIN` lists in
+  `lumen_router_config.py`. Transient failures are not exclusions: `503`/`429` set a cooldown that
+  survives a restart, repeated empty answers set an in-memory quarantine that a restart clears.
+  Never remove a model on a guess.
+- In that same file `GEMINI_DEFAULT_CHAIN`, `GEMINI_LINK_CHAIN` and `GEMINI_LINK_SEARCH_CHAIN` are
+  copies, not aliases, of the heavy and search chains (аудит 26.09.2026): editing one list does not
+  move the others, so check which copy a route actually reads.
+- Streaming has no real transport test: every automated test mocks the client. Munito SSE from the
+  deployed container is now proven in production (Space logs 10.11.2026: answers received via
+  streaming on the Munito head), but nothing tests Gemini SSE or a failover. Before touching
+  streaming code, follow the manual smoke checklist in `docs/ARCHITECTURE.md` and list in the
+  report which points the owner must run by hand.
+- `unittest.mock.patch` only replaces the name in the namespace that reads it: patch
+  `lumen_router_config.X`, not `bot.X`.
+- The working tree is CRLF (`core.autocrlf=true`, no `.gitattributes`), so multi-line edits often
+  fail to match because of `\r`. Edit single lines, and never reflow a whole file to LF as a side
+  effect. Source files are UTF-8 with Cyrillic, and `col_offset` in an AST is a byte offset: a
+  script that patches by offset must work on bytes.
 
 ## Code style
-- Targeted edits on existing files. Never rewrite a file from scratch unless splitting it was approved.
-- Comments: Russian only, except structural headers containing identifiers/commands. Explain why (reason, incident date, tradeoff), max 2-3 lines. Never restate what the code does.
-- Add a comment only where non-obvious: magic numbers, regexes, workarounds, ordering constraints, counterintuitive behavior.
-- Keep dated evidence comments that prevent regressions, short: (prod ДД.ММ.ГГГГ: ...), (audit ДД.ММ.ГГГГ), (review ДД.ММ.ГГГГ). Move long write-ups to docs/.
-- Banned in code, comments and docs: code paraphrase, filler ("Важно", "Здесь мы", "Следует отметить"), emojis, heavy dash use, commented-out code.
-- Module docstring: one line saying what the module does. No extraction history ("вынесено из bot.py").
+- Targeted edits on existing files. Never rewrite a file from scratch unless a split was approved.
+- Comments in Russian, except structural headers carrying identifiers or commands. Say why (reason,
+  incident date, tradeoff), 2-3 lines max, never restate the code. Comment only where something is
+  non-obvious: magic numbers, regexes, workarounds, ordering constraints, surprising behavior.
+- Keep dated regression markers short: `(prod ДД.ММ.ГГГГ: ...)`, `(audit ...)`, `(review ...)`.
+  Long write-ups belong in `docs/`.
+- Banned in code, comments and docs: paraphrasing the code, filler ("Важно", "Здесь мы",
+  "Следует отметить"), emojis, dash spam, commented-out code. A module docstring is one line saying
+  what the module does, with no extraction history ("вынесено из bot.py").
+- Before writing new code, check whether the repo, the stdlib or an installed dependency already
+  does it. New dependencies need approval.
 
 ## Tests
-- Before adding a test, state in the report: what behavior it protects, what real regression makes it fail, why existing tests do not already catch it. If you cannot answer, do not add it.
-- Extend an existing parametrized test instead of writing a near-duplicate.
-- A bug-fix test must fail on the old code and pass on the fixed code; run both to confirm.
-- Do not write: tests without assertions, tests comparing a value to itself, tests where the mock reimplements the asserted behavior, greps over source text.
+- State before adding a test: what behavior it protects, which real regression would make it fail,
+  why an existing test does not catch it. No answer means no test.
+- There is no pytest-asyncio: tests are plain `def test_*` that call `asyncio.run(scenario())`
+  inside. An `async def test_*` is collected, never awaited, and passes without testing anything.
+- `tests/conftest.py` stubs `BOT_TOKEN`, `GEMINI_API_KEY`, `BOT_LOG_PATH` and blanks ten more
+  provider and experiment variables, so a local `.env` cannot send a test to a live API. Because
+  those keys stay empty, tests only see the Gemini and Pollinations branches: to exercise Munito or
+  Cloudflare a fixture must set the key itself. When a module starts reading a new key at import
+  time, add it to that list.
+- Reuse the shared fakes in `tests/bot_test_helpers.py` instead of writing new ones, and extend an
+  existing parametrized test rather than add a near-duplicate.
+- A bug-fix test must fail on the old code and pass on the fixed one; run it both ways.
+- Do not write: tests without assertions, a value compared with itself, a mock that reimplements
+  the behavior being asserted, greps over source text.
 
-## Before writing new code
-- Check first whether the project, the stdlib or an already installed dependency does it. New dependencies need approval.
+## Docs and mirrors
+The same facts live in several places and they drift. A change to behavior updates them in the same
+commit: `docs/ARCHITECTURE.md` (pipelines, routing, the streaming smoke checklist, deploy paths),
+`docs/ENVIRONMENT.md` (every environment variable and the hardcoded limits), `README.md` and
+`README.ru.md` (translations of one text: both, or neither), this file, and `opencode.json` when a
+permission changed. A generated RepoWiki may sit in the gitignored `.qoder/` directory: it is not
+committed, it drifts, and `docs/` stays the truth.
 
-## Sentry
-- Organization: silverelixir. Call find_organizations first, then search_issues with organizationSlug=silverelixir. Read a single issue via get_sentry_resource with resourceType=issue.
-
-## Docs
-- Architecture: docs/ARCHITECTURE.md. Environment variables: docs/ENVIRONMENT.md. Library docs (aiogram, FastAPI, google-genai, Deno): context7 MCP.
+## Evals and tools
+- `eval/` holds the offline probes and the persona harness, run by hand from main through
+  `persona-eval.yml`; method and results are in `docs/PROMPT_EVAL.md`, and its dated measurements
+  are what the evidence rule above expects. `eval/harness_eval.py` measures this file itself: it
+  replays real fix-commits through an agent with a candidate `AGENTS.md` and judges by the repo
+  gate, so a longer file has to earn its length.
+- Sentry: organization `silverelixir`; `find_organizations`, then `search_issues` with
+  `organizationSlug=silverelixir`, then `get_sentry_resource` with `resourceType=issue` for one
+  issue. Library docs (aiogram, FastAPI, google-genai, Deno): context7 MCP. Both servers come from
+  `opencode.json`.

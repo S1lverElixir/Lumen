@@ -76,7 +76,7 @@ CLOUDFLARE_AI_BASE_URL=https://<proxy-domain>/fetch/api.cloudflare.com/client/v4
 LUMEN_PROXY_SECRET=<случайная строка от 32 символов: без неё прокси отвечает 503, а бот падает на старте>
 ```
 
-Прокси пропускает запросы только к явному списку хостов (`api.telegram.org`, `www.tikwm.com`, `tikwm.com` и `api.cloudflare.com` — последнему только путь `/client/v4/accounts/<id>/ai/...`, потому что токен генерации едет в `Authorization`). Cloudflare здесь по той же причине, что и TikWM: исходящие с Hugging Face к этому хосту молча виснут (прод 09.11.2026). Реализация — в `proxy/proxy.ts`, тесты — в `proxy/proxy_test.ts`; этот файл деплоится на Deno Deploy отдельно и вручную.
+Прокси пропускает запросы только к явному списку хостов (`api.telegram.org`, `www.tikwm.com`, `tikwm.com` и `api.cloudflare.com` — последнему только путь `/client/v4/accounts/<id>/ai/...`, потому что токен генерации едет в `Authorization`). Cloudflare здесь по той же причине, что и TikWM: исходящие с Hugging Face к этому хосту молча виснут (прод 09.11.2026). Реализация — в `proxy/proxy.ts`, тесты — в `proxy/proxy_test.ts`; зелёный CI в `main` выкатывает его через `.github/workflows/deploy-proxy.yml`, но этот деплой условный: он срабатывает только если в диффе проверенного коммита есть `proxy/`, и один раз уже промахнулся (прод 09.11.2026). После правки списка хостов убедись, что шаги деплоя действительно выполнились, или выкати вручную (см. `docs/ARCHITECTURE.md`, раздел "Deploy paths").
 
 ## Диагностика
 

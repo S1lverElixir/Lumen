@@ -94,7 +94,7 @@ Streaming is covered only by mocked clients; no test exercises a real Gemini or 
 7. A site link and a YouTube link: both still go to Gemini, and a user over `DAILY_USER_GEMINI_LIMIT` gets the honest refusal, not a Munito guess.
 8. A voice note: Groq Whisper transcribes first and the text answers through the normal route; with Whisper unavailable the audio must still reach Gemini.
 
-Routing changes also need two owner-side checks that no chat message exercises: `/selftest` (the Munito probe line, plus the Gemini line with the `gemini` argument) and `/stats`, whose Munito section must appear only while the provider is active. Live egress from the container to `api.munito.ai` has never been observed in production, so `/diag`'s `munito_api` row is part of the same first check.
+Routing changes also need two owner-side checks that no chat message exercises: `/selftest` (the Munito probe line, plus the Gemini line with the `gemini` argument) and `/stats`, whose Munito section must appear only while the provider is active. `/diag`'s `munito_api` row is the quick check of the egress itself: Munito streaming from the container is already proven in production (prod 10.11.2026: answers received via streaming on the Munito head), so a red row means a regression, not an unmeasured path.
 
 ## Prompt-injection and identity-leak defenses
 
@@ -127,3 +127,21 @@ Chat memory is one chronological log per chat (`<chat_id>.json`, or `lumen:chat:
 ## Error tracking
 
 If `SENTRY_DSN` is set, `sentry_sdk` picks up every `log.exception()`/`log.error()` call already in the codebase with no changes needed at the call sites. Local variables and request bodies are disabled, because stack locals can contain prompts and chat history; every event is additionally scrubbed of known secrets (`BOT_TOKEN`, API keys, `WEBHOOK_SECRET`, `ADMIN_PANEL_KEY`, the Upstash token) before it leaves the process. Performance tracing is off; this only tracks errors, to stay comfortably inside Sentry's free tier.
+
+## Deploy paths
+
+Two production surfaces deploy independently, both gated on a green CI run of the same commit.
+
+- **Hugging Face Space** — `sync-to-hf.yml` (`workflow_run` on CI, `main` only): checks out exactly the SHA CI tested, refuses to move unless that commit descends from the Space's current `main` (a hotfix made directly on the Space therefore fails the sync loudly instead of being silently overwritten), then pushes with `--force-with-lease`. A green CI run on main is a deploy.
+- **Deno proxy** — `deploy-proxy.yml` ships `proxy/proxy.ts` with `denoland/deployctl` through GitHub OIDC (no token in the workflow, only `id-token: write`), to the two projects named in the `DENO_PROXY_PROJECT` and `DENO_PROXY_PROJECT_FALLBACK` repo secrets. One-time prerequisite per project, in the Deno dashboard: Settings → Git → connect this repository, deploy mode "GitHub Actions".
+
+The proxy deploy is conditional: it fires only when `git diff <base> HEAD` lists a path under `proxy/`, where `<base>` is the merge base for a merge commit and `HEAD~1` otherwise. That check has already missed a real change once. On 09.11.2026 `proxy/proxy.ts` (the `api.cloudflare.com` relay rule) landed on `main` as a direct commit, CI for it was cancelled by the very next push (`cancel-in-progress: true` in `ci.yml`), and the deploy-proxy run that did execute compared `HEAD~1`, which no longer contained the proxy diff. Both Deno apps kept the previous revision, `/draw` kept failing from the container, and the owner deployed by hand (prod 09.11.2026). So after any proxy change, open the Deploy proxy run and confirm that both "Deploy to primary proxy" and "Deploy to fallback proxy" finished as success rather than skipped.
+
+Manual fallback, from a checkout of `main` whose root directory contains `proxy/proxy.ts` — that path is the app's entrypoint, and using `proxy` itself as the bundle root fails the build with `REVISION_FAILED` while Deno keeps serving the previous production revision:
+
+```
+DENO_DEPLOY_TOKEN=... deno deploy . --prod --org silverelixir --app lumen-proxy
+DENO_DEPLOY_TOKEN=... deno deploy . --prod --org silverelixir --app lumen-proxy-backup
+```
+
+Both apps must end up with the same file; the token is the `DENO_DEPLOY_TOKEN` repo secret.
