@@ -209,16 +209,19 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
 
         # Правка идёт одной моделью: референс понимает только Cloudflare klein,
         # у Pollinations/sana правки нет вовсе. Генерация — прежней цепочкой.
-        if reference is not None:
-            reference_bytes = reference[0]
-            # Кадр правки повторяет ориентацию референса: 16:9 фото иначе
+        # Один или два референса (multi-image): список приходит из резолвера,
+        # одиночный tuple поддерживается для совместимости вызовов.
+        ref_items = reference if isinstance(reference, list) else ([reference] if reference else [])
+        if ref_items:
+            ref_bytes = [item[0] for item in ref_items[:2]]
+            # Кадр правки повторяет ориентацию первого референса: 16:9 фото иначе
             # возвращалось квадратом и теряло края (прод 10.11.2026).
-            width, height = bot.size_for_reference(bot.image_dimensions(reference_bytes))
+            width, height = bot.size_for_reference(bot.image_dimensions(ref_bytes[0]))
 
             async def _edit_call(session, text, timeout_sec=None, _w=width, _h=height):
                 return await bot._cloudflare_edit_to_image(
-                    session, text, reference_bytes, timeout_sec=timeout_sec,
-                    width=_w, height=_h,
+                    session, text, ref_bytes[0], second_reference=(ref_bytes[1] if len(ref_bytes) > 1 else None),
+                    timeout_sec=timeout_sec, width=_w, height=_h,
                 )
 
             calls = {"cloudflare": _edit_call}
@@ -509,7 +512,7 @@ async def cmd_draw(message: Message) -> None:
     reference = None
     if _match_trigger_prefix(prompt.lower(), EDIT_TRIGGER_PREFIXES):
         try:
-            reference = await bot._resolve_edit_reference(
+            reference = await bot._resolve_edit_references(
                 message, bot.get_state(message.chat.id),
                 is_private=message.chat.type == ChatType.PRIVATE, implicit=False,
             )

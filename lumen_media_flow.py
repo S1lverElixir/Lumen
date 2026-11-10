@@ -127,12 +127,12 @@ def _fresh_generation_ref(state: dict[str, Any], sender_id: int | None) -> bool:
     return time.time() - float(drawn_at) <= bot.DRAW_EDIT_CONTEXT_TTL_SEC
 
 
-async def _resolve_edit_reference(
+async def _resolve_edit_references(
     message: Any, state: dict[str, Any], *, is_private: bool, implicit: bool,
-) -> tuple[bytes, str] | None:
-    """Картинка для правки: 1) вложение сообщения, 2) реплай на фото, 3) для
-    сильных глаголов ("измени") — последнее фото автора в чате. Референс
-    сохраняем в медиа-историю: следующее "покажи фото" должно его находить."""
+) -> list[tuple[bytes, str]]:
+    """Референсы правки: вложение, реплай, затем (если других нет) свежая своя
+    генерация; для сильных глаголов — свежее фото автора. До двух картинок:
+    «совмести это с этим» у klein работает как multi-image (замер 10.11.2026)."""
     import bot
     import lumen_memory
     from lumen_media import _media_file_id_and_mime, _msg_media_source
@@ -143,6 +143,8 @@ async def _resolve_edit_reference(
 
     sender = getattr(message, "from_user", None)
     sender_id = sender.id if sender is not None else None
+    collected: list[tuple[bytes, str]] = []
+    seen_ids: set[str] = set()
 
     src = _msg_media_source(message)
     if src is not None and _is_image(src):
@@ -150,23 +152,26 @@ async def _resolve_edit_reference(
         if res:
             data, mime, _ = res
             if (mime or "").startswith("image/"):
+                collected.append((data, mime))
+                fid, _mime, _ = _media_file_id_and_mime(src)
+                if fid:
+                    seen_ids.add(fid)
                 bot._save_media_to_history(src, state, sender_id)
-                return data, mime
 
     reply = getattr(message, "reply_to_message", None)
-    if reply is not None:
+    if len(collected) < 2 and reply is not None:
         reply_src = _msg_media_source(reply)
         if reply_src is not None and _is_image(reply_src):
             fid, mime, _ = _media_file_id_and_mime(reply_src)
-            fetched = await bot._fetch_media(fid, mime) if fid else None
-            if fetched:
-                bot._save_media_to_history(reply_src, state, sender_id)
-                return fetched
+            if fid and fid not in seen_ids:
+                fetched = await bot._fetch_media(fid, mime)
+                if fetched:
+                    collected.append(fetched)
+                    bot._save_media_to_history(reply_src, state, sender_id)
 
-    # Своя сгенерированная картинка в общий лог не пишется как media (только
-    # файл в корзинку). Слабым глаголам ("добавь звезду") она нужна, но только
-    # свежая: иначе старое фото превращало бы любую фразу в правку.
-    if _fresh_generation_ref(state, sender_id):
+    # Неявный контекст подключаем только когда явных референсов нет: иначе
+    # «совмести эти два» тянул бы ещё и старую картинку из истории.
+    if not collected and _fresh_generation_ref(state, sender_id):
         from lumen_message_parse import _find_recent_media_by_category
 
         buckets = state.get("recent_media_ids") if isinstance(state, dict) else None
@@ -179,14 +184,12 @@ async def _resolve_edit_reference(
                     continue
                 fetched = await bot._fetch_media(fid_mime[0], fid_mime[1])
                 if fetched:
-                    return fetched
+                    collected.append(fetched)
+                    break
 
-    if implicit:
-        # «Измени/поменяй…» относится к НЕДАВНЕМУ фото, а не к любой картинке из
-        # истории: иначе «поменяй пароль» после старого фото уходил в рисование
-        # (ревью 10.11.2026). Окно — последние реплики и тот же TTL.
+    if not collected and implicit:
         if not is_private and sender_id is None:
-            return None
+            return []
         found = lumen_memory.recent_media(
             state, "photo", window=6, max_items=1,
             sender_id=sender_id, any_sender=is_private,
@@ -201,8 +204,19 @@ async def _resolve_edit_reference(
             if fresh:
                 fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
                 if fetched:
-                    return fetched
-    return None
+                    collected.append(fetched)
+
+    return collected[:2]
+
+
+async def _resolve_edit_reference(
+    message: Any, state: dict[str, Any], *, is_private: bool, implicit: bool,
+) -> tuple[bytes, str] | None:
+    """Первый референс правки — совместимая обёртка над списком (см. выше)."""
+    refs = await _resolve_edit_references(
+        message, state, is_private=is_private, implicit=implicit,
+    )
+    return refs[0] if refs else None
 
 
 async def _download_message_attachment(source: Any) -> tuple[bytes, str, str] | None:

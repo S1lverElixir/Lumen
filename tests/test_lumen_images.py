@@ -301,6 +301,16 @@ def test_cloudflare_edit_sends_reference_as_input_image(cf_configured):
     assert fields["input_image_0"][1]["content_type"] == "image/jpeg"
 
 
+def test_cloudflare_edit_sends_two_references(cf_configured):
+    # Multi-image: второй референс обязан уехать своим полем input_image_1.
+    captured = {}
+    asyncio.run(cf_configured._cloudflare_edit_to_image(
+        _cf_ok_session(captured), "combine these two", b"one", second_reference=b"two"))
+    fields = {name: (value, kw) for name, value, kw in captured["data"].fields}
+    assert fields["input_image_0"][0] == b"one"
+    assert fields["input_image_1"][0] == b"two"
+
+
 def test_cloudflare_moderation_rejection_is_not_retryable(cf_configured):
     # Замер 10.11.2026: NSFW-промт получает 400 code 3030 "output has been
     # flagged". Это не перегрузка: политика не должна включать cooldown.

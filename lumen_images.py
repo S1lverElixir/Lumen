@@ -376,6 +376,7 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
 
 def _cloudflare_form(
     prompt: str, *, reference: bytes | None = None,
+    second_reference: bytes | None = None,
     width: int = 1024, height: int = 1024,
 ) -> aiohttp.FormData:
     """Тело запроса klein: prompt/width/height/seed и референс для правки.
@@ -386,10 +387,12 @@ def _cloudflare_form(
     form.add_field("width", str(width))
     form.add_field("height", str(height))
     form.add_field("seed", str(_random_seed()))
-    if reference:
+    for index, data in enumerate((reference, second_reference)):
+        if not data:
+            continue
         form.add_field(
-            "input_image_0", reference,
-            filename="reference" + (".png" if reference.startswith(b"\x89PNG") else ".jpg"),
+            f"input_image_{index}", data,
+            filename=f"reference{index}" + (".png" if data.startswith(b"\x89PNG") else ".jpg"),
             content_type=_image_content_type(reference),
         )
     return form
@@ -411,6 +414,7 @@ async def _cloudflare_text_to_image(
 
 async def _cloudflare_edit_to_image(
     session: aiohttp.ClientSession, prompt: str, reference: bytes, *,
+    second_reference: bytes | None = None,
     timeout_sec: float | None = None, width: int = 1024, height: int = 1024,
 ) -> bytes:
     """Правка готовой картинки: референс уходит полем input_image_0 (замер
@@ -421,7 +425,10 @@ async def _cloudflare_edit_to_image(
         raise ImageProviderError("Cloudflare edit: пустой референс")
     status, retry_after, data = await _cloudflare_request(
         session, _cloudflare_model_url(CLOUDFLARE_EDIT_MODEL),
-        form=_cloudflare_form(prompt, reference=reference, width=width, height=height),
+        form=_cloudflare_form(
+            prompt, reference=reference, second_reference=second_reference,
+            width=width, height=height,
+        ),
         timeout_sec=timeout_sec,
     )
     return _cloudflare_image_result(status, retry_after, data)

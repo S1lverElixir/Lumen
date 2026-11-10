@@ -720,6 +720,7 @@ from lumen_media_flow import (
     _download_message_attachment,
     _fetch_media,
     _resolve_edit_reference,
+    _resolve_edit_references,
     _fresh_generation_ref,
 )
 
@@ -1049,6 +1050,7 @@ __all__ = [
     "_save_media_to_history",
     "_download_message_attachment",
     "_resolve_edit_reference",
+    "_resolve_edit_references",
     "_fresh_generation_ref",
     "_fetch_media",
     "_sanitize_mime_type",

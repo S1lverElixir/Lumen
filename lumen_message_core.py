@@ -738,7 +738,7 @@ async def _handle_message_core(
     matched_edit_trigger = _match_trigger_prefix(lower_prompt, EDIT_TRIGGER_PREFIXES)
     if matched_edit_trigger and not is_continuation:
         try:
-            reference = await bot._resolve_edit_reference(
+            reference = await bot._resolve_edit_references(
                 message, state,
                 is_private=is_private,
                 implicit=matched_edit_trigger in EDIT_TRIGGER_IMPLICIT,
@@ -754,7 +754,7 @@ async def _handle_message_core(
         except Exception as exc:
             log.warning("[draw] Edit reference resolve failed, answering as text: %s", exc)
             reference = None
-        if reference is not None:
+        if reference:
             # Промпт правки идёт целиком, с глаголом: "измени фон на синий"
             # без "измени" превратилось бы в "фон на синий" и потеряло действие.
             await bot.inline_draw(message, clean_prompt, reference=reference)

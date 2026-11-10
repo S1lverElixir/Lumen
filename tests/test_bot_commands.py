@@ -1306,7 +1306,7 @@ def test_edit_trigger_with_reply_photo_routes_to_edit(rate_guard_setup, monkeypa
     async def fake_resolve(*args, **kwargs):
         return reference
 
-    monkeypatch.setattr(bot, "_resolve_edit_reference", fake_resolve)
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
     message.text = "измени фон на синий"
     asyncio.run(bot._handle_message_core(message))
     bot.inline_draw.assert_awaited_once_with(message, "измени фон на синий", reference=reference)
@@ -1322,7 +1322,7 @@ def test_edit_word_without_image_goes_to_llm(rate_guard_setup, monkeypatch):
     async def fake_route(*args, **kwargs):
         return "обычный ответ", False
 
-    monkeypatch.setattr(bot, "_resolve_edit_reference", no_reference)
+    monkeypatch.setattr(bot, "_resolve_edit_references", no_reference)
     monkeypatch.setattr(bot, "_run_route", fake_route)
     message.text = "измени мир к лучшему"
     asyncio.run(bot._handle_message_core(message))
@@ -1337,7 +1337,7 @@ def test_draw_command_edits_photo_when_prompt_is_edit_verb(rate_guard_setup, mon
     async def fake_resolve(*args, **kwargs):
         return reference
 
-    monkeypatch.setattr(bot, "_resolve_edit_reference", fake_resolve)
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
     message.text = "/draw сделай фон синим"
     asyncio.run(bot.cmd_draw(message))
     bot.inline_draw.assert_awaited_once_with(message, "сделай фон синим", reference=reference)
@@ -1464,7 +1464,7 @@ def test_inline_draw_edit_keeps_reference_orientation(monkeypatch):
     chat_id = 999449
     captured = {}
 
-    async def fake_edit(session, prompt, reference, timeout_sec=None, width=1024, height=1024):
+    async def fake_edit(session, prompt, reference, timeout_sec=None, width=1024, height=1024, **_):
         captured["size"] = (width, height)
         return b"PNG bytes"
 
@@ -1553,6 +1553,59 @@ def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
     asyncio.run(bot.handle_draw_more_callback(stale))
     assert stale.answer.await_args.args[0] == bot._t(123, "pick_expired")
     assert called == []
+
+
+def test_inline_draw_edit_passes_second_reference(monkeypatch):
+    # «Совмести это с этим»: два референса уезжают в input_image_0/1.
+    chat_id = 999452
+    captured = {}
+
+    async def fake_edit(session, prompt, reference, second_reference=None, **kwargs):
+        captured["refs"] = (reference, second_reference)
+        return b"PNG bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_cloudflare_edit_to_image", fake_edit)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    refs = [(b"first", "image/jpeg"), (b"second", "image/jpeg")]
+    asyncio.run(bot.inline_draw(incoming, "совмести эти две картинки", reference=refs))
+    assert captured["refs"] == (b"first", b"second")
+
+
+def test_resolve_edit_references_collects_attachment_and_reply(monkeypatch):
+    # Вложение и фото в реплае — два референса; дубликат того же файла не считается.
+    from lumen_media_flow import _resolve_edit_references
+
+    attachment = SimpleNamespace(file_id="att-fid", mime_type="image/jpeg")
+    reply_photo = SimpleNamespace(file_id="reply-fid", mime_type="image/jpeg")
+    message = SimpleNamespace(
+        photo=None, document=attachment, video=None, animation=None, video_note=None,
+        voice=None, audio=None, sticker=None,
+        reply_to_message=SimpleNamespace(photo=None, document=reply_photo),
+        from_user=SimpleNamespace(id=7),
+    )
+    fetched = []
+
+    async def fake_download(src):
+        return b"attach-bytes", "image/jpeg", "file.jpg"
+
+    async def fake_fetch(fid, mime):
+        fetched.append(fid)
+        return b"reply-bytes", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_download_message_attachment", fake_download)
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(bot, "_save_media_to_history", lambda *a, **k: None)
+    refs = asyncio.run(_resolve_edit_references(
+        message, {}, is_private=True, implicit=False,
+    ))
+    assert [item[0] for item in refs] == [b"attach-bytes", b"reply-bytes"]
+    assert fetched == ["reply-fid"]
 
 
 def test_repeat_variant_redraws_last_prompt(rate_guard_setup, monkeypatch):
@@ -1648,7 +1701,7 @@ def test_edit_reference_too_large_replies_media_too_big(rate_guard_setup, monkey
     async def too_big(*args, **kwargs):
         raise bot._MediaTooLargeError(60 * 1024 * 1024, 20 * 1024 * 1024)
 
-    monkeypatch.setattr(bot, "_resolve_edit_reference", too_big)
+    monkeypatch.setattr(bot, "_resolve_edit_references", too_big)
     message.text = "измени фон на ночной"
     asyncio.run(bot._handle_message_core(message))
     bot._safe_reply.assert_awaited()
