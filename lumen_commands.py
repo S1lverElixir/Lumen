@@ -224,7 +224,15 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             ref_bytes = [item[0] for item in ref_items[:2]]
             # Кадр правки повторяет ориентацию первого референса: 16:9 фото иначе
             # возвращалось квадратом и теряло края (прод 10.11.2026).
-            width, height = bot.size_for_reference(bot.image_dimensions(ref_bytes[0]))
+            # Разбор заголовков 20-мегабайтного файла байт за байтом вешал event
+            # loop примерно на секунду — все чаты ждали (ревью 10.11.2026).
+            _ref_dims = await asyncio.to_thread(bot.image_dimensions, ref_bytes[0])
+            if _ref_dims:
+                log.info(
+                    "[draw] Reference %.1f MP (%dx%d).",
+                    _ref_dims[0] * _ref_dims[1] / 1e6, _ref_dims[0], _ref_dims[1],
+                )
+            width, height = bot.size_for_reference(_ref_dims)
 
             async def _edit_call(session, text, timeout_sec=None, _w=width, _h=height):
                 return await bot._cloudflare_edit_to_image(
@@ -377,7 +385,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             # закачивания нет.
             _drawn_source = bot._msg_media_source(sent)
             if _drawn_source is not None:
-                with contextlib.suppress(Exception):
+                try:
                     _state = bot.get_state(cid)
                     # Метка для «добавь звезду» без реплая: слабые глаголы правки
                     # относятся только к свежей генерации (прод 10.11.2026).
@@ -390,6 +398,10 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                     # Корзина после меток: её сбой не должен стирать контекст
                     # кнопки и слабых глаголов.
                     bot._save_media_to_history(_drawn_source, _state, uid)
+                except Exception as exc:
+                    # Молчаливый пропуск превращал следующее «ещё вариант» в «no fresh
+                    # context» без единой зацепки в логе (ревью 10.11.2026).
+                    log.warning("[draw] Fresh-draw context marks failed: %s", exc)
                 # Без пометки «грязно» корзинка не уезжала в хранилище: после
                 # рестарта «измени эту картинку» не находил своё фото (прод 10.11.2026).
                 bot.mark_state_dirty(cid)
@@ -420,6 +432,10 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         raise
     except Exception as exc:
         log.exception("Image generation failed:")
+        # Слот возвращаем ДО ответов в Telegram: тот же порядок, что в ветке
+        # отмены (ревью 09.11.2026), иначе сбой правки статуса съедал слот до полуночи
+        # (ревью 10.11.2026).
+        bot._refund_user_daily(uid, total=1, draw=0 if generated else 1)
         txt = bot._error_text(exc).strip()
         if any(kw in txt.lower() for kw in ("cannot connect", "ssl:", "no address", "connection", "timeout", "host")):
             user_err = bot._t(cid, "draw_err_unavailable")
@@ -438,10 +454,6 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
-        # Картинки нет — дневной слот возвращаем (резерв списан заранее). Исключение:
-        # генерация уже состоялась и списала общий бюджет, тогда слот не возвращаем,
-        # иначе упавшая отправка превращалась бы в бесконечные бесплатные попытки.
-        bot._refund_user_daily(uid, total=1, draw=0 if generated else 1)
         return False
     finally:
         if acquired:
@@ -878,6 +890,10 @@ async def cmd_reset(message: Message) -> None:
     # всплывали после /reset (аудит 28.10.2026).
     state.get("recent_media_ids", {}).clear()
     state.get("user_names", {}).clear()
+    # Контекст рисования — тоже память чата: после «забудь всё» кнопка и слово
+    # «ещё вариант» не должны возвращать забытое описание (ревью 10.11.2026).
+    for _draw_key in ("last_drawn_at", "last_drawn_user", "last_draw_prompt", "last_drawn_message_id"):
+        state.pop(_draw_key, None)
     bot.mark_state_dirty(message.chat.id)
     await bot._tg_call(
         message.reply,
