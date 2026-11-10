@@ -1039,6 +1039,44 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
+def test_inline_draw_marks_fresh_generation_even_if_media_history_raises(monkeypatch):
+    # Кнопка «Ещё вариант» и слабые глаголы правки читают метки, а не корзинку:
+    # сбой _save_media_to_history не имел права обнулять контекст свежей генерации.
+    from aiogram.types import PhotoSize
+
+    chat_id = 999446
+    uid = 777046
+
+    async def ok(session, prompt, timeout_sec=None, **_):
+        return b"\x89PNG fake bytes"
+
+    sent_photo = SimpleNamespace(
+        photo=[PhotoSize(file_id="gen-file-id", file_unique_id="gen-unique", width=1024, height=1024, file_size=1234)]
+    )
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return sent_photo
+
+    def boom(*_a, **_k):
+        raise RuntimeError("media history unavailable")
+
+    _one_image_provider(monkeypatch, ok)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    monkeypatch.setattr(bot, "_save_media_to_history", boom)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        assert asyncio.run(bot.inline_draw(incoming, "нарисуй кота в шляпе")) is True
+        state = bot.get_state(chat_id)
+        assert state["last_drawn_at"] > 0
+        assert state["last_drawn_user"] == uid
+        assert state["last_draw_prompt"] == "нарисуй кота в шляпе"
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_inline_draw_send_failure_keeps_the_draw_slot(monkeypatch):
     # Генерация уже списала общий дневной бюджет, а отправка упала: возвращать
     # личный слот в этом случае значит дать одному человеку бесконечные бесплатные

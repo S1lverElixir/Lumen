@@ -363,7 +363,6 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             if _drawn_source is not None:
                 with contextlib.suppress(Exception):
                     _state = bot.get_state(cid)
-                    bot._save_media_to_history(_drawn_source, _state, uid)
                     # Метка для «добавь звезду» без реплая: слабые глаголы правки
                     # относятся только к свежей генерации (прод 10.11.2026).
                     _state["last_drawn_at"] = time.time()
@@ -372,6 +371,9 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                     # берутся из него же); правка его не перезаписывает.
                     if reference is None:
                         _state["last_draw_prompt"] = prompt
+                    # Корзина после меток: её сбой не должен стирать контекст
+                    # кнопки и слабых глаголов.
+                    bot._save_media_to_history(_drawn_source, _state, uid)
                 # Без пометки «грязно» корзинка не уезжала в хранилище: после
                 # рестарта «измени эту картинку» не находил своё фото (прод 10.11.2026).
                 bot.mark_state_dirty(cid)
@@ -456,6 +458,7 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
     Чужой тап не тратит ни слот человека, ни бюджет провайдера."""
     import bot
     if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
+        log.info("[draw] More tap refused: banned (uid=%s).", query.from_user.id)
         with contextlib.suppress(Exception):
             await query.answer()
         return
@@ -472,6 +475,7 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
     owner = state.get("last_drawn_user")
     lang = bot._chat_lang(chat.id)
     if owner is not None and user_id is not None and owner != user_id:
+        log.info("[draw] More tap refused: not the author (chat=%s, uid=%s, owner=%s).", chat.id, user_id, owner)
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(lang, "pick_not_yours"), show_alert=True)
         return
@@ -481,6 +485,10 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
         or not bot._fresh_generation_ref(state, user_id)
     ):
         # Кнопки из старых сообщений не должны генерировать по вчерашнему описанию.
+        log.info(
+            "[draw] More tap refused: no fresh context (chat=%s, uid=%s, drawn_at=%r, prompt=%r).",
+            chat.id, user_id, state.get("last_drawn_at"), bool(last_prompt and last_prompt.strip()),
+        )
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(lang, "pick_expired"), show_alert=False)
         return
@@ -488,6 +496,13 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
     # (ревью 10.11.2026). Двойной тап отдельно режет _draw_inflight в inline_draw,
     # поэтому клавиатуру не снимаем: после сбоя человеку не нужно ждать новое фото.
     if not bot._check_and_register_rate_limit(user_id if user_id is not None else chat.id):
+        # Окно 5/30с общее с сообщениями: без размера корзины отказ по тапу
+        # нельзя объяснить ни по логам, ни человеку (прод 10.11.2026).
+        _rl_key = user_id if user_id is not None else chat.id
+        log.info(
+            "[draw] More tap refused: rate limited (chat=%s, uid=%s, in_window=%d).",
+            chat.id, user_id, len(bot.user_rate_limits.get(_rl_key) or []),
+        )
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(lang, "rate_limited"), show_alert=False)
         return
