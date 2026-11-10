@@ -54,6 +54,11 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   Clearing `NO_PROXY` is mandatory for every `hf` call (`NO_PROXY= ` prefix in Git Bash,
   `$env:NO_PROXY=''` in PowerShell): the owner's global value contains `[::1]`, which kills any
   httpx-based tool with `InvalidURL: Invalid port` (prod 09.11.2026).
+- Logs are evidence the owner and the tooling read (`hf spaces logs`, Sentry, `devtrace`), so a
+  log line is a publication: never write user text, media bytes or a key value into one. Secrets
+  are scrubbed on the way out (`bot.py` redacts the provider keys, Sentry scrubs again in
+  `before_send`), and `devtrace.jsonl` is gitignored for the same privacy reason as the state
+  export. Keep an identifier or a hash, not the content.
 - Found a leaked secret? Tell the owner to rotate it. Do not rewrite git history without asking.
 
 ## Commands
