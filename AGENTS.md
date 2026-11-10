@@ -68,11 +68,17 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   checks and `pip-audit` on every push, so the extra ones are your job locally only when you touch
   those files. One file: `pytest tests/<file>.py -v`; one test:
   `pytest tests/<file>.py::<name> -v`.
-- Globs do not expand in a PowerShell shell (opencode on Windows), so there run
-  `pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name })`
-  then `pytest -q`, and read or search with the file tools rather than `cat` and `grep`. Never wrap
-  a command in `bash -lc` just to get globs. In Qoder the Bash tool is Git Bash, where the first
-  form works exactly as written.
+- Globs do not expand in a PowerShell shell (opencode on Windows), so there the gate is these two
+  lines verbatim:
+
+  ```powershell
+  pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name })
+  pytest -q
+  ```
+
+  In Qoder the Bash tool is Git Bash, where the Linux form above works exactly as written. Read and
+  search with the file tools rather than `cat` and `grep`, and never wrap a command in `bash -lc`
+  just to get globs.
 - Proxy gate, run it whenever you change `proxy/`: `deno test proxy/proxy_test.ts` (offline, no
   external imports), `deno check proxy/proxy.ts`, `deno lint proxy/proxy.ts`.
 - `pip-audit -r requirements.txt` is not part of the local baseline: it needs network and goes red
@@ -128,7 +134,7 @@ or a routing change). If nothing is unverified or risky, say so in one line.
   hundreds of names from the `lumen_*.py` modules: a grep for a symbol hits `bot.py` first, the
   definition is in the module. `lumen_admin.py` holds the FastAPI app and the admin endpoints; the
   rest is in the `lumen_*.py` modules, whose docstring says what each one does. A name ending in
-  `_flow` or `_calls` is the Telegram-touching half of the plain module next to it.
+  `_flow` or `_calls` is the Telegram-touching half of the plain module it pairs with.
 - A user-visible string is a key, never a literal: it lives in `lumen_lang.py` (over 300 KB of fixed
   strings in 25 languages, so grep a narrow pattern instead of reading it) and is read through
   `_t(chat_id, "key")`; buttons are assembled in `lumen_commands.py`. A new key must be filled in
