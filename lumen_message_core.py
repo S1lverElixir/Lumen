@@ -27,6 +27,7 @@ from lumen_message_parse import (
     REVERT_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
     _detect_image_variants,
+    _is_bare_trigger_request,
     _is_new_artifact_request,
     _match_draw_intent,
     _has_visual_signal,
@@ -751,7 +752,7 @@ async def _handle_message_core(
             _rv_rest = _strip_trigger_content(
                 _rv_body, _rv_trigger, message, reply_fallback=False,
             )
-            if not re.search(r"\w", _rv_rest, re.UNICODE):
+            if _is_bare_trigger_request(_rv_rest):
                 await bot.revert_draw_version(
                     message, state, redo=bool(_redo_hit and not _revert_hit),
                 )

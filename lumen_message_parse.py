@@ -72,7 +72,8 @@ EDIT_TRIGGER_IMPLICIT = [
 # поэтому «повтори» здесь нет: оно слишком часто значит «повтори ответ».
 REPEAT_TRIGGER_PREFIXES = [
     "ещё вариант", "еще вариант", "ещё варианты", "еще варианты", "другой вариант",
-    "другие варианты", "новый вариант",
+    "другие варианты", "новый вариант", "ещё картинку", "еще картинку",
+    "ещё одну картинку", "еще одну картинку",
     "другую картинку",
     "another version", "another variant", "regenerate",
 ]
@@ -81,6 +82,10 @@ REPEAT_TRIGGER_PREFIXES = [
 REVERT_TRIGGER_PREFIXES = [
     "верни предыдущий вариант", "верни прошлый вариант", "верни предыдущую картинку",
     "верни прошлую картинку", "верни предыдущее изображение", "предыдущий вариант",
+    # Разрешение по пустому хвосту («14.2») позволяет вернуть и короткими формами:
+    # раньше «верни предыдущий» и «верни картинку» молча уходили текстовой модели.
+    "верни предыдущий", "верни прошлый", "верни картинку", "верни фото",
+    "верни изображение", "верни как было", "верни то", "previous version",
     "прошлый вариант", "верни как было", "отмени правку", "отмени последнее изменение",
     "верни назад", "previous version", "back to the previous version", "undo",
 ]
@@ -167,7 +172,7 @@ _IMAGE_ARTIFACT_RE = re.compile(
     r"макет|мем\b|мемы|мемов|мема|визитк|стикерпак|"
     r"аватар|обложк|превью|обои|заставк|стикер|открытк|наклейк|комикс|скринсейвер|эскиз|"
     r"набросок|карикатур|image|picture|illustration|poster|logo|banner|avatar|wallpaper|"
-    r"sticker|mockup|sketch|drawing|cartoon|mascot|flyer)",
+    r"sticker|mockup|sketch|drawing|cartoon|mascot|flyer|emblem|emblems|thumbnail|thumbnails)",
     re.IGNORECASE,
 )
 # Глагол просьбы: он превращает название артефакта в заказ.
@@ -179,11 +184,32 @@ _IMAGE_REQUEST_VERB_RE = re.compile(
     re.IGNORECASE,
 )
 # Артефакт в роли детали: «книга с красивой обложкой», «дом с большим
-# макетом». Заказать рисование так не просят (ревью 10.11.2026).
+# макетом». Заказать рисование так не просят (ревью 10.11.2026). Группу артефакта
+# помечаем: «сделай картинку с логотипом» — это заказ картинки, а не детали.
 _IMAGE_PART_RE = re.compile(
     r"\w+\s+(?:с|со|with)\s+(?:\w+\s+){0,2}"
-    r"(?:обложк|превью|логотип|иконк|стикер|макет|постер|плакат|баннер|эмблем|"
+    r"(?P<part>обложк|превью|логотип|иконк|стикер|макет|постер|плакат|баннер|эмблем|"
     r"иллюстрац|картинк|изображени|аватар|stickers?|logos?|banner|poster|cover)\w*",
+    re.IGNORECASE,
+)
+# Артефакт первым словом — implicit заказ, как в ChatGPT («poster for a gig»,
+# «логотип кофейни»). До этого такие фразы терялись: глагол просьбы в них есть
+# только по смыслу (ревью 10.11.2026).
+_IMAGE_HEAD_ARTIFACT_RE = re.compile(
+    r"^(?:картинк|изображени|иллюстрац|постер|плакат|баннер|логотип|эмблем|маскот|"
+    r"талисман|аватар|обложк|обои|заставк|стикер|стикерпак|наклейк|открытк|комикс|"
+    r"мем|макет|эскиз|набросок|карикатур|превью|визитк|скринсейвер|эпиграф|"
+    r"image|picture|poster|logo|banner|avatar|wallpaper|sticker|mockup|sketch|"
+    r"drawing|cartoon|mascot|flyer|thumbnail|emblem|icon)\w*\b",
+    re.IGNORECASE,
+)
+# Жалоба на картинку или утверждение о ней — не просьба нарисовать: сюда же
+# «обложка альбома была лучшей» и «image not loading» (ревью 10.11.2026).
+_IMAGE_COMPLAINT_RE = re.compile(
+    r"\b(?:не|ні|немає|ошибк\w*|error|бит\w*|сломан\w*|broken|failed)\b"
+    r"|\bне\s+(?:работает|грузится|открыв\w*|видн\w*|загруз\w*)\b"
+    r"|\bnot\s+\w+ing\b|\bdoesn'?t\s+work\b|\bcan'?t\s+(?:see|open|load)\b"
+    r"|\b(?:был[аио]?|были|стал[аи]?|выглядит|нравится|понравил[аи]сь|was|were|is|are)\b",
     re.IGNORECASE,
 )
 # Указание на уже существующий кадр: тогда это правка, а не новая генерация.
@@ -222,6 +248,11 @@ _DRAW_ANAPHORA_RE = re.compile(
     r"|\b(?:this|that)\s+(?:you\s+)?described\b",
     re.IGNORECASE,
 )
+# Слова, которые ничего не добавляют к просьбе: «верни предыдущий вариант ок».
+_POLITE_TAIL_RE = re.compile(
+    r"\b(?:пожалуйста|please|ок|окей|хорошо|it|this|то|это)\b",
+    re.IGNORECASE,
+)
 # Просьба нарисовать без названия артефакта: «хочу увидеть кота на луне»,
 # «imagine a city on the moon». Одна эта фраза картинку не заказывает — она
 # только оправдывает один короткий вопрос модели.
@@ -237,6 +268,19 @@ def _is_anaphoric_draw_request(content: str) -> bool:
     «кота, это что я люблю» — конкретный сюжет, а не местоимение (ревью 10.11.2026)."""
     text = (content or "").strip()
     return bool(_DRAW_ANAPHORA_RE.match(text))
+
+
+def _is_bare_trigger_request(rest: str) -> bool:
+    """Пусто или только вежливые слова: «верни предыдущий вариант, пожалуйста» —
+    это всё ещё возврат, а не просьба о тексте (ревью 10.11.2026)."""
+    text = (rest or "").strip()
+    for _ in range(3):
+        stripped = _DRAW_FILLER_RE.match(text.lower())
+        cut = len(stripped.group(0)) if stripped else 0
+        text = _POLITE_TAIL_RE.sub("", text[cut:]).strip(" ,.!?:;-")
+        if not cut:
+            break
+    return not re.search(r"\w", text, re.UNICODE)
 
 
 def _has_visual_signal(text_lower: str) -> bool:
@@ -279,12 +323,22 @@ def _is_new_artifact_request(text: str) -> bool:
     правка: указание на существующий кадр перевешивает слабый глагол."""
     if _DRAW_BLOCK_LEAD_RE.search(text) or not _IMAGE_ARTIFACT_RE.search(text):
         return False
-    # «посоветуй книгу с красивой обложкой» — не заказ: артефактное слово само
-    # по себе рисует только вместе с глаголом просьбы (ревью 10.11.2026).
-    if not _IMAGE_REQUEST_VERB_RE.search(text):
+    if _IMAGE_EXISTING_RE.search(text):
         return False
-    # Слово-артефакт должно быть именно заказом, а не деталью чужого предмета.
-    return not (_IMAGE_EXISTING_RE.search(text) or _IMAGE_PART_RE.search(text))
+    head = bool(_IMAGE_HEAD_ARTIFACT_RE.match(_strip_trigger_fillers(text)[0]))
+    verb = bool(_IMAGE_REQUEST_VERB_RE.search(text))
+    # Без глагола просьбы артефакт заказывает кадр только стоя в начале фразы,
+    # и то не в жалобе («картинка не загружается»).
+    if not verb:
+        return head and not _IMAGE_COMPLAINT_RE.search(text)
+    # С глаголом — ловим только «артефакт как деталь чужого предмета»: если хоть
+    # одно артефактное слово стоит вне связки «книга с обложкой», это заказ
+    # (ревью 10.11.2026: «сделай картинку с логотипом кота»).
+    parts = [m.span("part") for m in _IMAGE_PART_RE.finditer(text)]
+    for m in _IMAGE_ARTIFACT_RE.finditer(text):
+        if not any(a <= m.start() < b for a, b in parts):
+            return True
+    return False
 
 
 def _match_draw_intent(text_lower: str, text_original: str) -> tuple[str, str]:
@@ -293,8 +347,11 @@ def _match_draw_intent(text_lower: str, text_original: str) -> tuple[str, str]:
     core_start = len(_DRAW_FILLER_RE.match(text_lower).group(0))
     core = text_lower[core_start:]
     # «ну покажи картинку» — показ, а не генерация: лид проверяем после обвязки.
-    # Вопрос («какой логотип лучше выбрать?») заказом не считаем (ревью 10.11.2026).
+    # Вопрос («какой логотип лучше выбрать?») и жалоба («image not loading»)
+    # заказом не считаются (ревью 10.11.2026).
     if _DRAW_BLOCK_LEAD_RE.search(core) or "?" in core or "？" in core:
+        return "", ""
+    if _IMAGE_COMPLAINT_RE.search(core):
         return "", ""
 
     if _match_trigger_prefix(core, DRAW_TRIGGER_PREFIXES):
