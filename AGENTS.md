@@ -36,7 +36,8 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   separate `git worktree`, so never move the shared checkout yourself and ask if it sits on `main`.
   Commit there yourself, in small logical steps, one line saying what and why, in the language of
   the recent git log (Russian). The owner merges. Never push, merge to main, deploy to the Space,
-  or message the live bot on your own.
+  or message the live bot on your own. The hand fallback for the proxy is the owner's too: it needs
+  `DENO_DEPLOY_TOKEN`, which you do not hold.
 
 ## Secrets and privacy
 - Never read or print `.env` or any key value. Some free model tiers train on prompts.
@@ -75,7 +76,8 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   sync. Report it, never "fix" it by re-pinning; CI reruns weekly, so a quiet repo still gets
   checked.
 - Do not start the bot locally; it needs live tokens and a webhook. Live checks after a deploy
-  (`/diag` plus the main commands) are the owner's job.
+  (`/diag` plus the main commands) are the owner's job, and so are the routing checks `/selftest`
+  and `/stats`.
 - Run the gate before changing anything (green baseline) and after each batch. If it is red before
   your changes, stop and report which checks fail; do not carry on with the task or fix unrelated
   failures unless the owner says to. A missing dev dependency is the exception: install it.
@@ -101,7 +103,8 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   fails only on the Space.
 - A Space variable or secret is read once at import, because `bot.py` binds its configuration to
   module-level constants: a change in the Space settings only lands after the Space restarts, so
-  never report that a switch "took effect" while the old process is still running.
+  never report that a switch "took effect" while the old process is still running. Only the owner
+  sets or changes Space variables and secrets.
 - What ships is not what is in the repo: `.dockerignore` keeps `tests/`, `docs/`, `proxy/` and
   `.github/` out of the image, so a runtime path reading one of those passes tests and fails in
   production. The image rebuilds from scratch every deploy, which is why `requirements.txt` pins
@@ -117,11 +120,13 @@ or a routing change). If nothing is unverified or risky, say so in one line.
   over 250 names from the `lumen_*.py` modules (226 of them in `__all__`): a grep for a symbol
   hits `bot.py` first, the definition is in the module. `lumen_admin.py` holds the FastAPI app and
   the admin endpoints; the rest is in the 30 `lumen_*.py` files, each opening with a one-line
-  docstring. A name ending in `_flow`
-  or `_calls` is the Telegram-touching half of the plain module next to it.
-- `lumen_lang.py` is over 300 KB of fixed UI strings in 25 languages. Never read it whole; grep a
-  narrow pattern. Any new user-visible string must be added in all 25 languages or the
-  completeness test fails.
+  docstring. A name ending in `_flow` or `_calls` is the Telegram-touching half of the plain module
+  next to it.
+- A user-visible string is a key, never a literal: it lives in `lumen_lang.py` (300 KB of fixed
+  strings in 25 languages, so grep a narrow pattern instead of reading it) and is read through
+  `_t(chat_id, "key")`; buttons are assembled in `lumen_commands.py`. A new key must be filled in
+  all 25 language packs, or `test_lang_table_covers_all_keys_in_all_languages` in
+  `tests/test_bot_commands.py` fails.
 
 ## Providers, in one screen
 The backbone since 05.11.2026 is Munito AI (an OpenAI-compatible endpoint serving open models), with
@@ -139,7 +144,8 @@ Gemini as the unconditional automatic reserve for everything it answers.
 - Limits are derived, not picked: a daily cap sits under the provider's real free-tier budget with
   headroom, and per-user caps follow the existing family (one for messages, one per heavy feature).
   The global cap is what protects a shared provider, so a reflexively small number is not safety.
-  Put the arithmetic in the plan; `docs/ENVIRONMENT.md` records the reasoning behind the values.
+  Put the arithmetic in the plan, and say in it whether the number is an env variable at all:
+  `docs/ENVIRONMENT.md` records the reasoning and lists the limits that are hardcoded.
 - User-facing text must never name a provider or a model, including in an error message. The leak
   filter in `lumen_security.py` and the persona in `system_prompt.py` are the source of truth.
 
@@ -159,7 +165,8 @@ Gemini as the unconditional automatic reserve for everything it answers.
   deployed container is proven in production (Space logs 10.11.2026: answers received via streaming
   on the Munito head); Gemini SSE has only ever been exercised by hand through the smoke bot, and
   no failover path is covered at all. Before touching streaming code, follow the manual smoke
-  checklist in `docs/ARCHITECTURE.md` and list in the report which points the owner must run.
+  checklist in `docs/ARCHITECTURE.md` and put in the report which points the owner has to run
+  after the deploy: the bot is not yours to drive, so you never run those checks yourself.
 - `python bot.py` makes the module `__main__` while tests import it as `bot`; the alias at the top
   of `bot.py` (`sys.modules.setdefault("bot", ...)`) keeps them one module, and every `import bot`
   in `lumen_*.py` is function-level on purpose. Hoisting one, or dropping the alias, gives two
