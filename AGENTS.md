@@ -117,9 +117,9 @@ or a routing change). If nothing is unverified or risky, say so in one line.
   completeness test fails.
 
 ## Providers, in one screen
-The backbone since 05.11.2026 is Munito AI (an OpenAI-compatible endpoint serving open models) with
-Gemini as the unconditional automatic reserve.
-- Text and image input: Munito (`_MUNITO_ORDER`) first, Gemini as the reserve. Reading a site by
+The backbone since 05.11.2026 is Munito AI (an OpenAI-compatible endpoint serving open models), with
+Gemini as the unconditional automatic reserve for everything it answers.
+- Text and image input: Munito (`_MUNITO_ORDER`) is the head. Reading a site by
   URL, YouTube, video, audio input and TTS: Gemini only. Voice notes are transcribed by Groq
   Whisper first, the only thing Groq is still used for.
 - `/draw` is a different provider: Cloudflare Workers AI (`@cf/black-forest-labs/flux-2-klein-4b`)
@@ -141,10 +141,10 @@ Gemini as the unconditional automatic reserve.
   as a comment next to the chain it came out of: `_MUNITO_ORDER` or the `GEMINI_*_CHAIN` lists in
   `lumen_router_config.py`. Transient failures are not exclusions: `503`/`429` set a cooldown stored
   inside the quota state, so it outlives a restart only when Upstash is configured, and repeated
-  empty answers set an in-memory quarantine that a restart always clears.
-  The old `_OR_MODEL_HEALTH` registry went away with OpenRouter on 05.11.2026 and has no successor:
-  do not look for it or rebuild it. Never remove a model on a guess, and remember that file is
-  protected: the change goes through an approved plan.
+  empty answers set an in-memory quarantine that a restart always clears. Never remove a model on a
+  guess, and remember that editing those lists needs an approved plan.
+- The old `_OR_MODEL_HEALTH` registry went away with OpenRouter on 05.11.2026 and has no successor,
+  so do not look for it or rebuild one: cooldown and quarantine are the mechanism.
 - In that same file `GEMINI_DEFAULT_CHAIN`, `GEMINI_LINK_CHAIN` and `GEMINI_LINK_SEARCH_CHAIN` are
   copies, not aliases, of the heavy and search chains (audit 26.09.2026): editing one list does not
   move the others, so check which copy a route actually reads.
@@ -222,11 +222,10 @@ it drifts, and `docs/` stays the truth.
 - Sentry: organization `silverelixir`. `find_organizations`, then `search_issues` with
   `organizationSlug=silverelixir`, then `get_sentry_resource` with `resourceType=issue` for one
   issue. Library docs (aiogram, FastAPI, google-genai, Deno): context7, `resolve-library-id` then
-  `query-docs`. It is configured twice: as a user-level connector in Qoder (`~/.qoder/settings.json`
-  — the app has no per-project scope for custom connectors) and as an MCP server in
-  `opencode.json`. If the tools are missing from the session, say so instead of reciting
-  documentation from memory, and note that a connector added mid-session only appears in a new
-  chat.
+  `query-docs` — configured as a user-level connector in Qoder (the app has no per-project scope
+  for custom connectors) and as an MCP server in `opencode.json`. A connector added mid-session
+  appears only in a new chat; if the tools are missing here, say so instead of reciting
+  documentation from memory.
 
 ## About this file
 - Keep here only what an agent cannot learn from the code in a minute of searching: explanations of
