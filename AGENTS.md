@@ -99,6 +99,9 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   (`413`) but cuts an oversized reply mid-stream, and never follows a redirect, deliberately
   (`redirect: "error"`) — so a timeout above 60 s, a large upload or a provider behind a 302
   fails only on the Space.
+- A Space variable or secret is read once at import, because `bot.py` binds its configuration to
+  module-level constants: a change in the Space settings only lands after the Space restarts, so
+  never report that a switch "took effect" while the old process is still running.
 - What ships is not what is in the repo: `.dockerignore` keeps `tests/`, `docs/`, `proxy/` and
   `.github/` out of the image, so a runtime path reading one of those passes tests and fails in
   production. The image rebuilds from scratch every deploy, which is why `requirements.txt` pins
