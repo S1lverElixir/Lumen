@@ -492,10 +492,11 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(lang, "pick_expired"), show_alert=False)
         return
-    # Тап — тоже сообщение: без этого кнопки обходили лимит 5/30с
-    # (ревью 10.11.2026). Двойной тап отдельно режет _draw_inflight в inline_draw,
+    # Тап — тоже сообщение: без этого кнопки обходили лимит 5/30с (ревью 10.11.2026),
+    # но True у гейта значит «лимит исчерпан»: обратное условие срезало каждый тап
+    # (прод 10.11.2026). Двойной тап отдельно режет _draw_inflight в inline_draw,
     # поэтому клавиатуру не снимаем: после сбоя человеку не нужно ждать новое фото.
-    if not bot._check_and_register_rate_limit(user_id if user_id is not None else chat.id):
+    if bot._check_and_register_rate_limit(user_id if user_id is not None else chat.id):
         # Окно 5/30с общее с сообщениями: без размера корзины отказ по тапу
         # нельзя объяснить ни по логам, ни человеку (прод 10.11.2026).
         _rl_key = user_id if user_id is not None else chat.id

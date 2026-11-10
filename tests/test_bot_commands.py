@@ -1553,7 +1553,7 @@ def test_draw_more_callback_regenerates_last_prompt(monkeypatch):
     monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
     monkeypatch.setattr(bot, "inline_draw", fake_inline)
     monkeypatch.setattr(bot, "_tg_call", AsyncMock())
-    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: True)
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: False)
     query = _make_draw_more_query()
     asyncio.run(bot.handle_draw_more_callback(query))
     assert captured == [("красное яблоко на белом столе", None)]
@@ -1580,7 +1580,7 @@ def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
     monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
     monkeypatch.setattr(bot, "inline_draw", fake_inline)
     monkeypatch.setattr(bot, "_tg_call", AsyncMock())
-    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: True)
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: False)
 
     foreign = _make_draw_more_query(user_id=999)
     asyncio.run(bot.handle_draw_more_callback(foreign))
@@ -1590,6 +1590,34 @@ def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
     stale = _make_draw_more_query(user_id=456)
     asyncio.run(bot.handle_draw_more_callback(stale))
     assert stale.answer.await_args.args[0] == bot._t(123, "pick_expired")
+    assert called == []
+
+
+def test_draw_more_callback_refuses_rate_limited_tap(monkeypatch):
+    # True у rate-гейта = «окно 5/30с исчерпано»: тап обязан погаснуть здесь,
+    # а не в генерации (прод 10.11.2026: обратное условие резало каждый тап).
+    state = {
+        "last_draw_prompt": "кот в шляпе",
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 456,
+    }
+    called = []
+
+    async def fake_lock(message, run):
+        await run()
+
+    async def fake_inline(message, prompt, *, reference=None):
+        called.append(prompt)
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
+    monkeypatch.setattr(bot, "inline_draw", fake_inline)
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: True)
+
+    query = _make_draw_more_query(user_id=456)
+    asyncio.run(bot.handle_draw_more_callback(query))
+    assert query.answer.await_args.args[0] == bot._t(123, "rate_limited")
     assert called == []
 
 
