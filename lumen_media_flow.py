@@ -182,14 +182,26 @@ async def _resolve_edit_reference(
                     return fetched
 
     if implicit:
-        found = lumen_memory.last_media_for_user(
-            state, "photo", sender_id=sender_id, private=is_private,
+        # «Измени/поменяй…» относится к НЕДАВНЕМУ фото, а не к любой картинке из
+        # истории: иначе «поменяй пароль» после старого фото уходил в рисование
+        # (ревью 10.11.2026). Окно — последние реплики и тот же TTL.
+        if not is_private and sender_id is None:
+            return None
+        found = lumen_memory.recent_media(
+            state, "photo", window=6, max_items=1,
+            sender_id=sender_id, any_sender=is_private,
         )
         if found:
-            _entry, ref = found
-            fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
-            if fetched:
-                return fetched
+            entry, ref = found[0]
+            ts = entry.get("ts")
+            fresh = (
+                isinstance(ts, (int, float)) and not isinstance(ts, bool)
+                and time.time() - float(ts) <= bot.DRAW_EDIT_CONTEXT_TTL_SEC
+            )
+            if fresh:
+                fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
+                if fetched:
+                    return fetched
     return None
 
 

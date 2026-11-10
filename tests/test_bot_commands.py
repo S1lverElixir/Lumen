@@ -1400,6 +1400,30 @@ def test_resolve_edit_reference_finds_generated_image_in_bucket(monkeypatch):
     assert fetched == [("gen-fid", "image/jpeg")]
 
 
+def test_resolve_edit_reference_strong_verb_needs_recent_photo(monkeypatch):
+    # «Поменяй пароль» после старого фото — не правка; свежее фото — правка.
+    from lumen_media_flow import _resolve_edit_reference
+
+    async def fake_fetch(fid, mime):
+        return b"img-bytes", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+
+    def make_state(ts):
+        return {
+            "history": [
+                {"role": "user", "content": "смотри", "ts": ts,
+                 "media": [{"file_id": "old-fid", "mime": "image/jpeg"}]},
+            ],
+        }
+
+    stale = make_state(time.time() - bot.DRAW_EDIT_CONTEXT_TTL_SEC - 5)
+    assert asyncio.run(_resolve_edit_reference(_edit_ref_message(), stale, is_private=True, implicit=True)) is None
+
+    fresh = make_state(time.time())
+    assert asyncio.run(_resolve_edit_reference(_edit_ref_message(), fresh, is_private=True, implicit=True)) == (b"img-bytes", "image/jpeg")
+
+
 def test_resolve_edit_reference_weak_verb_uses_fresh_generation_only(monkeypatch):
     # "добавь звезду" без реплая — правка свежей генерации (прод 10.11.2026),
     # но древняя генерация или чужое фото контекстом не становятся.
@@ -1478,7 +1502,10 @@ def test_draw_more_callback_regenerates_last_prompt(monkeypatch):
     }
     captured = []
 
+    lock_calls = []
+
     async def fake_lock(message, run):
+        lock_calls.append(message)
         await run()
 
     async def fake_inline(message, prompt, *, reference=None):
@@ -1488,9 +1515,12 @@ def test_draw_more_callback_regenerates_last_prompt(monkeypatch):
     monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
     monkeypatch.setattr(bot, "inline_draw", fake_inline)
     monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: True)
     query = _make_draw_more_query()
     asyncio.run(bot.handle_draw_more_callback(query))
     assert captured == [("красное яблоко на белом столе", None)]
+    # Повтор обязан идти под тем же чат-локом и потолком, что обычный /draw.
+    assert len(lock_calls) == 1
 
 
 def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
@@ -1512,6 +1542,7 @@ def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
     monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
     monkeypatch.setattr(bot, "inline_draw", fake_inline)
     monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: True)
 
     foreign = _make_draw_more_query(user_id=999)
     asyncio.run(bot.handle_draw_more_callback(foreign))
@@ -1537,6 +1568,37 @@ def test_repeat_variant_redraws_last_prompt(rate_guard_setup, monkeypatch):
     message.text = "ещё вариант"
     asyncio.run(bot._handle_message_core(message))
     bot.inline_draw.assert_awaited_once_with(message, "красное яблоко на белом столе 16:9")
+
+
+def test_draw_more_words_with_new_subject_generate_it(rate_guard_setup, monkeypatch):
+    # «нарисуй ещё кота» — новая картинка кота, а не повтор прошлого промпта:
+    # repeat-список длинных фраз не содержит (ревью 10.11.2026).
+    message = rate_guard_setup()
+    state = {
+        "last_draw_prompt": "маяк на скале",
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 456,
+    }
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    message.text = "нарисуй ещё кота"
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once_with(message, "ещё кота")
+
+
+def test_edit_reference_too_large_replies_media_too_big(rate_guard_setup, monkeypatch):
+    # Гигантский файл реплая при «измени…» — честный отказ, а не молчание
+    # глобального обработчика (ревью 10.11.2026).
+    message = rate_guard_setup()
+
+    async def too_big(*args, **kwargs):
+        raise bot._MediaTooLargeError(60 * 1024 * 1024, 20 * 1024 * 1024)
+
+    monkeypatch.setattr(bot, "_resolve_edit_reference", too_big)
+    message.text = "измени фон на ночной"
+    asyncio.run(bot._handle_message_core(message))
+    bot._safe_reply.assert_awaited()
+    assert bot._safe_reply.await_args.args[1] == bot._t(123, "media_too_big", limit_mb=20)
+    bot.inline_draw.assert_not_awaited()
 
 
 def test_repeat_variant_without_fresh_draw_goes_to_llm(rate_guard_setup, monkeypatch):

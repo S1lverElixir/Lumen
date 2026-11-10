@@ -9,6 +9,7 @@ import base64
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -220,10 +221,8 @@ _SIZE_WORDS: tuple[tuple[str, str], ...] = (
     ("вертикальн", "9:16"),
     ("широкоформатн", "16:9"),
     ("квадрат", "1:1"),
-    ("landscape", "16:9"),
-    ("portrait", "9:16"),
-    ("vertical", "9:16"),
-    ("horizontal", "16:9"),
+    # Английские "portrait"/"landscape" — жанр, а не ориентация ("portrait of a woman"):
+    # размер не навязываем, иначе каждый портрет выходил вертикальным (ревью 10.11.2026).
     ("square", "1:1"),
 )
 
@@ -234,7 +233,7 @@ def detect_image_size(prompt: str) -> tuple[int, int]:
     с границами цифр: иначе "13:45" содержит "3:4" (найдено ревью 10.11.2026)."""
     low = (prompt or "").lower()
     for token, key in _SIZE_WORDS:
-        if token.isascii() and any(c.isdigit() for c in token) and ":" in token:
+        if any(c.isdigit() for c in token) and any(c in token for c in (":", "х", "x")):
             if re.search(r"(?<!\d)" + re.escape(token) + r"(?!\d)", low):
                 return _SIZES[key]
         elif token in low:
@@ -287,18 +286,18 @@ def image_dimensions(data: bytes) -> tuple[int, int] | None:
 
 
 def size_for_reference(dimensions: tuple[int, int] | None) -> tuple[int, int]:
-    """Выходной размер правки: рамка референса, при явной ориентации — та же
-    пропорция; неизвестные размеры дают квадрат."""
+    """Выходной размер правки: ближайшая из поддерживаемых пропорций к кадру
+    референса (4:3 и 3:4 тоже), неизвестные размеры дают квадрат."""
     if not dimensions:
         return (1024, 1024)
     w, h = dimensions
     if not w or not h:
         return (1024, 1024)
-    if w >= h * 1.25:
-        return _SIZES["16:9"]
-    if h >= w * 1.25:
-        return _SIZES["9:16"]
-    return (1024, 1024)
+    ratio = w / h
+    names = ("1:1", "4:3", "3:4", "16:9", "9:16")
+    target = {"1:1": 1.0, "4:3": 4 / 3, "3:4": 3 / 4, "16:9": 16 / 9, "9:16": 9 / 16}
+    best = min(names, key=lambda name: abs(math.log(ratio / target[name])))
+    return _SIZES[best]
 
 
 def _image_content_type(data: bytes) -> str:

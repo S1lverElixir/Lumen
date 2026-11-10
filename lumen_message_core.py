@@ -736,11 +736,23 @@ async def _handle_message_core(
     # обычной модели ("измени мир" — не рисование), поэтому триггер тут мягкий.
     matched_edit_trigger = _match_trigger_prefix(lower_prompt, EDIT_TRIGGER_PREFIXES)
     if matched_edit_trigger and not is_continuation:
-        reference = await bot._resolve_edit_reference(
-            message, state,
-            is_private=is_private,
-            implicit=matched_edit_trigger in EDIT_TRIGGER_IMPLICIT,
-        )
+        try:
+            reference = await bot._resolve_edit_reference(
+                message, state,
+                is_private=is_private,
+                implicit=matched_edit_trigger in EDIT_TRIGGER_IMPLICIT,
+            )
+        except bot._MediaTooLargeError as exc:
+            # Файл больше капа скачивания: честный отказ, иначе исключение уходило
+            # в глобальный обработчик и человек не видел ответа (ревью 10.11.2026).
+            await bot._safe_reply(message, bot._t(
+                message.chat.id, "media_too_big",
+                limit_mb=max(1, round(exc.cap_bytes / (1024 * 1024))),
+            ))
+            return
+        except Exception as exc:
+            log.warning("[draw] Edit reference resolve failed, answering as text: %s", exc)
+            reference = None
         if reference is not None:
             # Промпт правки идёт целиком, с глаголом: "измени фон на синий"
             # без "измени" превратилось бы в "фон на синий" и потеряло действие.

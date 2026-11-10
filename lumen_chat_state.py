@@ -351,7 +351,21 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         # Язык переживает рестарт: сериализатор его пишет, а восстановление
         # раньше теряло (прод-баг: /lang слетал при каждом деплое).
         "lang": normalize_lang(s.get("lang")),
+        # Контекст правки/повтора картинки (сериализатор пишет, старым снимкам — пусто).
+        "last_drawn_at": _restore_last_drawn_at(s),
+        "last_drawn_user": s.get("last_drawn_user") if isinstance(s.get("last_drawn_user"), int) and not isinstance(s.get("last_drawn_user"), bool) else None,
+        "last_draw_prompt": s.get("last_draw_prompt")[:600] if isinstance(s.get("last_draw_prompt"), str) else "",
     }
+
+
+def _restore_last_drawn_at(s: dict[str, Any]) -> float:
+    """Время последней генерации из снимка; старым снимкам — 0 (контекста нет)."""
+    raw = s.get("last_drawn_at")
+    if isinstance(raw, bool):
+        return 0.0
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    return 0.0
 
 
 def _restore_last_activity(s: dict[str, Any]) -> float:

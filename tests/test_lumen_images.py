@@ -101,7 +101,8 @@ def test_cloudflare_is_primary_only_when_configured(monkeypatch):
     ("кот 16:9", (1344, 768)),
     ("16х9 пейзаж", (1344, 768)),
     ("вертикальная картинка", (768, 1344)),
-    ("portrait photo", (768, 1344)),
+    ("portrait of a woman", (1024, 1024)),
+    ("встреча в 13х45", (1024, 1024)),
     ("квадрат", (1024, 1024)),
     ("кот", (1024, 1024)),
     ("широкий спектр", (1024, 1024)),
@@ -137,6 +138,9 @@ def test_size_for_reference_follows_orientation():
     assert lumen_images.size_for_reference((1280, 720)) == (1344, 768)
     assert lumen_images.size_for_reference((720, 1280)) == (768, 1344)
     assert lumen_images.size_for_reference((800, 800)) == (1024, 1024)
+    # 4:3 и 3:4 — ближайшая пропорция, а не «почти квадрат» (ревью 10.11.2026).
+    assert lumen_images.size_for_reference((1200, 900)) == (1152, 864)
+    assert lumen_images.size_for_reference((900, 1200)) == (864, 1152)
     assert lumen_images.size_for_reference(None) == (1024, 1024)
 
 

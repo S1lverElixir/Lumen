@@ -449,11 +449,15 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(lang, "pick_expired"), show_alert=False)
         return
+    # Тап — тоже сообщение: без этого кнопки обходили лимит 5/30с
+    # (ревью 10.11.2026). Двойной тап отдельно режет _draw_inflight в inline_draw,
+    # поэтому клавиатуру не снимаем: после сбоя человеку не нужно ждать новое фото.
+    if not bot._check_and_register_rate_limit(user_id if user_id is not None else chat.id):
+        with contextlib.suppress(Exception):
+            await query.answer(_lang_t(lang, "rate_limited"), show_alert=False)
+        return
     with contextlib.suppress(Exception):
         await query.answer()
-    # Клавиатуру снимаем, чтобы двойной тап не запускал две генерации подряд.
-    with contextlib.suppress(Exception):
-        await bot._tg_call(question_msg.edit_reply_markup, reply_markup=None, call_timeout=15.0)
 
     async def _cb_reply(text: str, **kwargs: Any) -> Any:
         return await bot._tg_call(
@@ -486,10 +490,19 @@ async def cmd_draw(message: Message) -> None:
         return
     reference = None
     if _match_trigger_prefix(prompt.lower(), EDIT_TRIGGER_PREFIXES):
-        reference = await bot._resolve_edit_reference(
-            message, bot.get_state(message.chat.id),
-            is_private=message.chat.type == ChatType.PRIVATE, implicit=False,
-        )
+        try:
+            reference = await bot._resolve_edit_reference(
+                message, bot.get_state(message.chat.id),
+                is_private=message.chat.type == ChatType.PRIVATE, implicit=False,
+            )
+        except bot._MediaTooLargeError as exc:
+            await bot._safe_reply(message, bot._t(
+                message.chat.id, "media_too_big",
+                limit_mb=max(1, round(exc.cap_bytes / (1024 * 1024))),
+            ))
+            return
+        except Exception as exc:
+            log.warning("[draw] Edit reference resolve failed (cmd_draw): %s", exc)
     await bot.inline_draw(message, prompt, reference=reference)
 
 
