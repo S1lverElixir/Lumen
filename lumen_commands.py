@@ -361,6 +361,16 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             # Кнопка «Ещё вариант» только под генерацией: повторять правку
             # бессмысленно, у неё уже есть свой референс.
             reply_markup = None
+            # Как в ChatGPT: «повторить» есть только у последней картинки. Снимаем
+            # клавиатуру с предыдущей, иначе тап по старому фото генерировал бы
+            # уже другой сюжет и тратил слоты (ревью 10.11.2026).
+            _prev_drawn = bot.get_state(cid).get("last_drawn_message_id")
+            if _prev_drawn and _prev_drawn != getattr(message, "message_id", None):
+                await bot._tg_call(
+                    bot.bot.edit_message_reply_markup,
+                    chat_id=cid, message_id=_prev_drawn, reply_markup=None,
+                    call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                )
             if reference is None:
                 reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(
@@ -391,6 +401,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                     # относятся только к свежей генерации (прод 10.11.2026).
                     _state["last_drawn_at"] = time.time()
                     _state["last_drawn_user"] = uid
+                    _state["last_drawn_message_id"] = getattr(message, "message_id", None)
                     # «Ещё вариант» повторяет исходное описание (пропорции
                     # берутся из него же); правка его не перезаписывает.
                     if reference is None:
@@ -510,14 +521,20 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
             await query.answer(_lang_t(lang, "pick_not_yours"), show_alert=True)
         return
     last_prompt = state.get("last_draw_prompt")
+    # Тап не под последней картинкой: повторять текущий сюжет под старым фото значит
+    # врать человеку; кнопки старых фото снимаются при новой генерации, а здесь
+    # страховка после рестарта (ревью 10.11.2026).
+    _bound_msg = state.get("last_drawn_message_id")
+    _stale_button = bool(_bound_msg) and _bound_msg != getattr(question_msg, "message_id", None)
     if (
-        not isinstance(last_prompt, str) or not last_prompt.strip()
+        _stale_button
+        or not isinstance(last_prompt, str) or not last_prompt.strip()
         or not bot._fresh_generation_ref(state, user_id)
     ):
         # Кнопки из старых сообщений не должны генерировать по вчерашнему описанию.
         log.info(
-            "[draw] More tap refused: no fresh context (chat=%s, uid=%s, drawn_at=%r, prompt=%r).",
-            chat.id, user_id, state.get("last_drawn_at"), bool(last_prompt and last_prompt.strip()),
+            "[draw] More tap refused: no fresh context (chat=%s, uid=%s, drawn_at=%r, prompt=%r, stale=%s).",
+            chat.id, user_id, state.get("last_drawn_at"), bool(last_prompt and last_prompt.strip()), _stale_button,
         )
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(lang, "pick_expired"), show_alert=False)
