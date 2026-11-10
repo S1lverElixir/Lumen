@@ -94,11 +94,13 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   exactly the tested commit to the Space with a lease. A hotfix made directly on the Space makes the
   sync fail loudly instead of being overwritten.
 - The proxy ships separately through `deploy-proxy.yml`, and it can miss a change silently: it
-  deploys only when the diff of the commit CI actually tested touches `proxy/`. Merge commits are
-  handled (it takes the merge base), but a proxy change carried by a linear multi-commit push is
-  invisible, because CI tests only the tip and the diff base is `HEAD~1` (prod 09.11.2026). After
-  any proxy change, confirm that both deploy steps of that run finished as success and not skipped;
-  if they were, ask the owner to ship it by hand (recipe: `docs/ARCHITECTURE.md`, "Deploy paths").
+  deploys only when the diff of the commit CI actually tested touches `proxy/`. Merges and squashes
+  are covered (the base is the merge base, or the whole squashed diff), but a rebase-style push of
+  several commits tests only the tip, whose base is `HEAD~1` — that is how the relay rule of
+  09.11.2026 stayed undeployed. After any proxy change, confirm both deploy steps finished as
+  success and not skipped; if they were skipped, the owner reruns the workflow from Actions (a
+  manual run always deploys and needs no token) or ships `deno deploy` by hand (recipe in
+  `docs/ARCHITECTURE.md`, "Deploy paths").
 - Container egress is blocked or hangs toward Telegram, TikWM and `api.cloudflare.com`: those hosts
   are reachable only through the allowlist in `proxy/proxy.ts`. Adding a provider without an
   allowlist entry times out in production while every local test passes: change the allowlist,
@@ -111,8 +113,8 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   module-level constants: a change in the Space settings only lands after the Space restarts, so
   never report that a switch "took effect" while the old process is still running. Only the owner
   sets or changes Space variables and secrets.
-- What ships is not what is in the repo: `.dockerignore` keeps `tests/`, `docs/`, `proxy/` and
-  `.github/` out of the image, so a runtime path reading one of those passes tests and fails in
+- What ships is not what is in the repo: `.dockerignore` keeps the tests, the docs, the proxy and
+  the CI config out of the image, so a runtime path reading one of those passes tests and fails in
   production. The image rebuilds from scratch every deploy, which is why `requirements.txt` pins
   with `==` (see its header): a version bump is a decision plus a smoke test, never a side effect.
 
@@ -127,7 +129,7 @@ or a routing change). If nothing is unverified or risky, say so in one line.
   definition is in the module. `lumen_admin.py` holds the FastAPI app and the admin endpoints; the
   rest is in the `lumen_*.py` modules, whose docstring says what each one does. A name ending in
   `_flow` or `_calls` is the Telegram-touching half of the plain module next to it.
-- A user-visible string is a key, never a literal: it lives in `lumen_lang.py` (300 KB of fixed
+- A user-visible string is a key, never a literal: it lives in `lumen_lang.py` (over 300 KB of fixed
   strings in 25 languages, so grep a narrow pattern instead of reading it) and is read through
   `_t(chat_id, "key")`; buttons are assembled in `lumen_commands.py`. A new key must be filled in
   all 25 language packs, or `test_lang_table_covers_all_keys_in_all_languages` in
@@ -177,12 +179,12 @@ Gemini is the unconditional reserve on every route where Munito answers.
   in `lumen_*.py` is function-level on purpose. Hoisting one, or dropping the alias, gives two
   instances with separate state and a permanent 503 with the whole suite green; the comment above
   that alias in `bot.py` records the incident.
-- Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`): it
-  is the only place that sets the message deadline (`MESSAGE_TOTAL_BUDGET_SEC`), the `chat=` label
-  in logs, the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the honest busy reply, so a path outside it
-  silently skips all four. A handler may be registered outside the lock and still take it around
-  the work it starts (`/draw` did not, and two people in one group each left a live button over one
-  photo; fixed 10.11.2026).
+- Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`): only
+  it enforces the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the honest busy reply, and it supplies
+  the message deadline (`MESSAGE_TOTAL_BUDGET_SEC`) and the `chat=` log label when the caller did
+  not (ordinary messages get both from `handle_message` in `bot.py` before the lock). A handler may
+  be registered outside the lock and still take it around the work it starts (`/draw` did not, and
+  two people in one group each left a live button over one photo; fixed 10.11.2026).
 - After a failed startup load `_state_load_failed` (`lumen_chat_state.py`) suppresses index and
   quota writes, so an Upstash outage cannot overwrite real history with empty in-memory state. Any
   new writer must honor that flag (audit A5-2, 28.10.2026).
@@ -214,8 +216,8 @@ Gemini is the unconditional reserve on every route where Munito answers.
 - There is no pytest-asyncio, and pytest 9 fails an `async def test_*` outright ("async def
   functions are not natively supported"). Every async path is driven from a plain `def test_*` that
   calls `asyncio.run(scenario())`: follow the shape the whole suite already uses.
-- `tests/conftest.py` stubs `BOT_TOKEN`, `GEMINI_API_KEY`, `BOT_LOG_PATH` and blanks ten more
-  provider and experiment variables, so a local `.env` cannot send a test to a live API. Because
+- `tests/conftest.py` stubs `BOT_TOKEN`, `GEMINI_API_KEY`, `BOT_LOG_PATH` and blanks the other
+  provider and experiment variables (Munito, Cloudflare, Groq, OpenRouter, Sentry), so a local `.env` cannot send a test to a live API. Because
   those keys stay empty, tests only see the Gemini and Pollinations branches: to exercise Munito or
   Cloudflare a fixture must set the key itself — a fake value for one test, never a real key in a
   test or a fixture. When a module starts reading a new key at import time, add it to that list.
