@@ -143,6 +143,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
     # Общий дневной бюджет картинок — до резерва и до сети: отказ не должен ни
     # списывать слот пользователя, ни биться в провайдера, у которого день кончился.
     if not bot._is_owner(uid) and bot._image_budget_exhausted():
+        log.info("[draw] Refused: global daily image budget exhausted (chat=%s).", cid)
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(cid, "draw_day_over", limit=bot.IMAGE_DAILY_LIMIT))
         return False
@@ -150,6 +151,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
     # ДО первого await — проверка в начале со списанием после генерации позволяли
     # пяти параллельным /draw пробить лимит (аудит 01.11.2026).
     if not bot._reserve_user_daily(uid, total=1, draw=1):
+        log.info("[draw] Refused: user daily limit reached (chat=%s, uid=%s).", cid, uid)
         _draw_entry = bot._user_daily_peek(uid)
         hours, mins = bot._user_daily_reset_in()
         bot._record_stats_event("daily_limit_denials")
@@ -168,6 +170,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
     # Одна генерация на человека: rate limit 5/30с этого не мешал, и пять висящих
     # /draw по 30 МБ держал в памяти один и тот же человек (аудит 09.11.2026).
     if uid is not None and uid in _draw_inflight:
+        log.info("[draw] Refused: generation already in flight (chat=%s, uid=%s).", cid, uid)
         bot._refund_user_daily(uid, total=1, draw=1)
         await bot._safe_reply(message, bot._t(cid, "draw_err_overloaded"))
         return False
@@ -373,6 +376,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             # больше, чем «сообщений» — аудит 01.11.2026).
             bot._record_stats_event("messages_received")
             bot._record_stats_event("answers_sent")
+            log.info("[draw] Image sent (chat=%s, %d bytes, edit=%s).", cid, len(image_bytes), reference is not None)
             return True
         else:
             if budget_exceeded:
@@ -431,6 +435,7 @@ async def inline_draw_variants(
     не тратить лимиты в пустоту."""
     import bot
     count = max(1, min(int(variants or 1), 4))
+    log.info("[draw] Variants request: chat=%s count=%s", message.chat.id, count)
     for _index in range(count):
         ok = await bot.inline_draw(message, prompt, reference=reference)
         if not ok:
