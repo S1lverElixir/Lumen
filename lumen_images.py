@@ -276,13 +276,16 @@ _SIZE_WORDS: tuple[tuple[str, str], ...] = (
 # (ревью 10.11.2026).
 _SIZE_DEFAULTS: tuple[tuple[str, str], ...] = (
     (r"обои на (?:телефон|смартфон)|phone wallpaper", "9:16"),
-    (r"\bсторис\b|(?:для|for)\s+(?:моей\s+|my\s+)?(?:сторис|stories?|reels?)\b", "9:16"),
-    (r"\b(?:instagram|insta)\s+(?:stories?|reels?)\b|\breels?\b[\s-]*(?:формат|format)", "9:16"),
+    (r"\bсторис\b|(?:для|for)\s+(?:моей\s+|my\s+)?(?:сторис|story|stories|reels?)\b", "9:16"),
+    (r"\b(?:instagram|insta)\s+(?:story|stories|reels?)\b|\breels?\b[\s-]*(?:формат|format)", "9:16"),
     (r"\btiktok\b", "9:16"),
     (r"в полный рост", "9:16"),
-    (r"\b(?:постер|постеры|постеров|плакат|плаката|обложк\w*|posters?|book cover)\b", "2:3"),
-    (r"\b(?:баннер|баннера|превью|banners?|thumbnails?)\b", "16:9"),
-    (r"(?:desktop|рабочего стол\w*) wallpaper|wallpaper for desktop|обои (?:для )?(?:рабочего )?стола", "16:9"),
+    # Stems с \w*: «кот на постере», «колонка в баннере» — те же форматы, что
+    # и в именительном падеже (ревью 10.11.2026).
+    (r"\b(?:постер\w*|плакат\w*|обложк\w*|posters?|book cover)\b", "2:3"),
+    (r"\b(?:баннер\w*|превью|banners?|thumbnails?)\b", "16:9"),
+    (r"(?:desktop|рабочего стол\w*) wallpaper|wallpaper for desktop"
+     r"|обои\s+(?:на|для|в)\s+(?:рабоч(?:ий|его|ем))?\s*стол\w*", "16:9"),
     (r"\b(?:логотип|эмблем\w*|аватар\w*|стикер\w*|наклейк\w*|logos?|avatars?|stickers?)\b", "1:1"),
 )
 
