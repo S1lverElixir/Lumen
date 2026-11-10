@@ -216,6 +216,7 @@ it drifts, and `docs/` stays the truth.
   `eval/persona_questions.json` stop being exactly 1..25 or a question loses its expectation.
 - Sentry: organization `silverelixir`. `find_organizations`, then `search_issues` with
   `organizationSlug=silverelixir`, then `get_sentry_resource` with `resourceType=issue` for one
-  issue. Library docs (aiogram, FastAPI, google-genai, Deno): context7 MCP. Both are MCP servers
-  configured in `opencode.json`, so they exist only in a session that loaded it; if the tools are
-  not there, say so instead of guessing at logs.
+  issue. Library docs (aiogram, FastAPI, google-genai, Deno): context7, `resolve-library-id` then
+  `query-docs`; it is a user-level connector in Qoder and an MCP server in `opencode.json`, so it
+  is available in both harnesses. If neither tool shows up in the session, say so instead of
+  reciting documentation from memory.
