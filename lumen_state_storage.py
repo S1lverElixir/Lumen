@@ -164,6 +164,16 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
         "last_drawn_at": state.get("last_drawn_at", 0.0),
         "last_drawn_user": state.get("last_drawn_user"),
         "last_draw_prompt": state.get("last_draw_prompt", ""),
+        # Версии для «верни предыдущий вариант»: без них после деплоя возврат
+        # отвечал «версий нет» (ревью 10.11.2026).
+        "draw_versions": [
+            v for v in list(state.get("draw_versions") or [])[-5:]
+            if isinstance(v, dict) and isinstance(v.get("file_id"), str)
+        ],
+        "draw_redo": [
+            v for v in list(state.get("draw_redo") or [])[-5:]
+            if isinstance(v, dict) and isinstance(v.get("file_id"), str)
+        ],
     }
 
 

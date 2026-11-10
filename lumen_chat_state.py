@@ -356,7 +356,25 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         "last_drawn_at": _restore_last_drawn_at(s),
         "last_drawn_user": _restore_int_field(s, "last_drawn_user"),
         "last_draw_prompt": s.get("last_draw_prompt")[:600] if isinstance(s.get("last_draw_prompt"), str) else "",
+        "draw_versions": _restore_draw_versions(s.get("draw_versions")),
+        "draw_redo": _restore_draw_versions(s.get("draw_redo")),
     }
+
+
+def _restore_draw_versions(raw: Any) -> list[dict[str, Any]]:
+    """Версии картинки после рестарта: словари с file_id, не больше пяти,
+    описание урезано как у last_draw_prompt (ревью 10.11.2026)."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for item in raw[-5:]:
+        if not isinstance(item, dict) or not isinstance(item.get("file_id"), str):
+            continue
+        version = dict(item)
+        if isinstance(version.get("prompt"), str):
+            version["prompt"] = version["prompt"][:600]
+        out.append(version)
+    return out
 
 
 def _restore_last_drawn_at(s: dict[str, Any]) -> float:
