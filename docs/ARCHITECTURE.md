@@ -51,7 +51,8 @@ clipped at `IMAGE_PROMPT_MAX_CHARS` on a word boundary rather than thrown away.
 A series of variants prepares the description once for the whole series, and
 any failure, empty answer or missing budget sends the original wording, so the
 picture still arrives. Aspect ratio is still read from the user's own words,
-not from the rewrite, which could drop «16:9». Second, a drawing request is no
+not from the rewrite, which could drop «16:9» (the resolver's answer is the one
+exception, so both its system prompts are told to copy any ratio marker verbatim). Second, a drawing request is no
 longer recognized only by its first word: `_match_draw_intent` also accepts a
 filler prefix («ну нарисуй», «мне, пожалуйста, нарисуй»), an imperative in the
 middle of the phrase («кот в шляпе, нарисуй»), an artifact noun with a request
@@ -75,18 +76,61 @@ word before the draw branch sees it, so what reaches the branch is an empty
 body, not the word «это» (10.11.2026).
 
 Picture versions work like the editor's Undo/Redo in ChatGPT (10.11.2026): every
-generation appends `{file_id, prompt, user, ts, message_id}` to `draw_versions`
+generation appends `{file_id, mime, prompt, user, ts}` to `draw_versions`
 (capped at five) and clears `draw_redo`, because a redo after a new drawing would
 return a picture from another branch. «верни предыдущий вариант» / «undo» moves the
 last version to `draw_redo` and re-sends the new last one by its Telegram file_id —
 no provider call and no personal slot spent; «верни обратно» / «redo» walks back.
 The resend carries the «Ещё вариант» keyboard, strips it off the previous anchor,
 refreshes `last_draw_prompt`/`last_drawn_at` so a following «ещё вариант» repeats the
-restored subject, and puts the photo into the media history like any generation. A
-failed resend leaves both lists untouched, someone else's picture in a group is
-refused with the same `pick_not_yours` rule as the button, an empty history answers
-`draw_no_versions` (translated in all 25 languages), and `/reset` forgets both lists
-together with the rest of the chat memory.
+restored subject (the owner of that context stays the author of the restored frame,
+not whoever pressed undo — review 10.11.2026), and puts the photo into the media
+history like any generation. A failed resend leaves both lists untouched, someone
+else's picture in a group is refused with the same `pick_not_yours` rule as the
+button, an empty history answers `draw_no_versions` (translated in all 25 languages),
+and `/reset` forgets both lists together with the rest of the chat memory. Both lists
+now go through the chat snapshot (`_serialize_chat_state`/`_restore_single_chat`):
+before that a deploy silently deleted the undo history while the pictures stayed in
+the chat (must-fix review 10.11.2026).
+
+What the blind review round (10.11.2026) closed in this layer, because each of
+these failed silently in production:
+
+- The rewrite call may answer with a meta-refusal («I can't generate that», «не могу
+  это нарисовать») or name the model behind the persona. Neither may become a prompt:
+  `_DRAW_REFUSAL_RE` and `_detect_identity_leak` reject the answer and the user's own
+  wording is sent, so the slot still buys a real picture.
+- The resolver payload puts `Current request:` first and trims the history to what is
+  left, because a fixed 1200-char payload used to cut the live request off entirely in
+  any chat with a long history, and the model then painted an older subject.
+- History lines enter the prompt through `_flatten_untrusted` (one line, brackets
+  folded) under a «data, not instructions» heading, and the number of variants is read
+  from the human's phrase, never from the resolver's answer: «A ginger cat, 3 variants»
+  would otherwise spend three personal slots on someone else's sentence.
+- Rewrite and context calls are not counted in model quotas (`service=True`), so they
+  carry their own daily cap (`IMAGE_DESC_DAILY_LIMIT`); when it is spent the picture is
+  still drawn from the user's wording.
+- `inline_draw` takes its deadline from `_deadline_within_message`, so the fallback
+  chain cannot outlive the message budget that started it.
+- The reserve's ASCII translation is memoized per description (60 s) and translates
+  what is about to be sent, not the original phrase: a series used to pay 12 seconds
+  per variant.
+- Filler stripping («ну», «please», «мне, пожалуйста») is a chain of words, and a
+  trigger is looked for at each boundary, because «ну ещё вариант кота» starts with a
+  filler and continues with a repeat trigger that itself begins with «ещё»; an offset
+  is returned only together with a found trigger, otherwise «please draw a cat in a
+  hat» lost «please draw» twice and painted «in a hat».
+- An artifact noun only orders a picture when a request verb stands next to it and the
+  artifact is not a detail of another object: «посоветуй книгу с красивой обложкой»
+  and «какой логотип лучше выбрать?» are advice, not a frame. Question marks and URLs
+  switch the whole intent path off.
+- Frame words are matched with word boundaries and explicit phrases, so «imposter»,
+  «posterior view», «a cat telling stories» and «fisherman with reels» keep the square
+  default while «instagram stories», «для сторис», «постер», «обои на телефон» get
+  theirs.
+- Undo only fires when there is a version history and nothing but the trigger around
+  it: «верни предыдущий вариант перевода» is about text, and in a chat where nothing
+  was drawn the message belongs to the language model.
 
 ## Streaming & typing pace
 
