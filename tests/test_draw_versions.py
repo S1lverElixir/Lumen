@@ -13,7 +13,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 import bot
-import lumen_images
 
 
 def _photo_message(mid=10):
