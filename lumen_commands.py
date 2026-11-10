@@ -327,6 +327,9 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             if _drawn_source is not None:
                 with contextlib.suppress(Exception):
                     bot._save_media_to_history(_drawn_source, bot.get_state(cid), uid)
+                # Без пометки «грязно» корзинка не уезжала в хранилище: после
+                # рестарта «измени эту картинку» не находил своё фото (прод 10.11.2026).
+                bot.mark_state_dirty(cid)
             # Суточный счётчик уже списан резервом выше; в /stats картинка — и
             # полученное сообщение, и отправленный ответ (иначе «ответов» было
             # больше, чем «сообщений» — аудит 01.11.2026).

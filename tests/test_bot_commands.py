@@ -1015,8 +1015,11 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
         async def send_photo(self, **kwargs):
             return sent_photo
 
+    marked = []
+
     _one_image_provider(monkeypatch, ok)
     monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    monkeypatch.setattr(bot, "mark_state_dirty", lambda cid: marked.append(cid))
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
     incoming.from_user = SimpleNamespace(id=uid)
@@ -1025,6 +1028,8 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
         bucket = bot.get_state(chat_id)["recent_media_ids"][str(uid)]
         # Mime берётся из PhotoSize, поэтому категория "photo" при поиске совпадёт.
         assert list(bucket)[-1] == ("gen-file-id", "image/jpeg")
+        # Корзинка обязана уйти в хранилище: иначе после рестарта правка не найдёт фото.
+        assert chat_id in marked
     finally:
         bot.chat_state.pop(chat_id, None)
 
