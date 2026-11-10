@@ -164,7 +164,12 @@ async def _resolve_edit_references(
         if reply_src is not None and _is_image(reply_src):
             fid, mime, _ = _media_file_id_and_mime(reply_src)
             if fid and fid not in seen_ids:
-                fetched = await bot._fetch_media(fid, mime)
+                try:
+                    fetched = await bot._fetch_media(fid, mime)
+                except _MediaTooLargeError:
+                    # Второй референс не влез — правим по уже собранному первому,
+                    # а не отменяем всю правку (ревью 10.11.2026).
+                    fetched = None
                 if fetched:
                     collected.append(fetched)
                     bot._save_media_to_history(reply_src, state, sender_id)
@@ -212,7 +217,9 @@ async def _resolve_edit_references(
 async def _resolve_edit_reference(
     message: Any, state: dict[str, Any], *, is_private: bool, implicit: bool,
 ) -> tuple[bytes, str] | None:
-    """Первый референс правки — совместимая обёртка над списком (см. выше)."""
+    """Первый референс правки. Оставлено для одиночных вызовов и тестов;
+    многокартиночный путь обязан идти через _resolve_edit_references, иначе
+    второй референс молча теряется (ревью 10.11.2026)."""
     refs = await _resolve_edit_references(
         message, state, is_private=is_private, implicit=implicit,
     )

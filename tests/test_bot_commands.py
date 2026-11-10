@@ -1635,6 +1635,33 @@ def test_detect_image_variants(text, expected):
     assert _detect_image_variants(text) == expected
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("нарисуй 2 варианта кота", (2, "нарисуй кота")),
+    ("сделай три варианта маяка", (3, "сделай маяка")),
+    ("нарисуй две картинки лис", (2, "нарисуй лис")),
+    ("кот", (1, "кот")),
+])
+def test_split_image_variants_removes_phrase(text, expected):
+    # Фраза количества не должна уезжать модели и в повтор («ещё вариант»).
+    from lumen_message_parse import _split_image_variants
+    assert _split_image_variants(text) == expected
+
+
+def test_weak_verb_with_variants_is_generation_not_edit(rate_guard_setup, monkeypatch):
+    # «Сделай 2 варианта кота» без вложений — серия генераций, а не правка
+    # (ревью 10.11.2026: слабый edit-глагол съедал запрос).
+    message = rate_guard_setup()
+    captured = {}
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        captured.update(prompt=prompt, variants=variants, reference=reference)
+
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "сделай 2 варианта кота"
+    asyncio.run(bot._handle_message_core(message))
+    assert captured == {"prompt": "кота", "variants": 2, "reference": None}
+
+
 def test_inline_draw_variants_stops_after_failure(monkeypatch):
     # Серия вариантов тратит слоты только на реальные картинки: сбой/отказ
     # останавливает её, а не добивает лимит пустыми попытками.
@@ -1675,7 +1702,7 @@ def test_draw_trigger_passes_variant_count(rate_guard_setup, monkeypatch):
     monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
     message.text = "нарисуй 2 варианта кота"
     asyncio.run(bot._handle_message_core(message))
-    assert captured == {"prompt": "2 варианта кота", "variants": 2, "reference": None}
+    assert captured == {"prompt": "кота", "variants": 2, "reference": None}
 
 
 def test_draw_more_words_with_new_subject_generate_it(rate_guard_setup, monkeypatch):

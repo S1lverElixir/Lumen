@@ -33,7 +33,11 @@ from lumen_images import (
     image_filename,
 )
 from lumen_lang import SUPPORTED_LANGS, LANG_NAMES, normalize_lang, pick_texts, t as _lang_t
-from lumen_message_parse import EDIT_TRIGGER_PREFIXES, _detect_image_variants, _match_trigger_prefix
+from lumen_message_parse import (
+    EDIT_TRIGGER_PREFIXES,
+    _match_trigger_prefix,
+    _split_image_variants,
+)
 from lumen_limits import (
     PICK_TTL_SEC,
     _purge_expired_picks,
@@ -437,6 +441,11 @@ async def inline_draw_variants(
     count = max(1, min(int(variants or 1), 4))
     log.info("[draw] Variants request: chat=%s count=%s", message.chat.id, count)
     for _index in range(count):
+        if _index:
+            remaining = bot._msg_remaining_sec()
+            if remaining is not None and remaining < 15:
+                log.info("[draw] Variants stopped early: %.0fs of message budget left", remaining)
+                break
         ok = await bot.inline_draw(message, prompt, reference=reference)
         if not ok:
             break
@@ -520,7 +529,7 @@ async def cmd_draw(message: Message) -> None:
             reference = await bot._resolve_edit_references(
                 message, bot.get_state(message.chat.id),
                 is_private=message.chat.type == ChatType.PRIVATE, implicit=False,
-            )
+            ) or None
         except bot._MediaTooLargeError as exc:
             await bot._safe_reply(message, bot._t(
                 message.chat.id, "media_too_big",
@@ -529,10 +538,14 @@ async def cmd_draw(message: Message) -> None:
             return
         except Exception as exc:
             log.warning("[draw] Edit reference resolve failed (cmd_draw): %s", exc)
-    await bot.inline_draw_variants(
-        message, prompt, variants=_detect_image_variants(prompt),
-        reference=reference,
-    )
+    if reference:
+        # Правка — всегда одна: «измени … 2 варианта» не превращается в две правки.
+        await bot.inline_draw_variants(message, prompt, variants=1, reference=reference)
+    else:
+        _variants, _clean_prompt = _split_image_variants(prompt)
+        await bot.inline_draw_variants(
+            message, _clean_prompt or prompt, variants=_variants, reference=None,
+        )
 
 
 

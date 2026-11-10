@@ -78,19 +78,28 @@ _VARIANTS_RE = re.compile(
     r"(?<!\d)([2-4])\s*(?:вариант\w*|картинк\w*|изображени\w*|верси\w*|versions?|variants?)(?!\w)",
     re.IGNORECASE,
 )
-_VARIANTS_WORDS: dict[str, int] = {"два": 2, "три": 3, "четыре": 4, "two": 2, "three": 3, "four": 4}
+_VARIANTS_WORDS: dict[str, int] = {"два": 2, "две": 2, "три": 3, "четыре": 4, "two": 2, "three": 3, "four": 4}
+
+
+def _split_image_variants(text: str) -> tuple[int, str]:
+    """(сколько вариантов, текст без фразы количества): «2 варианта кота» ->
+    (2, «кота»), чтобы число не уезжало модели и в повтор («ещё вариант»)."""
+    low = (text or "").lower()
+    m = _VARIANTS_RE.search(low)
+    if m:
+        cleaned = (text[:m.start()] + " " + text[m.end():]).strip()
+        return int(m.group(1)), re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
+    for word, num in _VARIANTS_WORDS.items():
+        mm = re.search(r"(?<!\w)" + word + r"\s+(?:вариант\w*|картинк\w*|изображени\w*|versions?|variants?)", low)
+        if mm:
+            cleaned = (text[:mm.start()] + " " + text[mm.end():]).strip()
+            return num, re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
+    return 1, text
 
 
 def _detect_image_variants(text: str) -> int:
     """Сколько вариантов просили: 1 — обычная генерация, 2-4 — несколько."""
-    low = (text or "").lower()
-    m = _VARIANTS_RE.search(low)
-    if m:
-        return int(m.group(1))
-    for word, num in _VARIANTS_WORDS.items():
-        if re.search(r"(?<!\w)" + word + r"\s+(?:вариант\w*|картинк\w*|изображени\w*|versions?|variants?)", low):
-            return num
-    return 1
+    return _split_image_variants(text)[0]
 
 
 # "хочу картинку" не триггер: путается с показом/редактурой. Длинные фразы выше коротких, иначе вернётся первое совпадение.

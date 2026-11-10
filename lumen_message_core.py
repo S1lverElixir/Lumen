@@ -25,6 +25,7 @@ from lumen_message_parse import (
     REPEAT_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
     _detect_image_variants,
+    _split_image_variants,
     _NO_MEDIA_NOTE,
     _find_recent_media_by_category,
     _match_trigger_prefix,
@@ -762,6 +763,28 @@ async def _handle_message_core(
 
     matched_draw_trigger = _match_trigger_prefix(lower_prompt, DRAW_TRIGGER_PREFIXES)
     matched_tts_trigger = _match_trigger_prefix(lower_prompt, TTS_TRIGGER_PREFIXES)
+
+    # «Сделай/нарисуй 2 варианта кота» — это серия генераций, а не правка:
+    # проверяем число ДО edit-ветки, иначе слабый глагол съедал запрос
+    # (ревью 10.11.2026). Есть вложение/реплай — остаётся правкой.
+    _variant_count = _detect_image_variants(clean_prompt)
+    _explicit_media = _msg_media_source(message) is not None or (
+        message.reply_to_message is not None and _msg_media_source(message.reply_to_message) is not None
+    )
+    if (
+        _variant_count > 1 and not is_continuation and not _explicit_media
+        and (matched_draw_trigger or matched_edit_trigger)
+    ):
+        _base_prompt = _strip_trigger_content(
+            clean_prompt, matched_draw_trigger or matched_edit_trigger, message,
+        )
+        _count2, _variant_prompt = _split_image_variants(_base_prompt)
+        _variant_prompt = _variant_prompt or _base_prompt
+        if _variant_prompt:
+            await bot.inline_draw_variants(
+                message, _variant_prompt, variants=max(_variant_count, _count2),
+            )
+            return
 
     if matched_draw_trigger:
         prompt_content = _strip_trigger_content(clean_prompt, matched_draw_trigger, message)

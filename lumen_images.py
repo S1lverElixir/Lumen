@@ -393,7 +393,7 @@ def _cloudflare_form(
         form.add_field(
             f"input_image_{index}", data,
             filename=f"reference{index}" + (".png" if data.startswith(b"\x89PNG") else ".jpg"),
-            content_type=_image_content_type(reference),
+            content_type=_image_content_type(data),
         )
     return form
 
