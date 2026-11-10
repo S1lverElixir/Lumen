@@ -214,6 +214,14 @@ it drifts, and `docs/` stays the truth.
 - Sentry: organization `silverelixir`. `find_organizations`, then `search_issues` with
   `organizationSlug=silverelixir`, then `get_sentry_resource` with `resourceType=issue` for one
   issue. Library docs (aiogram, FastAPI, google-genai, Deno): context7, `resolve-library-id` then
-  `query-docs`; it is a user-level connector in Qoder and an MCP server in `opencode.json`, so it
-  is available in both harnesses. If neither tool shows up in the session, say so instead of
-  reciting documentation from memory.
+  `query-docs`. It is configured twice: as a user-level connector in Qoder (`~/.qoder/settings.json`
+  — the app has no per-project scope for custom connectors) and as an MCP server in
+  `opencode.json`. If the tools are missing from the session, say so instead of reciting
+  documentation from memory, and note that a connector added mid-session only appears in a new
+  chat.
+
+## About this file
+- Keep here only what an agent cannot learn from the code in a minute of searching: explanations of
+  behavior go to `docs/`, mechanics into comments.
+- Add a rule once the same mistake has repeated, drop a rule that no longer changes behavior, and
+  re-run every command you edited here before committing it.
