@@ -466,10 +466,16 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             user_err = bot._t(cid, "draw_err_generic")
         # Статус уже снесён выше (перед send_photo): если правка не прошла — дублируем реплаем,
         # иначе пользователь не увидит вообще ничего (найдено внешним аудитом).
-        if status_obj is not None:
-            await status_obj.stop()
-        if not await bot._edit_message_quietly(status, user_err):
-            await bot._safe_reply(message, user_err)
+        try:
+            if status_obj is not None:
+                await status_obj.stop()
+            if not await bot._edit_message_quietly(status, user_err):
+                await bot._safe_reply(message, user_err)
+        except Exception as notice_exc:
+            # Сбой самого уведомления не имел права уходить наружу из обработчика
+            # ошибки: слот уже возвращён, а генератор падал бы на пустом месте
+            # (ревью 10.11.2026).
+            log.warning("[draw] Failure notice failed: %s", notice_exc)
         return False
     finally:
         if acquired:
