@@ -219,8 +219,9 @@ Gemini is the unconditional reserve on every route where Munito answers.
   those keys stay empty, tests only see the Gemini and Pollinations branches: to exercise Munito or
   Cloudflare a fixture must set the key itself — a fake value for one test, never a real key in a
   test or a fixture. When a module starts reading a new key at import time, add it to that list.
-- Waits go through a module-level seam read at call time, and `conftest.py` replaces two of them
-  for the whole suite: `bot._typing_sleep` and `lumen_tiktok._sleep`, each read from its own module.
+- Waits go through a module-level seam read at call time, and `tests/conftest.py` replaces two of
+  them for the whole suite: `bot._typing_sleep` and `lumen_tiktok._sleep`, each read from its own
+  module.
   A direct `asyncio.sleep` therefore slows every test in the run. Network has the same seam shape
   (`bot._get_http_session`) but is patched per test, not suite-wide, so new code that reaches out
   is tested by patching that name in the module that reads it.
