@@ -129,8 +129,8 @@ or a routing change). If nothing is unverified or risky, say so in one line.
   `tests/test_bot_commands.py` fails.
 
 ## Providers, in one screen
-The backbone since 05.11.2026 is Munito AI (an OpenAI-compatible endpoint serving open models), with
-Gemini as the unconditional automatic reserve for everything it answers.
+The backbone since 05.11.2026 is Munito AI (an OpenAI-compatible endpoint serving open models), and
+Gemini is the unconditional reserve on every route where Munito answers.
 - Text and image input: Munito (`_MUNITO_ORDER`) is the head. Reading a site by
   URL, YouTube, video, audio input and TTS: Gemini only. Voice notes are transcribed by Groq
   Whisper first, the only thing Groq is still used for.
@@ -163,8 +163,8 @@ Gemini as the unconditional automatic reserve for everything it answers.
   move the others, so check which copy a route actually reads.
 - Streaming has no automated test of a real transport: every client is mocked. Munito SSE from the
   deployed container is proven in production (Space logs 10.11.2026: answers received via streaming
-  on the Munito head); Gemini SSE has only ever been exercised by hand through the smoke bot, and
-  no failover path is covered at all. Before touching streaming code, follow the manual smoke
+  on the Munito head); Gemini SSE has only ever been exercised by hand through the smoke bot, and no
+  automated test covers a failover. Before touching streaming code, follow the manual smoke
   checklist in `docs/ARCHITECTURE.md` and put in the report which points the owner has to run
   after the deploy: the bot is not yours to drive, so you never run those checks yourself.
 - `python bot.py` makes the module `__main__` while tests import it as `bot`; the alias at the top
