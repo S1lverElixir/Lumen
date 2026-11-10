@@ -157,9 +157,10 @@ Gemini as the unconditional automatic reserve for everything it answers.
   of `bot.py` (`sys.modules.setdefault("bot", ...)`) keeps them one module, and every `import bot`
   in `lumen_*.py` is function-level on purpose. Hoisting one, or dropping the alias, gives two
   instances with separate state and a permanent 503 with the whole suite green (prod 09.2026).
-- Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`):
-  outside it a request skips the message budget, the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the
-  busy reply. A handler may be registered outside the lock and still take it around the work it
+- Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`): it
+  is the only place that sets the message deadline (`MESSAGE_TOTAL_BUDGET_SEC`), the `chat=` label
+  in logs, the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the honest busy reply, so a path outside it
+  silently skips all four. A handler may be registered outside the lock and still take it around the work it
   starts (`/draw` did not, and two people in one group each left a live button over one photo;
   fixed 10.11.2026).
 - After a failed startup load `_state_load_failed` (`lumen_chat_state.py`) suppresses index and
