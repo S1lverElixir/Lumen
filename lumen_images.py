@@ -64,6 +64,11 @@ class ImageRateLimitedError(ImageProviderError):
         self.retry_after_sec = retry_after_sec
 
 
+class ImageModerationError(ImageProviderError):
+    """Фильтр содержания провайдера: не сетевой сбой и не бюджет. Резерв умеет
+    рисовать то же самое без фильтра, поэтому цепочка обязана встать (ревю 10.11.2026)."""
+
+
 class ImageBudgetExhaustedError(ImageProviderError):
     """Бесплатный дневной бюджет провайдера выбран — до следующих суток пробовать бессмысленно."""
 
@@ -358,7 +363,7 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
         # Фильтр содержания (замер 10.11.2026: код 3030 "Your output has been
         # flagged"): это не сетевой сбой, повтор и резерв не помогут — человеку
         # честнее «ошибка генерации, переформулируй».
-        raise ImageProviderError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
+        raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
     if status != 200:
         raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
     if not data.get("success", True):
@@ -438,6 +443,11 @@ async def _pollinations_text_to_image(session: aiohttp.ClientSession, prompt: st
     """Классический эндпоинт без ключа — только резерв. Замер 09.11.2026: 1 картинка в
     45 секунд на IP (HTTP 402 FREE_LIMIT с Retry-After), модель всегда sana, nologo
     игнорируется, поэтому водяной знак остаётся."""
+    if not (prompt or "").isascii():
+        # sana превращает кириллицу в '?' на разборе URL и рисует случайное
+        # (пруф 09.11.2026): без перевода честнее отказа, чем картинка-мусор за
+        # счёт дневного бюджета (ревю 10.11.2026).
+        raise ImageProviderError("Pollinations: описание не переведено на английский")
     encoded = _encoded_prompt(prompt)
     # safe=true: без него фильтр NSFW выключен (так в их доках), а бот публичный.
     url = (

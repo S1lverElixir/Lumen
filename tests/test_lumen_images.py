@@ -156,23 +156,35 @@ def test_pollinations_url_carries_seed_safe_and_nologo():
     # Замер 09.11.2026: без seed Pollinations отдаёт seed=42 и байт-в-байт тот же
     # файл на повторе промпта, без safe фильтр NSFW выключен.
     captured = {}
-    asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_image_resp(), captured), "кот"))
+    asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_image_resp(), captured), "cat"))
     url = captured["url"]
     assert "safe=true" in url and "nologo=true" in url and "enhance=false" in url
     query = urllib.parse.parse_qs(url.split("?", 1)[1])
     assert int(query["seed"][0]) > 0
-    asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_image_resp(), captured), "кот"))
+    asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_image_resp(), captured), "cat"))
     assert int(urllib.parse.parse_qs(captured["url"].split("?", 1)[1])["seed"][0]) != int(query["seed"][0])
 
 
 def test_pollinations_truncates_prompt_to_cap():
     captured = {}
+    prompt = "big cat " * 120
     asyncio.run(lumen_images._pollinations_text_to_image(
-        _FakeSession(_image_resp(), captured), "д" * 900, timeout_sec=7.5))
+        _FakeSession(_image_resp(), captured), prompt, timeout_sec=7.5))
     path = captured["url"].split("/prompt/", 1)[1].split("?", 1)[0]
-    assert path == urllib.parse.quote("д" * lumen_images.IMAGE_PROMPT_MAX_CHARS, safe="")
+    assert path == urllib.parse.quote(prompt[:lumen_images.IMAGE_PROMPT_MAX_CHARS], safe="")
+    assert "%20" in path
     assert captured["timeout"].total == 7.5
     assert captured["timeout"].sock_connect == 12.0
+
+
+def test_pollinations_refuses_untranslated_cyrillic_prompt():
+    # sana получает кириллицу как '?' на разборе URL и рисует случайное
+    # (пруф 09.11.2026); запрос всё равно списывал дневной бюджет.
+    captured = {}
+    with pytest.raises(lumen_images.ImageProviderError):
+        asyncio.run(lumen_images._pollinations_text_to_image(
+            _FakeSession(_image_resp(), captured), "нарисуй кота"))
+    assert "url" not in captured
 
 
 def test_pollinations_free_limit_402_is_rate_limit_with_retry_after():
@@ -183,7 +195,7 @@ def test_pollinations_free_limit_402_is_rate_limit_with_retry_after():
     resp = _FakeResp(status=402, headers={"Content-Type": "application/json", "Retry-After": "35"},
                     text=body, chunks=(body.encode(),))
     with pytest.raises(lumen_images.ImageRateLimitedError) as exc:
-        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "кот"))
+        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "cat"))
     assert exc.value.retry_after_sec == 35.0
     assert "FREE_LIMIT" in str(exc.value)
 
@@ -192,16 +204,16 @@ def test_pollinations_402_without_retry_after_is_budget():
     body = json.dumps({"error": {"code": "INSUFFICIENT_POLLEN"}})
     resp = _FakeResp(status=402, text=body, chunks=(body.encode(),))
     with pytest.raises(lumen_images.ImageBudgetExhaustedError):
-        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "кот"))
+        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "cat"))
 
 
 def test_pollinations_429_and_500_are_classified_apart():
     with pytest.raises(lumen_images.ImageRateLimitedError):
         asyncio.run(lumen_images._pollinations_text_to_image(
-            _FakeSession(_FakeResp(status=429, headers={"Retry-After": "7"})), "кот"))
+            _FakeSession(_FakeResp(status=429, headers={"Retry-After": "7"})), "cat"))
     with pytest.raises(lumen_images.ImageProviderError) as exc:
         asyncio.run(lumen_images._pollinations_text_to_image(
-            _FakeSession(_FakeResp(status=500)), "кот"))
+            _FakeSession(_FakeResp(status=500)), "cat"))
     assert not isinstance(exc.value, lumen_images.ImageRateLimitedError)
 
 
@@ -211,7 +223,7 @@ def test_pollinations_429_and_500_are_classified_apart():
 def test_accepts_jpeg_by_magic_bytes_when_content_type_lies():
     # Регрессия AUD-E-001: JPEG без image/* Content-Type отвергался как не-изображение.
     resp = _FakeResp(status=200, headers={"Content-Type": "application/octet-stream"}, chunks=(JPEG,))
-    body = asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "кот"))
+    body = asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "cat"))
     assert body[:3] == b"\xff\xd8\xff"
 
 
@@ -222,11 +234,11 @@ def test_rejects_oversized_body(monkeypatch):
     big = b"\x89PNG" + b"\x00" * 200
     with pytest.raises(lumen_images.ImageProviderError):
         asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_FakeResp(
-            status=200, headers={"Content-Type": "image/png"}, chunks=(big,))), "кот"))
+            status=200, headers={"Content-Type": "image/png"}, chunks=(big,))), "cat"))
     with pytest.raises(lumen_images.ImageProviderError):
         asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_FakeResp(
             status=200, headers={"Content-Type": "image/png", "Content-Length": "1000000"},
-            chunks=(b"\x89PNG" + b"\x00" * 10,))), "кот"))
+            chunks=(b"\x89PNG" + b"\x00" * 10,))), "cat"))
 
 
 def test_rejects_format_sendphoto_cannot_take():
@@ -234,7 +246,7 @@ def test_rejects_format_sendphoto_cannot_take():
     # ошибку человек видел только как «не удалось отправить».
     resp = _FakeResp(status=200, headers={"Content-Type": "image/gif"}, chunks=(GIF,))
     with pytest.raises(lumen_images.ImageProviderError):
-        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "кот"))
+        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "cat"))
 
 
 def test_image_filename_follows_magic_bytes():
@@ -353,7 +365,7 @@ def test_retry_after_accepts_http_date():
     resp = _FakeResp(status=402, headers={"Retry-After": format_datetime(when)},
                     chunks=(b'{"error":{"code":"RATE","message":"slow down"}}',))
     with pytest.raises(lumen_images.ImageRateLimitedError) as exc:
-        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "кот"))
+        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "cat"))
     assert 20 <= exc.value.retry_after_sec <= 60
 
 

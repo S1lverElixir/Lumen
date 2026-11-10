@@ -29,6 +29,7 @@ from aiogram.types import (
 from lumen_images import (
     IMAGE_PROMPT_MAX_CHARS,
     ImageBudgetExhaustedError,
+    ImageModerationError,
     ImageRateLimitedError,
     image_filename,
 )
@@ -250,6 +251,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         budget_exceeded = False
         rate_limited = False
         budget_out = False
+        moderation_blocked = False
         translated_prompt: str | None = None
         truncated = len(prompt.strip()) > IMAGE_PROMPT_MAX_CHARS
 
@@ -306,6 +308,14 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                 budget_out = True
                 last_error = exc
                 log.warning("[draw] Provider %s daily budget exhausted (%s) — trying next.", provider, exc)
+            except ImageModerationError as exc:
+                # Отказ по содержанию не «сетевая проблема»: fallback на sana
+                # повторил бы ровно тот контент, который Cloudflare flagged, и ещё
+                # и списал бюджет (ревю 10.11.2026).
+                moderation_blocked = True
+                last_error = exc
+                log.warning("[draw] Provider %s refused by content moderation — chain stopped.", provider)
+                break
             except Exception as exc:
                 last_error = exc
                 elapsed = time.monotonic() - attempt_started
@@ -313,8 +323,14 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                 # Висящий хост — это тоже «не трогать минуту»: без паузы каждый
                 # следующий человек платил бы полные IMAGE_ATTEMPT_TIMEOUT_SEC
                 # (прод 09.11.2026).
+                # Ответы relay-прокси ("Cloudflare HTTP 502/504") — тоже «не трогать
+                # минуту»: без паузы каждый следующий человек платил бы полный таймаут
+                # (прод 09.11.2026, ревю 10.11.2026).
                 unreachable = isinstance(exc, (asyncio.TimeoutError, OSError)) or any(
-                    kw in txt for kw in ("timeout", "cannot connect", "ssl:", "no address", "connection", "dns")
+                    kw in txt for kw in (
+                        "timeout", "cannot connect", "ssl:", "no address", "connection", "dns",
+                        "http 500", "http 502", "http 503", "http 504", "gateway", "timed out",
+                    )
                 )
                 if unreachable:
                     bot._note_image_rate_limited(provider)
@@ -385,6 +401,8 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             log.info("[draw] Image sent (chat=%s, %d bytes, edit=%s).", cid, len(image_bytes), reference is not None)
             return True
         else:
+            if moderation_blocked:
+                raise RuntimeError("image generation refused by content moderation") from last_error
             if budget_exceeded:
                 raise RuntimeError("image generation total time budget exceeded") from last_error
             if rate_limited:
