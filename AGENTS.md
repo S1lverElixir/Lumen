@@ -89,10 +89,11 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   exactly the tested commit to the Space with a lease. A hotfix made directly on the Space makes the
   sync fail loudly instead of being overwritten.
 - The proxy ships separately through `deploy-proxy.yml`, and it can miss a change silently: it
-  deploys only when the diff of the commit CI actually tested touches `proxy/`, so a proxy change
-  pushed together with other commits never deploys on its own (prod 09.11.2026). After any proxy
-  change, confirm that both deploy steps of that run finished as success and not skipped; otherwise
-  deploy by hand (`docs/ARCHITECTURE.md`, section "Deploy paths").
+  deploys only when the diff of the commit CI actually tested touches `proxy/`. Merge commits are
+  handled (it takes the merge base), but a proxy change carried by a linear multi-commit push is
+  invisible, because CI tests only the tip and the diff base is `HEAD~1` (prod 09.11.2026). After
+  any proxy change, confirm that both deploy steps of that run finished as success and not skipped;
+  if they were, ask the owner to ship it by hand (recipe: `docs/ARCHITECTURE.md`, "Deploy paths").
 - Container egress is blocked or hangs toward Telegram, TikWM and `api.cloudflare.com`: those hosts
   are reachable only through the allowlist in `proxy/proxy.ts`. Adding a provider without an
   allowlist entry times out in production while every local test passes: change the allowlist,
@@ -116,12 +117,11 @@ run); what was not verified; what the owner must check by hand (a smoke test aft
 or a routing change). If nothing is unverified or risky, say so in one line.
 
 ## Where things live
-- `bot.py` is the entry point and composition root (env, logging, Dispatcher, main) and re-exports
-  over 250 names from the `lumen_*.py` modules (226 of them in `__all__`): a grep for a symbol
-  hits `bot.py` first, the definition is in the module. `lumen_admin.py` holds the FastAPI app and
-  the admin endpoints; the rest is in the 30 `lumen_*.py` files, each opening with a one-line
-  docstring. A name ending in `_flow` or `_calls` is the Telegram-touching half of the plain module
-  next to it.
+- `bot.py` is the entry point and composition root (env, logging, Dispatcher, main) and imports
+  hundreds of names from the `lumen_*.py` modules: a grep for a symbol hits `bot.py` first, the
+  definition is in the module. `lumen_admin.py` holds the FastAPI app and the admin endpoints; the
+  rest is in the `lumen_*.py` modules, whose docstring says what each one does. A name ending in
+  `_flow` or `_calls` is the Telegram-touching half of the plain module next to it.
 - A user-visible string is a key, never a literal: it lives in `lumen_lang.py` (300 KB of fixed
   strings in 25 languages, so grep a narrow pattern instead of reading it) and is read through
   `_t(chat_id, "key")`; buttons are assembled in `lumen_commands.py`. A new key must be filled in
@@ -156,8 +156,8 @@ Gemini is the unconditional reserve on every route where Munito answers.
   inside the quota state, so it outlives a restart only when Upstash is configured, and repeated
   empty answers set an in-memory quarantine that a restart always clears. Never remove a model on a
   guess, and remember that editing those lists needs an approved plan.
-- The old `_OR_MODEL_HEALTH` registry went away with OpenRouter on 05.11.2026 and has no successor,
-  so do not look for it or rebuild one: cooldown and quarantine are the mechanism.
+- There is no model-health registry: `_OR_MODEL_HEALTH` went away with OpenRouter on 05.11.2026 and
+  was not replaced, so do not look for one or build it again.
 - In that same file `GEMINI_DEFAULT_CHAIN`, `GEMINI_LINK_CHAIN` and `GEMINI_LINK_SEARCH_CHAIN` are
   copies, not aliases, of the heavy and search chains (audit 26.09.2026): editing one list does not
   move the others, so check which copy a route actually reads.
@@ -228,9 +228,9 @@ Gemini is the unconditional reserve on every route where Munito answers.
 ## Docs, mirrors and tools
 The same facts live in several places and they drift. A change to behavior updates them in the same
 commit: `docs/ARCHITECTURE.md` (pipelines, routing, the streaming checklist, deploy paths),
-`docs/ENVIRONMENT.md` (variables and hardcoded limits), `README.md` and `README.ru.md`
-(translations of one text: both, or neither), this file, and `opencode.json` when a permission
-changed. A generated RepoWiki may sit in the gitignored `.qoder/` directory: it is not committed,
+`docs/ENVIRONMENT.md` (variables and hardcoded limits), `README.md` and `README.ru.md` (two
+languages of one document, so a user-facing change edits both), this file, and `opencode.json` when
+a permission changed. A generated RepoWiki may sit in the gitignored `.qoder/` directory: it is not committed,
 it drifts, and `docs/` stays the truth.
 - `eval/` holds the offline probes and the persona harness, run by hand from main through
   `persona-eval.yml`; method and results are in `docs/PROMPT_EVAL.md`, and its dated measurements
