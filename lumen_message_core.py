@@ -29,11 +29,9 @@ from lumen_message_parse import (
     _detect_image_variants,
     _is_new_artifact_request,
     _match_draw_intent,
-    _DRAW_FILLER_RE,
     _has_visual_signal,
     _is_anaphoric_draw_request,
     _match_trigger_with_fillers,
-    _strip_trigger_fillers,
     _split_image_variants,
     _wants_style_reference,
     _NO_MEDIA_NOTE,
@@ -736,25 +734,20 @@ async def _handle_message_core(
         clean_prompt = continued_prompt
         lower_prompt = clean_prompt.lower().strip()
 
-    # Длина обвязки по оригиналу: lower() турецкой İ даёт два символа, и срез
-    # по нижнему регистру резал живые буквы (ревью 10.11.2026).
-    _filler_cut = len(_DRAW_FILLER_RE.match(clean_prompt).group(0))
-
     # Возврат к предыдущей версии картинки: раньше повтора и правки, иначе
     # «верни предыдущий вариант» рисовал бы новый кадр вместо готового.
     if not is_continuation:
-        _revert_core = _strip_trigger_fillers(lower_prompt)[0]
         _revert_hit, _revert_cut = _match_trigger_with_fillers(
-            lower_prompt, _revert_core, REVERT_TRIGGER_PREFIXES,
+            lower_prompt, REVERT_TRIGGER_PREFIXES,
         )
         _redo_hit, _redo_cut = _match_trigger_with_fillers(
-            lower_prompt, _revert_core, REDO_TRIGGER_PREFIXES,
+            lower_prompt, REDO_TRIGGER_PREFIXES,
         )
         if (_revert_hit or _redo_hit) and state.get("draw_versions"):
             # «верни предыдущий вариант перевода» — про текст, а не про кадр:
             # буквы после триггера уводят запрос обычной модели (ревью 10.11.2026).
             _rv_trigger = _revert_hit if _revert_hit else _redo_hit
-            _rv_body = clean_prompt[_filler_cut if (_revert_cut or _redo_cut) else 0:]
+            _rv_body = clean_prompt[(_revert_cut or _redo_cut):]
             _rv_rest = _strip_trigger_content(
                 _rv_body, _rv_trigger, message, reply_fallback=False,
             )
@@ -767,7 +760,7 @@ async def _handle_message_core(
     # «Ещё вариант»: повтор последней генерации тем же описанием. Только свежая
     # своя генерация — иначе «ещё раз» это обычный текст (шутка, повтор ответа).
     _repeat_hit, _repeat_cut = _match_trigger_with_fillers(
-        lower_prompt, _strip_trigger_fillers(lower_prompt)[0], REPEAT_TRIGGER_PREFIXES,
+        lower_prompt, REPEAT_TRIGGER_PREFIXES,
     )
     if not is_continuation and _repeat_hit:
         matched_repeat = _repeat_hit
@@ -778,8 +771,7 @@ async def _handle_message_core(
         # где картинку не просили, — ошибка маршрута: «другой вариант перевода
         # письма» и «regenerate the summary» остаются текстом (ревью 10.11.2026).
         _repeat_rest = _strip_trigger_content(
-            clean_prompt[_filler_cut if _repeat_cut else 0:], matched_repeat,
-            message, reply_fallback=False,
+            clean_prompt[_repeat_cut:], matched_repeat, message, reply_fallback=False,
         )
         # Хвост без букв — не новый сюжет: «ещё вариант...» отдавало модели «...»
         # и рисовало месиво вместо кота (live 10.11.2026 16:49).
@@ -801,23 +793,20 @@ async def _handle_message_core(
     # Обвязка («ну», «мне, пожалуйста», «ты можешь») не меняет смысл просьбы,
     # но раньше ломала её распознавание (паритет с ChatGPT, 10.11.2026).
     # Чистое начало по-прежнему приоритетнее: прежние маршруты не двигаются.
-    _prompt_core = _strip_trigger_fillers(lower_prompt)[0]
     matched_draw_trigger, _draw_cut = _match_trigger_with_fillers(
-        lower_prompt, _prompt_core, DRAW_TRIGGER_PREFIXES,
+        lower_prompt, DRAW_TRIGGER_PREFIXES,
     )
     matched_edit_trigger, _edit_cut = _match_trigger_with_fillers(
-        lower_prompt, _prompt_core, EDIT_TRIGGER_PREFIXES,
+        lower_prompt, EDIT_TRIGGER_PREFIXES,
     )
     # «сделай картинку кота» — заказ нового кадра, а не правка: слабый глагол
     # не должен уводить его в edit-ветку (паритет 10.11.2026).
     _new_artifact = _is_new_artifact_request(lower_prompt)
     matched_tts_trigger, _tts_cut = _match_trigger_with_fillers(
-        lower_prompt, _prompt_core, TTS_TRIGGER_PREFIXES,
+        lower_prompt, TTS_TRIGGER_PREFIXES,
     )
-    # Тело фразы: обвязку снимаем только когда триггер найден после неё, иначе
-    # теряются буквы («ещё вариант» сам начинается с обвязочного слова).
-    _body_cut = _filler_cut if (_draw_cut or _edit_cut or _tts_cut) else 0
-    _prompt_text = clean_prompt[_body_cut:] if _body_cut else clean_prompt
+    # Тело фразы: срез даёт сам матчер — ровно до найденного триггера.
+    _prompt_text = clean_prompt[max(_draw_cut, _edit_cut, _tts_cut):]
 
     # «Сделай/нарисуй 2 варианта кота» — это серия генераций, а не правка:
     # проверяем число ДО edit-ветки, иначе слабый глагол съедал запрос

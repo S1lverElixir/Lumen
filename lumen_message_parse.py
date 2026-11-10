@@ -133,6 +133,29 @@ _DRAW_BLOCK_LEAD_RE = re.compile(
     re.IGNORECASE,
 )
 # Обвязка перед глаголом: «ну нарисуй», «мне, пожалуйста, нарисуй», «ты можешь...».
+# Одно снятое слово-связки: цепочку «ну ещё вариант» режем по границам,
+    # потому что «ещё» — одновременно связка и первое слово триггера повтора
+    # (ревью 10.11.2026).
+_DRAW_FILLER_ONE_RE = re.compile(
+    r"^(?:(?:ну|давай|а|и|вот|мне|пожалуйста|ещё|еще|тоже|также|сначала|для\s+начала|"
+    r"please|pls|also|just)\b[,\s]*)",
+    re.IGNORECASE,
+)
+
+
+def _filler_offsets(text_lower: str) -> list[int]:
+    """Возможные начала просьбы: 0 и позиция после каждого снятого слова."""
+    offsets = [0]
+    pos = 0
+    for _ in range(4):
+        m = _DRAW_FILLER_ONE_RE.match(text_lower[pos:])
+        if not m:
+            break
+        pos += m.end()
+        offsets.append(pos)
+    return offsets
+
+
 _DRAW_FILLER_RE = re.compile(
     r"^(?:(?:ну|давай|а|и|вот|мне|пожалуйста|ещё|еще|тоже|также|сначала|для\s+начала|"
     r"please|pls|also|just)\b[,\s]*){0,4}",
@@ -238,17 +261,17 @@ def _strip_trigger_fillers(text_lower: str) -> tuple[str, int]:
     return text_lower[cut:], cut
 
 
-def _match_trigger_with_fillers(text_lower: str, core_lower: str, prefixes) -> tuple[str | None, int]:
-    """Триггер в чистом начале — приоритетнее: прежние маршруты не двигаются.
-    Если его нет, ищем после обвязки и возвращаем, сколько символов снято,
-    чтобы контент вырезался из оригинала по тем же индексам."""
-    hit = _match_trigger_prefix(text_lower, prefixes)
-    if hit:
-        return hit, 0
-    # Без найденного триггера срез не отдаём: иначе «please draw a cat» терял
-    # «please draw» дважды, и в модель уходило «in a hat» (ревью 10.11.2026).
-    hit = _match_trigger_prefix(core_lower, prefixes)
-    return hit, (len(text_lower) - len(core_lower)) if hit else 0
+def _match_trigger_with_fillers(text_lower: str, prefixes) -> tuple[str | None, int]:
+    """(триггер, сколько символов снято). Триггер в чистом начале приоритетнее:
+    прежние маршруты не двигаются. Дальше перебираем границы обвязки — «ну ещё
+    вариант» начинается со второго слова, и срез обязан быть точно по нему.
+    Без найденного триггера срез не отдаём: иначе «please draw a cat» теряло
+    «please draw» дважды и в модель уходило «in a hat» (ревью 10.11.2026)."""
+    for cut in _filler_offsets(text_lower):
+        hit = _match_trigger_prefix(text_lower[cut:], prefixes)
+        if hit:
+            return hit, cut
+    return None, 0
 
 
 def _is_new_artifact_request(text: str) -> bool:
