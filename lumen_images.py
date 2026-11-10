@@ -104,8 +104,8 @@ def image_filename(data: bytes) -> str | None:
 def _error_strings(payload: Any) -> str:
     """Сообщения об ошибке из JSON-ответа одним текстом: у Cloudflare это
     errors:[{code,message}], у Pollinations — одиночный error:{code,message}
-    (в нём и живёт код FREE_LIMIT). Разбор только dict/list, без обхода
-    произвольного чужого JSON."""
+    (в нём и живёт код FREE_LIMIT), у обёртки Workers AI текст несёт messages[]
+    и result. Разбор только dict/list, без обхода произвольного чужого JSON."""
     out: list[str] = []
     if isinstance(payload, dict):
         for item in payload.get("errors") or []:
@@ -120,6 +120,22 @@ def _error_strings(payload: Any) -> str:
             out.append(error)
         if isinstance(payload.get("message"), str):
             out.append(payload["message"])
+        # У обёртки Workers AI текст отказа живёт ещё и в messages[], и в result —
+        # строкой или короткими полями словаря. Длинные не берём: detail уходит в
+        # лог, а в result на успехе лежит base64 картинки (ревью 10.11.2026).
+        for item in payload.get("messages") or []:
+            if isinstance(item, dict):
+                out.append(f"{item.get('code')} {item.get('message')}")
+            elif isinstance(item, str):
+                out.append(item)
+        result = payload.get("result")
+        if isinstance(result, dict):
+            values = [v for k, v in result.items() if k != "image"]
+        elif isinstance(result, str):
+            values = [result]
+        else:
+            values = []
+        out.extend(v for v in values if isinstance(v, str) and len(v) < 120)
     return " ".join(out)[:400]
 
 
@@ -368,19 +384,18 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
         if any(word in detail.lower() for word in ("allocation", "free tier", "daily")):
             raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 429 {detail})")
         raise ImageRateLimitedError(f"Cloudflare HTTP 429 {detail}".strip(), retry_after_sec=retry_after)
-    if status == 400 and _is_moderation_detail(detail):
-        # Фильтр содержания (замер 10.11.2026: код 3030 "Your output has been
-        # flagged"): это не сетевой сбой, повтор и резерв не помогут — человеку
-        # честнее «ошибка генерации, переформулируй».
+    # Фильтр содержания (замер 10.11.2026: код 3030 "Your output has been
+    # flagged"): это не сетевой сбой, повтор и резерв не помогут — человеку
+    # честнее «ошибка генерации, переформулируй». Тот же флаг приходит и телом
+    # (обёртка Workers AI) при любом статусе, поэтому проверка до ветки статусов:
+    # иначе sana дорисовывала отклонённое содержимое (ревью 10.11.2026).
+    if _is_moderation_detail(detail) and (
+        status == 400 or (isinstance(data, dict) and not data.get("success", True))
+    ):
         raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
     if status != 200:
         raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
     if not data.get("success", True):
-        # Тот же флаг приходит и телом при HTTP 200 (обёртка Workers AI): без этой
-        # проверки отказ не терминален, и sana дорисовала бы отклонённое содержимое
-        # (ревью 10.11.2026).
-        if _is_moderation_detail(detail):
-            raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
         raise ImageProviderError(f"Cloudflare: {detail}")
     result = data.get("result")
     image_b64 = result.get("image") if isinstance(result, dict) else None

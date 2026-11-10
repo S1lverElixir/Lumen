@@ -1201,6 +1201,14 @@ def test_translate_draw_prompt_translates_non_ascii(monkeypatch):
     assert asyncio.run(bot._translate_draw_prompt("one apple", deadline)) == "one apple"
     assert len(calls) == 1
 
+    # Guard sana режет ЛЮБОЙ не-ASCII, поэтому «café» или эмодзи в переводе
+    # выключали резерв целиком (ревью 10.11.2026).
+    async def accented_munito(path, method="GET", *, json_body=None, deadline=None):
+        return {"choices": [{"message": {"content": "cafe\u0301 \u2615 one apple"}}]}
+
+    monkeypatch.setattr(bot, "_munito_request", accented_munito)
+    assert asyncio.run(bot._translate_draw_prompt("одно кафе", deadline)) == "cafe one apple"
+
 
 def test_translate_draw_prompt_keeps_original_on_failure(monkeypatch):
     # Сбой перевода не роняет картинку: уходит оригинал. Пустой ответ и ответ
@@ -3469,3 +3477,182 @@ def test_inline_draw_edit_leaves_the_generation_button_alone(monkeypatch):
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
         bot.chat_state.pop(chat_id, None)
+
+
+def test_draw_prompt_ascii_without_latin_returns_original():
+    # После нормализации не осталось ни одной латинской буквы — оригинал
+    # возвращаем как есть: иначе sana рисовала бы случайное по пустому описанию
+    # вместо честного отказа (ревью 10.11.2026).
+    assert lumen_commands._draw_prompt_ascii("просто кот") == "просто кот"
+    assert lumen_commands._draw_prompt_ascii("\u2615\u2615") == "\u2615\u2615"
+
+
+def test_repeat_trigger_without_letters_repeats_stored_prompt(rate_guard_setup, monkeypatch):
+    # «ещё вариант...» с хвостом из точек: остаток уезжал в модель промптом и
+    # рисовал абстрактное месиво вместо прошлой картинки (live 10.11.2026 16:49).
+    message = rate_guard_setup()
+    state = _fresh_draw_state(prompt="красное яблоко")
+    variants_calls = []
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        variants_calls.append(prompt)
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "ещё вариант..."
+    asyncio.run(bot._handle_message_core(message))
+    assert variants_calls == [], "хвост без букв не становится промптом"
+    bot.inline_draw.assert_awaited_once_with(message, "красное яблоко")
+
+
+def test_repeat_trigger_with_stale_draw_context_stays_text(rate_guard_setup, monkeypatch):
+    # Окно свежести нужно обеим веткам повтора: в чате, где рисовали неделю назад,
+    # «другой вариант перевода письма» сжигал картинку вместо текста
+    # (ревью 10.11.2026).
+    message = rate_guard_setup()
+    state = _fresh_draw_state(prompt="красное яблоко")
+    state["last_drawn_at"] = time.time() - (bot.DRAW_EDIT_CONTEXT_TTL_SEC + 120)
+    variants_calls = []
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        variants_calls.append(prompt)
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    monkeypatch.setattr(bot, "_run_route", AsyncMock(return_value=("ok", False)))
+    message.text = "другой вариант перевода письма"
+    asyncio.run(bot._handle_message_core(message))
+    assert variants_calls == []
+    bot.inline_draw.assert_not_awaited()
+    assert bot._run_route.await_count == 1, "устаревший контекст — это текст"
+
+
+def test_inline_draw_moderation_refusal_keeps_the_personal_slot(monkeypatch):
+    # Отказ модерации НЕ возвращает личный суточный слот: klein посчитал картинку
+    # и списал Neuron, и без этого один человек циклом запрещённых описаний
+    # выжигал общий дневной бюджет (ревью 10.11.2026).
+    chat_id = 999461
+    uid = 777061
+
+    async def flagged(session, prompt, timeout_sec=None, **_):
+        raise lumen_images.ImageModerationError("Cloudflare отклонил содержимое: 3030")
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    _one_image_provider(monkeypatch, flagged)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        assert asyncio.run(bot.inline_draw(incoming, "cat")) is False
+        assert bot._user_daily_entry(uid).get("draw", 0) == 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_cmd_reset_strips_more_button_from_last_photo(monkeypatch):
+    # /reset стирает якорь кнопки, поэтому снимает клавиатуру заранее: иначе под
+    # забытым фото навечно оставалась живая «Ещё вариант» на сброшенное описание
+    # (ревью 10.11.2026).
+    from aiogram.types import InlineKeyboardMarkup
+
+    chat_id = 999462
+    calls = []
+
+    async def fake_tg_call(func, *args, **kwargs):
+        calls.append((func, kwargs))
+        return SimpleNamespace()
+
+    editor = AsyncMock()
+    bot.chat_state[chat_id] = {
+        "history": [{"role": "user", "content": "hi"}],
+        "last_draw_prompt": "секретное описание",
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 42,
+        "last_drawn_message_id": 5151,
+    }
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=42)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(edit_message_reply_markup=editor))
+    monkeypatch.setattr(bot, "_is_privileged_in_chat", AsyncMock(return_value=True))
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    try:
+        asyncio.run(bot.cmd_reset(incoming))
+        strips = [kw for fn, kw in calls if fn is editor]
+        assert len(strips) == 1, "кнопка снимается до сброса контекста"
+        assert strips[0]["message_id"] == 5151
+        assert strips[0]["reply_markup"].inline_keyboard == []
+        assert isinstance(strips[0]["reply_markup"], InlineKeyboardMarkup)
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_draw_attempt_timeout_excludes_translation_budget(monkeypatch):
+    # Таймаут попытки считался ДО перевода: его 12 секунд ложились сверх потолка,
+    # и зависшая sana съедала бюджет сообщения целиком (ревью 10.11.2026).
+    chat_id = 999463
+    uid = 777063
+    recorded = []
+
+    async def slow_translate(prompt, deadline):
+        await asyncio.sleep(1.0)
+        return "cat in a hat"
+
+    async def record_and_fail(session, prompt, timeout_sec=None, **_):
+        recorded.append(timeout_sec)
+        raise RuntimeError("stop after recording")
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    _one_image_provider(monkeypatch, record_and_fail)
+    monkeypatch.setattr(bot, "_translate_draw_prompt", slow_translate)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    monkeypatch.setattr(bot, "DRAW_TOTAL_BUDGET_SEC", 60.0)
+    monkeypatch.setattr(bot, "IMAGE_ATTEMPT_TIMEOUT_SEC", 100.0)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        assert asyncio.run(bot.inline_draw(incoming, "кот в шляпе")) is False
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(chat_id, None)
+    assert len(recorded) == 1
+    # Полсекундного запаса достаточно: сборка до перевода стоит миллисекунды.
+    assert recorded[0] < 59.5, "таймаут попытки должен учитывать уже потраченный перевод"
+
+
+def test_cmd_draw_runs_under_chat_lock(monkeypatch):
+    # /draw шёл мимо per-chat лока: два человека в группе читали один старый
+    # якорь кнопки, снимали клавиатуру с одного фото, и под чатом оставалось две
+    # живые «Ещё вариант» (ревью 10.11.2026).
+    calls = []
+
+    async def ok_variants(message, prompt, *, variants=1, reference=None):
+        calls.append(prompt)
+
+    async def free_lock(message, run):
+        await run()
+
+    async def busy_lock(message, run):
+        return None
+
+    incoming = _FakeIncomingMessage(999467)
+    incoming.text = "/draw кот"
+    incoming.from_user = SimpleNamespace(id=777067)
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
+    monkeypatch.setattr(bot, "inline_draw_variants", ok_variants)
+    monkeypatch.setattr(bot, "_run_under_chat_lock", free_lock)
+    asyncio.run(bot.cmd_draw(incoming))
+    assert calls == ["кот"], "генерация стартует только из-под лока"
+
+    calls.clear()
+    monkeypatch.setattr(bot, "_run_under_chat_lock", busy_lock)
+    asyncio.run(bot.cmd_draw(incoming))
+    assert calls == [], "занятый чат не должен запускать генерацию в обход лока"

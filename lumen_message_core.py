@@ -742,13 +742,20 @@ async def _handle_message_core(
         _repeat_rest = _strip_trigger_content(
             clean_prompt, matched_repeat, message, reply_fallback=False,
         )
-        if _repeat_rest and _has_draw_ctx:
+        # Хвост без букв — не новый сюжет: «ещё вариант...» отдавало модели «...»
+        # и рисовало месиво вместо кота (live 10.11.2026 16:49).
+        _repeat_subject = bool(re.search(r"\w", _repeat_rest, re.UNICODE))
+        # Оба повтора требуют свежей СВОЕЙ генерации: без окна TTL «другой вариант
+        # перевода письма» в чате, где рисовали неделю назад, сжигало картинку
+        # вместо текста (ревью 10.11.2026).
+        _repeat_ok = _has_draw_ctx and bot._fresh_generation_ref(state, uid_early)
+        if _repeat_subject and _repeat_ok:
             _repeat_count, _repeat_prompt = _split_image_variants(_repeat_rest)
             await bot.inline_draw_variants(
                 message, _repeat_prompt or _repeat_rest, variants=_repeat_count,
             )
             return
-        if _has_draw_ctx and bot._fresh_generation_ref(state, uid_early):
+        if _repeat_ok:
             await bot.inline_draw(message, _last_prompt)
             return
 
