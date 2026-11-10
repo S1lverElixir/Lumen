@@ -3,8 +3,8 @@
 Lumen is a Telegram bot with a persona styled after Claude that never names the model behind it:
 one FastAPI + aiogram webhook process on a Hugging Face Space (Docker, Python 3.13,
 `CMD ["python", "-u", "bot.py"]`), plus a small Deno pass-through proxy for the hosts that block
-Hugging Face egress. The Claude look is a goal, not a coincidence: keep the answer layout, the live
-status bubble and the plain tone in anything a user reads.
+Hugging Face egress. The Claude look is deliberate: when you change how the bot answers, keep that
+reference's layout, its live status bubble and its plain tone.
 This file holds only what an agent cannot get from the code: the owner's rules, the commands, the
 traps; how any feature works is in `docs/`. Every fact below was checked against the repo and
 production on 10.11.2026, so change a fact and update this file in the same commit.
@@ -54,11 +54,11 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   checks and `pip-audit` on every push, so the extra ones are your job locally only when you touch
   those files. One file: `pytest tests/<file>.py -v`; one test:
   `pytest tests/<file>.py::<name> -v`.
-- Globs do not expand in PowerShell (opencode sessions), so there run
+- Globs do not expand in a PowerShell shell (opencode on Windows), so there run
   `pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name })`
   then `pytest -q`, and read or search with the file tools rather than `cat` and `grep`. Never wrap
   a command in `bash -lc` just to get globs. In Qoder the Bash tool is Git Bash, where the first
-  form works as written.
+  form works exactly as written.
 - Proxy gate, run it whenever you change `proxy/`: `deno test proxy/proxy_test.ts` (offline, no
   external imports), `deno check proxy/proxy.ts`, `deno lint proxy/proxy.ts`.
 - `pip-audit -r requirements.txt` is not part of the local baseline: it needs network and goes red
@@ -67,7 +67,7 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   sync. Report it, never "fix" it by re-pinning; CI reruns weekly, so a quiet repo still gets
   checked.
 - Do not start the bot locally; it needs live tokens and a webhook. Live checks after a deploy
-  (`/diag` plus the main commands) are the owner's.
+  (`/diag` plus the main commands) are the owner's job.
 - Run the gate before changing anything (green baseline) and after each batch. If it is red before
   your changes, stop and report which checks fail; do not carry on with the task or fix unrelated
   failures unless the owner says to. A missing dev dependency is the exception: install it.
