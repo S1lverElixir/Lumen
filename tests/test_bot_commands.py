@@ -541,7 +541,9 @@ def test_draw_trigger_this_with_reply_draws_replied_message(rate_guard_setup):
     message.text = "нарисуй это"
     message.reply_to_message = SimpleNamespace(text="закат над морем", caption=None)
     asyncio.run(bot._handle_message_core(message))
-    bot.inline_draw.assert_awaited_once_with(message, "закат над морем", reference=None)
+    bot.inline_draw.assert_awaited_once_with(
+        message, "закат над морем", reference=None, prepared_prompt="закат над морем",
+    )
 
 
 def test_imgmodel_command_and_callback_removed():
@@ -1391,7 +1393,9 @@ def test_draw_command_edits_photo_when_prompt_is_edit_verb(rate_guard_setup, mon
     monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
     message.text = "/draw сделай фон синим"
     asyncio.run(bot.cmd_draw(message))
-    bot.inline_draw.assert_awaited_once_with(message, "сделай фон синим", reference=reference)
+    bot.inline_draw.assert_awaited_once_with(
+        message, "сделай фон синим", reference=reference, prepared_prompt="сделай фон синим",
+    )
 
 
 def test_resolve_edit_reference_prefers_reply_photo_over_last_media(monkeypatch):
@@ -1826,7 +1830,7 @@ def test_inline_draw_variants_stops_after_failure(monkeypatch):
     calls = []
     results = [True, True, False, True]
 
-    async def fake_inline(message, prompt, *, reference=None):
+    async def fake_inline(message, prompt, *, reference=None, prepared_prompt=None):
         calls.append(prompt)
         return results.pop(0)
 
@@ -1839,7 +1843,7 @@ def test_inline_draw_variants_stops_after_failure(monkeypatch):
 def test_inline_draw_variants_caps_at_four(monkeypatch):
     calls = []
 
-    async def fake_inline(message, prompt, *, reference=None):
+    async def fake_inline(message, prompt, *, reference=None, prepared_prompt=None):
         calls.append(prompt)
         return True
 
@@ -1875,7 +1879,9 @@ def test_draw_more_words_with_new_subject_generate_it(rate_guard_setup, monkeypa
     monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
     message.text = "нарисуй ещё кота"
     asyncio.run(bot._handle_message_core(message))
-    bot.inline_draw.assert_awaited_once_with(message, "ещё кота", reference=None)
+    bot.inline_draw.assert_awaited_once_with(
+        message, "ещё кота", reference=None, prepared_prompt="ещё кота",
+    )
 
 
 def test_edit_reference_too_large_replies_media_too_big(rate_guard_setup, monkeypatch):
@@ -1941,7 +1947,9 @@ def test_mixed_commands_share_rate_quota_and_reject_before_work(rate_guard_setup
         await bot._handle_message_core(message)
 
     asyncio.run(run())
-    bot.inline_draw.assert_awaited_once_with(message, "кот", reference=None)
+    bot.inline_draw.assert_awaited_once_with(
+        message, "кот", reference=None, prepared_prompt="кот",
+    )
     bot.inline_tts.assert_awaited_once_with(message, "привет")
     media.assert_not_awaited()
     assert bot._tg_call.await_count == 3
@@ -1968,7 +1976,9 @@ def test_natural_language_trigger_consumes_one_slot(rate_guard_setup, text, hand
     message.text = text
     asyncio.run(bot._handle_message_core(message))
     if handler == "inline_draw":
-        getattr(bot, handler).assert_awaited_once_with(message, content, reference=None)
+        getattr(bot, handler).assert_awaited_once_with(
+            message, content, reference=None, prepared_prompt=content,
+        )
     else:
         getattr(bot, handler).assert_awaited_once_with(message, content)
     assert len(lumen_limits.user_rate_limits[456]) == 1
@@ -3656,3 +3666,150 @@ def test_cmd_draw_runs_under_chat_lock(monkeypatch):
     monkeypatch.setattr(bot, "_run_under_chat_lock", busy_lock)
     asyncio.run(bot.cmd_draw(incoming))
     assert calls == [], "занятый чат не должен запускать генерацию в обход лока"
+
+
+# ── Паритет с ChatGPT: провайдер получает не дословную просьбу, а описание кадра
+# (10.11.2026). Без этих тестов шаг подготовки мог молча выпасть из пути:
+# он добавлен в основную ветку inline_draw и в серию вариантов.
+def _prep_teardown(chat_id):
+    # Слот и состояние чата после каждого прогона: иначе user_daily
+    # перетекает в соседние тесты.
+    bot.chat_state.pop(chat_id, None)
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
+
+
+def _draw_prep_env(monkeypatch, chat_id, reply=""):
+    """Munito «активен» и отдаёт заготовленное описание; провайдер пишет его в лог."""
+    captured = {}
+
+    async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
+        captured.setdefault("calls", []).append(json_body["messages"][0]["content"])
+        if callable(reply):
+            answer = reply(json_body)
+        else:
+            answer = reply
+        if isinstance(answer, Exception):
+            raise answer
+        return {"choices": [{"message": {"content": answer}}]}
+
+    async def fake_cloudflare(session, text, timeout_sec=None, width=None, height=None, **_):
+        captured["text"] = text
+        captured["width"] = width
+        captured["height"] = height
+        return b"\x89PNG fake bytes"
+
+    async def fake_cloudflare_edit(session, text, first, second_reference=None, timeout_sec=None, **_):
+        captured["text"] = text
+        return b"\x89PNG fake bytes"
+
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    monkeypatch.setattr(lumen_images, "image_provider_names", lambda: ("cloudflare",))
+    monkeypatch.setattr(bot, "image_provider_names", lambda: ("cloudflare",))
+    monkeypatch.setattr(bot, "_cloudflare_text_to_image", fake_cloudflare)
+    monkeypatch.setattr(bot, "_cloudflare_edit_to_image", fake_cloudflare_edit)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_photo=AsyncMock()))
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    return incoming, captured
+
+
+def test_draw_prompt_is_rewritten_before_provider(monkeypatch):
+    # Короткая просьба должна доезжать до klein как описание кадра: иначе
+    # «кот в шляпе» давало плоский случайный кадр (паритет 10.11.2026).
+    chat_id = 999480
+    rich = "A ginger cat in a straw hat on a windowsill, soft morning light, 35 mm framing, photorealistic."
+    incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=rich)
+    try:
+        assert asyncio.run(bot.inline_draw(incoming, "кот в шляпе")) is True
+        assert captured["text"] == rich
+        assert "text-to-image" in captured["calls"][0]
+    finally:
+        _prep_teardown(chat_id)
+
+
+def test_draw_prompt_rewrite_english_also_enhanced(monkeypatch):
+    # Английскую просьбу раньше не трогали вообще (prompt.isascii -> выход):
+    # паритет требует, чтобы улучшение дописывало и её.
+    chat_id = 999481
+    incoming, captured = _draw_prep_env(
+        monkeypatch, chat_id, reply="A red apple on a wooden table, studio light, macro detail.",
+    )
+    try:
+        asyncio.run(bot.inline_draw(incoming, "red apple"))
+        assert captured["text"].startswith("A red apple")
+        assert len(captured["calls"]) == 1
+    finally:
+        _prep_teardown(chat_id)
+
+
+def test_draw_edit_prompt_stays_instruction(monkeypatch):
+    # Правка — инструкция, а не пересказ сцены: системный контракт обязан быть
+    # edit-variant, иначе klein терял, что именно менять.
+    chat_id = 999482
+    incoming, captured = _draw_prep_env(
+        monkeypatch, chat_id, reply="Make the background deep blue, keep the cat unchanged.",
+    )
+    try:
+        asyncio.run(bot.inline_draw(
+            incoming, "сделай фон синим", reference=(b"\xff\xd8jpeg", "image/jpeg"),
+        ))
+        assert "editing an existing picture" in captured["calls"][0]
+        assert captured["text"] == "Make the background deep blue, keep the cat unchanged."
+    finally:
+        _prep_teardown(chat_id)
+
+
+def test_draw_prompt_rewrite_failure_keeps_user_wording(monkeypatch):
+    # Пустой ответ и сбой модели не отменяют генерацию: уходит исходная фраза.
+    chat_id = 999483
+    for answer in ("", RuntimeError("munito down")):
+        incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=answer)
+        try:
+            asyncio.run(bot.inline_draw(incoming, "рыжий кот"))
+            assert captured["text"] == "рыжий кот"
+        finally:
+            _prep_teardown(chat_id)
+
+
+def test_draw_prompt_rewrite_is_clipped_not_discarded(monkeypatch):
+    # Длинное описание лучше обрезать по границе слова, чем выбросить: кап
+    # провайдера жёсткий, а исходная фраза хуже подготовленной.
+    chat_id = 999484
+    long_answer = "word " * 300
+    incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=long_answer)
+    try:
+        asyncio.run(bot.inline_draw(incoming, "кот"))
+        sent = captured["text"]
+        assert len(sent) <= lumen_images.IMAGE_PROMPT_MAX_CHARS
+        assert sent.startswith("word ")
+    finally:
+        _prep_teardown(chat_id)
+
+
+def test_draw_variants_prepare_description_once(monkeypatch):
+    # Серия из трёх вариантов — один сюжет: три вызова подготовки добавили бы
+    # ~3 секунды и квоту на каждую картинку.
+    chat_id = 999485
+    incoming, captured = _draw_prep_env(
+        monkeypatch, chat_id, reply="A ginger cat sleeping, warm light, shallow depth of field.",
+    )
+    try:
+        asyncio.run(bot.inline_draw_variants(incoming, "рыжий кот спит", variants=3))
+        assert len(captured["calls"]) == 1
+    finally:
+        _prep_teardown(chat_id)
+
+
+def test_draw_size_comes_from_user_words_not_rewrite(monkeypatch):
+    # Кадр считаем по словам человека: переписанное описание могло потерять
+    # «16:9», и широкая сцена стала бы квадратом.
+    chat_id = 999486
+    incoming, captured = _draw_prep_env(
+        monkeypatch, chat_id, reply="A wide coastal cliff at sunset with gulls overhead.",
+    )
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй 16:9 скалу на закате"))
+        assert (captured["width"], captured["height"]) == (1344, 768)
+    finally:
+        _prep_teardown(chat_id)

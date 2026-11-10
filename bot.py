@@ -491,6 +491,7 @@ IMAGE_ATTEMPT_TIMEOUT_SEC = _env_number("IMAGE_ATTEMPT_TIMEOUT_SEC", 20, min_val
 # Перевод не-латинского промпта на английский перед генерацией: sana теряет кириллицу
 # в '?' (пруф 09.11.2026). Сбой перевода не роняет картинку — уходит оригинал.
 DRAW_TRANSLATE_TIMEOUT_SEC = _env_number("DRAW_TRANSLATE_TIMEOUT_SEC", 12, min_value=1)
+DRAW_PROMPT_PREP_TIMEOUT_SEC = _env_number("DRAW_PROMPT_PREP_TIMEOUT_SEC", 8, min_value=1)
 # Глобальный дневной бюджет картинок: 10 000 бесплатных Neuron Cloudflare в сутки.
 # flux-2-klein-4b стоит 104 Neuron за картинку 1024x1024 (~96 в день), правка
 # добавляет ~21 Neuron за входной мегапиксель, поэтому 80 с запасом: иначе к

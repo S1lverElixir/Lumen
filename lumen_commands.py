@@ -92,6 +92,30 @@ _DRAW_TRANSLATE_SYSTEM = (
     "Reply with only the English description, no quotes, no explanations."
 )
 
+# Паритет с ChatGPT (10.11.2026): он никогда не отдаёт модели дословную просьбу,
+# а пишет из неё законченный кадр. Кап промпта 600 символов, поэтому просим
+# 30-60 слов: длиннее — отбрасывали бы лучший вариант ради исходной фразы.
+_DRAW_PROMPT_SYSTEM = (
+    "You write the final prompt for a text-to-image model. Turn the user's request "
+    "into one English paragraph of 30-60 words describing only what is visible in "
+    "the frame. Keep: the subject, the exact number of objects and people, colors, "
+    "positions, the requested medium or style, and any text to be rendered, quoted "
+    "verbatim in double quotes. Add only craft detail: lighting, composition, "
+    "framing, texture, finish. Never invent new objects, characters, brands or "
+    "real people, never write negations ('without', 'no x'), never talk about the "
+    "user or their request. If the request is already a detailed English "
+    "description, keep it and only tidy the wording. Output the prompt only."
+)
+# Правка — инструкция, а не описание сцены: «убери фон» не должно превращаться
+# в пересказ всей картинки, иначе klein теряет смысл изменения.
+_DRAW_EDIT_SYSTEM = (
+    "Translate the user's instruction for editing an existing picture into English "
+    "for an image-editing model. Keep it as an instruction saying what to change, "
+    "keep every object name, count and any text to be rendered in double quotes. "
+    "Do not describe the rest of the picture, do not add details. Output the "
+    "instruction only."
+)
+
 
 # Лапки и тире из перевода ломали резерв: sana принимает только ASCII, а guard
 # в провайдере не различает кириллицу и типографику (ревью 10.11.2026).
@@ -109,6 +133,54 @@ def _draw_prompt_ascii(text: str) -> str:
     folded = unicodedata.normalize("NFKD", text.translate(_DRAW_TRANSLATE_ASCII))
     folded = re.sub(r"\s+", " ", folded.encode("ascii", "ignore").decode()).strip()
     return folded if re.search(r"[A-Za-z]", folded) else text
+
+
+def _clip_prompt_text(text: str) -> str:
+    """Кап по границе слова: обрезанное описание честнее, чем выброшенное, а
+    кап нужен — провайдер режет длинный prompt без предупреждения."""
+    if len(text) <= IMAGE_PROMPT_MAX_CHARS:
+        return text
+    cut = text[:IMAGE_PROMPT_MAX_CHARS]
+    sp = cut.rfind(" ")
+    return (cut[:sp] if sp > 40 else cut).strip()
+
+
+async def _prepare_draw_prompt(prompt: str, deadline: float, *, edit: bool = False) -> str:
+    """Описание для провайдера: генерацию переписываем в законченный кадр по-
+    английски, правку только переводим, оставляя инструкцию. Пустой ответ, сбой
+    или нехватка бюджета — исходная формулировка, генерация не отменяется."""
+    import bot
+    from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
+    if not _munito_active():
+        return prompt
+    remaining = deadline - time.monotonic()
+    if remaining < 1.5:
+        return prompt
+    model = _MUNITO_ORDER[0]
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _DRAW_EDIT_SYSTEM if edit else _DRAW_PROMPT_SYSTEM},
+            {"role": "user", "content": prompt[:IMAGE_PROMPT_MAX_CHARS]},
+        ],
+        "temperature": 0.4, "max_tokens": 500, "stream": False,
+        **_munito_payload_extras(),
+    }
+    try:
+        resp = await bot._munito_request(
+            "chat/completions", "POST", json_body=payload,
+            deadline=time.monotonic() + min(bot.DRAW_PROMPT_PREP_TIMEOUT_SEC, remaining),
+        )
+        choices = resp.get("choices") or []
+        answer = bot._or_extract_text(choices[0].get("message") or "").strip() if choices else ""
+        prepared = _clip_prompt_text(_draw_prompt_ascii(answer)) if answer else ""
+        if len(prepared) >= 20:
+            bot._record_quota_usage("munito", model, service=True)
+            return prepared
+        log.warning("[draw] Prompt rewrite unusable (len=%d, edit=%s) — keeping original.", len(answer), edit)
+    except Exception as exc:
+        log.warning("[draw] Prompt rewrite failed (%s) — keeping original.", exc)
+    return prompt
 
 
 async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
@@ -159,8 +231,13 @@ def _image_semaphore() -> asyncio.Semaphore:
     return sem
 
 
-async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, str] | None = None) -> bool:
-    """Одна картинка (или правка). Возвращает True, если фото реально ушло в чат."""
+async def inline_draw(
+    message: Message, prompt: str, *, reference: tuple[bytes, str] | None = None,
+    prepared_prompt: str | None = None,
+) -> bool:
+    """Одна картинка (или правка). Возвращает True, если фото реально ушло в чат.
+    prepared_prompt — описание, уже готовое для провайдера (серия вариантов
+    готовит его один раз), иначе готовим внутри."""
     import bot
     cid = message.chat.id
     uid = bot._user_key_for_message(message)
@@ -228,14 +305,15 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         )
         status = status_obj.message if status_obj is not None else None
 
-        # Переводим только то, что реально требует перевода: klein принимает
-        # русский промпт напрямую (замер 10.11.2026), поэтому основной путь
-        # сохраняет формулировки и надписи на картинке как у человека, а
-        # английский подставляется лишь резерву sana (у неё кириллица -> '?').
-
         # Пропорции из промпта (16:9, 9:16, 4:3, 3:4, квадрат): правка всегда
         # сохраняет кадр референса, поэтому размер задаётся только генерации.
+        # Кадр читаем из слов человека, а не из переписанного описания: модель
+        # могла бы потерять «16:9» или переформулировать его (паритет 10.11.2026).
         width, height = bot.detect_image_size(prompt)
+        if prepared_prompt is None:
+            prepared_prompt = await _prepare_draw_prompt(
+                prompt, deadline, edit=reference is not None,
+            )
 
         # Правка идёт одной моделью: референс понимает только Cloudflare klein,
         # у Pollinations/sana правки нет вовсе. Генерация — прежней цепочкой.
@@ -312,8 +390,10 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                     else:
                         await bot._edit_message_quietly(status, bot._t(cid, "status_taking_longer"))
                 attempt_started = time.monotonic()
-                text = prompt
-                if provider == "pollinations" and not prompt.isascii():
+                text = prepared_prompt
+                # sana требует ASCII: если подготовка не сработала и осталась
+                # не-латиница, подключаем прежний точечный перевод для резерва.
+                if provider == "pollinations" and not text.isascii():
                     if translated_prompt is None:
                         translated_prompt = await bot._translate_draw_prompt(prompt, deadline)
                     text = translated_prompt
@@ -530,13 +610,21 @@ async def inline_draw_variants(
     import bot
     count = max(1, min(int(variants or 1), 4))
     log.info("[draw] Variants request: chat=%s count=%s", message.chat.id, count)
+    # Описание пишем один раз на серию: N вариантов — один сюжет, а N вызовов
+    # модели добавили бы только задержку и квоту (паритет 10.11.2026).
+    _remaining = bot._msg_remaining_sec()
+    _prep_deadline = time.monotonic() + (
+        min(bot.DRAW_TOTAL_BUDGET_SEC, _remaining) if _remaining is not None
+        else bot.DRAW_TOTAL_BUDGET_SEC
+    )
+    _prepared = await _prepare_draw_prompt(prompt, _prep_deadline, edit=reference is not None)
     for _index in range(count):
         if _index:
             remaining = bot._msg_remaining_sec()
             if remaining is not None and remaining < 15:
                 log.info("[draw] Variants stopped early: %.0fs of message budget left", remaining)
                 break
-        ok = await bot.inline_draw(message, prompt, reference=reference)
+        ok = await bot.inline_draw(message, prompt, reference=reference, prepared_prompt=_prepared)
         if not ok:
             break
 
