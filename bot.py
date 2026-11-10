@@ -1069,6 +1069,7 @@ __all__ = [
     "clean_mention",
     "inline_draw",
     "_translate_draw_prompt",
+    "handle_draw_more_callback",
     "inline_tts",
     "_send_pick_question",
     "DEFAULT_GEMINI_MODEL",
@@ -1305,6 +1306,7 @@ from lumen_commands import (
     inline_draw,
     _translate_draw_prompt,
     cmd_draw,
+    handle_draw_more_callback,
     _gemini_tts_bytes,
     inline_tts,
     cmd_tts,
@@ -1322,6 +1324,7 @@ from lumen_commands import (
 )
 dp.message.register(cmd_start, Command("start"))
 dp.message.register(cmd_draw, Command("draw"))
+dp.callback_query.register(handle_draw_more_callback, F.data == "draw:more")
 dp.message.register(cmd_tts, Command("tts"))
 dp.message.register(cmd_reset, Command("reset"))
 dp.message.register(cmd_lang, Command("lang"))

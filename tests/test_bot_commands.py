@@ -1276,6 +1276,7 @@ def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
 
     class _FakePhotoBot:
         async def send_photo(self, **kwargs):
+            captured["sent"] = kwargs
             return SimpleNamespace()
 
     async def must_not_generate(session, prompt, timeout_sec=None, **_):
@@ -1293,6 +1294,8 @@ def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
     reference = (b"ref bytes", "image/jpeg")
     asyncio.run(bot.inline_draw(incoming, "сделай небо синим", reference=reference))
     assert captured["edit"] == ("сделай небо синим", reference[0])
+    # Под правкой кнопки «Ещё вариант» нет: повторять нечего.
+    assert captured["sent"].get("reply_markup") is None
 
 
 def test_edit_trigger_with_reply_photo_routes_to_edit(rate_guard_setup, monkeypatch):
@@ -1452,6 +1455,73 @@ def test_inline_draw_edit_keeps_reference_orientation(monkeypatch):
     incoming.message_id = 1
     asyncio.run(bot.inline_draw(incoming, "сделай небо ночным", reference=(b"ref", "image/jpeg")))
     assert captured["size"] == (1344, 768)
+
+
+def _make_draw_more_query(user_id=456, chat_id=123):
+    msg = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE),
+        message_id=11,
+        edit_reply_markup=AsyncMock(),
+    )
+    return SimpleNamespace(
+        data="draw:more", from_user=SimpleNamespace(id=user_id), message=msg,
+        answer=AsyncMock(),
+    )
+
+
+def test_draw_more_callback_regenerates_last_prompt(monkeypatch):
+    # Кнопка под фото повторяет генерацию тем же описанием.
+    state = {
+        "last_draw_prompt": "красное яблоко на белом столе",
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 456,
+    }
+    captured = []
+
+    async def fake_lock(message, run):
+        await run()
+
+    async def fake_inline(message, prompt, *, reference=None):
+        captured.append((prompt, reference))
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
+    monkeypatch.setattr(bot, "inline_draw", fake_inline)
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+    query = _make_draw_more_query()
+    asyncio.run(bot.handle_draw_more_callback(query))
+    assert captured == [("красное яблоко на белом столе", None)]
+
+
+def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
+    # Чужой тап и кнопка от старой генерации не тратят чужие слоты и бюджет.
+    state = {
+        "last_draw_prompt": "кот",
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 456,
+    }
+    called = []
+
+    async def fake_lock(message, run):
+        await run()
+
+    async def fake_inline(message, prompt, *, reference=None):
+        called.append(prompt)
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
+    monkeypatch.setattr(bot, "inline_draw", fake_inline)
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+
+    foreign = _make_draw_more_query(user_id=999)
+    asyncio.run(bot.handle_draw_more_callback(foreign))
+    assert foreign.answer.await_args.args[0] == bot._t(123, "pick_not_yours")
+
+    state["last_drawn_at"] = time.time() - bot.DRAW_EDIT_CONTEXT_TTL_SEC - 5
+    stale = _make_draw_more_query(user_id=456)
+    asyncio.run(bot.handle_draw_more_callback(stale))
+    assert stale.answer.await_args.args[0] == bot._t(123, "pick_expired")
+    assert called == []
 
 
 def test_repeat_variant_redraws_last_prompt(rate_guard_setup, monkeypatch):

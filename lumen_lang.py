@@ -426,6 +426,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Картинки на сегодня закончились — общий лимит {limit}. Попробуй завтра, обычные вопросы работают.",
         "uk": "Зображень на сьогодні не лишилось — спільний ліміт {limit}. Спробуй завтра, звичайні питання працюють.",
     },
+    "draw_more_button": {
+        "be": "Яшчэ варыянт",
+        "en": "Another one",
+        "es": "Otra versión",
+        "kk": "Тағы бір нұсқа",
+        "ru": "Ещё вариант",
+        "uk": "Ще варіант",
+    },
     "draw_truncated": {
         "be": "Апісанне даўжэйшае за {limit} сімвалаў — узяў пачатак.",
         "en": "Description was longer than {limit} characters — I used the beginning.",
@@ -1064,6 +1072,7 @@ PACK_PT: dict[str, str] = {
     "user_daily_draw": "Limite diário de imagens esgotado ({used}/{limit}). Poderei desenhar de novo amanhã.",
     "draw_day_over": "As imagens de hoje acabaram — limite geral de {limit}. Tenta amanhã; perguntas normais funcionam.",
     "draw_truncated": "Descrição maior que {limit} caracteres — usei o começo.",
+    "draw_more_button": "Outra versão",
     "fallback_no_search": "Respondendo sem busca na web (limite diário esgotado) — os dados podem não estar totalmente atualizados.",
 }
 
@@ -1179,6 +1188,7 @@ PACK_AR: dict[str, str] = {
     "user_daily_draw": "تم استنفاد الحد اليومي للصور ({used}/{limit}). سأتمكن من الرسم غدًا.",
     "draw_day_over": "نفدت صور اليوم — الحد العام {limit}. حاول غدًا، والأسئلة العادية تعمل.",
     "draw_truncated": "الوصف أطول من {limit} حرفًا — أخذت بدايته.",
+    "draw_more_button": "نسخة أخرى",
     "fallback_no_search": "أجيب دون بحث في الإنترنت (الحد اليومي مستنفد) — قد لا تكون البيانات محدثة تمامًا.",
 }
 
@@ -1294,6 +1304,7 @@ PACK_TR: dict[str, str] = {
     "user_daily_draw": "Günlük çizim limiti doldu ({used}/{limit}). Yarın tekrar çizebilirim.",
     "draw_day_over": "Bugünkü çizim hakkı bitti (genel limit {limit}). Yarın dene; normal sorular çalışıyor.",
     "draw_truncated": "Açıklama {limit} karakterden uzun — başını aldım.",
+    "draw_more_button": "Başka sürüm",
     "fallback_no_search": "İnternette arama yapmadan yanıtlıyorum (günlük limit doldu) — bilgiler güncel olmayabilir.",
 }
 
@@ -1409,6 +1420,7 @@ PACK_DE: dict[str, str] = {
     "user_daily_draw": "Tageslimit für Bilder erreicht ({used}/{limit}). Morgen kann ich wieder zeichnen.",
     "draw_day_over": "Die Bildgenerierungen für heute sind aufgebraucht (gemeinsames Limit {limit}). Versuch es morgen — normale Fragen funktionieren weiter.",
     "draw_truncated": "Beschreibung länger als {limit} Zeichen — ich habe den Anfang genommen.",
+    "draw_more_button": "Noch eine Variante",
     "fallback_no_search": "Antwort ohne Websuche (Tageslimit erreicht) — die Angaben sind vielleicht nicht ganz aktuell.",
 }
 
@@ -1524,6 +1536,7 @@ PACK_FR: dict[str, str] = {
     "user_daily_draw": "Limite quotidienne d'images atteinte ({used}/{limit}). Je pourrai dessiner demain.",
     "draw_day_over": "Plus d'images pour aujourd'hui (limite commune de {limit}). Réessaie demain ; les questions normales fonctionnent.",
     "draw_truncated": "Description plus longue que {limit} caractères — j'ai pris le début.",
+    "draw_more_button": "Autre version",
     "fallback_no_search": "Réponse sans recherche web (limite quotidienne atteinte) — les données ne sont peut-être plus à jour.",
 }
 
@@ -1639,6 +1652,7 @@ PACK_IT: dict[str, str] = {
     "user_daily_draw": "Limite giornaliero di immagini raggiunto ({used}/{limit}). Potrò disegnare domani.",
     "draw_day_over": "Generazioni di immagini esaurite per oggi (limite comune {limit}). Riprova domani; le domande normali funzionano.",
     "draw_truncated": "Descrizione più lunga di {limit} caratteri — ho preso l'inizio.",
+    "draw_more_button": "Un'altra versione",
     "fallback_no_search": "Risposta senza ricerca web (limite giornaliero raggiunto) — i dati potrebbero non essere aggiornatissimi.",
 }
 
@@ -1754,6 +1768,7 @@ PACK_HI: dict[str, str] = {
     "user_daily_draw": "दैनिक इमेज सीमा पूरी ({used}/{limit})। कल फिर बना पाऊंगा।",
     "draw_day_over": "आज के लिए इमेज खत्म (साझा सीमा {limit})। कल कोशिश करो; आम सवाल चलते हैं।",
     "draw_truncated": "विवरण {limit} अक्षर से लंबा था — शुरुआत ली।",
+    "draw_more_button": "एक और विकल्प",
     "fallback_no_search": "वेब खोज के बिना जवाब (दैनिक सीमा पूरी) — जानकारी ताज़ा न हो सके।",
 }
 
@@ -1869,6 +1884,7 @@ PACK_ID: dict[str, str] = {
     "user_daily_draw": "Batas harian gambar tercapai ({used}/{limit}). Besok bisa menggambar lagi.",
     "draw_day_over": "Kuota gambar hari ini habis (batas bersama {limit}). Coba besok; pertanyaan biasa tetap jalan.",
     "draw_truncated": "Deskripsi lebih panjang dari {limit} karakter — bagian awal yang dipakai.",
+    "draw_more_button": "Versi lain",
     "fallback_no_search": "Menjawab tanpa pencarian web (batas harian tercapai) — datanya mungkin tidak terbaru.",
 }
 
@@ -1984,6 +2000,7 @@ PACK_MS: dict[str, str] = {
     "user_daily_draw": "Had harian gambar tercapai ({used}/{limit}). Esok boleh melukis lagi.",
     "draw_day_over": "Kuota gambar hari ini habis (had bersama {limit}). Cuba esok; soalan biasa masih jalan.",
     "draw_truncated": "Deskripsi lebih panjang daripada {limit} aksara — ambil bahagian awal.",
+    "draw_more_button": "Versi lain",
     "fallback_no_search": "Menjawab tanpa carian web (had harian tercapai) — datanya mungkin tidak terkini.",
 }
 
@@ -2099,6 +2116,7 @@ PACK_VI: dict[str, str] = {
     "user_daily_draw": "Đã hết hạn mức ảnh trong ngày ({used}/{limit}). Mai vẽ tiếp được.",
     "draw_day_over": "Suất ảnh hôm nay đã dùng hết (hạn chung {limit}). Thử lại mai; câu hỏi thường vẫn chạy.",
     "draw_truncated": "Mô tả dài hơn {limit} ký tự — mình lấy phần đầu.",
+    "draw_more_button": "Bản khác",
     "fallback_no_search": "Trả lời không kèm tìm kiếm web (đã hết hạn mức ngày) — thông tin có thể chưa mới nhất.",
 }
 
@@ -2214,6 +2232,7 @@ PACK_TH: dict[str, str] = {
     "user_daily_draw": "โควต้าภาพรายวันหมดแล้ว ({used}/{limit}) พรุ่งนี้วาดได้ใหม่",
     "draw_day_over": "โควต้าภาพวันนี้ใช้ครบแล้ว (จำกัดรวม {limit}) ลองใหม่พรุ่งนี้ คำถามทั่วไปยังได้",
     "draw_truncated": "คำบรรยายยาวกว่า {limit} ตัวอักษร จึงใช้เฉพาะตอนต้น",
+    "draw_more_button": "อีกรุ่น",
     "fallback_no_search": "ตอบโดยไม่ค้นเว็บ (โควต้ารายวันหมด) — ข้อมูลอาจไม่ใหม่ที่สุด",
 }
 
@@ -2329,6 +2348,7 @@ PACK_FA: dict[str, str] = {
     "user_daily_draw": "سقف روزانه تصویر تمام شد ({used}/{limit}). فردا دوباره می‌توانم بکشم.",
     "draw_day_over": "سهم تصویر امروز تمام شد (سقف مشترک {limit}). فردا تلاش کن؛ سوال‌های معمولی کار می‌کنند.",
     "draw_truncated": "توضیح بلندتر از {limit} نویسه بود — ابتدای آن را برداشتم.",
+    "draw_more_button": "نسخه دیگر",
     "fallback_no_search": "بدون جست‌وجوی اینترنتی جواب می‌دهم (سقف روزانه تمام شد) — اطلاعات ممکن است به‌روز نباشند.",
 }
 
@@ -2444,6 +2464,7 @@ PACK_UR: dict[str, str] = {
     "user_daily_draw": "روزانہ امیج کی حد پوری ({used}/{limit})۔ کل پھر بنا سکوں گا۔",
     "draw_day_over": "آج کے امیج ختم (مشترکہ حد {limit})۔ کل کوشش کریں؛ عام سوالات جاری ہیں۔",
     "draw_truncated": "تفصیل {limit} حروف سے لمبی تھی — شروع لیا۔",
+    "draw_more_button": "ایک اور ورژن",
     "fallback_no_search": "ویب تلاش کے بغیر جواب (روزانہ حد پوری) — معلومات تازہ نہ ہو سکتی ہیں۔",
 }
 
@@ -2559,6 +2580,7 @@ PACK_UZ: dict[str, str] = {
     "user_daily_draw": "Kunlik rasm limiti tugadi ({used}/{limit}). Ertaga yana chiza olaman.",
     "draw_day_over": "Bugungi rasm uchun joy qolmadi (umumiy limit {limit}). Ertaga urinib ko'ring; oddiy savollar ishlaydi.",
     "draw_truncated": "Tavsif {limit} belgidan uzun — boshini oldim.",
+    "draw_more_button": "Boshqa variant",
     "fallback_no_search": "Internetdan izlamay javob beraman (kunlik limit tugadi) — ma'lumotlar eskirgan bo'lishi mumkin.",
 }
 
@@ -2674,6 +2696,7 @@ PACK_BN: dict[str, str] = {
     "user_daily_draw": "দৈনিক ছবির সীমা শেষ ({used}/{limit})। কাল আবার আঁকতে পারব।",
     "draw_day_over": "আজকের ছবির কোটা শেষ (সাধারণ সীমা {limit})। কাল চেষ্টা করো; সাধারণ প্রশ্ন চলছে।",
     "draw_truncated": "বিবরণ {limit} অক্ষরের বেশি লম্বা — শুরুটা নিয়েছি।",
+    "draw_more_button": "আরেকটি সংস্করণ",
     "fallback_no_search": "ওয়েব অনুসন্ধান ছাড়াই উত্তর (দৈনিক সীমা শেষ) — তথ্য হালনাগাদ নাও হতে পারে।",
 }
 
@@ -2789,6 +2812,7 @@ PACK_FIL: dict[str, str] = {
     "user_daily_draw": "Naabot na ang daily limit ng larawan ({used}/{limit}). Bukas pwede ulit gumuhit.",
     "draw_day_over": "Ubos na ang larawan ngayong araw (shared limit {limit}). Subukan bukas; ordinaryong tanong ay gumagana pa rin.",
     "draw_truncated": "Mas mahaba ang deskripsyon sa {limit} character — kinuha ang simula.",
+    "draw_more_button": "আরেকটি সংস্করণ",
     "fallback_no_search": "Sumasagot nang walang web search (naabot na ang daily limit) — baka hindi pinakabago ang datos.",
 }
 
@@ -2904,6 +2928,7 @@ PACK_PL: dict[str, str] = {
     "user_daily_draw": "Dzienny limit obrazków wyczerpany ({used}/{limit}). Jutro znów będę mógł narysować.",
     "draw_day_over": "Na dziś limit generacji obrazów wyczerpany (wspólny limit {limit}). Spróbuj jutro — zwykłe pytania działają dalej.",
     "draw_truncated": "Opis dłuższy niż {limit} znaków — wziąłem początek.",
+    "draw_more_button": "Inna wersja",
     "fallback_no_search": "Odpowiadam bez wyszukiwania w internecie (limit dzienny wyczerpany) — dane mogą być nieaktualne.",
 }
 
@@ -3019,6 +3044,7 @@ PACK_NL: dict[str, str] = {
     "user_daily_draw": "Daglimiet voor afbeeldingen bereikt ({used}/{limit}). Morgen kan ik weer tekenen.",
     "draw_day_over": "De beeldlimiet voor vandaag is op (gemeenschappelijk limiet {limit}). Probeer morgen; gewone vragen werken nog.",
     "draw_truncated": "Beschrijving langer dan {limit} tekens — ik heb het begin genomen.",
+    "draw_more_button": "Nog een versie",
     "fallback_no_search": "Antwoord zonder webzoekopdracht (daglimiet bereikt) — de gegevens zijn misschien niet helemaal actueel.",
 }
 
@@ -3134,6 +3160,7 @@ PACK_ZU: dict[str, str] = {
     "user_daily_draw": "Umkhawulo wansuku zonke wezithombe ufinyelelwe ({used}/{limit}). Ngizokwazi ukudweba futhi kusasa.",
     "draw_day_over": "Izithombe zanamuhla ziphelile (umkhawulo ohlanganyelwe {limit}). Zama kusasa; imibuzo evamile iyaqhubeka.",
     "draw_truncated": "Incazelo ide kunenhlamvu ezingu-{limit} — ngithathe ekuqaleni.",
+    "draw_more_button": "Enye inguqulo",
     "fallback_no_search": "Ngiphendula ngaphandle kokusesha ku-inthanethi (umkhawulo wansuku zonke ufinyelelwe) — imininingwane kungenzeka ingaseshi.",
 }
 

@@ -323,11 +323,21 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             # _tg_call отдаёт None вместо исключения — внешний except ждёт исключение,
             # поэтому отсутствие результата превращаем в ошибку сервиса здесь.
             caption = bot._t(cid, "draw_truncated", limit=IMAGE_PROMPT_MAX_CHARS) if truncated else None
+            # Кнопка «Ещё вариант» только под генерацией: повторять правку
+            # бессмысленно, у неё уже есть свой референс.
+            reply_markup = None
+            if reference is None:
+                reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=bot._t(cid, "draw_more_button"), callback_data="draw:more",
+                    ),
+                ]])
             sent = await bot._tg_call(
                 bot.bot.send_photo,
                 chat_id=cid,
                 photo=BufferedInputFile(image_bytes, filename=image_filename(image_bytes) or "generated.jpg"),
                 caption=caption,
+                reply_markup=reply_markup,
                 reply_to_message_id=message.message_id,
                 call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
             )
@@ -404,6 +414,62 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             sem.release()
         if uid is not None:
             _draw_inflight.discard(uid)
+
+
+async def handle_draw_more_callback(query: CallbackQuery) -> None:
+    """Кнопка «Ещё вариант»: повтор последней генерации тем же описанием.
+    Чужой тап не тратит ни слот человека, ни бюджет провайдера."""
+    import bot
+    if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    if (query.data or "") != "draw:more":
+        return
+    question_msg = query.message
+    if question_msg is None or question_msg.chat is None:
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    chat = question_msg.chat
+    state = bot.get_state(chat.id)
+    user_id = query.from_user.id if query.from_user else None
+    owner = state.get("last_drawn_user")
+    lang = bot._chat_lang(chat.id)
+    if owner is not None and user_id is not None and owner != user_id:
+        with contextlib.suppress(Exception):
+            await query.answer(_lang_t(lang, "pick_not_yours"), show_alert=True)
+        return
+    last_prompt = state.get("last_draw_prompt")
+    if (
+        not isinstance(last_prompt, str) or not last_prompt.strip()
+        or not bot._fresh_generation_ref(state, user_id)
+    ):
+        # Кнопки из старых сообщений не должны генерировать по вчерашнему описанию.
+        with contextlib.suppress(Exception):
+            await query.answer(_lang_t(lang, "pick_expired"), show_alert=False)
+        return
+    with contextlib.suppress(Exception):
+        await query.answer()
+    # Клавиатуру снимаем, чтобы двойной тап не запускал две генерации подряд.
+    with contextlib.suppress(Exception):
+        await bot._tg_call(question_msg.edit_reply_markup, reply_markup=None, call_timeout=15.0)
+
+    async def _cb_reply(text: str, **kwargs: Any) -> Any:
+        return await bot._tg_call(
+            bot.bot.send_message, chat_id=chat.id, text=text,
+            reply_to_message_id=getattr(question_msg, "message_id", None),
+            **kwargs,
+        )
+
+    ns = SimpleNamespace(
+        text=None, caption=None, chat=chat, from_user=query.from_user,
+        sender_chat=None, reply_to_message=None,
+        message_id=getattr(question_msg, "message_id", None),
+        reply=_cb_reply,
+    )
+    # Под тем же чат-локом и потолком, что обычный /draw (та же защита, что у кнопок-пиков).
+    await bot._run_under_chat_lock(ns, lambda: bot.inline_draw(ns, last_prompt))
 
 
 async def cmd_draw(message: Message) -> None:
