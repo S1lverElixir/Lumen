@@ -52,13 +52,13 @@ production on 10.11.2026, so change a fact and update this file in the same comm
 - Gate: `pyflakes bot.py lumen_*.py system_prompt.py tests/*.py` then `pytest -q`. The suite is
   over a thousand tests and takes under a minute. CI runs these two plus the three deno proxy
   checks and `pip-audit` on every push, so the extra ones are your job locally only when you touch
-  those files.
+  those files. One file: `pytest tests/<file>.py -v`; one test:
+  `pytest tests/<file>.py::<name> -v`.
 - Globs do not expand in PowerShell (opencode sessions), so there run
   `pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name })`
   then `pytest -q`, and read or search with the file tools rather than `cat` and `grep`. Never wrap
   a command in `bash -lc` just to get globs. In Qoder the Bash tool is Git Bash, where the first
   form works as written.
-- One file: `pytest tests/<file>.py -v`. One test: `pytest tests/<file>.py::<name> -v`.
 - Proxy gate, run it whenever you change `proxy/`: `deno test proxy/proxy_test.ts` (offline, no
   external imports), `deno check proxy/proxy.ts`, `deno lint proxy/proxy.ts`.
 - `pip-audit -r requirements.txt` is not part of the local baseline: it needs network and goes red
@@ -97,9 +97,9 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   followed by a manual smoke test, never a side effect.
 
 ## Report
-Short, in this order: what changed and why; changed files; gate result (plus proxy gate if run);
-what was not verified; what the owner must check by hand (a smoke test after a version bump or a
-routing change). If nothing is unverified or risky, say so in one phrase instead of padding.
+In this order, no padding: what changed and why; changed files; gate result (plus proxy gate if
+run); what was not verified; what the owner must check by hand (a smoke test after a version bump
+or a routing change). If nothing is unverified or risky, say so in one line.
 
 ## Where things live
 - `bot.py` is the entry point and composition root (env, logging, Dispatcher, main) and re-exports
@@ -118,12 +118,17 @@ Gemini as the unconditional automatic reserve.
   URL, YouTube, video, audio input and TTS: Gemini only. Voice notes are transcribed by Groq
   Whisper first, the only thing Groq is still used for.
 - `/draw` is a different provider: Cloudflare Workers AI (`@cf/black-forest-labs/flux-2-klein-4b`)
-  does both generation and edits, Pollinations (`sana`) is the reserve and only generates. Fallback
-  is by provider, not by model. A moderation refusal is terminal for the chain and still costs the
-  person their personal slot.
+  does both generation and edits, Pollinations (`sana`) is the reserve and only generates; the
+  chain falls back by provider, not by model. A moderation refusal is terminal for the chain and
+  still costs the person their personal slot.
 - Freshness: no Munito model has web search, so every provider also gets an external snippet block
   built from DuckDuckGo, Bing and Google News; the order and merge rules are in
   `docs/ARCHITECTURE.md`.
+- Limits are derived, not picked: a daily cap sits under the provider's real free-tier budget with
+  headroom, and per-user caps follow the existing family (one number for messages, one per heavy
+  feature). The global cap is what protects a shared provider, so a reflexively small number is not
+  safety. Put the arithmetic in the plan before changing one; `docs/ENVIRONMENT.md` documents the
+  reasoning behind the current values.
 - User-facing text must never name a provider or a model, including in an error message. The leak
   filter in `lumen_security.py` and the persona in `system_prompt.py` are the source of truth.
 
