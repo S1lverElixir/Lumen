@@ -1662,6 +1662,59 @@ def test_weak_verb_with_variants_is_generation_not_edit(rate_guard_setup, monkey
     assert captured == {"prompt": "кота", "variants": 2, "reference": None}
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("нарисуй горы в стиле этого фото", True),
+    ("in the style of this photo draw a castle", True),
+    ("нарисуй кота", False),
+])
+def test_wants_style_reference(text, expected):
+    from lumen_message_parse import _wants_style_reference
+    assert _wants_style_reference(text) is expected
+
+
+def test_style_reference_uses_edit_with_photo(rate_guard_setup, monkeypatch):
+    # «Нарисуй X в стиле этого фото» — генерация с референсом стиля (одна, без серии).
+    message = rate_guard_setup()
+    message.reply_to_message = SimpleNamespace(
+        photo=None, document=SimpleNamespace(file_id="style-fid", mime_type="image/jpeg"),
+    )
+    refs = [(b"style-bytes", "image/jpeg")]
+    captured = {}
+
+    async def fake_resolve(*args, **kwargs):
+        return refs
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        captured.update(prompt=prompt, variants=variants, reference=reference)
+
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "нарисуй горы в стиле этого фото"
+    asyncio.run(bot._handle_message_core(message))
+    assert captured == {"prompt": "горы в стиле этого фото", "variants": 1, "reference": refs}
+
+
+def test_style_reference_without_photo_generates_plain(rate_guard_setup, monkeypatch):
+    # Без фото «в стиле» — обычное описание: референс не ищем вовсе.
+    message = rate_guard_setup()
+    captured = {}
+    resolve_calls = []
+
+    async def fake_resolve(*args, **kwargs):
+        resolve_calls.append(True)
+        return []
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        captured.update(reference=reference)
+
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "нарисуй горы в стиле этого фото"
+    asyncio.run(bot._handle_message_core(message))
+    assert captured["reference"] is None
+    assert resolve_calls == []
+
+
 def test_inline_draw_variants_stops_after_failure(monkeypatch):
     # Серия вариантов тратит слоты только на реальные картинки: сбой/отказ
     # останавливает её, а не добивает лимит пустыми попытками.

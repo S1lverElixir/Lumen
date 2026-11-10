@@ -180,6 +180,9 @@ def _quota_day_reset_in_sec() -> float:
     nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(0.0, (nxt - now).total_seconds())
 
+_TZ_FALLBACK_LOGGED = False
+
+
 def _current_quota_day() -> str:
     """Дата (ISO, YYYY-MM-DD) для определения "новых суток" в целях сброса квоты.
     Google обнуляет дневные RPD-лимиты по полуночи Pacific Time — используем ту
@@ -188,8 +191,17 @@ def _current_quota_day() -> str:
     (маловероятно, но встречается в урезанных Docker-образах) — тихо откатываемся
     на UTC: чуть менее точно по времени суток, но не ломает сам факт ежедневного
     сброса."""
+    global _TZ_FALLBACK_LOGGED
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
-    except Exception:
+    except Exception as exc:
+        # Один раз за процесс: иначе каждая проверка квоты писала бы warning.
+        # Fallback сдвигает суточный сброс на 00:00 UTC (03:00 МСК вместо 10:00).
+        if not _TZ_FALLBACK_LOGGED:
+            _TZ_FALLBACK_LOGGED = True
+            log.warning(
+                '[quota] ZoneInfo(America/Los_Angeles) unavailable (%s: %s) — quota day falls back to UTC.',
+                type(exc).__name__, exc,
+            )
         return datetime.now(timezone.utc).date().isoformat()

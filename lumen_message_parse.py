@@ -102,6 +102,21 @@ def _detect_image_variants(text: str) -> int:
     return _split_image_variants(text)[0]
 
 
+# «Нарисуй X в стиле этого фото»: генерация с референсом стиля (как в ChatGPT).
+# Срабатывает только когда рядом есть фото — иначе это обычная генерация.
+_STYLE_PHRASES = (
+    "в стиле", "по образцу",
+    "как на этом фото", "как на этой картинке", "как на этом изображении",
+)
+_STYLE_RE = re.compile(r"in the style of|like this (?:photo|image)", re.IGNORECASE)
+
+
+def _wants_style_reference(text: str) -> bool:
+    """Просили перенести стиль с приложенного фото, а не просто нарисовать."""
+    low = (text or "").lower()
+    return any(phrase in low for phrase in _STYLE_PHRASES) or bool(_STYLE_RE.search(low))
+
+
 # "хочу картинку" не триггер: путается с показом/редактурой. Длинные фразы выше коротких, иначе вернётся первое совпадение.
 TTS_TRIGGER_PREFIXES = [
     "озвучьте", "озвучь текст", "озвучь мне", "озвуч текст", "озвучь", "озвуч",

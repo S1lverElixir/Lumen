@@ -26,6 +26,7 @@ from lumen_message_parse import (
     TTS_TRIGGER_PREFIXES,
     _detect_image_variants,
     _split_image_variants,
+    _wants_style_reference,
     _NO_MEDIA_NOTE,
     _find_recent_media_by_category,
     _match_trigger_prefix,
@@ -789,9 +790,28 @@ async def _handle_message_core(
     if matched_draw_trigger:
         prompt_content = _strip_trigger_content(clean_prompt, matched_draw_trigger, message)
         if prompt_content:
-            # «нарисуй 2 варианта» — Nintendo-стиль: несколько генераций подряд.
+            # «Нарисуй X в стиле этого фото»: стиль переносим с приложенного фото
+            # (как в ChatGPT), а не игнорируем его. Без фото — обычная генерация.
+            _style_refs = None
+            if _wants_style_reference(clean_prompt) and _explicit_media:
+                try:
+                    _style_refs = await bot._resolve_edit_references(
+                        message, state, is_private=is_private, implicit=False,
+                    ) or None
+                except bot._MediaTooLargeError as exc:
+                    await bot._safe_reply(message, bot._t(
+                        message.chat.id, "media_too_big",
+                        limit_mb=max(1, round(exc.cap_bytes / (1024 * 1024))),
+                    ))
+                    return
+                except Exception as exc:
+                    log.warning("[draw] Style reference resolve failed, generating as usual: %s", exc)
+            _draw_variants, _draw_prompt = _split_image_variants(prompt_content)
+            if _style_refs:
+                _draw_variants = 1
             await bot.inline_draw_variants(
-                message, prompt_content, variants=_detect_image_variants(clean_prompt),
+                message, _draw_prompt or prompt_content, variants=_draw_variants,
+                reference=_style_refs,
             )
             return
 
