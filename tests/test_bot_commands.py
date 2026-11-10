@@ -1522,11 +1522,22 @@ def test_inline_draw_edit_keeps_reference_orientation(monkeypatch):
     monkeypatch.setattr(bot, "image_dimensions", fake_dims)
     monkeypatch.setattr(bot, "_cloudflare_edit_to_image", fake_edit)
     monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    # Декодирование заголовков картинки — CPU, оно не должно вставать в цикл
+    # (b83277b): without to_thread тест проходил бы ровно так же (ревью 10.11.2026).
+    real_to_thread = asyncio.to_thread
+    off_loop = []
+
+    async def _recorder(func, /, *args, **kwargs):
+        off_loop.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _recorder)
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
     asyncio.run(bot.inline_draw(incoming, "сделай небо ночным", reference=(b"ref", "image/jpeg")))
     assert captured["size"] == (1344, 768)
     assert captured["dims_arg"] == b"ref"
+    assert fake_dims in off_loop, "размер референса считается в отдельном потоке"
 
 
 def _make_draw_more_query(user_id=456, chat_id=123):
@@ -1601,6 +1612,15 @@ def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
     stale = _make_draw_more_query(user_id=456)
     asyncio.run(bot.handle_draw_more_callback(stale))
     assert stale.answer.await_args.args[0] == bot._t(123, "pick_expired")
+
+    # Кнопки старых фото снимаются при новой генерации; после рестарта это
+    # страховка: тап не под последней картинкой не повторяет чужой сюжет
+    # (ревью 10.11.2026).
+    state["last_drawn_at"] = time.time()
+    state["last_drawn_message_id"] = 404
+    older = _make_draw_more_query(user_id=456)
+    asyncio.run(bot.handle_draw_more_callback(older))
+    assert older.answer.await_args.args[0] == bot._t(123, "pick_expired")
     assert called == []
 
 
@@ -2249,6 +2269,16 @@ def test_callback_handlers_have_data_prefix_filters():
     assert by_fn["handle_pick_callback"].filters, "pick handler must not be a catch-all"
     assert "handle_draw_more_callback" in by_fn, "draw:more handler must be registered"
     assert by_fn["handle_draw_more_callback"].filters, "draw:more handler must not be a catch-all"
+    # «Фильтр есть» не значит «фильтр правильный»: F.data == "draw:moreX" тоже
+    # фильтр, но кнопку бы не нашёл (ревью 10.11.2026). FilterObject.callback —
+    # внутренний вызов aiogram 3.31, привязан к этой версии.
+    draw_filter = by_fn["handle_draw_more_callback"].filters[0]
+    assert bool(draw_filter.callback(value=SimpleNamespace(data="draw:more"))) is True
+    assert bool(draw_filter.callback(value=SimpleNamespace(data="draw:moreX"))) is False
+    assert bool(draw_filter.callback(value=SimpleNamespace(data="lang:ru"))) is False
+    lang_filter = by_fn["handle_lang_callback"].filters[0]
+    assert bool(lang_filter.callback(value=SimpleNamespace(data="lang:ru"))) is True
+    assert bool(lang_filter.callback(value=SimpleNamespace(data="draw:more"))) is False
 
 
 def test_expired_picks_purged_on_new_pick(rate_guard_setup, monkeypatch):
@@ -3137,7 +3167,10 @@ def test_inline_draw_moderation_refusal_stops_the_chain(monkeypatch):
         assert asyncio.run(bot.inline_draw(incoming, "cat")) is False
         assert attempts == ["cloudflare"]
         assert bot._image_provider_ready("cloudflare") is True, "модерация — не перегрузка"
-        assert bot._image_usage_total() == usage_before
+        # klein картинку посчитал, значит Neuron списаны: попытка обязана попасть в
+        # общий дневной бюджет, иначе цикл из запрещённых описаний выжигал бы квоту
+        # провайдера мимо всяких лимитов (ревью 10.11.2026).
+        assert bot._image_usage_total() == usage_before + 1
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -3171,7 +3204,7 @@ def test_inline_draw_refunds_slot_even_if_failure_notice_explodes(monkeypatch):
 def test_inline_draw_strips_more_button_from_previous_photo(monkeypatch):
     # «Повторить» живёт только у последней картинки, как в ChatGPT: без съёма
     # старой клавиатуры под ней оставался кликабельный чужой сюжет (ревью 10.11.2026).
-    from aiogram.types import PhotoSize
+    from aiogram.types import InlineKeyboardMarkup, PhotoSize
 
     chat_id = 999453
     uid = 777053
@@ -3185,26 +3218,40 @@ def test_inline_draw_strips_more_button_from_previous_photo(monkeypatch):
         photo=[PhotoSize(file_id="gen", file_unique_id="gen-u", width=1024, height=1024, file_size=1)],
     )
 
+    fake_bot = SimpleNamespace(
+        send_photo=lambda **k: None, edit_message_reply_markup=lambda **k: None,
+    )
+
     async def fake_tg_call(func, *args, **kwargs):
-        calls.append(kwargs)
+        calls.append((func, kwargs))
         return sent_photo
 
     _one_image_provider(monkeypatch, ok)
     monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
-    monkeypatch.setattr(bot, "bot", SimpleNamespace(
-        send_photo=lambda **k: None, edit_message_reply_markup=lambda **k: None,
-    ))
+    monkeypatch.setattr(bot, "bot", fake_bot)
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
     incoming.from_user = SimpleNamespace(id=uid)
     try:
         asyncio.run(bot.inline_draw(incoming, "cat"))
         asyncio.run(bot.inline_draw(incoming, "dog"))
-        # Съём клавиатуры — вызов с reply_markup, но без photo (отправка фото
-        # тоже несёт reply_markup).
-        strips = [kw for kw in calls if "reply_markup" in kw and "photo" not in kw]
+        sends = [kw for fn, kw in calls if fn is fake_bot.send_photo]
+        # Мок возвращал sent_photo ЛЮБОМУ вызову, и «кнопка под фото» в тесте
+        # не проверялась вовсе: мутант без клавиатуры проходил зелёным
+        # (ревью 10.11.2026).
+        assert len(sends) == 2
+        for kw in sends:
+            buttons = [b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row]
+            assert buttons == ["draw:more"], "кнопка «Ещё вариант» обязана ехать с фото"
+        # Съём клавиатуры опознаётся по самой функции, а не по форме kwargs.
+        strips = [kw for fn, kw in calls if fn is fake_bot.edit_message_reply_markup]
         assert len(strips) == 1, "у первой генерации снимать клавиатуру не с чего"
+        assert strips[0]["chat_id"] == chat_id
         assert strips[0]["message_id"] == 4242
+        # None aiogram выбрасывает из запроса, и вживую кнопка оставалась на месте:
+        # снимать надо пустой клавиатурой (ревью 10.11.2026).
+        assert isinstance(strips[0]["reply_markup"], InlineKeyboardMarkup)
+        assert strips[0]["reply_markup"].inline_keyboard == []
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
         bot.chat_state.pop(chat_id, None)
@@ -3246,30 +3293,6 @@ def test_inline_draw_sends_photo_when_markup_editor_is_absent(monkeypatch):
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
         bot.chat_state.pop(chat_id, None)
-
-
-def test_draw_more_callback_refuses_tap_from_older_photo(monkeypatch):
-    # Кнопки старых фото снимаются при новой генерации; после рестарта это
-    # страховка: тап не под последней картинкой не должен повторять чужой сюжет
-    # и тратить слоты (ревью 10.11.2026).
-    state = _fresh_draw_state(prompt="кот")
-    state["last_drawn_message_id"] = 404
-    called = []
-
-    async def fake_lock(message, run):
-        await run()
-
-    async def fake_inline(message, prompt, *, reference=None):
-        called.append(prompt)
-
-    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
-    monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
-    monkeypatch.setattr(bot, "inline_draw", fake_inline)
-    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: False)
-    query = _make_draw_more_query(user_id=456)
-    asyncio.run(bot.handle_draw_more_callback(query))
-    assert called == []
-    assert query.answer.await_args.args[0] == bot._t(123, "pick_expired")
 
 
 def test_reply_to_foreign_photo_lands_in_that_photos_owner_bucket(monkeypatch):
@@ -3326,3 +3349,123 @@ def test_resolve_edit_references_dedups_same_file_id(monkeypatch):
     refs = asyncio.run(_resolve_edit_references(message, {}, is_private=True, implicit=False))
     assert len(refs) == 1
     assert fetched == []
+
+
+
+def test_repeat_trigger_without_draw_context_stays_text(rate_guard_setup, monkeypatch):
+    # «другой вариант перевода письма» и «regenerate the summary» в чате, где
+    # картинку не просили, — это текст: рисовать по одному слову «вариант»
+    # значило тратить дневный слот на неизвестно что (ревью 10.11.2026).
+    message = rate_guard_setup()
+    variants_calls = []
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        variants_calls.append(prompt)
+
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    monkeypatch.setattr(bot, "_run_route", AsyncMock(return_value=("ok", False)))
+    message.text = "другой вариант перевода письма"
+    asyncio.run(bot._handle_message_core(message))
+    assert variants_calls == []
+    bot.inline_draw.assert_not_awaited()
+    assert bot._run_route.await_count == 1, "запрос должен дойти до текстового маршрута"
+
+
+def test_repeat_trigger_reply_to_text_message_does_not_paint_the_reply(rate_guard_setup, monkeypatch):
+    # Реплай «ещё вариант» на текстовый ответ рисовал текст этого ответа:
+    # фолбэк на реплай в ветке повтора выключен (ревью 10.11.2026).
+    message = rate_guard_setup()
+    state = _fresh_draw_state(prompt="красное яблоко")
+    variants_calls = []
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        variants_calls.append(prompt)
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "ещё вариант"
+    message.reply_to_message = SimpleNamespace(
+        text="Вот ваш перевод письма.", caption=None, photo=None, document=None,
+        from_user=SimpleNamespace(id=456),
+    )
+    asyncio.run(bot._handle_message_core(message))
+    assert variants_calls == [], "текст реплая не уезжает в промпт"
+    # Повторяется последняя генерация, а не чужая подпись.
+    bot.inline_draw.assert_awaited_once_with(message, "красное яблоко")
+
+
+def test_edit_variants_request_keeps_the_reference(rate_guard_setup, monkeypatch):
+    # «сделай 3 варианта: убери фон» с фото в реплае давал одну картинку без
+    # объяснений: число вариантов отрезала проверка «нет вложения» (ревью 10.11.2026).
+    message = rate_guard_setup()
+    refs = [(b"ref-bytes", "image/jpeg")]
+    captured = {}
+
+    async def fake_resolve(*args, **kwargs):
+        return refs
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        captured.update(prompt=prompt, variants=variants, reference=reference)
+
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "сделай 3 варианта: убери фон"
+    message.reply_to_message = SimpleNamespace(
+        photo=[SimpleNamespace(file_id="p", mime_type="image/jpeg")], text=None, caption=None,
+        from_user=SimpleNamespace(id=456),
+    )
+    asyncio.run(bot._handle_message_core(message))
+    assert captured["variants"] == 3
+    assert captured["reference"] == refs, "правка остаётся правкой по тому же референсу"
+    assert "3 варианта" not in captured["prompt"], "фраза количества не едет модели"
+
+
+def test_inline_draw_edit_leaves_the_generation_button_alone(monkeypatch):
+    # Правка не переносит якорь кнопки и не снимает клавиатуру с прошлого фото:
+    # под правкой кнопки нет, а «ещё вариант» повторяет именно генерацию,
+    # иначе кнопка и текст расходились (ревью 10.11.2026).
+    from aiogram.types import PhotoSize
+
+    chat_id = 999456
+    uid = 777056
+    calls = []
+
+    async def ok_edit(session, prompt, reference, second_reference=None, **kwargs):
+        return b"\x89PNG fake bytes"
+
+    sent_photo = SimpleNamespace(
+        message_id=5252,
+        photo=[PhotoSize(file_id="gen", file_unique_id="gen-u", width=1024, height=1024, file_size=1)],
+    )
+    fake_bot = SimpleNamespace(
+        send_photo=lambda **k: None, edit_message_reply_markup=lambda **k: None,
+    )
+
+    async def fake_tg_call(func, *args, **kwargs):
+        calls.append((func, kwargs))
+        return sent_photo
+
+    monkeypatch.setattr(bot, "image_provider_names", lambda: ("cloudflare",))
+    monkeypatch.setattr(bot, "_cloudflare_edit_to_image", ok_edit)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", fake_bot)
+    bot.chat_state[chat_id] = {
+        "last_drawn_message_id": 4242, "last_drawn_at": time.time(),
+        "last_drawn_user": uid, "last_draw_prompt": "cat",
+    }
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        sent = asyncio.run(bot.inline_draw(incoming, "сделай фон синим", reference=(b"ref", "image/jpeg")))
+        assert sent is True
+        assert [fn for fn, _ in calls if fn is fake_bot.edit_message_reply_markup] == []
+        sends = [kw for fn, kw in calls if fn is fake_bot.send_photo]
+        assert len(sends) == 1 and sends[0]["reply_markup"] is None, "у правки кнопки нет"
+        st = bot.chat_state[chat_id]
+        assert st["last_drawn_message_id"] == 4242, "правка не двигает якорь кнопки"
+        assert st["last_draw_prompt"] == "cat", "правка не перезаписывает описание"
+        assert st["last_drawn_at"] > time.time() - 5, "свежесть для слабых глаголов обновляется"
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(chat_id, None)

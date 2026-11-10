@@ -336,10 +336,10 @@ def test_cloudflare_moderation_rejection_is_not_retryable(cf_configured):
     with pytest.raises(lumen_images.ImageProviderError) as exc:
         asyncio.run(cf_configured._cloudflare_text_to_image(_FakeSession(_FakeResp(
             status=400, chunks=(body,))), "кот"))
+    # Класс ошибки — и есть контракт: на голых подстроках тест проходил бы и с
+    # обычным ImageProviderError (ревью 10.11.2026).
+    assert isinstance(exc.value, lumen_images.ImageModerationError)
     assert not isinstance(exc.value, (lumen_images.ImageRateLimitedError, lumen_images.ImageBudgetExhaustedError))
-    # Ветка модерации обязана сработать именно она, а не общий 400: иначе
-    # «Provider failed» поведёт себя как временный сбой (ревью 10.11.2026).
-    assert "модерации" in str(exc.value)
 
 
 def test_cloudflare_rejects_unconfigured_without_request(cf_configured, monkeypatch):
@@ -404,3 +404,22 @@ def test_cloudflare_error_shapes(cf_configured):
     with pytest.raises(lumen_images.ImageProviderError):
         asyncio.run(cf_configured._cloudflare_text_to_image(_FakeSession(_FakeResp(
             status=200, chunks=(json.dumps({"success": True, "result": {}}).encode(),))), "кот"))
+
+
+
+def test_cloudflare_moderation_flag_at_http_200_is_terminal(cf_configured):
+    # Обёртка Workers AI умеет отдавать отказ телом при HTTP 200: без разбора
+    # success:false такой ответ не терминален, и sana дорисовала бы заблокированное
+    # содержимое (ревью 10.11.2026).
+    body = json.dumps({"success": False, "errors": [
+        {"code": 3030, "message": "Your output has been flagged"}]}).encode()
+    with pytest.raises(lumen_images.ImageModerationError):
+        asyncio.run(cf_configured._cloudflare_image_result(200, None, json.loads(body)))
+
+
+def test_cloudflare_plain_failure_at_http_200_stays_retryable(cf_configured):
+    # Рядом — обычная ошибка обёртки: она НЕ модерация, и цепочку обязана
+    # оставлять живой (ревью 10.11.2026).
+    with pytest.raises(lumen_images.ImageProviderError) as exc:
+        asyncio.run(cf_configured._cloudflare_image_result(200, None, {"success": False, "error": "boom"}))
+    assert not isinstance(exc.value, lumen_images.ImageModerationError)

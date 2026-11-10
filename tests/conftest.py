@@ -60,11 +60,17 @@ def _bot_global_state_guard():
     аналогичные); расширять фикстуру на них без реальной необходимости было бы
     накоплением сложности "на будущее", а не решением подтверждённой проблемы."""
     import bot as _bot_module
+    import lumen_commands as _commands_module
     chat_state_snapshot = copy.deepcopy(_bot_module.chat_state)
     quota_snapshot = copy.deepcopy(_bot_module.GLOBAL_QUOTA)
     quarantine_snapshot = copy.deepcopy(lumen_router_config._QUARANTINE)
     client_snapshot = _bot_module.client
     bot_snapshot = _bot_module.bot
+    # Инфлайт-генерация и выключатель прокси живут вне снимка чата: оставшийся uid
+    # блокировал следующий тест на «already in flight», а tripped down_until
+    # превращал отправку фото в None (мутант-прогон ревью 10.11.2026).
+    inflight_snapshot = set(_commands_module._draw_inflight)
+    breaker_snapshot = dict(_bot_module._tg_proxy_breaker.__dict__)
     yield
     _bot_module.chat_state.clear()
     _bot_module.chat_state.update(chat_state_snapshot)
@@ -74,6 +80,10 @@ def _bot_global_state_guard():
     lumen_router_config._QUARANTINE.update(quarantine_snapshot)
     _bot_module.client = client_snapshot
     _bot_module.bot = bot_snapshot
+    _commands_module._draw_inflight.clear()
+    _commands_module._draw_inflight.update(inflight_snapshot)
+    _bot_module._tg_proxy_breaker.__dict__.clear()
+    _bot_module._tg_proxy_breaker.__dict__.update(breaker_snapshot)
 
 
 @pytest.fixture(autouse=True)

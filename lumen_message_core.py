@@ -600,12 +600,16 @@ async def _resolve_incoming_media(
     return med_name, media_tuple
 
 
-def _strip_trigger_content(clean_prompt: str, trigger: str, message: Message) -> str:
+def _strip_trigger_content(
+    clean_prompt: str, trigger: str, message: Message, *, reply_fallback: bool = True,
+) -> str:
     """Текст после draw/tts-триггера: чистка префикса + фолбэк на текст реплая
-    ("нарисуй это" в ответ на сообщение с описанием)."""
+    ("нарисуй это" в ответ на сообщение с описанием). У повтора фолбэк выключен:
+    «ещё вариант» к текстовому ответу — это текст, а не картинка с его подписью
+    (ревью 10.11.2026)."""
     content = re.sub(r'^[:\s\-\,]+', '', clean_prompt[len(trigger):].strip()).strip()
     content = _strip_reply_marker(content)
-    if not content and message.reply_to_message is not None:
+    if reply_fallback and not content and message.reply_to_message is not None:
         reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
         if reply_text:
             content = reply_text
@@ -729,20 +733,22 @@ async def _handle_message_core(
     if not is_continuation and (
         matched_repeat := _match_trigger_prefix(lower_prompt, REPEAT_TRIGGER_PREFIXES)
     ):
-        # «ещё вариант кота в шляпе» называет новый сюжет: молча игнорировать эти
-        # слова и повторять старое описание значило рисовать не то (ревью 10.11.2026).
-        _repeat_rest = _strip_trigger_content(clean_prompt, matched_repeat, message)
-        if _repeat_rest:
+        _last_prompt = state.get("last_draw_prompt")
+        _has_draw_ctx = isinstance(_last_prompt, str) and bool(_last_prompt.strip())
+        # «ещё вариант кота в шляпе» называет новый сюжет: повторять старое
+        # описание значило рисовать не то. Но рисовать по одному этому слову там,
+        # где картинку не просили, — ошибка маршрута: «другой вариант перевода
+        # письма» и «regenerate the summary» остаются текстом (ревью 10.11.2026).
+        _repeat_rest = _strip_trigger_content(
+            clean_prompt, matched_repeat, message, reply_fallback=False,
+        )
+        if _repeat_rest and _has_draw_ctx:
             _repeat_count, _repeat_prompt = _split_image_variants(_repeat_rest)
             await bot.inline_draw_variants(
                 message, _repeat_prompt or _repeat_rest, variants=_repeat_count,
             )
             return
-        _last_prompt = state.get("last_draw_prompt")
-        if (
-            isinstance(_last_prompt, str) and _last_prompt.strip()
-            and bot._fresh_generation_ref(state, uid_early)
-        ):
+        if _has_draw_ctx and bot._fresh_generation_ref(state, uid_early):
             await bot.inline_draw(message, _last_prompt)
             return
 
@@ -804,6 +810,17 @@ async def _handle_message_core(
         if reference:
             # Промпт правки идёт целиком, с глаголом: "измени фон на синий"
             # без "измени" превратилось бы в "фон на синий" и потеряло действие.
+            # Число вариантов здесь, а не в ветке выше: там оно отрезалось из-за
+            # вложения, и «сделай 3 варианта: убери фон» молча давало одну картинку
+            # (ревью 10.11.2026).
+            _edit_count, _edit_prompt = _split_image_variants(clean_prompt)
+            _edit_count = max(_edit_count, _variant_count)
+            if _edit_count > 1:
+                await bot.inline_draw_variants(
+                    message, _edit_prompt or clean_prompt,
+                    variants=_edit_count, reference=reference,
+                )
+                return
             await bot.inline_draw(message, clean_prompt, reference=reference)
             return
 

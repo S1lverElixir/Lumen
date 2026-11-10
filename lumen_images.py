@@ -347,6 +347,15 @@ async def _cloudflare_request(
         return status, retry_after, data
 
 
+_MODERATION_MARKERS = ("flagged", "moderation")
+
+
+def _is_moderation_detail(detail: str) -> bool:
+    """Признак фильтра содержания в ответе Cloudflare (замер 10.11.2026: код 3030
+    "Your output has been flagged")."""
+    return any(word in (detail or "").lower() for word in _MODERATION_MARKERS)
+
+
 def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) -> bytes:
     """Общая расшифровка ответа flux-2-klein: успех, бюджет, темп, модерация."""
     detail = _error_strings(data)
@@ -359,7 +368,7 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
         if any(word in detail.lower() for word in ("allocation", "free tier", "daily")):
             raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 429 {detail})")
         raise ImageRateLimitedError(f"Cloudflare HTTP 429 {detail}".strip(), retry_after_sec=retry_after)
-    if status == 400 and any(word in detail.lower() for word in ("flagged", "moderation")):
+    if status == 400 and _is_moderation_detail(detail):
         # Фильтр содержания (замер 10.11.2026: код 3030 "Your output has been
         # flagged"): это не сетевой сбой, повтор и резерв не помогут — человеку
         # честнее «ошибка генерации, переформулируй».
@@ -367,6 +376,11 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
     if status != 200:
         raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
     if not data.get("success", True):
+        # Тот же флаг приходит и телом при HTTP 200 (обёртка Workers AI): без этой
+        # проверки отказ не терминален, и sana дорисовала бы отклонённое содержимое
+        # (ревью 10.11.2026).
+        if _is_moderation_detail(detail):
+            raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
         raise ImageProviderError(f"Cloudflare: {detail}")
     result = data.get("result")
     image_b64 = result.get("image") if isinstance(result, dict) else None

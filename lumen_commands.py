@@ -92,6 +92,14 @@ _DRAW_TRANSLATE_SYSTEM = (
 )
 
 
+# Лапки и тире из перевода ломали резерв: sana принимает только ASCII, а guard
+# в провайдере не различает кириллицу и типографику (ревью 10.11.2026).
+_DRAW_TRANSLATE_ASCII = str.maketrans({
+    "\u201c": '"', "\u201d": '"', "\u00ab": '"', "\u00bb": '"',
+    "\u2018": "'", "\u2019": "'", "\u2013": "-", "\u2014": "-", "\u2026": "...",
+})
+
+
 async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
     """Промт с не-латиницей переводим на английский: Pollinations/sana превращает
     кириллицу в '?' ещё при разборе URL (пруф 09.11.2026: метаданные готового JPEG),
@@ -123,7 +131,7 @@ async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
         # Перевод длиннее капа — модель ушла в рассуждения вместо описания.
         if answer and len(answer) <= IMAGE_PROMPT_MAX_CHARS:
             bot._record_quota_usage("munito", model, service=True)
-            return answer
+            return answer.translate(_DRAW_TRANSLATE_ASCII)
         log.warning("[draw] Prompt translation unusable (len=%d) — keeping original.", len(answer))
     except Exception as exc:
         log.warning("[draw] Prompt translation failed (%s) — keeping original.", exc)
@@ -317,11 +325,16 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                 last_error = exc
                 log.warning("[draw] Provider %s daily budget exhausted (%s) — trying next.", provider, exc)
             except ImageModerationError as exc:
-                # Отказ по содержанию не «сетевая проблема»: fallback на sana
-                # повторил бы ровно тот контент, который Cloudflare flagged, и ещё
-                # и списал бюджет (ревю 10.11.2026).
+                # Отказ по содержанию не «сетевая проблема»: резерв на sana
+                # повторил бы ровно тот контент, который flagged у Cloudflare
+                # (ревью 10.11.2026).
                 moderation_blocked = True
                 last_error = exc
+                # klein картинку посчитал и Neuron списал (флаг ставится на выходе),
+                # поэтому попытка идёт в общий дневной бюджет: без этого цикл из
+                # запрещённых описаний выжигал бы квоту провайдера у всего чата
+                # (ревью 10.11.2026).
+                bot._note_image_success(provider)
                 log.warning("[draw] Provider %s refused by content moderation — chain stopped.", provider)
                 break
             except Exception as exc:
@@ -361,17 +374,10 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             # Кнопка «Ещё вариант» только под генерацией: повторять правку
             # бессмысленно, у неё уже есть свой референс.
             reply_markup = None
-            # Как в ChatGPT: «повторить» есть только у последней картинки. Снимаем
-            # клавиатуру с предыдущей, иначе тап по старому фото генерировал бы
-            # уже другой сюжет и тратил слоты (ревью 10.11.2026).
+            # Якорь старой кнопки читаем до отправки: ниже состояние переезжает на
+            # новое фото, и снимать клавиатуру стало бы уже не с чего.
             _prev_drawn = bot.get_state(cid).get("last_drawn_message_id")
             _markup_editor = getattr(bot.bot, "edit_message_reply_markup", None)
-            if _prev_drawn and _markup_editor is not None:
-                await bot._tg_call(
-                    _markup_editor,
-                    chat_id=cid, message_id=_prev_drawn, reply_markup=None,
-                    call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
-                )
             if reference is None:
                 reply_markup = InlineKeyboardMarkup(inline_keyboard=[[
                     InlineKeyboardButton(
@@ -389,6 +395,18 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             )
             if sent is None:
                 raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
+            # Как в ChatGPT: «повторить» есть только у последней картинки. Снимаем
+            # клавиатуру с предыдущей уже после успешной отправки, иначе сбой отправки
+            # оставлял чат без единой рабочей кнопки (ревью 10.11.2026). Пустой
+            # клавиатурой, а не None: aiogram выкидывает falsy-поля из запроса, и с
+            # None Telegram кнопку не убирал (тот же приём, что в lang/pick).
+            if reference is None and _prev_drawn and _markup_editor is not None:
+                await bot._tg_call(
+                    _markup_editor,
+                    chat_id=cid, message_id=_prev_drawn,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                    call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                )
             # Свой сгенерированный файл — в медиа-историю тем же путём, что и
             # присланное: без этого «покажи ту картинку» и «что на ней» находили
             # только реплай, а словесная ссылка на картинку проваливалась
@@ -402,15 +420,14 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                     # относятся только к свежей генерации (прод 10.11.2026).
                     _state["last_drawn_at"] = time.time()
                     _state["last_drawn_user"] = uid
-                    # id ОТПРАВЛЕННОГО фото, а не запроса: тап приходит с фото, и
-                    # запись id сообщения пользователя делала каждый тап «старым»
-                    # (ревью 10.11.2026). Telegram может не отдать message_id —
-                    # тогда None, и страховка молчит, а не ломает кнопку.
-                    _state["last_drawn_message_id"] = getattr(sent, "message_id", None)
-                    # «Ещё вариант» повторяет исходное описание (пропорции
-                    # берутся из него же); правка его не перезаписывает.
+                    # «Ещё вариант» повторяет исходное описание (пропорции берутся
+                    # из него же), и якорь кнопки — у генерации: правка не меняет ни
+                    # то, ни другое, иначе кнопка и текст расходились (ревью 10.11.2026).
                     if reference is None:
                         _state["last_draw_prompt"] = prompt
+                        # id ОТПРАВЛЕННОГО фото, а не запроса: тап приходит с фото, и
+                        # запись id сообщения пользователя делала каждый тап «старым».
+                        _state["last_drawn_message_id"] = getattr(sent, "message_id", None)
                     # Корзина после меток: её сбой не должен стирать контекст
                     # кнопки и слабых глаголов.
                     bot._save_media_to_history(_drawn_source, _state, uid)
