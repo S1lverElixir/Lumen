@@ -47,7 +47,7 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   output as public configuration, not as a safe place to look for a key. Prefix `hf` with
   `NO_PROXY` cleared for that one command (`NO_PROXY= hf ...` in Git Bash, `$env:NO_PROXY=''` in
   PowerShell): the owner's global value contains `[::1]`, which kills any httpx-based tool with
-  `InvalidURL: Invalid port` (found 09.11.2026).
+  `InvalidURL: Invalid port` (prod 09.11.2026).
 - Found a leaked secret? Tell the owner to rotate it. Do not rewrite git history without asking.
 
 ## Commands
@@ -143,7 +143,7 @@ Gemini as the unconditional automatic reserve.
   do not look for it or rebuild it. Never remove a model on a guess, and remember that file is
   protected: the change goes through an approved plan.
 - In that same file `GEMINI_DEFAULT_CHAIN`, `GEMINI_LINK_CHAIN` and `GEMINI_LINK_SEARCH_CHAIN` are
-  copies, not aliases, of the heavy and search chains (аудит 26.09.2026): editing one list does not
+  copies, not aliases, of the heavy and search chains (audit 26.09.2026): editing one list does not
   move the others, so check which copy a route actually reads.
 - Streaming has no automated test of a real transport: every client is mocked. Munito SSE from the
   deployed container is proven in production (Space logs 10.11.2026: answers received via streaming
@@ -153,7 +153,7 @@ Gemini as the unconditional automatic reserve.
 - `python bot.py` makes the module `__main__` while tests import it as `bot`; the alias at the top
   of `bot.py` (`sys.modules.setdefault("bot", ...)`) keeps them one module, and every `import bot`
   in `lumen_*.py` is function-level on purpose. Hoisting one, or dropping the alias, gives two
-  instances with separate state and a permanent 503 with the whole suite green (прод 09.2026).
+  instances with separate state and a permanent 503 with the whole suite green (prod 09.2026).
 - Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`):
   outside it a request skips the message budget, the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the
   busy reply, and `/draw` outside the lock left two live buttons over one photo (review 10.11.2026).
