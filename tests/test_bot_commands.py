@@ -1176,6 +1176,39 @@ def test_translate_draw_prompt_keeps_original_on_failure(monkeypatch):
     assert asyncio.run(bot._translate_draw_prompt("кот", time.monotonic() - 1)) == "кот"
 
 
+def test_cloudflare_gets_original_prompt_and_pollinations_the_translation(monkeypatch):
+    # Klein понимает русский и сохраняет надписи; перевод нужен только резерву
+    # sana, которая теряет кириллицу в '?' (пруф 09.11.2026).
+    chat_id = 999447
+    captured = {"cloudflare": [], "pollinations": []}
+
+    async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
+        captured["translated"] = json_body["messages"][1]["content"]
+        return {"choices": [{"message": {"content": "an apple"}}]}
+
+    async def failing_cloudflare(session, prompt, timeout_sec=None):
+        captured["cloudflare"].append(prompt)
+        raise RuntimeError("cloudflare down")
+
+    async def ok_pollinations(session, prompt, timeout_sec=None):
+        captured["pollinations"].append(prompt)
+        return b"PNG fallback bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    _two_image_providers(monkeypatch, failing_cloudflare, ok_pollinations)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    asyncio.run(bot.inline_draw(incoming, "яблоко"))
+    assert captured["cloudflare"] == ["яблоко"]
+    assert captured["pollinations"] == ["an apple"]
+
+
 def test_inline_draw_sends_translated_prompt_to_provider(monkeypatch):
     # Регрессия прода 09.11.2026: кириллица умирала в '?' по дороге в sana, человек
     # получал случайную картинку. Провайдер обязан получить перевод, а не оригинал.
@@ -1205,14 +1238,10 @@ def test_inline_draw_sends_translated_prompt_to_provider(monkeypatch):
 
 def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
     # Правка не должна уходить в цепочку генерации: референс понимает только
-    # Cloudflare klein, а промпт переводится в режиме инструкции правки.
+    # Cloudflare klein. Промпт идёт как есть: klein понимает русский и сохраняет
+    # надписи на картинке (перевод тут испортил бы текст на изображении).
     chat_id = 999442
     captured = {}
-
-    async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
-        captured["system"] = json_body["messages"][0]["content"]
-        captured["user"] = json_body["messages"][1]["content"]
-        return {"choices": [{"message": {"content": "make the sky blue"}}]}
 
     async def fake_edit(session, prompt, reference, timeout_sec=None):
         captured["edit"] = (prompt, reference)
@@ -1225,8 +1254,10 @@ def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
     async def must_not_generate(session, prompt, timeout_sec=None):
         raise AssertionError("edit must not fall back to text-to-image providers")
 
-    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
-    monkeypatch.setattr(bot, "_munito_request", fake_munito)
+    async def must_not_translate(*args, **kwargs):
+        raise AssertionError("edit prompt must not be translated")
+
+    monkeypatch.setattr(bot, "_translate_draw_prompt", must_not_translate)
     monkeypatch.setattr(bot, "_cloudflare_edit_to_image", fake_edit)
     monkeypatch.setattr(bot, "_pollinations_text_to_image", must_not_generate)
     monkeypatch.setattr(bot, "bot", _FakePhotoBot())
@@ -1234,10 +1265,7 @@ def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
     incoming.message_id = 1
     reference = (b"ref bytes", "image/jpeg")
     asyncio.run(bot.inline_draw(incoming, "сделай небо синим", reference=reference))
-    assert captured["edit"] == ("make the sky blue", reference[0])
-    assert captured["user"] == "сделай небо синим"
-    # Отдельный системный промпт правки: сохранить остальное и не перерисовать сцену.
-    assert "image-edit instruction" in captured["system"]
+    assert captured["edit"] == ("сделай небо синим", reference[0])
 
 
 def test_edit_trigger_with_reply_photo_routes_to_edit(rate_guard_setup, monkeypatch):

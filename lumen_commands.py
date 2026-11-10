@@ -85,17 +85,9 @@ _DRAW_TRANSLATE_SYSTEM = (
     "Keep every visual detail, count and style; translate literally, do not add anything. "
     "Reply with only the English description, no quotes, no explanations."
 )
-# Правка: модель должна понять, что менять, а что сохранить, иначе klein
-# перерисовывает сцену с нуля.
-_DRAW_EDIT_TRANSLATE_SYSTEM = (
-    "Translate the user's image-edit instruction into English for an image editing model. "
-    "Keep the requested change exact and say nothing beyond it; the model keeps the rest "
-    "of the scene unchanged by default. Keep any text to render and the requested style verbatim. "
-    "Reply with only the English instruction, no quotes, no explanations."
-)
 
 
-async def _translate_draw_prompt(prompt: str, deadline: float, *, edit: bool = False) -> str:
+async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
     """Промт с не-латиницей переводим на английский: Pollinations/sana превращает
     кириллицу в '?' ещё при разборе URL (пруф 09.11.2026: метаданные готового JPEG),
     модель рисует случайное. Сбой/таймаут перевода — оригинал, как раньше."""
@@ -110,7 +102,7 @@ async def _translate_draw_prompt(prompt: str, deadline: float, *, edit: bool = F
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _DRAW_EDIT_TRANSLATE_SYSTEM if edit else _DRAW_TRANSLATE_SYSTEM},
+            {"role": "system", "content": _DRAW_TRANSLATE_SYSTEM},
             {"role": "user", "content": prompt[:IMAGE_PROMPT_MAX_CHARS]},
         ],
         "temperature": 0.1, "max_tokens": 400, "stream": False,
@@ -205,9 +197,10 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         )
         status = status_obj.message if status_obj is not None else None
 
-        # Перевод до фолбэка: оба провайдера обязаны получить один и тот же текст,
-        # и латиница не платит за служебный вызов вообще.
-        prompt = await bot._translate_draw_prompt(prompt, deadline, edit=reference is not None)
+        # Переводим только то, что реально требует перевода: klein принимает
+        # русский промпт напрямую (замер 10.11.2026), поэтому основной путь
+        # сохраняет формулировки и надписи на картинке как у человека, а
+        # английский подставляется лишь резерву sana (у неё кириллица -> '?').
 
         # Правка идёт одной моделью: референс понимает только Cloudflare klein,
         # у Pollinations/sana правки нет вовсе. Генерация — прежней цепочкой.
@@ -230,6 +223,7 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         budget_exceeded = False
         rate_limited = False
         budget_out = False
+        translated_prompt: str | None = None
         truncated = len(prompt.strip()) > IMAGE_PROMPT_MAX_CHARS
 
         for attempt, (provider, call) in enumerate(calls.items()):
@@ -264,7 +258,12 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                 # IMAGE_ATTEMPT_TIMEOUT_SEC: один зависший провайдер не должен
                 # съедать весь бюджет (аудит 29.10.2026).
                 attempt_timeout = max(1.0, min(bot.IMAGE_ATTEMPT_TIMEOUT_SEC, deadline - time.monotonic()))
-                image_bytes = await call(session, prompt, timeout_sec=attempt_timeout)
+                text = prompt
+                if provider == "pollinations" and not prompt.isascii():
+                    if translated_prompt is None:
+                        translated_prompt = await bot._translate_draw_prompt(prompt, deadline)
+                    text = translated_prompt
+                image_bytes = await call(session, text, timeout_sec=attempt_timeout)
                 bot._note_image_success(provider)
                 generated = True
                 break
