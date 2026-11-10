@@ -132,6 +132,30 @@ these failed silently in production:
   it: «верни предыдущий вариант перевода» is about text, and in a chat where nothing
   was drawn the message belongs to the language model.
 
+The second review round (10.11.2026, after the first deploy) widened routing back
+without reopening the false positives: an artifact noun alone at the head of a
+phrase is an order («логотип кофейни», «макет лендинга», «аватарку в круге»,
+«emblem for a gaming clan»), because that is exactly how people ask in ChatGPT,
+and the verb requirement that had replaced it silently cost those phrases. Three
+guards keep it honest: a complaint or a statement about a picture
+(«картинка не загружается», «image not loading», «обложка альбома была лучшей»)
+is never an order; an artifact that only appears inside a «thing with an
+artifact» phrase («книга с красивой обложкой») is a detail, not the order, while
+«сделай картинку с логотипом» still draws because its first artifact stands
+outside that phrase; and a question mark still switches the whole intent path
+off. Undo accepts short forms («верни картинку», «верни предыдущий») and polite
+tails («верни предыдущий вариант, пожалуйста») because the residue test now
+ignores fillers and politeness instead of any leftover letter.
+
+Two timings were corrected from production, not from guesswork: a short Munito
+request answers in 6-9 s from the container, so the old 8 s rewrite cap cut off a
+real 8.3 s reply and the 6 s resolver cap failed twice
+(`Description call failed (Munito network error: TimeoutError())`), leaving
+«хочу увидеть кота на луне» as a text answer. Both caps are now above the
+measured latency (12 s / 10 s) and still bounded by the draw budget. The provider
+log line carries the delivered frame size (`Image sent ... 896x1120`), because
+aspect ratios cannot be verified from Telegram's blurred previews.
+
 ## Streaming & typing pace
 
 For a plain-text route (no attachments, no links), Lumen streams the reply by repeatedly editing one message, the same mechanism for Gemini (`generate_content_stream`) and Munito (`_munito_stream_pieces` over the shared `_sse_pieces`, SSE on `chat/completions`). Streaming is attempted on every model in the route, not only on the first one: a failing head model no longer costs the chat its typing effect while a reserve model answers.
