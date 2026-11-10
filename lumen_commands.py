@@ -203,9 +203,10 @@ def _draw_prompt_ascii(text: str) -> str:
     folded = re.sub(r"\s+", " ", folded.encode("ascii", "ignore").decode()).strip()
     if not re.search(r"[A-Za-z]", folded):
         return text
-    # Если фолдинг съел больше сорока процентов, в оригинале была содержательная
-    # кириллица: смысл важнее ASCII-требования резерва (ревью 10.11.2026).
-    if len(folded) < 0.6 * len(text.strip()):
+    # Потеряна хоть одна буква — потерян и смысл: «убери фон, keep the cat
+    # unchanged» сжималось в «keep the cat unchanged», то есть «ничего не меняй»
+    # (ревью 10.11.2026). Типографика и эмодзи при этом режутся как раньше.
+    if sum(ch.isalpha() for ch in text) != sum(ch.isalpha() for ch in folded):
         return text
     return folded
 
@@ -242,13 +243,31 @@ def _note_description_call() -> None:
 
 
 # Модель может ответить мета-фразой вместо описания: провайдеру такое нельзя.
+# Форм отказа шире, чем «I can't»: сокращения, ведущая разметка, другие языки
+# (ревью 10.11.2026).
 _DRAW_REFUSAL_RE = re.compile(
-    r"^(?:i(?:\s+am)?\s+(?:can'?t|cannot|unable|not able|not allowed|won'?t)"
-    r"|sorry|unfortunately|i\s+must\s+refuse|this\s+is\s+not\s+something"
-    r"|не\s+(?:могу|получится|смогу|умею|буду)|извини|к\s+сожалению"
-    r"|я\s+(?:не\s+могу|не\s+умею))\b",
+    r"^(?:"
+    r"i(?:'?m|\s+am)?\s+(?:ca(?:n'?t|nnot)|unable|not\s+(?:able|allowed)|won'?t"
+    r"|must\s+refuse|am\s+sorry|sorry)"
+    r"|i\s+(?:cannot|ca\s?n'?t|will\s+not|wo\s?n'?t)"
+    r"|\bsorry\b|\bunfortunately\b"
+    r"|it'?s\s+(?:not|against)\b|this\s+is\s+not\s+something"
+    r"|не\s+(?:могу|смогу|получится|умею|буду)|извини|к\s+сожалению|я\s+не\s+могу"
+    r"|no\s+puedo|non\s+posso|je\s+ne\s+peux|ich\s+kann"
+    r")",
     re.IGNORECASE,
 )
+_DRAW_PREAMBLE_RE = re.compile(
+    r"^(?:sure|of course|конечно|here(?:'?s|\s+is)|the\s+prompt\s+is)"
+    r"[^:\n]{0,60}:\s*",
+    re.IGNORECASE,
+)
+
+
+def _meta_refusal(text: str) -> bool:
+    """Ищем отказ после ведущих markup-символов; curly-апостроф сводим к '.__"""
+    clean = re.sub(r"^[\s*\"'`#—–-]+", "", (text or "").replace("\u2019", "'"))
+    return bool(_DRAW_REFUSAL_RE.match(clean))
 
 
 async def _draw_llm_description(
@@ -267,6 +286,9 @@ async def _draw_llm_description(
         # (ревью 10.11.2026).
         log.info("[draw] Description budget for today exhausted — using the user's words.")
         return ""
+    # Считаем попытку до запроса: сбой, отказ и ливк тоже бьют по общему лимиту
+    # Munito, а после await их уже не учесть (ревью 10.11.2026).
+    _note_description_call()
     remaining = deadline - time.monotonic()
     if remaining < 1.5:
         return ""
@@ -290,20 +312,20 @@ async def _draw_llm_description(
     except Exception as exc:
         log.warning("[draw] Description call failed (%s).", exc)
         return ""
-    if not answer or answer.upper().startswith("NONE"):
+    if not answer or re.match(r"^NONE\b", answer.strip().upper()):
         return ""
     if len(answer) > 3 * IMAGE_PROMPT_MAX_CHARS:
         log.warning("[draw] Description too long (len=%d) — ignored.", len(answer))
         return ""
-    if _DRAW_REFUSAL_RE.match(answer.strip()):
+    if _meta_refusal(answer):
         log.info("[draw] Description refused as text (len=%d) — keeping the user's words.", len(answer))
         return ""
+    answer = _DRAW_PREAMBLE_RE.sub("", answer, count=1)
     from lumen_security import _detect_identity_leak
     if _detect_identity_leak(answer):
         # Описание с названием модели: наружу его не пускаем, генерацию не отменяем.
         log.warning("[draw] Description leaked identity (len=%d) — ignored.", len(answer))
         return ""
-    _note_description_call()
     bot._record_quota_usage("munito", model, service=True)
     return answer
 
@@ -340,9 +362,12 @@ async def _translate_for_reserve(text: str, deadline: float) -> str:
     if hit is not None and now - hit[0] < _RESERVE_TRANSLATE_TTL_SEC:
         return hit[1]
     translated = await bot._translate_draw_prompt(text, deadline)
-    if len(_reserve_translate_memo) > 32:
-        _reserve_translate_memo.clear()
-    _reserve_translate_memo[text] = (now, translated)
+    # В кэш только удачный перевод: сбой или нехватка бюджета возвращают ту же
+    # кириллицу, и её резерв рисовал бы знаками «?» ещё 60 секунд (ревью 10.11.2026).
+    if translated and translated != text and translated.isascii():
+        if len(_reserve_translate_memo) > 32:
+            _reserve_translate_memo.clear()
+        _reserve_translate_memo[text] = (now, translated)
     return translated
 
 
@@ -354,6 +379,10 @@ async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
     from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
     if prompt.isascii() or not _munito_active():
         return prompt
+    if not _description_budget_left():
+        log.info("[draw] Description budget for today exhausted — skipping the reserve translation.")
+        return prompt
+    _note_description_call()
     remaining = deadline - time.monotonic()
     if remaining < 1.0:
         return prompt
@@ -452,10 +481,11 @@ async def inline_draw(
     try:
         from lumen_status import StatusMessage
         session = await bot._get_http_session()
-        # Не больше потолка сообщения: DRAW_TOTAL_BUDGET_SEC иначе позволял
-        # цепочке жить после того, как Telegram/бюджет уже всё бросили
-        # (ревью 10.11.2026; вне handle_message _msg_remaining_sec = None).
-        deadline = bot._deadline_within_message(bot.DRAW_TOTAL_BUDGET_SEC)
+        # Потолок сообщения (90 с) картинке не ставим: он считался бы уже после
+        # очереди и подготовки, и последний провайдер звался бы на остатке в
+        # секунду — таймаут парковал бы Cloudflare cooldown'ом на всех (ревью
+        # 10.11.2026). Рисование сознательно живёт дольше текстового маршрута.
+        deadline = time.monotonic() + bot.DRAW_TOTAL_BUDGET_SEC
         sem = _image_semaphore()
         try:
             await asyncio.wait_for(
@@ -722,7 +752,8 @@ async def inline_draw(
             # больше, чем «сообщений» — аудит 01.11.2026).
             bot._record_stats_event("messages_received")
             bot._record_stats_event("answers_sent")
-            log.info("[draw] Image sent (chat=%s, %d bytes, edit=%s).", cid, len(image_bytes), reference is not None)
+            log.info("[draw] Image sent (chat=%s, %d bytes, %dx%d, edit=%s).",
+                     cid, len(image_bytes), width, height, reference is not None)
             return True
         else:
             if moderation_blocked:
