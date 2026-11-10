@@ -25,6 +25,10 @@ from lumen_message_parse import (
     REPEAT_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
     _detect_image_variants,
+    _is_new_artifact_request,
+    _match_draw_intent,
+    _match_trigger_with_fillers,
+    _strip_trigger_fillers,
     _split_image_variants,
     _wants_style_reference,
     _NO_MEDIA_NOTE,
@@ -759,9 +763,26 @@ async def _handle_message_core(
             await bot.inline_draw(message, _last_prompt)
             return
 
-    matched_draw_trigger = _match_trigger_prefix(lower_prompt, DRAW_TRIGGER_PREFIXES)
-    matched_edit_trigger = _match_trigger_prefix(lower_prompt, EDIT_TRIGGER_PREFIXES)
-    matched_tts_trigger = _match_trigger_prefix(lower_prompt, TTS_TRIGGER_PREFIXES)
+    # Обвязка («ну», «мне, пожалуйста», «ты можешь») не меняет смысл просьбы,
+    # но раньше ломала её распознавание (паритет с ChatGPT, 10.11.2026).
+    # Чистое начало по-прежнему приоритетнее: прежние маршруты не двигаются.
+    _prompt_core = _strip_trigger_fillers(lower_prompt)[0]
+    matched_draw_trigger, _draw_cut = _match_trigger_with_fillers(
+        lower_prompt, _prompt_core, DRAW_TRIGGER_PREFIXES,
+    )
+    matched_edit_trigger, _edit_cut = _match_trigger_with_fillers(
+        lower_prompt, _prompt_core, EDIT_TRIGGER_PREFIXES,
+    )
+    # «сделай картинку кота» — заказ нового кадра, а не правка: слабый глагол
+    # не должен уводить его в edit-ветку (паритет 10.11.2026).
+    _new_artifact = _is_new_artifact_request(lower_prompt)
+    matched_tts_trigger, _tts_cut = _match_trigger_with_fillers(
+        lower_prompt, _prompt_core, TTS_TRIGGER_PREFIXES,
+    )
+    # Тело фразы без обвязки: триггер вырезаем из него, чтобы не терять регистр
+    # и кавычки в описании.
+    _body_cut = max(_draw_cut, _edit_cut, _tts_cut)
+    _prompt_text = clean_prompt[_body_cut:] if _body_cut else clean_prompt
 
     # «Сделай/нарисуй 2 варианта кота» — это серия генераций, а не правка:
     # проверяем число ДО edit-ветки, иначе слабый глагол съедал запрос
@@ -775,7 +796,7 @@ async def _handle_message_core(
         and (matched_draw_trigger or matched_edit_trigger)
     ):
         _base_prompt = _strip_trigger_content(
-            clean_prompt, matched_draw_trigger or matched_edit_trigger, message,
+            _prompt_text, matched_draw_trigger or matched_edit_trigger, message,
         )
         _count2, _variant_prompt = _split_image_variants(_base_prompt)
         _variant_prompt = _variant_prompt or _base_prompt
@@ -789,14 +810,14 @@ async def _handle_message_core(
     # и в окне свежей генерации уводило запрос в правку картинки — после любого
     # рисунка аудио было недоступно 10 минут (ревью 10.11.2026).
     if matched_tts_trigger:
-        tts_content = _strip_trigger_content(clean_prompt, matched_tts_trigger, message)
+        tts_content = _strip_trigger_content(_prompt_text, matched_tts_trigger, message)
         if tts_content:
             await bot.inline_tts(message, tts_content)
             return
 
     # Правка картинки: глагол + реальный референс. Без картинки текст уходит
     # обычной модели ("измени мир" — не рисование), поэтому триггер тут мягкий.
-    if matched_edit_trigger and not is_continuation:
+    if matched_edit_trigger and not is_continuation and not _new_artifact:
         try:
             reference = await bot._resolve_edit_references(
                 message, state,
@@ -820,7 +841,7 @@ async def _handle_message_core(
             # Число вариантов здесь, а не в ветке выше: там оно отрезалось из-за
             # вложения, и «сделай 3 варианта: убери фон» молча давало одну картинку
             # (ревью 10.11.2026).
-            _edit_count, _edit_prompt = _split_image_variants(clean_prompt)
+            _edit_count, _edit_prompt = _split_image_variants(_prompt_text)
             _edit_count = max(_edit_count, _variant_count)
             if _edit_count > 1:
                 await bot.inline_draw_variants(
@@ -828,16 +849,16 @@ async def _handle_message_core(
                     variants=_edit_count, reference=reference,
                 )
                 return
-            await bot.inline_draw(message, clean_prompt, reference=reference)
+            await bot.inline_draw(message, _prompt_text, reference=reference)
             return
 
     if matched_draw_trigger:
-        prompt_content = _strip_trigger_content(clean_prompt, matched_draw_trigger, message)
+        prompt_content = _strip_trigger_content(_prompt_text, matched_draw_trigger, message)
         if prompt_content:
             # «Нарисуй X в стиле этого фото»: стиль переносим с приложенного фото
             # (как в ChatGPT), а не игнорируем его. Без фото — обычная генерация.
             _style_refs = None
-            if _wants_style_reference(clean_prompt) and _explicit_media:
+            if _wants_style_reference(_prompt_text) and _explicit_media:
                 try:
                     _style_refs = await bot._resolve_edit_references(
                         message, state, is_private=is_private, implicit=False,
@@ -859,6 +880,18 @@ async def _handle_message_core(
             )
             return
 
+    # Просьба нарисовать без триггера в начале: «хочу картинку с котом»,
+    # «нужен логотип кофейни», «кот в шляпе, нарисуй», «picture of a cat»
+    # (паритет с ChatGPT, 10.11.2026). Вопрос и служебные глаголы отсекает
+    # _match_draw_intent, поэтому сюда не попадают «как нарисовать» и «покажи».
+    if not is_continuation:
+        _intent, _intent_prompt = _match_draw_intent(lower_prompt, clean_prompt)
+        if _intent == "draw" and _intent_prompt:
+            _i_count, _i_prompt = _split_image_variants(_intent_prompt)
+            await bot.inline_draw_variants(
+                message, _i_prompt or _intent_prompt, variants=_i_count,
+            )
+            return
 
     # Кнопки-уточнения для вкусовых запросов без деталей — вместо гадания модели.
     # _pick_resolved ставят только колбэки: без флага дополненный текст ушёл бы

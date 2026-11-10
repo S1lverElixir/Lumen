@@ -44,6 +44,9 @@ DRAW_TRIGGER_PREFIXES = [
     "создай изображение", "создай мне изображение", "нарисуй картинку", "нарисуй изображение",
     "нарисуй мне", "нарисуй", "нарисуйте", "изобрази картинку", "изобрази", "нарисуй-ка",
     "сгенери картинку", "сгенери изображение", "можешь нарисовать", "можешь нарисовать мне",
+    "ты можешь нарисовать", "можешь нарисовать мне", "сможешь нарисовать", "можете нарисовать",
+    "не мог бы ты нарисовать", "мог бы ты нарисовать", "can you draw", "can you generate",
+    "can you create", "could you draw", "please draw", "please generate", "i want you to draw",
     # EN: /start обещает "draw a cat" — чиним (найдено внешним аудитом: был только русский).
     "generate an image", "generate me an image", "create an image", "draw a picture",
     "draw me", "draw an", "draw a", "paint me", "paint", "sketch",
@@ -101,6 +104,114 @@ def _detect_image_variants(text: str) -> int:
     """Сколько вариантов просили: 1 — обычная генерация, 2-4 — несколько."""
     return _split_image_variants(text)[0]
 
+
+
+# ── Паритет с ChatGPT (10.11.2026): он рисует по любому запросу, где виден
+# смысл «сделай картинку», а не по первому слову. Человек пишет «ну нарисуй
+# кота», «кот в шляпе, нарисуй», «хочу картинку с котом», «нужен логотип
+# кофейни», «make me an image of a cat». При этом вопрос «как нарисовать кота»
+# и служебные глаголы («покажи картинку», «сохрани», «переведи») картинкой
+# становиться не должны.
+# Начало-вопрос или служебный глагол: до них просьбой рисовать не считаем.
+_DRAW_BLOCK_LEAD_RE = re.compile(
+    r"^(?:как|почему|зачем|что|кто|где|когда|сколько|можно|нужно\s+ли|объясни|расскажи|"
+    r"покажи|сохрани|переведи|удали|найди|открой|закрой|отправь|пришли|погоди|сравни|"
+    r"how|why|what|who|where|when|explain|show|save|translate|delete|find|open|send)\b",
+    re.IGNORECASE,
+)
+# Обвязка перед глаголом: «ну нарисуй», «мне, пожалуйста, нарисуй», «ты можешь...».
+_DRAW_FILLER_RE = re.compile(
+    r"^(?:(?:ну|давай|а|и|вот|мне|пожалуйста|ещё|еще|тоже|также|сначала|для\s+начала|"
+    r"please|pls|also|just)\b[,\s]*){0,4}",
+    re.IGNORECASE,
+)
+# Артефакт, который просят создать (в ChatGPT это и шаблоны: постер, логотип, обложка).
+_IMAGE_ARTIFACT_RE = re.compile(
+    r"(?:картинк|изображени|иллюстрац|постер|плакат|баннер|логотип|эмблем|маскот|талисман|"
+    r"аватар|обложк|превью|обои|заставк|стикер|открытк|наклейк|комикс|скринсейвер|эскиз|"
+    r"набросок|карикатур|image|picture|illustration|poster|logo|banner|avatar|wallpaper|"
+    r"sticker|mockup|sketch|drawing|cartoon|mascot|flyer)",
+    re.IGNORECASE,
+)
+# Глагол просьбы: он превращает название артефакта в заказ.
+_IMAGE_REQUEST_VERB_RE = re.compile(
+    r"(?:^|[\s,.!?])(?:хочу|хочешь|хотелось|нужен|нужна|нужно|надо|дай|сделай|создай|"
+    r"придумай|накидай|давай|увидеть|want|need|give|make|create|design|generate|produce|see)\b",
+    re.IGNORECASE,
+)
+# Указание на уже существующий кадр: тогда это правка, а не новая генерация.
+_IMAGE_EXISTING_RE = re.compile(
+    r"\b(?:этот|этого|этому|этим|эта|этой|эту|эти|этих|тот|того|та|ту|те|такую|такой|"
+    r"прежн|прошл|её|ее|неё|ней|this|that|previous|earlier|same)",
+    re.IGNORECASE,
+)
+# Императив рисования в любом месте фразы: «кот в шляпе, нарисуй».
+_DRAW_IMPERATIVE_ANYWHERE_RE = re.compile(
+    r"(?<![A-Za-zА-Яа-яЁё])(нарисуй-ка|нарисуй|нарисуйте|изобрази|сгенерируй|"
+    r"draw|sketch|illustrate|render|paint|generate)\b",
+    re.IGNORECASE,
+)
+# Фраза, начинающаяся с артефакта: «picture of a cat», «логотип для кофейни».
+_IMAGE_LED_RE = re.compile(
+    r"^(?:картинка|картинку|картину|изображение|иллюстрация|иллюстрацию|постер|плакат|"
+    r"баннер|логотип|эмблема|маскот|аватар|аватарка|обложка|обои|стикер|"
+    r"image|picture|photo|illustration|poster|logo|banner|avatar|wallpaper|sticker|mockup)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_trigger_fillers(text_lower: str) -> tuple[str, int]:
+    """(текст без обвязки, длина снятого префикса): «ну нарисуй кота» и
+    «мне, пожалуйста, нарисуй кота» — та же просьба, что «нарисуй кота».
+    Снимаем только известные слова-связки и только в начале, максимум четыре."""
+    m = _DRAW_FILLER_RE.match(text_lower)
+    cut = len(m.group(0)) if m else 0
+    return text_lower[cut:], cut
+
+
+def _match_trigger_with_fillers(text_lower: str, core_lower: str, prefixes) -> tuple[str | None, int]:
+    """Триггер в чистом начале — приоритетнее: прежние маршруты не двигаются.
+    Если его нет, ищем после обвязки и возвращаем, сколько символов снято,
+    чтобы контент вырезался из оригинала по тем же индексам."""
+    hit = _match_trigger_prefix(text_lower, prefixes)
+    if hit:
+        return hit, 0
+    return _match_trigger_prefix(core_lower, prefixes), (len(text_lower) - len(core_lower))
+
+
+def _is_new_artifact_request(text: str) -> bool:
+    """«сделай картинку кота» — новая генерация, «сделай эту картинку ярче» —
+    правка: указание на существующий кадр перевешивает слабый глагол."""
+    if _DRAW_BLOCK_LEAD_RE.search(text) or not _IMAGE_ARTIFACT_RE.search(text):
+        return False
+    return not _IMAGE_EXISTING_RE.search(text)
+
+
+def _match_draw_intent(text_lower: str, text_original: str) -> tuple[str, str]:
+    """(вид, описание): "draw" — просьба нарисовать без триггера в начале фразы.
+    Пустой вид — обычные маршруты (текст, правка, повтор) не трогаем."""
+    if _DRAW_BLOCK_LEAD_RE.search(text_lower):
+        return "", ""
+    core_start = len(_DRAW_FILLER_RE.match(text_lower).group(0))
+    core = text_lower[core_start:]
+    if _match_trigger_prefix(core, DRAW_TRIGGER_PREFIXES):
+        # Обычный префиксный путь: он уже обработан выше по коду, здесь не дублируем.
+        return "", ""
+    if _is_new_artifact_request(text_lower):
+        return "draw", text_original.strip()
+    m = _DRAW_IMPERATIVE_ANYWHERE_RE.search(core)
+    if m:
+        rest = re.sub(r"\s{2,}", " ", (core[:m.start()] + " " + core[m.end():])).strip(" ,.!?:;-")
+        if rest:
+            content = re.sub(
+                r"\s{2,}", " ",
+                (text_original[:core_start + m.start()] + " "
+                 + text_original[core_start + m.end():]),
+            ).strip(" ,.!?:;-")
+            return "draw", content or rest
+    if _IMAGE_LED_RE.match(core):
+        return "draw", text_original.strip()
+    return "", ""
 
 # «Нарисуй X в стиле этого фото»: генерация с референсом стиля (как в ChatGPT).
 # Срабатывает только когда рядом есть фото — иначе это обычная генерация.
