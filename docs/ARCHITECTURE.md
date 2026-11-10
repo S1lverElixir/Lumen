@@ -63,9 +63,16 @@ or a service verb («как нарисовать кота», «покажи ка
 generation while «сделай эту картинку ярче» stays an edit — the demonstrative
 that points at an existing picture wins over the weak verb. The full matrix of
 accepted and rejected phrasings is a test (`tests/test_draw_triggers.py`), not
-a comment. Still open: a request that names a scene without any artifact word
-(«хочу увидеть кота на луне») and anaphoric requests («нарисуй это») go to the
-text model, because the classifier for them is not built yet.
+a comment. A request that names no artifact word («хочу увидеть кота на луне», «imagine a
+city on the moon») and anaphoric ones («нарисуй это», «изобрази то, что я
+описал») are resolved by one short question over this chat's own history
+(`DRAW_CONTEXT_TIMEOUT_SEC`): the answer is either a finished description that
+goes to the provider or `NONE`, which leaves the message on the text route
+exactly as before. With an attached or replied photo «это» edits that photo
+instead of painting from history, and an empty pointer with nothing to resolve
+asks for a description. Note that `_strip_reply_marker` removes the pointer
+word before the draw branch sees it, so what reaches the branch is an empty
+body, not the word «это» (10.11.2026).
 
 ## Streaming & typing pace
 
