@@ -45,8 +45,8 @@ on 10.11.2026; a commit that changes a fact here updates this file in the same c
 
 ## Commands
 - Setup, once per session: `pip install -r requirements.txt -r requirements-dev.txt`
-- Gate: `pyflakes bot.py lumen_*.py system_prompt.py tests/*.py` then `pytest -q`. About 1200 tests,
-  around 30 seconds. This is what CI runs; CI also always runs the three deno proxy checks and
+- Gate: `pyflakes bot.py lumen_*.py system_prompt.py tests/*.py` then `pytest -q`. About 1300 tests,
+  under 30 seconds. This is what CI runs; CI also always runs the three deno proxy checks and
   `pip-audit`, whether or not you touched them.
 - Globs do not expand in PowerShell (opencode sessions), so there run
   `pyflakes bot.py system_prompt.py (Get-ChildItem lumen_*.py | ForEach-Object Name) (Get-ChildItem tests -Filter *.py | ForEach-Object { "tests/" + $_.Name })`
@@ -67,6 +67,25 @@ on 10.11.2026; a commit that changes a fact here updates this file in the same c
 - Done means: you ran the gate and it is green, and the report is written. Never say "done" or
   "tests pass" otherwise.
 
+## Deploy
+- A green CI run on main is a deploy: `.github/workflows/sync-to-hf.yml` waits for CI, then pushes
+  exactly the tested commit to the Space with a lease. A hotfix made directly on the Space makes the
+  sync fail loudly instead of being overwritten.
+- The proxy ships separately through `deploy-proxy.yml`, and it can miss a change silently: it
+  deploys only when the diff of the commit CI tested touches `proxy/`, which failed for exactly one
+  real change (prod 09.11.2026). After any proxy change, confirm that both deploy steps of that run
+  finished as success and not skipped; otherwise deploy by hand (`docs/ARCHITECTURE.md`, section
+  "Deploy paths").
+- Container egress is blocked or hangs toward Telegram, TikWM and `api.cloudflare.com`: those hosts
+  are reachable only through the allowlist in `proxy/proxy.ts`. Adding a provider without an
+  allowlist entry times out in production while every local test passes: change the allowlist,
+  deploy the proxy, confirm with `/diag`.
+- What ships is not what is in the repo: `.dockerignore` keeps `tests/`, `docs/`, `proxy/` and
+  `.github/` out of the image, so a runtime path that reads one of those passes the tests and fails
+  in production. The image is rebuilt from scratch on every deploy, which is why
+  `requirements.txt` pins with `==` (see its header): bumping a version is a deliberate decision
+  followed by a manual smoke test, never a side effect.
+
 ## Report
 Short, in this order: what changed and why; changed files; gate result (plus proxy gate if run);
 what was not verified; what the owner must check by hand (a smoke test after a version bump or a
@@ -74,9 +93,9 @@ routing change). If nothing is unverified or risky, say so in one phrase instead
 
 ## Where things live
 - `bot.py` is the entry point and composition root (env, logging, Dispatcher, main), and it
-  re-exports about 300 names from the `lumen_*.py` modules: a grep for any symbol hits `bot.py`
+  re-exports over 200 names from the `lumen_*.py` modules: a grep for any symbol hits `bot.py`
   first, but the definition is in the module. `lumen_admin.py` holds the FastAPI app and the admin
-  endpoints; the other domain logic is in the 31 `lumen_*.py` files, each opening with a one-line
+  endpoints; the other domain logic is in the 30 `lumen_*.py` files, each opening with a one-line
   docstring. A name ending in `_flow` or `_calls` is the Telegram-touching half of the plain module
   next to it, which holds the mechanics.
 - `lumen_lang.py` is over 300 KB of fixed UI strings in 25 languages. Never read it whole; grep a
@@ -98,24 +117,6 @@ routing change). If nothing is unverified or risky, say so in one phrase instead
   filter in `lumen_security.py` and the persona in `system_prompt.py` are the source of truth.
 
 ## Gotchas
-- A green CI run on main is a deploy: `sync-to-hf.yml` waits for CI, then pushes exactly the tested
-  commit to the Space with a lease. A hotfix made directly on the Space makes the sync fail loudly
-  instead of being overwritten.
-- The proxy has its own deploy (`deploy-proxy.yml`), and it can miss a change silently: it deploys
-  only when the diff of the commit CI tested touches `proxy/`. On 09.11.2026 a `proxy/proxy.ts`
-  change reached main, a second push cancelled its CI run, the deploy step then saw no proxy diff,
-  and both Deno apps kept the old revision. After any proxy change, check that the deploy steps of
-  that run really executed; if they were skipped, deploy by hand (recipe: `docs/ARCHITECTURE.md`,
-  section "Deploy paths").
-- Container egress is blocked or hangs toward every external host: Telegram Bot API, TikWM,
-  `api.cloudflare.com`. They are reachable only through the allowlist in `proxy/proxy.ts`. Adding a
-  provider whose host is not on that list produces timeouts in production that no local test can
-  reproduce: change the allowlist, deploy the proxy, then confirm with `/diag`.
-- What ships is not what is in the repo: `.dockerignore` keeps `tests/`, `docs/`, `proxy/`,
-  `AGENTS.md` and `.github/` out of the image, so a runtime path that reads one of those works in
-  the tests and fails in production. Versions in `requirements.txt` are pinned for the same reason
-  (the Space rebuilds the image from scratch; see its header): bumping one is a deliberate decision
-  followed by a manual smoke test, never a side effect.
 - A model leaves routing only with dated evidence (production log errors or provider docs), written
   as a comment next to the chain it came out of: `_MUNITO_ORDER` or the `GEMINI_*_CHAIN` lists in
   `lumen_router_config.py`. Transient failures are not exclusions: `503`/`429` set a cooldown that
@@ -176,10 +177,9 @@ committed, it drifts, and `docs/` stays the truth.
 ## Evals and tools
 - `eval/` holds the offline probes and the persona harness, run by hand from main through
   `persona-eval.yml`; method and results are in `docs/PROMPT_EVAL.md`, and its dated measurements
-  are what the evidence rule above expects. `eval/harness_eval.py` measures this file itself: it
-  replays real fix-commits through an agent with a candidate `AGENTS.md` and judges by the repo
-  gate, so a longer file has to earn its length.
-- Sentry: organization `silverelixir`; `find_organizations`, then `search_issues` with
+  are what the evidence rule in Gotchas expects. `eval/harness_eval.py` measures this file itself:
+  it replays real fix-commits through an agent and judges by the repo gate.
+- Sentry: organization `silverelixir`. `find_organizations`, then `search_issues` with
   `organizationSlug=silverelixir`, then `get_sentry_resource` with `resourceType=issue` for one
-  issue. Library docs (aiogram, FastAPI, google-genai, Deno): context7 MCP. Both servers come from
-  `opencode.json`.
+  issue. Library docs (aiogram, FastAPI, google-genai, Deno): context7 MCP. Both servers are
+  configured in `opencode.json`.
