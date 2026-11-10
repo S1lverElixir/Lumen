@@ -78,10 +78,10 @@ production on 10.11.2026, so change a fact and update this file in the same comm
   exactly the tested commit to the Space with a lease. A hotfix made directly on the Space makes the
   sync fail loudly instead of being overwritten.
 - The proxy ships separately through `deploy-proxy.yml`, and it can miss a change silently: it
-  deploys only when the diff of the commit CI tested touches `proxy/`, which failed for exactly one
-  real change (prod 09.11.2026). After any proxy change, confirm that both deploy steps of that run
-  finished as success and not skipped; otherwise deploy by hand (`docs/ARCHITECTURE.md`, section
-  "Deploy paths").
+  deploys only when the diff of the commit CI actually tested touches `proxy/`, so a proxy change
+  pushed together with other commits never deploys on its own (prod 09.11.2026). After any proxy
+  change, confirm that both deploy steps of that run finished as success and not skipped; otherwise
+  deploy by hand (`docs/ARCHITECTURE.md`, section "Deploy paths").
 - Container egress is blocked or hangs toward Telegram, TikWM and `api.cloudflare.com`: those hosts
   are reachable only through the allowlist in `proxy/proxy.ts`. Adding a provider without an
   allowlist entry times out in production while every local test passes: change the allowlist,
