@@ -22,6 +22,7 @@ from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
     EDIT_TRIGGER_IMPLICIT,
     EDIT_TRIGGER_PREFIXES,
+    REPEAT_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
     _NO_MEDIA_NOTE,
     _find_recent_media_by_category,
@@ -719,6 +720,17 @@ async def _handle_message_core(
     if is_continuation:
         clean_prompt = continued_prompt
         lower_prompt = clean_prompt.lower().strip()
+
+    # «Ещё вариант»: повтор последней генерации тем же описанием. Только свежая
+    # своя генерация — иначе «ещё раз» это обычный текст (шутка, повтор ответа).
+    if not is_continuation and _match_trigger_prefix(lower_prompt, REPEAT_TRIGGER_PREFIXES):
+        _last_prompt = state.get("last_draw_prompt")
+        if (
+            isinstance(_last_prompt, str) and _last_prompt.strip()
+            and bot._fresh_generation_ref(state, uid_early)
+        ):
+            await bot.inline_draw(message, _last_prompt)
+            return
 
     # Правка картинки: глагол + реальный референс. Без картинки текст уходит
     # обычной модели ("измени мир" — не рисование), поэтому триггер тут мягкий.

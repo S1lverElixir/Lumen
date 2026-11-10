@@ -720,6 +720,7 @@ from lumen_media_flow import (
     _download_message_attachment,
     _fetch_media,
     _resolve_edit_reference,
+    _fresh_generation_ref,
 )
 
 # разбор ошибок
@@ -988,6 +989,7 @@ __all__ = [
     "_cloudflare_text_to_image",
     "_cloudflare_edit_to_image",
     "_pollinations_text_to_image",
+    "detect_image_size",
     "image_provider_names",
     "image_filename",
     "_gemini_tts_bytes",
@@ -1045,6 +1047,7 @@ __all__ = [
     "_save_media_to_history",
     "_download_message_attachment",
     "_resolve_edit_reference",
+    "_fresh_generation_ref",
     "_fetch_media",
     "_sanitize_mime_type",
     "_mime_suffix",
@@ -1114,6 +1117,7 @@ from lumen_images import (
     _cloudflare_edit_to_image,
     _cloudflare_text_to_image,
     _pollinations_text_to_image,
+    detect_image_size,
     image_filename,
     image_provider_names,
 )

@@ -202,6 +202,10 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         # сохраняет формулировки и надписи на картинке как у человека, а
         # английский подставляется лишь резерву sana (у неё кириллица -> '?').
 
+        # Пропорции из промпта (16:9, 9:16, 4:3, 3:4, квадрат): правка всегда
+        # сохраняет кадр референса, поэтому размер задаётся только генерации.
+        width, height = bot.detect_image_size(prompt)
+
         # Правка идёт одной моделью: референс понимает только Cloudflare klein,
         # у Pollinations/sana правки нет вовсе. Генерация — прежней цепочкой.
         if reference is not None:
@@ -216,8 +220,16 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
         else:
             # Фолбэк — по провайдерам, не по моделям: классический Pollinations игнорирует
             # model (замер 09.11.2026), так что перебор пяти моделей звал один и тот же
-            # эндпоинт пять раз подряд.
-            calls = _image_provider_calls()
+            # эндпоинт пять раз подряд. Размер поддержан только Cloudflare.
+            calls = {}
+            for _name, _fn in _image_provider_calls().items():
+                if _name == "cloudflare":
+                    def _sized_call(session, text, timeout_sec=None, _fn=_fn, _w=width, _h=height):
+                        return _fn(session, text, timeout_sec=timeout_sec, width=_w, height=_h)
+
+                    calls[_name] = _sized_call
+                else:
+                    calls[_name] = _fn
         image_bytes = None
         last_error: Exception | None = None
         budget_exceeded = False
@@ -331,6 +343,10 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
                     # относятся только к свежей генерации (прод 10.11.2026).
                     _state["last_drawn_at"] = time.time()
                     _state["last_drawn_user"] = uid
+                    # «Ещё вариант» повторяет исходное описание (пропорции
+                    # берутся из него же); правка его не перезаписывает.
+                    if reference is None:
+                        _state["last_draw_prompt"] = prompt
                 # Без пометки «грязно» корзинка не уезжала в хранилище: после
                 # рестарта «измени эту картинку» не находил своё фото (прод 10.11.2026).
                 bot.mark_state_dirty(cid)

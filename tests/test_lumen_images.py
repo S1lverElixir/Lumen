@@ -97,6 +97,28 @@ def test_cloudflare_is_primary_only_when_configured(monkeypatch):
 # ─────────────────────────── контракт Pollinations ───────────────────────────
 
 
+@pytest.mark.parametrize("prompt, expected", [
+    ("кот 16:9", (1344, 768)),
+    ("16х9 пейзаж", (1344, 768)),
+    ("вертикальная картинка", (768, 1344)),
+    ("portrait photo", (768, 1344)),
+    ("квадрат", (1024, 1024)),
+    ("кот", (1024, 1024)),
+    ("широкий спектр", (1024, 1024)),
+])
+def test_detect_image_size(prompt, expected):
+    # Пропорции как в генераторе ChatGPT; "широкий спектр" не должен стать 16:9.
+    assert lumen_images.detect_image_size(prompt) == expected
+
+
+def test_cloudflare_generation_passes_requested_size(cf_configured):
+    captured = {}
+    asyncio.run(cf_configured._cloudflare_text_to_image(
+        _cf_ok_session(captured), "кот", width=1344, height=768))
+    fields = {name: value for name, value, _ in captured["data"].fields}
+    assert fields["width"] == "1344" and fields["height"] == "768"
+
+
 def test_pollinations_url_carries_seed_safe_and_nologo():
     # Замер 09.11.2026: без seed Pollinations отдаёт seed=42 и байт-в-байт тот же
     # файл на повторе промпта, без safe фильтр NSFW выключен.

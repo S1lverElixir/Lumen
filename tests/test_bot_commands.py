@@ -487,7 +487,7 @@ def test_draw_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypat
     async def fake_safe_reply(msg, text, **kwargs):
         replied.append(text)
 
-    async def failing_generate(session, prompt, timeout_sec=None):
+    async def failing_generate(session, prompt, timeout_sec=None, **_):
         raise RuntimeError("all image generation models unavailable")
 
     async def fake_get_http_session():
@@ -644,7 +644,7 @@ def test_inline_draw_does_not_touch_chat_state(monkeypatch):
     # Состояние чата картинке не нужно вообще: ни ключ модели, ни что-то ещё.
     chat_id = 999430
 
-    async def fake_pollinations_text_to_image(session, prompt, timeout_sec=None):
+    async def fake_pollinations_text_to_image(session, prompt, timeout_sec=None, **_):
         return b"\x89PNG fake bytes"
 
     incoming = _FakeIncomingMessage(chat_id)
@@ -670,7 +670,7 @@ def test_inline_draw_caps_single_attempt_timeout(monkeypatch):
     # лишала шанса резервные. Таймаут одной попытки ограничен 40 с.
     captured = {}
 
-    async def fake_image(session, prompt, timeout_sec=None):
+    async def fake_image(session, prompt, timeout_sec=None, **_):
         captured["timeout"] = timeout_sec
         return b"\x89PNG fake bytes"
 
@@ -701,11 +701,11 @@ def test_inline_draw_parks_unreachable_provider(monkeypatch):
     chat_id = 999446
     attempts = []
 
-    async def hanging_cloudflare(session, prompt, timeout_sec=None):
+    async def hanging_cloudflare(session, prompt, timeout_sec=None, **_):
         attempts.append("cloudflare")
         raise asyncio.TimeoutError()
 
-    async def ok_pollinations(session, prompt, timeout_sec=None):
+    async def ok_pollinations(session, prompt, timeout_sec=None, **_):
         attempts.append("pollinations")
         return b"\x89PNG fallback bytes"
 
@@ -741,7 +741,7 @@ def test_inline_draw_refuses_when_user_total_limit_exhausted(monkeypatch):
     bot._record_user_daily(777021)
     bot._record_user_daily(777021)
 
-    async def fail_generate(session, prompt, timeout_sec=None):
+    async def fail_generate(session, prompt, timeout_sec=None, **_):
         raise AssertionError("generation must not run for an exhausted user")
 
     monkeypatch.setattr(bot, "_pollinations_text_to_image", fail_generate)
@@ -768,7 +768,7 @@ def test_inline_draw_records_user_daily_on_success(monkeypatch):
     incoming.from_user = SimpleNamespace(id=777022)
     monkeypatch.setattr(bot, "OWNER_ID", 1)
 
-    async def fake_generate(session, prompt, timeout_sec=None):
+    async def fake_generate(session, prompt, timeout_sec=None, **_):
         return b"\x89PNG fake bytes"
 
     class _FakePhotoBot:
@@ -793,12 +793,12 @@ def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded(monkeypatch)
     chat_id = 999432
     attempts = []
 
-    async def slow_cloudflare(session, prompt, timeout_sec=None):
+    async def slow_cloudflare(session, prompt, timeout_sec=None, **_):
         attempts.append("cloudflare")
         await asyncio.sleep(0.05)  # дольше урезанного бюджета ниже
         raise RuntimeError("503 Service Unavailable")
 
-    async def never_pollinations(session, prompt, timeout_sec=None):
+    async def never_pollinations(session, prompt, timeout_sec=None, **_):
         attempts.append("pollinations")
         return b"\x89PNG fake bytes"
 
@@ -819,11 +819,11 @@ def test_inline_draw_falls_back_to_next_provider(monkeypatch):
     chat_id = 999431
     attempts = []
 
-    async def failing_cloudflare(session, prompt, timeout_sec=None):
+    async def failing_cloudflare(session, prompt, timeout_sec=None, **_):
         attempts.append("cloudflare")
         raise RuntimeError("503 Service Unavailable")
 
-    async def ok_pollinations(session, prompt, timeout_sec=None):
+    async def ok_pollinations(session, prompt, timeout_sec=None, **_):
         attempts.append("pollinations")
         return b"\x89PNG fallback bytes"
 
@@ -853,11 +853,11 @@ def test_inline_draw_rate_limit_does_not_skip_other_provider(monkeypatch):
     chat_id = 999436
     attempts = []
 
-    async def limited_cloudflare(session, prompt, timeout_sec=None):
+    async def limited_cloudflare(session, prompt, timeout_sec=None, **_):
         attempts.append("cloudflare")
         raise lumen_images.ImageRateLimitedError("Cloudflare HTTP 429", retry_after_sec=35.0)
 
-    async def ok_pollinations(session, prompt, timeout_sec=None):
+    async def ok_pollinations(session, prompt, timeout_sec=None, **_):
         attempts.append("pollinations")
         return b"\x89PNG fallback bytes"
 
@@ -885,7 +885,7 @@ def test_inline_draw_service_rate_limit_says_overloaded(monkeypatch):
     # а не «переформулируй описание».
     chat_id = 999432
 
-    async def always_limited(session, prompt, timeout_sec=None):
+    async def always_limited(session, prompt, timeout_sec=None, **_):
         raise lumen_images.ImageRateLimitedError("Pollinations HTTP 402 FREE_LIMIT", retry_after_sec=35.0)
 
     _one_image_provider(monkeypatch, always_limited)
@@ -906,7 +906,7 @@ def test_inline_draw_global_budget_refuses_before_provider(monkeypatch):
     bot._note_image_success("pollinations")
     bot._note_image_success("pollinations")
 
-    async def never_called(session, prompt, timeout_sec=None):
+    async def never_called(session, prompt, timeout_sec=None, **_):
         raise AssertionError("генерация не должна запускаться при выбранном общем бюджете")
 
     replies = []
@@ -933,7 +933,7 @@ def test_inline_draw_user_draw_limit_refuses(monkeypatch):
     monkeypatch.setattr(bot, "DAILY_USER_DRAW_LIMIT", 1)
     bot._reserve_user_daily(uid, total=1, draw=1)
 
-    async def never_called(session, prompt, timeout_sec=None):
+    async def never_called(session, prompt, timeout_sec=None, **_):
         raise AssertionError("генерация не должна запускаться при выбранном лимите пользователя")
 
     replies = []
@@ -958,7 +958,7 @@ def test_inline_draw_one_generation_at_a_time_per_user(monkeypatch):
     gate = asyncio.Event()
     calls = []
 
-    async def slow_generate(session, prompt, timeout_sec=None):
+    async def slow_generate(session, prompt, timeout_sec=None, **_):
         calls.append(prompt)
         await gate.wait()
         return b"\x89PNG fake bytes"
@@ -1004,7 +1004,7 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
     chat_id = 999445
     uid = 777045
 
-    async def ok(session, prompt, timeout_sec=None):
+    async def ok(session, prompt, timeout_sec=None, **_):
         return b"\x89PNG fake bytes"
 
     sent_photo = SimpleNamespace(
@@ -1033,6 +1033,8 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
         # Метка свежей генерации: по ней слабые глаголы ("добавь") находят картинку.
         assert bot.get_state(chat_id)["last_drawn_at"] > 0
         assert bot.get_state(chat_id)["last_drawn_user"] == uid
+        # Описание сохранено для «ещё вариант».
+        assert bot.get_state(chat_id)["last_draw_prompt"] == "нарисуй кота"
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1044,7 +1046,7 @@ def test_inline_draw_send_failure_keeps_the_draw_slot(monkeypatch):
     chat_id = 999444
     uid = 777044
 
-    async def ok(session, prompt, timeout_sec=None):
+    async def ok(session, prompt, timeout_sec=None, **_):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
@@ -1071,7 +1073,7 @@ def test_inline_draw_queue_wait_is_bounded(monkeypatch):
     gate = asyncio.Event()
     started = []
 
-    async def slow_generate(session, prompt, timeout_sec=None):
+    async def slow_generate(session, prompt, timeout_sec=None, **_):
         started.append(prompt)
         await gate.wait()
         return b"\x89PNG fake bytes"
@@ -1122,7 +1124,7 @@ def test_inline_draw_truncated_prompt_says_so(monkeypatch):
     chat_id = 999440
     captured = {}
 
-    async def ok(session, prompt, timeout_sec=None):
+    async def ok(session, prompt, timeout_sec=None, **_):
         return b"\x89PNG fake bytes"
 
     class _FakePhotoBot:
@@ -1189,11 +1191,11 @@ def test_cloudflare_gets_original_prompt_and_pollinations_the_translation(monkey
         captured["translated"] = json_body["messages"][1]["content"]
         return {"choices": [{"message": {"content": "an apple"}}]}
 
-    async def failing_cloudflare(session, prompt, timeout_sec=None):
+    async def failing_cloudflare(session, prompt, timeout_sec=None, **_):
         captured["cloudflare"].append(prompt)
         raise RuntimeError("cloudflare down")
 
-    async def ok_pollinations(session, prompt, timeout_sec=None):
+    async def ok_pollinations(session, prompt, timeout_sec=None, **_):
         captured["pollinations"].append(prompt)
         return b"PNG fallback bytes"
 
@@ -1212,6 +1214,28 @@ def test_cloudflare_gets_original_prompt_and_pollinations_the_translation(monkey
     assert captured["pollinations"] == ["an apple"]
 
 
+def test_inline_draw_passes_aspect_size_to_cloudflare(monkeypatch):
+    # "16:9" в промпте — реальные width/height для klein, а не дефолтный квадрат.
+    chat_id = 999448
+    captured = {}
+
+    async def cf(session, prompt, timeout_sec=None, width=1024, height=1024):
+        captured["size"] = (width, height)
+        return b"PNG bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "image_provider_names", lambda: ("cloudflare",))
+    monkeypatch.setattr(bot, "_cloudflare_text_to_image", cf)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    asyncio.run(bot.inline_draw(incoming, "кот на пляже 16:9"))
+    assert captured["size"] == (1344, 768)
+
+
 def test_inline_draw_sends_translated_prompt_to_provider(monkeypatch):
     # Регрессия прода 09.11.2026: кириллица умирала в '?' по дороге в sana, человек
     # получал случайную картинку. Провайдер обязан получить перевод, а не оригинал.
@@ -1221,7 +1245,7 @@ def test_inline_draw_sends_translated_prompt_to_provider(monkeypatch):
     async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
         return {"choices": [{"message": {"content": "one apple"}}]}
 
-    async def ok(session, prompt, timeout_sec=None):
+    async def ok(session, prompt, timeout_sec=None, **_):
         captured["prompt"] = prompt
         return b"\x89PNG fake bytes"
 
@@ -1254,7 +1278,7 @@ def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
         async def send_photo(self, **kwargs):
             return SimpleNamespace()
 
-    async def must_not_generate(session, prompt, timeout_sec=None):
+    async def must_not_generate(session, prompt, timeout_sec=None, **_):
         raise AssertionError("edit must not fall back to text-to-image providers")
 
     async def must_not_translate(*args, **kwargs):
@@ -1406,6 +1430,40 @@ def test_resolve_edit_reference_weak_verb_uses_fresh_generation_only(monkeypatch
         "last_drawn_user": 8,
     }
     assert asyncio.run(_resolve_edit_reference(_edit_ref_message(), foreign, is_private=True, implicit=False)) is None
+
+
+def test_repeat_variant_redraws_last_prompt(rate_guard_setup, monkeypatch):
+    # «ещё вариант» после генерации повторяет последнее описание без реплая.
+    message = rate_guard_setup()
+    uid = 456
+    state = {
+        "last_draw_prompt": "красное яблоко на белом столе 16:9",
+        "last_drawn_at": time.time(),
+        "last_drawn_user": uid,
+    }
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    message.text = "ещё вариант"
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once_with(message, "красное яблоко на белом столе 16:9")
+
+
+def test_repeat_variant_without_fresh_draw_goes_to_llm(rate_guard_setup, monkeypatch):
+    # Без свежей своей генерации «ещё раз» — обычный текст, а не рисование.
+    message = rate_guard_setup()
+    state = {
+        "last_draw_prompt": "старый кот",
+        "last_drawn_at": time.time() - bot.DRAW_EDIT_CONTEXT_TTL_SEC - 5,
+        "last_drawn_user": 456,
+    }
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+
+    async def fake_route(*args, **kwargs):
+        return "обычный ответ", False
+
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    message.text = "ещё раз"
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_not_awaited()
 
 
 def test_draw_command_rejects_exhausted_quota(rate_guard_setup, monkeypatch):
@@ -1907,7 +1965,7 @@ def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
     incoming.message_id = 1
     calls = []
 
-    async def fake_pollinations(session, prompt, timeout_sec=None):
+    async def fake_pollinations(session, prompt, timeout_sec=None, **_):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
@@ -1937,7 +1995,7 @@ def test_inline_draw_send_failure_reports_service_error(monkeypatch):
     incoming.message_id = 1
     replied = []
 
-    async def fake_pollinations(session, prompt, timeout_sec=None):
+    async def fake_pollinations(session, prompt, timeout_sec=None, **_):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):

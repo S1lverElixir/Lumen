@@ -200,6 +200,43 @@ def _take_image_bytes(body: bytes, ctype: str, provider: str) -> bytes:
     raise ImageProviderError(f"{provider} вернул не-изображение: {ctype}")
 
 
+# Пропорции как в генераторе ChatGPT: размер задаётся маркером в промпте.
+# Все варианты ≈1 мегапиксель, чтобы цена в Neuron не росла (замер 10.11.2026).
+_SIZES: dict[str, tuple[int, int]] = {
+    "16:9": (1344, 768),
+    "9:16": (768, 1344),
+    "4:3": (1152, 864),
+    "3:4": (864, 1152),
+    "1:1": (1024, 1024),
+}
+_SIZE_WORDS: tuple[tuple[str, str], ...] = (
+    ("16:9", "16:9"), ("16х9", "16:9"),
+    ("9:16", "9:16"), ("9х16", "9:16"),
+    ("4:3", "4:3"), ("4х3", "4:3"),
+    ("3:4", "3:4"), ("3х4", "3:4"),
+    ("1:1", "1:1"),
+    ("горизонтальн", "16:9"),
+    ("вертикальн", "9:16"),
+    ("широкоформатн", "16:9"),
+    ("квадрат", "1:1"),
+    ("landscape", "16:9"),
+    ("portrait", "9:16"),
+    ("vertical", "9:16"),
+    ("horizontal", "16:9"),
+    ("square", "1:1"),
+)
+
+
+def detect_image_size(prompt: str) -> tuple[int, int]:
+    """Размер из маркера в промпте; по умолчанию 1024x1024. Ищем только явные
+    форматы/слова пропорций, чтобы "широкий спектр" не стал 16:9."""
+    low = (prompt or "").lower()
+    for token, key in _SIZE_WORDS:
+        if token in low:
+            return _SIZES[key]
+    return _SIZES["1:1"]
+
+
 def _image_content_type(data: bytes) -> str:
     """Тип референса по магическим байтам: имя файла у FormData условное."""
     if data.startswith(b"\x89PNG"):
@@ -274,13 +311,17 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
     return _take_image_bytes(image, "image/jpeg", "Cloudflare")
 
 
-def _cloudflare_form(prompt: str, *, reference: bytes | None = None) -> aiohttp.FormData:
+def _cloudflare_form(
+    prompt: str, *, reference: bytes | None = None,
+    width: int = 1024, height: int = 1024,
+) -> aiohttp.FormData:
     """Тело запроса klein: prompt/width/height/seed и референс для правки.
-    1024x1024 — дефолт и дешёвая единица бюджета (4*26.05 = 104 Neuron за картинку)."""
+    Размеры 256..1920, около мегапикселя — дешёвая единица бюджета
+    (4*26.05 = 104 Neuron за картинку 1024x1024)."""
     form = aiohttp.FormData()
     form.add_field("prompt", prompt[:IMAGE_PROMPT_MAX_CHARS])
-    form.add_field("width", "1024")
-    form.add_field("height", "1024")
+    form.add_field("width", str(width))
+    form.add_field("height", str(height))
     form.add_field("seed", str(_random_seed()))
     if reference:
         form.add_field(
@@ -291,13 +332,16 @@ def _cloudflare_form(prompt: str, *, reference: bytes | None = None) -> aiohttp.
     return form
 
 
-async def _cloudflare_text_to_image(session: aiohttp.ClientSession, prompt: str, *, timeout_sec: float | None = None) -> bytes:
+async def _cloudflare_text_to_image(
+    session: aiohttp.ClientSession, prompt: str, *,
+    timeout_sec: float | None = None, width: int = 1024, height: int = 1024,
+) -> bytes:
     """Генерация с нуля через Workers AI (multipart)."""
     if not cloudflare_configured():
         raise ImageProviderError("Cloudflare не настроен: нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN")
     status, retry_after, data = await _cloudflare_request(
         session, _cloudflare_model_url(CLOUDFLARE_IMAGE_MODEL),
-        form=_cloudflare_form(prompt), timeout_sec=timeout_sec,
+        form=_cloudflare_form(prompt, width=width, height=height), timeout_sec=timeout_sec,
     )
     return _cloudflare_image_result(status, retry_after, data)
 
