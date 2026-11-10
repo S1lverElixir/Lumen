@@ -442,3 +442,14 @@ def test_error_strings_never_carries_the_image_blob(cf_configured):
     assert lumen_images._error_strings({"success": True, "result": {"image": blob}}) == ""
     assert lumen_images._error_strings({"success": True, "result": blob}) == ""
     assert lumen_images._error_strings({"result": "Model not available"}) == "Model not available"
+    # Словарь result: короткие подписи берём, картинку и длинные значения — нет.
+    assert lumen_images._error_strings({"result": {"image": blob, "note": "busy"}}) == "busy"
+
+
+def test_cloudflare_moderation_flag_in_result_dict_at_odd_status_is_terminal(cf_configured):
+    # Обёртка Workers AI несёт текст отказа ещё и в result{}, а relay переписывает
+    # статус: без обоих разбор оставался «обычной ошибкой провайдера», цепочка
+    # доезжала до sana и та дорисовывала отклонённое содержимое (ревью 10.11.2026).
+    payload = {"success": False, "result": {"error": "flagged by moderation"}}
+    with pytest.raises(lumen_images.ImageModerationError):
+        asyncio.run(cf_configured._cloudflare_image_result(500, None, payload))

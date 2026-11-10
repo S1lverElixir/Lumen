@@ -104,8 +104,8 @@ def image_filename(data: bytes) -> str | None:
 def _error_strings(payload: Any) -> str:
     """Сообщения об ошибке из JSON-ответа одним текстом: у Cloudflare это
     errors:[{code,message}], у Pollinations — одиночный error:{code,message}
-    (в нём и живёт код FREE_LIMIT). Разбор только dict/list, без обхода
-    произвольного чужого JSON."""
+    (в нём и живёт код FREE_LIMIT), у обёртки Workers AI текст несёт messages[]
+    и result. Разбор только dict/list, без обхода произвольного чужого JSON."""
     out: list[str] = []
     if isinstance(payload, dict):
         for item in payload.get("errors") or []:
@@ -120,17 +120,22 @@ def _error_strings(payload: Any) -> str:
             out.append(error)
         if isinstance(payload.get("message"), str):
             out.append(payload["message"])
-        # У обёртки Workers AI текст отказа живёт ещё и в messages[], и в result.
-        # Длинные строки не берём: detail уходит в лог, а в result на успехе лежит
-        # base64 картинки (ревью 10.11.2026).
+        # У обёртки Workers AI текст отказа живёт ещё и в messages[], и в result —
+        # строкой или короткими полями словаря. Длинные не берём: detail уходит в
+        # лог, а в result на успехе лежит base64 картинки (ревью 10.11.2026).
         for item in payload.get("messages") or []:
             if isinstance(item, dict):
                 out.append(f"{item.get('code')} {item.get('message')}")
             elif isinstance(item, str):
                 out.append(item)
         result = payload.get("result")
-        if isinstance(result, str) and len(result) < 120:
-            out.append(result)
+        if isinstance(result, dict):
+            values = [v for k, v in result.items() if k != "image"]
+        elif isinstance(result, str):
+            values = [result]
+        else:
+            values = []
+        out.extend(v for v in values if isinstance(v, str) and len(v) < 120)
     return " ".join(out)[:400]
 
 
