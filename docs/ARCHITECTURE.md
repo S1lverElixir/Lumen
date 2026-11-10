@@ -40,6 +40,33 @@ Each model is tried exactly once per route, with no retries: a single failure (t
 
 Routing of drawing phrases lives in `lumen_message_core.py`, the trigger lists in `lumen_message_parse.py`: an explicit draw verb starts a generation; an edit verb needs a real reference — the attachment, a replied photo, up to two at once for «совмести это с этим» (замер 10.11.2026), and for strong verbs the requester's own recent photo; weak verbs («добавь звезду», «убери текст») apply only to the picture the bot generated itself inside `DRAW_EDIT_CONTEXT_TTL_SEC`. A number next to the word for a variant («сделай 2 варианта кота») is a series of generations and is checked before the edit branch, and «ещё вариант X» naming a new subject draws that subject instead of repeating the old description (review 10.11.2026) — but only where the bot's own generation is still inside `DRAW_EDIT_CONTEXT_TTL_SEC` and the words after the trigger contain letters: «ещё вариант...» repeats the stored description instead of painting «...», and «другой вариант перевода письма» or «regenerate the summary» — in a text-only chat or in one drawn a week ago — go to the text model, and a reply «ещё вариант» never paints the text of the message it answers (review 10.11.2026). The same count works for edits: «сделай 3 варианта: убери фон» on a replied photo is a series of edits of that photo. Aspect ratio comes from markers in the prompt — 16:9, 9:16, 4:3, 3:4 in both Cyrillic and Latin `x`, «вертикальная», «квадрат» — with digit boundaries so "13:45" is not read as 3:4, and an edit reuses the orientation of its first reference. The generated picture is recorded in the requester's media bucket (a reply to someone else's photo goes into that photo's owner bucket), and the message id of the sent photo is kept in the chat state: the «Ещё вариант» keyboard rides only with a generation (an edit has its own reference, so it neither gets the button nor moves the anchor), and the previous photo's keyboard is cleared after the new picture is delivered — with an explicit empty keyboard object instead of `reply_markup=None`: aiogram drops falsy fields, so the None version would have relied on Telegram's implicit "no field means no buttons" (review 10.11.2026). A tap on an old photo therefore cannot repeat a different subject, and `/reset` clears this drawing context together with the rest of the chat memory, striking the button off the photo it was anchored to first, because after the reset there would be nothing left to remove it by (review 10.11.2026). One known gap: the words-based lookup consults the history log first and the bucket only when the log has no matching media, so a photo the user uploaded earlier still wins over the newer generated picture.
 
+ChatGPT parity for image requests (10.11.2026). Two things changed on purpose.
+First, the provider no longer receives the user's phrase verbatim: before the
+first provider call one Munito request rewrites a generation request into a
+finished picture description (30-60 English words, craft detail only) and an
+edit request into a translated instruction, because an edit prompt that
+recounts the whole scene loses what has to change. Literal text to be rendered
+stays quoted and verbatim, counts and colors are kept, and the rewrite is
+clipped at `IMAGE_PROMPT_MAX_CHARS` on a word boundary rather than thrown away.
+A series of variants prepares the description once for the whole series, and
+any failure, empty answer or missing budget sends the original wording, so the
+picture still arrives. Aspect ratio is still read from the user's own words,
+not from the rewrite, which could drop «16:9». Second, a drawing request is no
+longer recognized only by its first word: `_match_draw_intent` also accepts a
+filler prefix («ну нарисуй», «мне, пожалуйста, нарисуй»), an imperative in the
+middle of the phrase («кот в шляпе, нарисуй»), an artifact noun with a request
+verb («хочу картинку с котом», «нужен логотип кофейни», «make me an image of a
+cat», «picture of a cat on a fence») and polite forms («ты можешь нарисовать
+дракона?», «can you draw a cat?»). The same pass refuses to fire on a question
+or a service verb («как нарисовать кота», «покажи картинку», «сохрани»,
+«переведи», «how do I draw a cat»), and «сделай картинку кота» is a new
+generation while «сделай эту картинку ярче» stays an edit — the demonstrative
+that points at an existing picture wins over the weak verb. The full matrix of
+accepted and rejected phrasings is a test (`tests/test_draw_triggers.py`), not
+a comment. Still open: a request that names a scene without any artifact word
+(«хочу увидеть кота на луне») and anaphoric requests («нарисуй это») go to the
+text model, because the classifier for them is not built yet.
+
 ## Streaming & typing pace
 
 For a plain-text route (no attachments, no links), Lumen streams the reply by repeatedly editing one message, the same mechanism for Gemini (`generate_content_stream`) and Munito (`_munito_stream_pieces` over the shared `_sse_pieces`, SSE on `chat/completions`). Streaming is attempted on every model in the route, not only on the first one: a failing head model no longer costs the chat its typing effect while a reserve model answers.
