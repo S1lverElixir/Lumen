@@ -1116,6 +1116,7 @@ GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC = 3600.0
 # Генерация картинок — в lumen_images.py (чистые функции, сессию передаёт вызывающий код).
 from lumen_images import (
     ImageBudgetExhaustedError,
+    ImageModerationError,
     ImageProviderError,
     ImageRateLimitedError,
     _cloudflare_edit_to_image,
@@ -1130,7 +1131,7 @@ from lumen_images import (
 
 # Имена провайдеров и ошибок нужны только тестам как `bot.X` (см. пояснение
 # про __all__ у первого блока в начале файла).
-__all__ += ["ImageProviderError", "ImageRateLimitedError", "ImageBudgetExhaustedError"]
+__all__ += ["ImageProviderError", "ImageRateLimitedError", "ImageBudgetExhaustedError", "ImageModerationError"]
 
 # Чистые утилиты медиа — в lumen_media.py; сетевая часть остаётся здесь
 # (ей нужны сессия, BOT_TOKEN и bot.get_file).
