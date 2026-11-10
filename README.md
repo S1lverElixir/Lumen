@@ -143,7 +143,7 @@ pytest -v
 
 Test files live in `tests/` and mirror the module split: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, `test_lumen_media.py`, `test_lumen_model_speed.py`, `test_lumen_search.py`, `test_lumen_status.py`, and `test_lumen_devtrace.py` each test their matching module directly, while `test_bot_admin.py`, `test_bot_commands.py`, `test_bot_routes.py`, `test_bot_search.py`, `test_bot_state.py`, `test_bot_streaming.py`, `test_bot_tiktok.py`, `test_bot_transport.py`, and `test_bot_tts.py` cover `bot.py` by domain (shared fakes live in `bot_test_helpers.py`). `test_eval_persona.py` covers the persona eval fixtures. `conftest.py` stubs `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH` so the suite needs no real secrets, and empties the remaining provider keys (Munito, Cloudflare, Groq, OpenRouter, Sentry) so a local `.env` cannot send a test to a live API.
 
-CI (`.github/workflows/ci.yml`) runs `pyflakes` + `pytest` + `pip-audit` + `deno test` on every push and pull request, plus a weekly scheduled run; a successful push run triggers `sync-to-hf.yml`, which mirrors the commit to the Hugging Face Space (and refuses to overwrite a direct Space hotfix).
+CI (`.github/workflows/ci.yml`) runs `pyflakes` + `pytest` + `pip-audit` and the proxy checks `deno test` / `deno check` / `deno lint` on every push and pull request, plus a weekly scheduled run; a successful push run triggers `sync-to-hf.yml`, which mirrors the commit to the Hugging Face Space (and refuses to overwrite a direct Space hotfix), and `deploy-proxy.yml`, which ships `proxy/` to Deno Deploy when the tested commit changed it.
 
 ## Known limitations
 
