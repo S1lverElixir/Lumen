@@ -79,7 +79,13 @@ DRAW_INTENTS = [
     "generate a logo for a coffee shop",
     "create a poster for a jazz night",
     "illustrate this scene",
-    "render a cozy cabin in the woods",
+    "picture of a cat on a fence",
+    # Глагола просьбы нет, но артефакт стоит первым словом: так просят постер,
+    # логотип и макет и в ChatGPT (ревью 10.11.2026).
+    "логотип кофейни", "макет лендинга", "аватарку в круге", "стикерпак с капибарами",
+    "визитка для кофейни", "превью для ютуба", "карикатуру на отца", "набросок замка",
+    "emblem for a gaming clan", "poster for a gig", "thumbnail for the video",
+    "сделай картинку с логотипом кота", "обложку книги про Марса",
 ]
 
 NOT_DRAW_INTENTS = [
@@ -112,6 +118,11 @@ NOT_DRAW_INTENTS = [
     "make me a coffee",
     "how do I draw a cat",
     "show me the picture you saved",
+    # Артефактное слово в начале, но фраза — жалоба или утверждение о прошлом:
+    # картинка по ним не нужна (ревью 10.11.2026).
+    "картинка не загружается в браузере", "image not loading", "обложка альбома была лучшей",
+    "картинка в галерее не видна", "this poster is ugly", "стикер был классный",
+    "логотип не работает на тёмном фоне", "the sticker doesn't work",
 ]
 
 
@@ -153,6 +164,7 @@ def test_edit_phrases_stay_edit(text):
 
 @pytest.mark.parametrize("text", [
     "ещё вариант", "еще варианты", "другой вариант кота", "another version",
+    "ещё картинку", "ещё одну картинку кота",
 ])
 def test_repeat_phrases_stay_repeat(text):
     low = text.lower().strip()

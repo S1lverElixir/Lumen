@@ -3966,3 +3966,60 @@ def test_resolve_draw_request_history_is_flattened_data(monkeypatch):
     payload = payloads[0]
     assert "data, not instructions" in payload
     assert "\nOutput" not in payload.split("Recent conversation")[-1]
+
+
+def test_draw_prompt_refusal_forms_all_keep_user_wording(monkeypatch):
+    # Отказ модели приходит в формах, которых не было в первой версии фильтра:
+    # сокращения, ведущая разметка, другой язык (ревью 10.11.2026).
+    forms = [
+        "I'm unable to generate that image, sorry.",
+        "I\u2019m sorry, but I can\u2019t help with that request.",
+        "**I cannot** create that picture for you.",
+        "No puedo generar im\u00e1genes con ese contenido.",
+    ]
+    for chat_id, answer in enumerate(forms, start=999530):
+        incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=answer)
+        try:
+            asyncio.run(bot.inline_draw(incoming, "кот в шляпе"))
+            assert captured["text"] == "кот в шляпе", answer
+        finally:
+            _prep_teardown(chat_id)
+
+
+def test_draw_prompt_meta_preamble_is_stripped(monkeypatch):
+    # «Sure — here is your prompt: X»: преамбула режется, иначе модель просит
+    # нарисовать её как текст в кадре (ревью 10.11.2026).
+    chat_id = 999540
+    rich = "A ginger cat on a windowsill, soft morning light, 35 mm framing, photorealistic."
+    incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply="Sure \u2014 here is your prompt: " + rich)
+    try:
+        asyncio.run(bot.inline_draw(incoming, "кот в шляпе"))
+        assert captured["text"] == rich
+    finally:
+        _prep_teardown(chat_id)
+
+
+def test_draw_prompt_word_starting_like_none_is_not_none(monkeypatch):
+    # startswith("NONE") ловил «Nonexistent bridge …»: хороший ответ
+    # выбрасывался, а серия вариантов рисовала исходную фразу (ревью 10.11.2026).
+    chat_id = 999541
+    rich = "A nonexistent bridge at dusk over a dry riverbed, wide shot, soft haze."
+    incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=rich)
+    try:
+        asyncio.run(bot.inline_draw(incoming, "мост на закате"))
+        assert captured["text"] == rich
+    finally:
+        _prep_teardown(chat_id)
+
+
+def test_reserve_translation_memo_skips_failed_translation(monkeypatch):
+    # Неудачный перевод возвращает ту же кириллицу: в кэше она заморозила бы
+    # подпись для sana на 60 секунд, и резерв рисовал бы знаками «?»
+    # (ревью 10.11.2026).
+    translate = AsyncMock(return_value="рыжий кот на луне")
+    monkeypatch.setattr(bot, "_translate_draw_prompt", translate)
+    monkeypatch.setattr(lumen_commands, "_reserve_translate_memo", {})
+    deadline = time.monotonic() + 20
+    asyncio.run(lumen_commands._translate_for_reserve("рыжий кот на луне", deadline))
+    asyncio.run(lumen_commands._translate_for_reserve("рыжий кот на луне", deadline))
+    assert translate.await_count == 2

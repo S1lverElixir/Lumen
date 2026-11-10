@@ -361,3 +361,25 @@ def test_core_revert_does_not_also_run_the_text_route(rate_guard_setup, monkeypa
     monkeypatch.setattr(bot, "_run_route", run_route)
     asyncio.run(bot._handle_message_core(message))
     run_route.assert_not_awaited()
+
+
+def test_revert_after_politeness_still_reverts(rate_guard_setup, monkeypatch):
+    # «верни предыдущий вариант, пожалуйста» — это всё ещё возврат: раньше
+    # вежливое слово превращало просьбу в текстовый ответ (ревью 10.11.2026).
+    for text in ("верни предыдущий вариант, пожалуйста", "верни картинку", "undo please"):
+        message = rate_guard_setup()
+        message.text = text
+        state = _versions_state(3)
+        monkeypatch.setattr(bot, "get_state", lambda cid: state)
+        reverted = []
+
+        async def fake_revert(msg, st, *, redo=False):
+            reverted.append(redo)
+            return True
+
+        monkeypatch.setattr(bot, "revert_draw_version", fake_revert)
+        run_route = AsyncMock(return_value=("ok", False))
+        monkeypatch.setattr(bot, "_run_route", run_route)
+        asyncio.run(bot._handle_message_core(message))
+        assert reverted == [False], text
+        run_route.assert_not_awaited()
