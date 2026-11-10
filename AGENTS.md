@@ -156,7 +156,9 @@ Gemini as the unconditional automatic reserve.
   instances with separate state and a permanent 503 with the whole suite green (prod 09.2026).
 - Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`):
   outside it a request skips the message budget, the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the
-  busy reply, and `/draw` outside the lock left two live buttons over one photo (review 10.11.2026).
+  busy reply. A handler may be registered outside the lock and still take it around the work it
+  starts (`/draw` did not, and two people in one group each left a live button over one photo;
+  fixed 10.11.2026).
 - After a failed startup load `_state_load_failed` (`lumen_chat_state.py`) suppresses index and
   quota writes, so an Upstash outage cannot overwrite real history with empty in-memory state. Any
   new writer must honor that flag (audit A5-2, 28.10.2026).
