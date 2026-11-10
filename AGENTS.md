@@ -230,8 +230,8 @@ The same facts live in several places and they drift. A change to behavior updat
 commit: `docs/ARCHITECTURE.md` (pipelines, routing, the streaming checklist, deploy paths),
 `docs/ENVIRONMENT.md` (variables and hardcoded limits), `README.md` and `README.ru.md` (two
 languages of one document, so a user-facing change edits both), this file, and `opencode.json` when
-a permission changed. A generated RepoWiki may sit in the gitignored `.qoder/` directory: it is not committed,
-it drifts, and `docs/` stays the truth.
+a permission changed. A generated RepoWiki may sit in the gitignored `.qoder/` directory: it is
+not committed, it drifts, and `docs/` stays the truth.
 - `eval/` holds the offline probes and the persona harness, run by hand from main through
   `persona-eval.yml`; method and results are in `docs/PROMPT_EVAL.md`, and its dated measurements
   are what the evidence rule in Gotchas expects. `eval/harness_eval.py` measures this file itself:
