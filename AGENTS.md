@@ -30,6 +30,8 @@ production on 10.11.2026, so change a fact and update this file in the same comm
 - This working tree is shared: other agent sessions and the owner edit and commit in it while you
   work. Never `git switch`, `git stash`, `git restore`, `git clean`, `git add -A` or
   `git commit -a`; stage the exact paths you changed and re-check `git status` before committing.
+  Commit your own files promptly: another session's broad commit absorbs your uncommitted work into
+  its message, which happened to this file on 10.11.2026.
 - Work on a branch `agent/<short-topic>`, never on main. Commit there yourself, small logical
   steps, one line saying what and why, in the language of the recent git log (Russian). The owner
   merges. Never push, merge to main, deploy to the Space, or message the live bot on your own.
