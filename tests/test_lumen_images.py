@@ -423,3 +423,22 @@ def test_cloudflare_plain_failure_at_http_200_stays_retryable(cf_configured):
     with pytest.raises(lumen_images.ImageProviderError) as exc:
         asyncio.run(cf_configured._cloudflare_image_result(200, None, {"success": False, "error": "boom"}))
     assert not isinstance(exc.value, lumen_images.ImageModerationError)
+
+
+
+def test_cloudflare_moderation_flag_in_messages_array_is_terminal(cf_configured):
+    # Обёртка Workers AI кладёт текст отказа в messages[]/result, а не в errors[]:
+    # без этих полей detail был пустым, отказ считался обычной ошибкой, и резерв
+    # sana дорисовывал заблокированное содержимое (ревью 10.11.2026).
+    payload = {"success": False, "messages": [{"code": 3030, "message": "Your output has been flagged"}]}
+    with pytest.raises(lumen_images.ImageModerationError):
+        asyncio.run(cf_configured._cloudflare_image_result(200, None, payload))
+
+
+def test_error_strings_never_carries_the_image_blob(cf_configured):
+    # detail уходит в лог и в текст человеку: base64 картинки из result не должен
+    # попадать ни туда, ни в маркеры модерации (ревью 10.11.2026).
+    blob = "A" * 4096
+    assert lumen_images._error_strings({"success": True, "result": {"image": blob}}) == ""
+    assert lumen_images._error_strings({"success": True, "result": blob}) == ""
+    assert lumen_images._error_strings({"result": "Model not available"}) == "Model not available"
