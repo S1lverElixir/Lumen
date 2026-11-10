@@ -633,29 +633,36 @@ async def cmd_draw(message: Message) -> None:
         return
     if await bot._reject_rate_limited_message(message):
         return
-    reference = None
-    if _match_trigger_prefix(prompt.lower(), EDIT_TRIGGER_PREFIXES):
-        try:
-            reference = await bot._resolve_edit_references(
-                message, bot.get_state(message.chat.id),
-                is_private=message.chat.type == ChatType.PRIVATE, implicit=False,
-            ) or None
-        except bot._MediaTooLargeError as exc:
-            await bot._safe_reply(message, bot._t(
-                message.chat.id, "media_too_big",
-                limit_mb=max(1, round(exc.cap_bytes / (1024 * 1024))),
-            ))
-            return
-        except Exception as exc:
-            log.warning("[draw] Edit reference resolve failed (cmd_draw): %s", exc)
-    if reference:
-        # Правка — всегда одна: «измени … 2 варианта» не превращается в две правки.
-        await bot.inline_draw_variants(message, prompt, variants=1, reference=reference)
-    else:
-        _variants, _clean_prompt = _split_image_variants(prompt)
-        await bot.inline_draw_variants(
-            message, _clean_prompt or prompt, variants=_variants, reference=None,
-        )
+    async def _dispatch() -> None:
+        reference = None
+        if _match_trigger_prefix(prompt.lower(), EDIT_TRIGGER_PREFIXES):
+            try:
+                reference = await bot._resolve_edit_references(
+                    message, bot.get_state(message.chat.id),
+                    is_private=message.chat.type == ChatType.PRIVATE, implicit=False,
+                ) or None
+            except bot._MediaTooLargeError as exc:
+                await bot._safe_reply(message, bot._t(
+                    message.chat.id, "media_too_big",
+                    limit_mb=max(1, round(exc.cap_bytes / (1024 * 1024))),
+                ))
+                return
+            except Exception as exc:
+                log.warning("[draw] Edit reference resolve failed (cmd_draw): %s", exc)
+        if reference:
+            # Правка — всегда одна: «измени … 2 варианта» не превращается в две правки.
+            await bot.inline_draw_variants(message, prompt, variants=1, reference=reference)
+        else:
+            _variants, _clean_prompt = _split_image_variants(prompt)
+            await bot.inline_draw_variants(
+                message, _clean_prompt or prompt, variants=_variants, reference=None,
+            )
+
+    # Тот же per-chat лок, что у пути словами: без него два человека в группе
+    # читали один и тот же старый якорь кнопки, обе генерации снимали клавиатуру
+    # с одного фото, и под чатом оставалось две живые «Ещё вариант»
+    # (ревью 10.11.2026).
+    await bot._run_under_chat_lock(message, _dispatch)
 
 
 

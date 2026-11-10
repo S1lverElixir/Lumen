@@ -3626,3 +3626,33 @@ def test_draw_attempt_timeout_excludes_translation_budget(monkeypatch):
     assert len(recorded) == 1
     # Полсекундного запаса достаточно: сборка до перевода стоит миллисекунды.
     assert recorded[0] < 59.5, "таймаут попытки должен учитывать уже потраченный перевод"
+
+
+def test_cmd_draw_runs_under_chat_lock(monkeypatch):
+    # /draw шёл мимо per-chat лока: два человека в группе читали один старый
+    # якорь кнопки, снимали клавиатуру с одного фото, и под чатом оставалось две
+    # живые «Ещё вариант» (ревью 10.11.2026).
+    calls = []
+
+    async def ok_variants(message, prompt, *, variants=1, reference=None):
+        calls.append(prompt)
+
+    async def free_lock(message, run):
+        await run()
+
+    async def busy_lock(message, run):
+        return None
+
+    incoming = _FakeIncomingMessage(999467)
+    incoming.text = "/draw кот"
+    incoming.from_user = SimpleNamespace(id=777067)
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
+    monkeypatch.setattr(bot, "inline_draw_variants", ok_variants)
+    monkeypatch.setattr(bot, "_run_under_chat_lock", free_lock)
+    asyncio.run(bot.cmd_draw(incoming))
+    assert calls == ["кот"], "генерация стартует только из-под лока"
+
+    calls.clear()
+    monkeypatch.setattr(bot, "_run_under_chat_lock", busy_lock)
+    asyncio.run(bot.cmd_draw(incoming))
+    assert calls == [], "занятый чат не должен запускать генерацию в обход лока"
