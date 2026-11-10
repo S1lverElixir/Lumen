@@ -160,6 +160,7 @@ def _serialize_chat_state(state: dict[str, Any]) -> dict[str, Any]:
         "lang": state.get("lang", "en"),
         # Контекст правки/повтора последней картинки: без него после деплоя
         # «добавь звезду» и кнопка «Ещё вариант» не находят генерацию (ревью 10.11.2026).
+        "last_drawn_message_id": state.get("last_drawn_message_id"),
         "last_drawn_at": state.get("last_drawn_at", 0.0),
         "last_drawn_user": state.get("last_drawn_user"),
         "last_draw_prompt": state.get("last_draw_prompt", ""),

@@ -3888,3 +3888,50 @@ def test_legacy_ctx_migrates_into_history_on_restore():
         assert snapshot["memory_summary"] == "люди: m1st"
     finally:
         bot.chat_state.pop(cid, None)
+
+
+def test_draw_context_survives_restart():
+    # После деплоя кнопка и «добавь звезду» находили генерацию только если чат
+    # не остыл: контекст картинки обязан входить в сериализуемый снимок, а не
+    # только в живую память (ревью 10.11.2026).
+    cid = 999908
+    state = {
+        "history": [], "quota": {}, "recent_media_ids": {},
+        "last_drawn_at": 1234.5,
+        "last_drawn_user": 4242,
+        "last_draw_prompt": "красное яблоко",
+        "last_drawn_message_id": 909,
+    }
+    snapshot = bot._serialize_chat_state(state)
+    try:
+        bot._restore_single_chat(cid, snapshot)
+        restored = bot.chat_state[cid]
+        assert restored["last_drawn_at"] == 1234.5
+        assert restored["last_drawn_user"] == 4242
+        assert restored["last_draw_prompt"] == "красное яблоко"
+        assert restored["last_drawn_message_id"] == 909
+    finally:
+        bot.chat_state.pop(cid, None)
+
+
+@pytest.mark.parametrize("field, raw, expected", [
+    ("last_drawn_user", True, None),
+    ("last_drawn_user", "4242", None),
+    ("last_drawn_user", 9.5, None),
+    ("last_drawn_message_id", True, None),
+    ("last_drawn_message_id", "909", None),
+    ("last_drawn_message_id", None, None),
+    ("last_drawn_at", True, 0.0),
+    ("last_drawn_at", "вчера", 0.0),
+])
+def test_draw_context_restart_rejects_dirty_types(field, raw, expected):
+    # bool — тоже int в Python, а строка в поле id делала каждый тап «Ещё вариант»
+    # вечным отказом: восстановление обязано выдавать None/0, а не мусор
+    # (ревью 10.11.2026).
+    cid = 999909
+    state = {"history": [], "quota": {}, "recent_media_ids": {}, field: raw}
+    try:
+        bot._restore_single_chat(cid, bot._serialize_chat_state(state))
+        assert bot.chat_state[cid][field] == expected
+    finally:
+        bot.chat_state.pop(cid, None)

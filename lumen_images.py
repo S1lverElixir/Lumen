@@ -64,6 +64,11 @@ class ImageRateLimitedError(ImageProviderError):
         self.retry_after_sec = retry_after_sec
 
 
+class ImageModerationError(ImageProviderError):
+    """Фильтр содержания провайдера: не сетевой сбой и не бюджет. Резерв умеет
+    рисовать то же самое без фильтра, поэтому цепочка обязана встать (ревю 10.11.2026)."""
+
+
 class ImageBudgetExhaustedError(ImageProviderError):
     """Бесплатный дневной бюджет провайдера выбран — до следующих суток пробовать бессмысленно."""
 
@@ -212,10 +217,10 @@ _SIZES: dict[str, tuple[int, int]] = {
     "1:1": (1024, 1024),
 }
 _SIZE_WORDS: tuple[tuple[str, str], ...] = (
-    ("16:9", "16:9"), ("16х9", "16:9"),
-    ("9:16", "9:16"), ("9х16", "9:16"),
-    ("4:3", "4:3"), ("4х3", "4:3"),
-    ("3:4", "3:4"), ("3х4", "3:4"),
+    ("16:9", "16:9"), ("16х9", "16:9"), ("16x9", "16:9"),
+    ("9:16", "9:16"), ("9х16", "9:16"), ("9x16", "9:16"),
+    ("4:3", "4:3"), ("4х3", "4:3"), ("4x3", "4:3"),
+    ("3:4", "3:4"), ("3х4", "3:4"), ("3x4", "3:4"),
     ("1:1", "1:1"),
     ("горизонтальн", "16:9"),
     ("вертикальн", "9:16"),
@@ -342,6 +347,15 @@ async def _cloudflare_request(
         return status, retry_after, data
 
 
+_MODERATION_MARKERS = ("flagged", "moderation")
+
+
+def _is_moderation_detail(detail: str) -> bool:
+    """Признак фильтра содержания в ответе Cloudflare (замер 10.11.2026: код 3030
+    "Your output has been flagged")."""
+    return any(word in (detail or "").lower() for word in _MODERATION_MARKERS)
+
+
 def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) -> bytes:
     """Общая расшифровка ответа flux-2-klein: успех, бюджет, темп, модерация."""
     detail = _error_strings(data)
@@ -354,14 +368,19 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
         if any(word in detail.lower() for word in ("allocation", "free tier", "daily")):
             raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 429 {detail})")
         raise ImageRateLimitedError(f"Cloudflare HTTP 429 {detail}".strip(), retry_after_sec=retry_after)
-    if status == 400 and any(word in detail.lower() for word in ("flagged", "moderation")):
+    if status == 400 and _is_moderation_detail(detail):
         # Фильтр содержания (замер 10.11.2026: код 3030 "Your output has been
         # flagged"): это не сетевой сбой, повтор и резерв не помогут — человеку
         # честнее «ошибка генерации, переформулируй».
-        raise ImageProviderError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
+        raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
     if status != 200:
         raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
     if not data.get("success", True):
+        # Тот же флаг приходит и телом при HTTP 200 (обёртка Workers AI): без этой
+        # проверки отказ не терминален, и sana дорисовала бы отклонённое содержимое
+        # (ревью 10.11.2026).
+        if _is_moderation_detail(detail):
+            raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
         raise ImageProviderError(f"Cloudflare: {detail}")
     result = data.get("result")
     image_b64 = result.get("image") if isinstance(result, dict) else None
@@ -438,6 +457,11 @@ async def _pollinations_text_to_image(session: aiohttp.ClientSession, prompt: st
     """Классический эндпоинт без ключа — только резерв. Замер 09.11.2026: 1 картинка в
     45 секунд на IP (HTTP 402 FREE_LIMIT с Retry-After), модель всегда sana, nologo
     игнорируется, поэтому водяной знак остаётся."""
+    if not (prompt or "").isascii():
+        # sana превращает кириллицу в '?' на разборе URL и рисует случайное
+        # (пруф 09.11.2026): без перевода честнее отказа, чем картинка-мусор за
+        # счёт дневного бюджета (ревю 10.11.2026).
+        raise ImageProviderError("Pollinations: описание не переведено на английский")
     encoded = _encoded_prompt(prompt)
     # safe=true: без него фильтр NSFW выключен (так в их доках), а бот публичный.
     url = (

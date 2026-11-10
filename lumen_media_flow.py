@@ -172,7 +172,13 @@ async def _resolve_edit_references(
                     fetched = None
                 if fetched:
                     collected.append(fetched)
-                    bot._save_media_to_history(reply_src, state, sender_id)
+                    # Корзина владельца фото, а не ответившего: иначе позже «добавь
+                    # звезду» без реплая правит чужой снимок (ревью 10.11.2026).
+                    _reply_owner = getattr(reply, "from_user", None)
+                    bot._save_media_to_history(
+                        reply_src, state,
+                        _reply_owner.id if _reply_owner is not None else sender_id,
+                    )
 
     # Неявный контекст подключаем только когда явных референсов нет: иначе
     # «совмести эти два» тянул бы ещё и старую картинку из истории.

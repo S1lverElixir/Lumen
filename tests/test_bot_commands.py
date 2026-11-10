@@ -1008,6 +1008,7 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
         return b"\x89PNG fake bytes"
 
     sent_photo = SimpleNamespace(
+        message_id=4242,
         photo=[PhotoSize(file_id="gen-file-id", file_unique_id="gen-unique", width=1024, height=1024, file_size=1234)]
     )
 
@@ -1035,6 +1036,9 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
         assert bot.get_state(chat_id)["last_drawn_user"] == uid
         # Описание сохранено для «ещё вариант».
         assert bot.get_state(chat_id)["last_draw_prompt"] == "нарисуй кота"
+        # Кнопка висит под фото, поэтому и id хранится фото, а не сообщения
+        # человека: иначе страховка «тап не под последней картинкой» резала всё.
+        assert bot.get_state(chat_id)["last_drawn_message_id"] == 4242
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1051,6 +1055,7 @@ def test_inline_draw_marks_fresh_generation_even_if_media_history_raises(monkeyp
         return b"\x89PNG fake bytes"
 
     sent_photo = SimpleNamespace(
+        message_id=4242,
         photo=[PhotoSize(file_id="gen-file-id", file_unique_id="gen-unique", width=1024, height=1024, file_size=1234)]
     )
 
@@ -1510,13 +1515,29 @@ def test_inline_draw_edit_keeps_reference_orientation(monkeypatch):
         async def send_photo(self, **kwargs):
             return SimpleNamespace()
 
-    monkeypatch.setattr(bot, "image_dimensions", lambda data: (1280, 720))
+    def fake_dims(data):
+        captured["dims_arg"] = data
+        return (1280, 720)
+
+    monkeypatch.setattr(bot, "image_dimensions", fake_dims)
     monkeypatch.setattr(bot, "_cloudflare_edit_to_image", fake_edit)
     monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    # Декодирование заголовков картинки — CPU, оно не должно вставать в цикл
+    # (b83277b): without to_thread тест проходил бы ровно так же (ревью 10.11.2026).
+    real_to_thread = asyncio.to_thread
+    off_loop = []
+
+    async def _recorder(func, /, *args, **kwargs):
+        off_loop.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", _recorder)
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
     asyncio.run(bot.inline_draw(incoming, "сделай небо ночным", reference=(b"ref", "image/jpeg")))
     assert captured["size"] == (1344, 768)
+    assert captured["dims_arg"] == b"ref"
+    assert fake_dims in off_loop, "размер референса считается в отдельном потоке"
 
 
 def _make_draw_more_query(user_id=456, chat_id=123):
@@ -1537,6 +1558,7 @@ def test_draw_more_callback_regenerates_last_prompt(monkeypatch):
         "last_draw_prompt": "красное яблоко на белом столе",
         "last_drawn_at": time.time(),
         "last_drawn_user": 456,
+        "last_drawn_message_id": 11,
     }
     captured = []
 
@@ -1590,6 +1612,15 @@ def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
     stale = _make_draw_more_query(user_id=456)
     asyncio.run(bot.handle_draw_more_callback(stale))
     assert stale.answer.await_args.args[0] == bot._t(123, "pick_expired")
+
+    # Кнопки старых фото снимаются при новой генерации; после рестарта это
+    # страховка: тап не под последней картинкой не повторяет чужой сюжет
+    # (ревью 10.11.2026).
+    state["last_drawn_at"] = time.time()
+    state["last_drawn_message_id"] = 404
+    older = _make_draw_more_query(user_id=456)
+    asyncio.run(bot.handle_draw_more_callback(older))
+    assert older.answer.await_args.args[0] == bot._t(123, "pick_expired")
     assert called == []
 
 
@@ -2236,6 +2267,18 @@ def test_callback_handlers_have_data_prefix_filters():
     assert "handle_lang_callback" in by_fn and "handle_pick_callback" in by_fn
     assert by_fn["handle_lang_callback"].filters, "lang handler must not be a catch-all"
     assert by_fn["handle_pick_callback"].filters, "pick handler must not be a catch-all"
+    assert "handle_draw_more_callback" in by_fn, "draw:more handler must be registered"
+    assert by_fn["handle_draw_more_callback"].filters, "draw:more handler must not be a catch-all"
+    # «Фильтр есть» не значит «фильтр правильный»: F.data == "draw:moreX" тоже
+    # фильтр, но кнопку бы не нашёл (ревью 10.11.2026). FilterObject.callback —
+    # внутренний вызов aiogram 3.31, привязан к этой версии.
+    draw_filter = by_fn["handle_draw_more_callback"].filters[0]
+    assert bool(draw_filter.callback(value=SimpleNamespace(data="draw:more"))) is True
+    assert bool(draw_filter.callback(value=SimpleNamespace(data="draw:moreX"))) is False
+    assert bool(draw_filter.callback(value=SimpleNamespace(data="lang:ru"))) is False
+    lang_filter = by_fn["handle_lang_callback"].filters[0]
+    assert bool(lang_filter.callback(value=SimpleNamespace(data="lang:ru"))) is True
+    assert bool(lang_filter.callback(value=SimpleNamespace(data="draw:more"))) is False
 
 
 def test_expired_picks_purged_on_new_pick(rate_guard_setup, monkeypatch):
@@ -2856,6 +2899,10 @@ def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
         "ctx": deque(["фон"]),
         "recent_media_ids": {"1": deque(["file-1"])},
         "user_names": {"1": "User"},
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 42,
+        "last_draw_prompt": "секретное описание картинки",
+        "last_drawn_message_id": 555,
         "lang": "en",
     }
     incoming = _FakeIncomingMessage(chat_id)
@@ -2873,6 +2920,8 @@ def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
         assert len(state["ctx"]) == 0
         assert state["recent_media_ids"] == {}
         assert state["user_names"] == {}
+        for _draw_key in ("last_drawn_at", "last_drawn_user", "last_draw_prompt", "last_drawn_message_id"):
+            assert _draw_key not in state
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -2973,3 +3022,450 @@ def test_cmd_banlist_cuts_long_output(monkeypatch):
     asyncio.run(bot.cmd_banlist(_make_ban_message(999808, 107001, "/banlist")))
     assert len(sent["text"]) <= bot.TG_MAX_LEN
     assert sent["text"].endswith("…")
+
+
+def _fresh_draw_state(uid=456, prompt="красное яблоко на столе"):
+    """Своя генерация несколько секунд назад — окно, в котором слабый глагол
+    правки имеет смысл (DRAW_EDIT_CONTEXT_TTL_SEC)."""
+    return {
+        "last_draw_prompt": prompt,
+        "last_drawn_at": time.time(),
+        "last_drawn_user": uid,
+        "last_drawn_message_id": 777,
+    }
+
+
+def test_tts_trigger_right_after_generation_is_audio_not_edit(rate_guard_setup, monkeypatch):
+    # «сделай голосовое» начинается со слабого edit-глагола: в окне свежей
+    # генерации запрос уезжал в правку картинки, и после любого рисунка озвучка
+    # была недоступна 10 минут (ревью 10.11.2026).
+    message = rate_guard_setup()
+    state = _fresh_draw_state()
+    ref_calls = []
+
+    async def fake_resolve(*args, **kwargs):
+        ref_calls.append(True)
+        return [(b"photo-bytes", "image/jpeg")]
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
+    message.text = "сделай голосовое: привет"
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_tts.assert_awaited_once()
+    bot.inline_draw.assert_not_awaited()
+    assert "привет" in bot.inline_tts.await_args.args[1]
+    assert ref_calls == [], "озвучка не должна собирать референсы правки"
+
+
+def test_variants_inside_edit_window_stay_generation(rate_guard_setup, monkeypatch):
+    # Тот же класс: «сделай 2 варианта кота» внутри окна правки превращалось в
+    # одну правку, а фраза «2 варианта» оставалась внутри промпта (ревью 10.11.2026).
+    message = rate_guard_setup()
+    state = _fresh_draw_state()
+    captured = {}
+    ref_calls = []
+
+    async def fake_resolve(*args, **kwargs):
+        ref_calls.append(True)
+        return [(b"photo-bytes", "image/jpeg")]
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        captured.update(prompt=prompt, variants=variants, reference=reference)
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "сделай 2 варианта кота"
+    asyncio.run(bot._handle_message_core(message))
+    assert captured == {"prompt": "кота", "variants": 2, "reference": None}
+    assert ref_calls == []
+
+
+def test_repeat_trigger_with_new_subject_draws_the_subject(rate_guard_setup, monkeypatch):
+    # «ещё вариант кота в шляпе» называет новый сюжет: молча повторять старое
+    # описание значило рисовать не то (ревью 10.11.2026).
+    message = rate_guard_setup()
+    state = _fresh_draw_state(prompt="красное яблоко")
+    captured = {}
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        captured.update(prompt=prompt, variants=variants)
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "ещё вариант кота в шляпе"
+    asyncio.run(bot._handle_message_core(message))
+    assert captured == {"prompt": "кота в шляпе", "variants": 1}
+    bot.inline_draw.assert_not_awaited()
+
+
+def test_longest_trigger_prefix_wins():
+    # «нарисуй» стоит в списке раньше «нарисуй-ка»: первый матч резал
+    # «нарисуй-ка кота» до «ка кота» (ревью 10.11.2026).
+    from lumen_message_parse import DRAW_TRIGGER_PREFIXES, _match_trigger_prefix
+    assert _match_trigger_prefix("нарисуй-ка кота", DRAW_TRIGGER_PREFIXES) == "нарисуй-ка"
+
+
+def test_inline_draw_parks_relay_5xx(monkeypatch):
+    # Ответ relay-прокси («Cloudflare HTTP 502») не похож ни на одно сетевое
+    # слово из прошлого списка: без паузы каждый следующий платил бы полный
+    # таймаут попытки (прод 09.11.2026, ревью 10.11.2026).
+    chat_id = 999447
+    attempts = []
+
+    async def bad_gateway(session, prompt, timeout_sec=None, **_):
+        attempts.append("cloudflare")
+        raise lumen_images.ImageProviderError("Cloudflare HTTP 502 Bad Gateway")
+
+    async def ok_pollinations(session, prompt, timeout_sec=None, **_):
+        attempts.append("pollinations")
+        return b"\x89PNG fallback bytes"
+
+    _two_image_providers(monkeypatch, bad_gateway, ok_pollinations)
+    monkeypatch.setattr(bot, "IMAGE_PROVIDER_COOLDOWN_SEC", 60)
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    try:
+        asyncio.run(bot.inline_draw(incoming, "cat"))
+        assert attempts == ["cloudflare", "pollinations"]
+        assert bot._image_provider_ready("cloudflare") is False
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_inline_draw_moderation_refusal_stops_the_chain(monkeypatch):
+    # Отказ по фильтру содержания — не сетевой сбой: резерв повторил бы то же
+    # самое и списал общий бюджет (ревью 10.11.2026).
+    chat_id = 999448
+    attempts = []
+    usage_before = bot._image_usage_total()
+
+    async def flagged(session, prompt, timeout_sec=None, **_):
+        attempts.append("cloudflare")
+        raise lumen_images.ImageModerationError("Cloudflare refused by moderation: 3030")
+
+    async def must_not_fallback(session, prompt, timeout_sec=None, **_):
+        attempts.append("pollinations")
+        return b"\x89PNG fallback bytes"
+
+    _two_image_providers(monkeypatch, flagged, must_not_fallback)
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    try:
+        assert asyncio.run(bot.inline_draw(incoming, "cat")) is False
+        assert attempts == ["cloudflare"]
+        assert bot._image_provider_ready("cloudflare") is True, "модерация — не перегрузка"
+        # klein картинку посчитал, значит Neuron списаны: попытка обязана попасть в
+        # общий дневной бюджет, иначе цикл из запрещённых описаний выжигал бы квоту
+        # провайдера мимо всяких лимитов (ревью 10.11.2026).
+        assert bot._image_usage_total() == usage_before + 1
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_inline_draw_refunds_slot_even_if_failure_notice_explodes(monkeypatch):
+    # Возврат слота стоял после awaited-ответов в Telegram: сбой уведомления лишал
+    # человека слота до полуночи без картинки (ревью 10.11.2026).
+    chat_id = 999450
+    uid = 777050
+
+    async def broken_provider(session, prompt, timeout_sec=None, **_):
+        raise RuntimeError("provider exploded")
+
+    async def exploding_notice(*args, **kwargs):
+        raise RuntimeError("telegram notice exploded")
+
+    _one_image_provider(monkeypatch, broken_provider)
+    monkeypatch.setattr(bot, "_edit_message_quietly", exploding_notice)
+    monkeypatch.setattr(bot, "_safe_reply", exploding_notice)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        assert asyncio.run(bot.inline_draw(incoming, "cat")) is False
+        assert bot._user_daily_entry(uid).get("draw", 0) == 0
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_inline_draw_strips_more_button_from_previous_photo(monkeypatch):
+    # «Повторить» живёт только у последней картинки, как в ChatGPT: без съёма
+    # старой клавиатуры под ней оставался кликабельный чужой сюжет (ревью 10.11.2026).
+    from aiogram.types import InlineKeyboardMarkup, PhotoSize
+
+    chat_id = 999453
+    uid = 777053
+    calls = []
+
+    async def ok(session, prompt, timeout_sec=None, **_):
+        return b"\x89PNG fake bytes"
+
+    sent_photo = SimpleNamespace(
+        message_id=4242,
+        photo=[PhotoSize(file_id="gen", file_unique_id="gen-u", width=1024, height=1024, file_size=1)],
+    )
+
+    fake_bot = SimpleNamespace(
+        send_photo=lambda **k: None, edit_message_reply_markup=lambda **k: None,
+    )
+
+    async def fake_tg_call(func, *args, **kwargs):
+        calls.append((func, kwargs))
+        return sent_photo
+
+    _one_image_provider(monkeypatch, ok)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", fake_bot)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        asyncio.run(bot.inline_draw(incoming, "cat"))
+        asyncio.run(bot.inline_draw(incoming, "dog"))
+        sends = [kw for fn, kw in calls if fn is fake_bot.send_photo]
+        # Мок возвращал sent_photo ЛЮБОМУ вызову, и «кнопка под фото» в тесте
+        # не проверялась вовсе: мутант без клавиатуры проходил зелёным
+        # (ревью 10.11.2026).
+        assert len(sends) == 2
+        for kw in sends:
+            buttons = [b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row]
+            assert buttons == ["draw:more"], "кнопка «Ещё вариант» обязана ехать с фото"
+        # Съём клавиатуры опознаётся по самой функции, а не по форме kwargs.
+        strips = [kw for fn, kw in calls if fn is fake_bot.edit_message_reply_markup]
+        assert len(strips) == 1, "у первой генерации снимать клавиатуру не с чего"
+        assert strips[0]["chat_id"] == chat_id
+        assert strips[0]["message_id"] == 4242
+        # Снятие — явная пустая клавиатура: None aiogram вообще не отправляет поле,
+        # и работало бы молчаливое «нет поля = нет кнопок» (ревью 10.11.2026).
+        assert isinstance(strips[0]["reply_markup"], InlineKeyboardMarkup)
+        assert strips[0]["reply_markup"].inline_keyboard == []
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_inline_draw_sends_photo_when_markup_editor_is_absent(monkeypatch):
+    # Съём клавиатуры берёт метод через getattr: у бота без edit_message_reply_markup
+    # прямой доступ кидал AttributeError внутри except, и человек оставался
+    # без картинки (ревью 10.11.2026).
+    from aiogram.types import PhotoSize
+
+    chat_id = 999454
+    uid = 777054
+
+    async def ok(session, prompt, timeout_sec=None, **_):
+        return b"\x89PNG fake bytes"
+
+    sent_photo = SimpleNamespace(
+        message_id=4243,
+        photo=[PhotoSize(file_id="gen", file_unique_id="gen-u", width=1024, height=1024, file_size=1)],
+    )
+
+    class _SendOnlyBot:
+        async def send_photo(self, **kwargs):
+            return sent_photo
+
+    async def fake_tg_call(func, *args, **kwargs):
+        return sent_photo
+
+    _one_image_provider(monkeypatch, ok)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", _SendOnlyBot())
+    bot.chat_state[chat_id] = {"last_drawn_message_id": 999, "last_drawn_at": time.time()}
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        assert asyncio.run(bot.inline_draw(incoming, "cat")) is True
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_reply_to_foreign_photo_lands_in_that_photos_owner_bucket(monkeypatch):
+    # Реплай на чужое фото клал файл в корзину ответившего: следующий «добавь
+    # звезду» без реплая правил чужой снимок (ревью 10.11.2026).
+    from lumen_media_flow import _resolve_edit_references
+
+    saved = []
+    photo = SimpleNamespace(file_id="owner-fid", mime_type="image/jpeg")
+    message = SimpleNamespace(
+        photo=None, document=None, video=None, animation=None, video_note=None,
+        voice=None, audio=None, sticker=None,
+        reply_to_message=SimpleNamespace(
+            photo=[photo], document=None, from_user=SimpleNamespace(id=77),
+        ),
+        from_user=SimpleNamespace(id=88),
+    )
+
+    async def fake_fetch(fid, mime):
+        return b"reply-bytes", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(bot, "_save_media_to_history", lambda src, state, user_id=None: saved.append(user_id))
+    refs = asyncio.run(_resolve_edit_references(message, {}, is_private=False, implicit=False))
+    assert [item[0] for item in refs] == [b"reply-bytes"]
+    assert saved == [77]
+
+
+def test_resolve_edit_references_dedups_same_file_id(monkeypatch):
+    # Вложение и реплай с одним file_id дают один референс; ветка seen_ids раньше
+    # не выполнялась ни в одном тесте (ревью 10.11.2026).
+    from lumen_media_flow import _resolve_edit_references
+
+    fid = "same-fid"
+    photo = SimpleNamespace(file_id=fid, mime_type="image/jpeg")
+    message = SimpleNamespace(
+        photo=[photo], document=None, video=None, animation=None, video_note=None,
+        voice=None, audio=None, sticker=None,
+        reply_to_message=SimpleNamespace(photo=[photo], document=None, from_user=SimpleNamespace(id=7)),
+        from_user=SimpleNamespace(id=7),
+    )
+    fetched = []
+
+    async def fake_download(src):
+        return b"bytes", "image/jpeg", "f.jpg"
+
+    async def fake_fetch(fid_arg, mime):
+        fetched.append(fid_arg)
+        return b"bytes", "image/jpeg"
+
+    monkeypatch.setattr(bot, "_download_message_attachment", fake_download)
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(bot, "_save_media_to_history", lambda *a, **k: None)
+    refs = asyncio.run(_resolve_edit_references(message, {}, is_private=True, implicit=False))
+    assert len(refs) == 1
+    assert fetched == []
+
+
+
+def test_repeat_trigger_without_draw_context_stays_text(rate_guard_setup, monkeypatch):
+    # «другой вариант перевода письма» и «regenerate the summary» в чате, где
+    # картинку не просили, — это текст: рисовать по одному слову «вариант»
+    # значило тратить дневный слот на неизвестно что (ревью 10.11.2026).
+    message = rate_guard_setup()
+    variants_calls = []
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        variants_calls.append(prompt)
+
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    monkeypatch.setattr(bot, "_run_route", AsyncMock(return_value=("ok", False)))
+    message.text = "другой вариант перевода письма"
+    asyncio.run(bot._handle_message_core(message))
+    assert variants_calls == []
+    bot.inline_draw.assert_not_awaited()
+    assert bot._run_route.await_count == 1, "запрос должен дойти до текстового маршрута"
+
+
+def test_repeat_trigger_reply_to_text_message_does_not_paint_the_reply(rate_guard_setup, monkeypatch):
+    # Реплай «ещё вариант» на текстовый ответ рисовал текст этого ответа:
+    # фолбэк на реплай в ветке повтора выключен (ревью 10.11.2026).
+    message = rate_guard_setup()
+    state = _fresh_draw_state(prompt="красное яблоко")
+    variants_calls = []
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        variants_calls.append(prompt)
+
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "ещё вариант"
+    message.reply_to_message = SimpleNamespace(
+        text="Вот ваш перевод письма.", caption=None, photo=None, document=None,
+        from_user=SimpleNamespace(id=456),
+    )
+    asyncio.run(bot._handle_message_core(message))
+    assert variants_calls == [], "текст реплая не уезжает в промпт"
+    # Повторяется последняя генерация, а не чужая подпись.
+    bot.inline_draw.assert_awaited_once_with(message, "красное яблоко")
+
+
+def test_edit_variants_request_keeps_the_reference(rate_guard_setup, monkeypatch):
+    # «сделай 3 варианта: убери фон» с фото в реплае давал одну картинку без
+    # объяснений: число вариантов отрезала проверка «нет вложения» (ревью 10.11.2026).
+    message = rate_guard_setup()
+    refs = [(b"ref-bytes", "image/jpeg")]
+    captured = {}
+
+    async def fake_resolve(*args, **kwargs):
+        return refs
+
+    async def fake_variants(msg, prompt, *, variants=1, reference=None):
+        captured.update(prompt=prompt, variants=variants, reference=reference)
+
+    monkeypatch.setattr(bot, "_resolve_edit_references", fake_resolve)
+    monkeypatch.setattr(bot, "inline_draw_variants", fake_variants)
+    message.text = "сделай 3 варианта: убери фон"
+    message.reply_to_message = SimpleNamespace(
+        photo=[SimpleNamespace(file_id="p", mime_type="image/jpeg")], text=None, caption=None,
+        from_user=SimpleNamespace(id=456),
+    )
+    asyncio.run(bot._handle_message_core(message))
+    assert captured["variants"] == 3
+    assert captured["reference"] == refs, "правка остаётся правкой по тому же референсу"
+    assert "3 варианта" not in captured["prompt"], "фраза количества не едет модели"
+
+
+def test_inline_draw_edit_leaves_the_generation_button_alone(monkeypatch):
+    # Правка не переносит якорь кнопки и не снимает клавиатуру с прошлого фото:
+    # под правкой кнопки нет, а «ещё вариант» повторяет именно генерацию,
+    # иначе кнопка и текст расходились (ревью 10.11.2026).
+    from aiogram.types import PhotoSize
+
+    chat_id = 999456
+    uid = 777056
+    calls = []
+
+    async def ok_edit(session, prompt, reference, second_reference=None, **kwargs):
+        return b"\x89PNG fake bytes"
+
+    sent_photo = SimpleNamespace(
+        message_id=5252,
+        photo=[PhotoSize(file_id="gen", file_unique_id="gen-u", width=1024, height=1024, file_size=1)],
+    )
+    fake_bot = SimpleNamespace(
+        send_photo=lambda **k: None, edit_message_reply_markup=lambda **k: None,
+    )
+
+    async def fake_tg_call(func, *args, **kwargs):
+        calls.append((func, kwargs))
+        return sent_photo
+
+    monkeypatch.setattr(bot, "image_provider_names", lambda: ("cloudflare",))
+    monkeypatch.setattr(bot, "_cloudflare_edit_to_image", ok_edit)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", fake_bot)
+    bot.chat_state[chat_id] = {
+        "last_drawn_message_id": 4242, "last_drawn_at": time.time(),
+        "last_drawn_user": uid, "last_draw_prompt": "cat",
+    }
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    try:
+        sent = asyncio.run(bot.inline_draw(incoming, "сделай фон синим", reference=(b"ref", "image/jpeg")))
+        assert sent is True
+        assert [fn for fn, _ in calls if fn is fake_bot.edit_message_reply_markup] == []
+        sends = [kw for fn, kw in calls if fn is fake_bot.send_photo]
+        assert len(sends) == 1 and sends[0]["reply_markup"] is None, "у правки кнопки нет"
+        st = bot.chat_state[chat_id]
+        assert st["last_drawn_message_id"] == 4242, "правка не двигает якорь кнопки"
+        assert st["last_draw_prompt"] == "cat", "правка не перезаписывает описание"
+        assert st["last_drawn_at"] > time.time() - 5, "свежесть для слабых глаголов обновляется"
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(chat_id, None)

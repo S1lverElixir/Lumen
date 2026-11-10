@@ -600,12 +600,16 @@ async def _resolve_incoming_media(
     return med_name, media_tuple
 
 
-def _strip_trigger_content(clean_prompt: str, trigger: str, message: Message) -> str:
+def _strip_trigger_content(
+    clean_prompt: str, trigger: str, message: Message, *, reply_fallback: bool = True,
+) -> str:
     """Текст после draw/tts-триггера: чистка префикса + фолбэк на текст реплая
-    ("нарисуй это" в ответ на сообщение с описанием)."""
+    ("нарисуй это" в ответ на сообщение с описанием). У повтора фолбэк выключен:
+    «ещё вариант» к текстовому ответу — это текст, а не картинка с его подписью
+    (ревью 10.11.2026)."""
     content = re.sub(r'^[:\s\-\,]+', '', clean_prompt[len(trigger):].strip()).strip()
     content = _strip_reply_marker(content)
-    if not content and message.reply_to_message is not None:
+    if reply_fallback and not content and message.reply_to_message is not None:
         reply_text = (message.reply_to_message.text or message.reply_to_message.caption or "").strip()
         if reply_text:
             content = reply_text
@@ -726,43 +730,30 @@ async def _handle_message_core(
 
     # «Ещё вариант»: повтор последней генерации тем же описанием. Только свежая
     # своя генерация — иначе «ещё раз» это обычный текст (шутка, повтор ответа).
-    if not is_continuation and _match_trigger_prefix(lower_prompt, REPEAT_TRIGGER_PREFIXES):
+    if not is_continuation and (
+        matched_repeat := _match_trigger_prefix(lower_prompt, REPEAT_TRIGGER_PREFIXES)
+    ):
         _last_prompt = state.get("last_draw_prompt")
-        if (
-            isinstance(_last_prompt, str) and _last_prompt.strip()
-            and bot._fresh_generation_ref(state, uid_early)
-        ):
+        _has_draw_ctx = isinstance(_last_prompt, str) and bool(_last_prompt.strip())
+        # «ещё вариант кота в шляпе» называет новый сюжет: повторять старое
+        # описание значило рисовать не то. Но рисовать по одному этому слову там,
+        # где картинку не просили, — ошибка маршрута: «другой вариант перевода
+        # письма» и «regenerate the summary» остаются текстом (ревью 10.11.2026).
+        _repeat_rest = _strip_trigger_content(
+            clean_prompt, matched_repeat, message, reply_fallback=False,
+        )
+        if _repeat_rest and _has_draw_ctx:
+            _repeat_count, _repeat_prompt = _split_image_variants(_repeat_rest)
+            await bot.inline_draw_variants(
+                message, _repeat_prompt or _repeat_rest, variants=_repeat_count,
+            )
+            return
+        if _has_draw_ctx and bot._fresh_generation_ref(state, uid_early):
             await bot.inline_draw(message, _last_prompt)
             return
 
-    # Правка картинки: глагол + реальный референс. Без картинки текст уходит
-    # обычной модели ("измени мир" — не рисование), поэтому триггер тут мягкий.
-    matched_edit_trigger = _match_trigger_prefix(lower_prompt, EDIT_TRIGGER_PREFIXES)
-    if matched_edit_trigger and not is_continuation:
-        try:
-            reference = await bot._resolve_edit_references(
-                message, state,
-                is_private=is_private,
-                implicit=matched_edit_trigger in EDIT_TRIGGER_IMPLICIT,
-            )
-        except bot._MediaTooLargeError as exc:
-            # Файл больше капа скачивания: честный отказ, иначе исключение уходило
-            # в глобальный обработчик и человек не видел ответа (ревью 10.11.2026).
-            await bot._safe_reply(message, bot._t(
-                message.chat.id, "media_too_big",
-                limit_mb=max(1, round(exc.cap_bytes / (1024 * 1024))),
-            ))
-            return
-        except Exception as exc:
-            log.warning("[draw] Edit reference resolve failed, answering as text: %s", exc)
-            reference = None
-        if reference:
-            # Промпт правки идёт целиком, с глаголом: "измени фон на синий"
-            # без "измени" превратилось бы в "фон на синий" и потеряло действие.
-            await bot.inline_draw(message, clean_prompt, reference=reference)
-            return
-
     matched_draw_trigger = _match_trigger_prefix(lower_prompt, DRAW_TRIGGER_PREFIXES)
+    matched_edit_trigger = _match_trigger_prefix(lower_prompt, EDIT_TRIGGER_PREFIXES)
     matched_tts_trigger = _match_trigger_prefix(lower_prompt, TTS_TRIGGER_PREFIXES)
 
     # «Сделай/нарисуй 2 варианта кота» — это серия генераций, а не правка:
@@ -785,6 +776,52 @@ async def _handle_message_core(
             await bot.inline_draw_variants(
                 message, _variant_prompt, variants=max(_variant_count, _count2),
             )
+            return
+
+    # Озвучка раньше правки: «сделай голосовое» начинается со слабого глагола,
+    # и в окне свежей генерации уводило запрос в правку картинки — после любого
+    # рисунка аудио было недоступно 10 минут (ревью 10.11.2026).
+    if matched_tts_trigger:
+        tts_content = _strip_trigger_content(clean_prompt, matched_tts_trigger, message)
+        if tts_content:
+            await bot.inline_tts(message, tts_content)
+            return
+
+    # Правка картинки: глагол + реальный референс. Без картинки текст уходит
+    # обычной модели ("измени мир" — не рисование), поэтому триггер тут мягкий.
+    if matched_edit_trigger and not is_continuation:
+        try:
+            reference = await bot._resolve_edit_references(
+                message, state,
+                is_private=is_private,
+                implicit=matched_edit_trigger in EDIT_TRIGGER_IMPLICIT,
+            )
+        except bot._MediaTooLargeError as exc:
+            # Файл больше капа скачивания: честный отказ, иначе исключение уходило
+            # в глобальный обработчик и человек не видел ответа (ревью 10.11.2026).
+            await bot._safe_reply(message, bot._t(
+                message.chat.id, "media_too_big",
+                limit_mb=max(1, round(exc.cap_bytes / (1024 * 1024))),
+            ))
+            return
+        except Exception as exc:
+            log.warning("[draw] Edit reference resolve failed, answering as text: %s", exc)
+            reference = None
+        if reference:
+            # Промпт правки идёт целиком, с глаголом: "измени фон на синий"
+            # без "измени" превратилось бы в "фон на синий" и потеряло действие.
+            # Число вариантов здесь, а не в ветке выше: там оно отрезалось из-за
+            # вложения, и «сделай 3 варианта: убери фон» молча давало одну картинку
+            # (ревью 10.11.2026).
+            _edit_count, _edit_prompt = _split_image_variants(clean_prompt)
+            _edit_count = max(_edit_count, _variant_count)
+            if _edit_count > 1:
+                await bot.inline_draw_variants(
+                    message, _edit_prompt or clean_prompt,
+                    variants=_edit_count, reference=reference,
+                )
+                return
+            await bot.inline_draw(message, clean_prompt, reference=reference)
             return
 
     if matched_draw_trigger:
@@ -815,11 +852,6 @@ async def _handle_message_core(
             )
             return
 
-    if matched_tts_trigger:
-        tts_content = _strip_trigger_content(clean_prompt, matched_tts_trigger, message)
-        if tts_content:
-            await bot.inline_tts(message, tts_content)
-            return
 
     # Кнопки-уточнения для вкусовых запросов без деталей — вместо гадания модели.
     # _pick_resolved ставят только колбэки: без флага дополненный текст ушёл бы

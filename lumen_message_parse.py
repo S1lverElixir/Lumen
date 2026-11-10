@@ -134,15 +134,19 @@ TTS_TRIGGER_PREFIXES = [
 ]
 
 def _match_trigger_prefix(text_lower: str, prefixes: list[str]) -> str | None:
-    """Первый триггер в начале строки. Нужна граница слова, иначе "прочтите"/"нарисуйка" дадут битую генерацию."""
+    """Самый длинный триггер в начале строки: «нарисуй» стоит раньше «нарисуй-ка» и
+    обрезал «нарисуй-ка кота» до «ка кота» (ревью 10.11.2026). Нужна граница слова,
+    иначе "прочтите"/"нарисуйка" дадут битую генерацию."""
+    best: str | None = None
     for prefix in prefixes:
         if not text_lower.startswith(prefix):
             continue
         rest = text_lower[len(prefix):]
         if rest and rest[0].isalpha():
             continue
-        return prefix
-    return None
+        if best is None or len(prefix) > len(best):
+            best = prefix
+    return best
 
 # Пустышки "это/этот текст" значат реплай. Найдено 09.2026: "нарисуй это" рисовало слово "это".
 _REPLY_MARKER_RE = re.compile(
