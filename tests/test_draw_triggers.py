@@ -40,6 +40,30 @@ DRAW_INTENTS = [
     # Слабый глагол + новый артефакт = генерация, а не правка.
     "сделай картинку кота",
     "сделай мне постер для концерта",
+    "сделай обложку для телеграм-канала",
+    "сделай плакат с китом",
+    "сделай наклейку с молнией",
+    "сделай аватарку с лисом",
+    # Название артефакта своими словами: местоимение правки не должно
+    # читаться внутри слов «талисман», «телефон», «телеграм».
+    "придумай талисман для олимпиады",
+    "хочу обои на телефон с космосом",
+    "нужен макет визитки",
+    "хочу стикерпак с котами",
+    "придумай эмблему для клуба",
+    "накидай баннер для сайта",
+    "накидай мемов с котом",
+    "нужна открытка на день рождения",
+    "хочу превью для видео",
+    "давай картинку с цитатой",
+    "можешь сделать картинку с котом",
+    "сгенерируй мне аватарку",
+    "design a logo for a bakery",
+    "make me a sticker of a cat",
+    "I need a poster for a concert",
+    "give me an illustration of a dragon",
+    "create a wallpaper with mountains",
+    "can you make an image of a castle",
     # Вежливые формы.
     "ты можешь нарисовать дракона?",
     "можешь нарисовать кота?",
@@ -75,7 +99,15 @@ NOT_DRAW_INTENTS = [
     # Совсем не про картинки.
     "хочу кофе",
     "кот",
-    "make me a sandwich",
+    "что такое стикерпак",
+    "как сделать логотип в фотошопе",
+    "покажи обои на рабочий стол",
+    "пришли картинку которую рисовал",
+    "сколько стоит сделать логотип",
+    "объясни что такое превью",
+    "design me a workout plan",
+    "give me a list of movies",
+    "make me a coffee",
     "how do I draw a cat",
     "show me the picture you saved",
 ]
@@ -107,6 +139,10 @@ def test_non_draw_phrases_are_not_draw(text):
     "сделай темнее",
     "сделай эту картинку ярче",
     "измени её пропорции",
+    "make the sky stormier",
+    "make it darker",
+    "remove the background",
+    "add a hat to the cat",
 ])
 def test_edit_phrases_stay_edit(text):
     low = text.lower().strip()
@@ -115,7 +151,9 @@ def test_edit_phrases_stay_edit(text):
     assert _intent(text) != "draw", text
 
 
-@pytest.mark.parametrize("text", ["ещё вариант", "другой вариант кота", "another version"])
+@pytest.mark.parametrize("text", [
+    "ещё вариант", "еще варианты", "другой вариант кота", "another version",
+])
 def test_repeat_phrases_stay_repeat(text):
     low = text.lower().strip()
     core = _strip_trigger_fillers(low)[0]
