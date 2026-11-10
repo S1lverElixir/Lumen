@@ -1030,6 +1030,9 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
         assert list(bucket)[-1] == ("gen-file-id", "image/jpeg")
         # Корзинка обязана уйти в хранилище: иначе после рестарта правка не найдёт фото.
         assert chat_id in marked
+        # Метка свежей генерации: по ней слабые глаголы ("добавь") находят картинку.
+        assert bot.get_state(chat_id)["last_drawn_at"] > 0
+        assert bot.get_state(chat_id)["last_drawn_user"] == uid
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1340,17 +1343,24 @@ def test_resolve_edit_reference_prefers_reply_photo_over_last_media(monkeypatch)
     assert fetched == [("reply-fid", "image/jpeg")]
 
 
+def _edit_ref_message(user_id=7):
+    return SimpleNamespace(
+        photo=None, document=None, video=None, animation=None, video_note=None,
+        voice=None, audio=None, sticker=None, reply_to_message=None,
+        from_user=SimpleNamespace(id=user_id),
+    )
+
+
 def test_resolve_edit_reference_finds_generated_image_in_bucket(monkeypatch):
     # Прод 10.11.2026: "измени" после /draw уходил в текстовую модель, потому что
     # сгенерированная картинка живёт только в recent_media_ids, не в общем логе.
     from lumen_media_flow import _resolve_edit_reference
 
-    message = SimpleNamespace(
-        photo=None, document=None, video=None, animation=None, video_note=None,
-        voice=None, audio=None, sticker=None, reply_to_message=None,
-        from_user=SimpleNamespace(id=7),
-    )
-    state = {"recent_media_ids": {"7": [("gen-fid", "image/jpeg")]}}
+    state = {
+        "recent_media_ids": {"7": [("gen-fid", "image/jpeg")]},
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 7,
+    }
     fetched = []
 
     async def fake_fetch(fid, mime):
@@ -1358,27 +1368,44 @@ def test_resolve_edit_reference_finds_generated_image_in_bucket(monkeypatch):
         return b"img-bytes", "image/jpeg"
 
     monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
-    got = asyncio.run(_resolve_edit_reference(message, state, is_private=True, implicit=True))
+    got = asyncio.run(_resolve_edit_reference(_edit_ref_message(), state, is_private=True, implicit=True))
     assert got == (b"img-bytes", "image/jpeg")
     assert fetched == [("gen-fid", "image/jpeg")]
 
 
-def test_resolve_edit_reference_ignores_bucket_when_not_implicit(monkeypatch):
-    # Слабый глагол ("сделай") без вложения/реплая не должен цеплять чужое фото.
+def test_resolve_edit_reference_weak_verb_uses_fresh_generation_only(monkeypatch):
+    # "добавь звезду" без реплая — правка свежей генерации (прод 10.11.2026),
+    # но древняя генерация или чужое фото контекстом не становятся.
     from lumen_media_flow import _resolve_edit_reference
 
-    message = SimpleNamespace(
-        photo=None, document=None, video=None, animation=None, video_note=None,
-        voice=None, audio=None, sticker=None, reply_to_message=None,
-        from_user=SimpleNamespace(id=7),
-    )
-    state = {"recent_media_ids": {"7": [("gen-fid", "image/jpeg")]}}
+    async def fake_fetch(fid, mime):
+        return b"img-bytes", "image/jpeg"
 
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+
+    fresh = {
+        "recent_media_ids": {"7": [("gen-fid", "image/jpeg")]},
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 7,
+    }
+    assert asyncio.run(_resolve_edit_reference(_edit_ref_message(), fresh, is_private=True, implicit=False)) == (b"img-bytes", "image/jpeg")
+
+    stale = {
+        "recent_media_ids": {"7": [("gen-fid", "image/jpeg")]},
+        "last_drawn_at": time.time() - bot.DRAW_EDIT_CONTEXT_TTL_SEC - 5,
+        "last_drawn_user": 7,
+    }
     async def must_not_fetch(*args, **kwargs):
-        raise AssertionError("non-implicit edit must not fetch a reference")
-
+        raise AssertionError("stale generation must not be an edit context")
     monkeypatch.setattr(bot, "_fetch_media", must_not_fetch)
-    assert asyncio.run(_resolve_edit_reference(message, state, is_private=True, implicit=False)) is None
+    assert asyncio.run(_resolve_edit_reference(_edit_ref_message(), stale, is_private=True, implicit=False)) is None
+
+    foreign = {
+        "recent_media_ids": {"7": [("gen-fid", "image/jpeg")]},
+        "last_drawn_at": time.time(),
+        "last_drawn_user": 8,
+    }
+    assert asyncio.run(_resolve_edit_reference(_edit_ref_message(), foreign, is_private=True, implicit=False)) is None
 
 
 def test_draw_command_rejects_exhausted_quota(rate_guard_setup, monkeypatch):

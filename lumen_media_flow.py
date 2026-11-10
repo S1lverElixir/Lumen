@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from typing import Any
 
@@ -111,6 +112,21 @@ def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | No
     if not recent or recent[-1][0] != file_id:
         recent.append((file_id, mime or "application/octet-stream"))
 
+def _fresh_generation_ref(state: dict[str, Any], sender_id: int | None) -> bool:
+    """Своя генерация не старше окна: только тогда слабый глагол ("добавь") —
+    правка, иначе "сделай мне кофе" рисовало бы поверх древнего фото."""
+    import bot
+    if not isinstance(state, dict):
+        return False
+    drawn_at = state.get("last_drawn_at")
+    drawn_user = state.get("last_drawn_user")
+    if not isinstance(drawn_at, (int, float)) or isinstance(drawn_at, bool):
+        return False
+    if drawn_user is not None and sender_id is not None and drawn_user != sender_id:
+        return False
+    return time.time() - float(drawn_at) <= bot.DRAW_EDIT_CONTEXT_TTL_SEC
+
+
 async def _resolve_edit_reference(
     message: Any, state: dict[str, Any], *, is_private: bool, implicit: bool,
 ) -> tuple[bytes, str] | None:
@@ -147,18 +163,10 @@ async def _resolve_edit_reference(
                 bot._save_media_to_history(reply_src, state, sender_id)
                 return fetched
 
-    if implicit:
-        found = lumen_memory.last_media_for_user(
-            state, "photo", sender_id=sender_id, private=is_private,
-        )
-        if found:
-            _entry, ref = found
-            fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
-            if fetched:
-                return fetched
-        # Своя сгенерированная картинка в общий лог не пишется как media (только
-        # файл в корзинку), поэтому без этого пути "измени" после /draw не находил
-        # картинку и уходил в текстовую модель (прод 10.11.2026).
+    # Своя сгенерированная картинка в общий лог не пишется как media (только
+    # файл в корзинку). Слабым глаголам ("добавь звезду") она нужна, но только
+    # свежая: иначе старое фото превращало бы любую фразу в правку.
+    if _fresh_generation_ref(state, sender_id):
         from lumen_message_parse import _find_recent_media_by_category
 
         buckets = state.get("recent_media_ids") if isinstance(state, dict) else None
@@ -172,6 +180,16 @@ async def _resolve_edit_reference(
                 fetched = await bot._fetch_media(fid_mime[0], fid_mime[1])
                 if fetched:
                     return fetched
+
+    if implicit:
+        found = lumen_memory.last_media_for_user(
+            state, "photo", sender_id=sender_id, private=is_private,
+        )
+        if found:
+            _entry, ref = found
+            fetched = await bot._fetch_media(ref["file_id"], ref["mime"])
+            if fetched:
+                return fetched
     return None
 
 

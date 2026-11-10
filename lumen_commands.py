@@ -325,7 +325,12 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             _drawn_source = bot._msg_media_source(sent)
             if _drawn_source is not None:
                 with contextlib.suppress(Exception):
-                    bot._save_media_to_history(_drawn_source, bot.get_state(cid), uid)
+                    _state = bot.get_state(cid)
+                    bot._save_media_to_history(_drawn_source, _state, uid)
+                    # Метка для «добавь звезду» без реплая: слабые глаголы правки
+                    # относятся только к свежей генерации (прод 10.11.2026).
+                    _state["last_drawn_at"] = time.time()
+                    _state["last_drawn_user"] = uid
                 # Без пометки «грязно» корзинка не уезжала в хранилище: после
                 # рестарта «измени эту картинку» не находил своё фото (прод 10.11.2026).
                 bot.mark_state_dirty(cid)

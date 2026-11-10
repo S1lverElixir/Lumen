@@ -505,6 +505,9 @@ IMAGE_GLOBAL_CONCURRENCY = _env_number("IMAGE_GLOBAL_CONCURRENCY", 2, min_value=
 # Сколько ждать свободный слот генерации: весь DRAW_TOTAL_BUDGET_SEC на очередь
 # тратить нельзя — человек отказывается от картинки раньше, чем её нарисует очередь.
 IMAGE_QUEUE_TIMEOUT_SEC = _env_number("IMAGE_QUEUE_TIMEOUT_SEC", 10, min_value=1)
+# Сколько после генерации «добавь звезду»/«сделай синим» ещё относится к этой
+# картинке: без окна слабый глагол искал бы фото до бесконечности (прод 10.11.2026).
+DRAW_EDIT_CONTEXT_TTL_SEC = _env_number("DRAW_EDIT_CONTEXT_TTL_SEC", 600, min_value=1)
 # Пауза на провайдера после его 429/402 FREE_LIMIT: Pollinations отдаёт Retry-After
 # ~35с, дефолт 60с с запасом. Без паузы следующий человек повторял бы те же попытки.
 IMAGE_PROVIDER_COOLDOWN_SEC = _env_number("IMAGE_PROVIDER_COOLDOWN_SEC", 60, min_value=1)
