@@ -365,9 +365,10 @@ async def inline_draw(message: Message, prompt: str, *, reference: tuple[bytes, 
             # клавиатуру с предыдущей, иначе тап по старому фото генерировал бы
             # уже другой сюжет и тратил слоты (ревью 10.11.2026).
             _prev_drawn = bot.get_state(cid).get("last_drawn_message_id")
-            if _prev_drawn and _prev_drawn != getattr(message, "message_id", None):
+            _markup_editor = getattr(bot.bot, "edit_message_reply_markup", None)
+            if _prev_drawn and _markup_editor is not None and _prev_drawn != getattr(message, "message_id", None):
                 await bot._tg_call(
-                    bot.bot.edit_message_reply_markup,
+                    _markup_editor,
                     chat_id=cid, message_id=_prev_drawn, reply_markup=None,
                     call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
                 )
