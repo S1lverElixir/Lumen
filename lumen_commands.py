@@ -594,6 +594,22 @@ async def inline_draw(
                     # id ОТПРАВЛЕННОГО фото, а не запроса: тап приходит с фото, и
                     # запись id сообщения пользователя делала каждый тап «старым».
                     _state["last_drawn_message_id"] = getattr(sent, "message_id", None)
+                    # Версии для «верни предыдущий вариант»: file_id уже у Telegram,
+                    # возврат не качает файл и не зовёт провайдера (паритет 10.11.2026).
+                    if _drawn_source is not None:
+                        from lumen_media import _media_file_id_and_mime
+                        _vfid, _vmime, _ = _media_file_id_and_mime(_drawn_source)
+                        if _vfid:
+                            _versions = _state.setdefault("draw_versions", [])
+                            _versions.append({
+                                "file_id": _vfid, "mime": _vmime or "image/jpeg",
+                                "prompt": prompt, "user": uid, "ts": time.time(),
+                                "message_id": getattr(sent, "message_id", None),
+                            })
+                            del _versions[:-5]
+                            # Новая генерация обнуляет отменённые версии: redo после
+                            # нового рисунка возвращал бы картинку из другой ветки.
+                            _state.pop("draw_redo", None)
                 # Корзина после меток: её сбой не должен стирать контекст
                 # кнопки и слабых глаголов.
                 if _drawn_source is not None:
@@ -697,6 +713,70 @@ async def inline_draw_variants(
         ok = await bot.inline_draw(message, prompt, reference=reference, prepared_prompt=_prepared)
         if not ok:
             break
+
+
+async def revert_draw_version(message: Message, state: dict, *, redo: bool = False) -> bool:
+    """Предыдущая (или отменённая) версия картинки: пересылаем уже готовое фото
+    по file_id, без провайдера и без списания дневного слота. Возврат чужой
+    картинки в группе запрещён тем же правилом, что и кнопка «Ещё вариант»."""
+    import bot
+    cid = message.chat.id
+    uid = bot._user_key_for_message(message)
+    versions = list(state.get("draw_versions") or [])
+    undone = list(state.get("draw_redo") or [])
+    owner = state.get("last_drawn_user")
+    if owner is not None and uid is not None and owner != uid and not bot._is_owner(uid):
+        await bot._safe_reply(message, bot._t(cid, "pick_not_yours"))
+        return False
+    if redo:
+        if not undone:
+            await bot._safe_reply(message, bot._t(cid, "draw_no_versions"))
+            return False
+        target = undone.pop()
+        versions.append(target)
+    else:
+        if len(versions) < 2:
+            await bot._safe_reply(message, bot._t(cid, "draw_no_versions"))
+            return False
+        undone.append(versions.pop())
+        target = versions[-1]
+    _prev_drawn = state.get("last_drawn_message_id")
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=bot._t(cid, "draw_more_button"), callback_data="draw:more"),
+    ]])
+    sent = await bot._tg_call(
+        bot.bot.send_photo,
+        chat_id=cid,
+        photo=target["file_id"],
+        reply_markup=markup,
+        reply_to_message_id=message.message_id,
+        call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+    )
+    if sent is None:
+        # Отправка не удалась — списки возвращаем как были, иначе версия
+        # потерялась бы без единой картинки в чате.
+        log.warning("[draw] Version resend failed (chat=%s, redo=%s).", cid, redo)
+        return False
+    _markup_editor = getattr(bot.bot, "edit_message_reply_markup", None)
+    if _prev_drawn and _markup_editor is not None:
+        await bot._tg_call(
+            _markup_editor,
+            chat_id=cid, message_id=_prev_drawn,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+        )
+    state["draw_versions"] = versions[-5:]
+    state["draw_redo"] = undone[-5:]
+    state["last_draw_prompt"] = target.get("prompt") or state.get("last_draw_prompt")
+    state["last_drawn_message_id"] = getattr(sent, "message_id", None)
+    state["last_drawn_at"] = time.time()
+    state["last_drawn_user"] = uid
+    _source = bot._msg_media_source(sent)
+    if _source is not None:
+        bot._save_media_to_history(_source, state, uid)
+    bot.mark_state_dirty(cid)
+    log.info("[draw] Version restored (chat=%s, redo=%s, left=%d).", cid, redo, len(versions))
+    return True
 
 
 async def handle_draw_more_callback(query: CallbackQuery) -> None:
@@ -1132,7 +1212,10 @@ async def cmd_reset(message: Message) -> None:
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
             call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
         )
-    for _draw_key in ("last_drawn_at", "last_drawn_user", "last_draw_prompt", "last_drawn_message_id"):
+    for _draw_key in (
+        "last_drawn_at", "last_drawn_user", "last_draw_prompt", "last_drawn_message_id",
+        "draw_versions", "draw_redo",
+    ):
         state.pop(_draw_key, None)
     bot.mark_state_dirty(message.chat.id)
     await bot._tg_call(

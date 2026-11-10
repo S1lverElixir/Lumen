@@ -3430,3 +3430,40 @@ def pick_texts(lang: str | None, scenario: str) -> tuple[str, list[str], str]:
         [str(o) for o in rec.get("opts", [])],
         str(rec.get("tpl", "{original} ({choice})")),
     )
+
+
+# Возврат к предыдущей версии картинки (паритет 10.11.2026): один ключ, явный
+# перевод во всех 25 языках — тест полноты таблицы пропуск не пустит.
+_DRAW_NO_VERSIONS: dict[str, str] = {
+    "en": "There is no earlier picture in this chat yet — draw something first.",
+    "ru": "В этом чате пока нет предыдущей картинки — сначала нарисуй что-нибудь.",
+    "be": "У гэтым чаце пакуль няма папярэдняй карцінкі — спачатку намалюй што-небудзь.",
+    "uk": "У цьому чаті ще немає попередньої картинки — спочатку намалюй щось.",
+    "kk": "Бұл чатта әзірге алдыңғы сурет жоқ — алдымен бірдеңе сал.",
+    "es": "Todavía no hay una imagen anterior en este chat: dibuja algo primero.",
+    "pt": "Ainda não há uma imagem anterior neste chat — desenha algo primeiro.",
+    "ar": "لا توجد صورة سابقة في هذه المحادثة بعد — ارسم شيئًا أولًا.",
+    "tr": "Bu sohbette henüz önceki bir resim yok — önce bir şey çiz.",
+    "de": "In diesem Chat gibt es noch kein früheres Bild — zeichne zuerst etwas.",
+    "fr": "Il n'y a pas encore d'image précédente dans ce chat — dessine d'abord quelque chose.",
+    "it": "In questa chat non c'è ancora un'immagine precedente: disegna prima qualcosa.",
+    "hi": "इस चैट में अभी कोई पिछली तस्वीर नहीं है — पहले कुछ बनाओ।",
+    "id": "Belum ada gambar sebelumnya di chat ini — gambar dulu sesuatu.",
+    "ms": "Belum ada gambar sebelumnya dalam chat ini — lukis sesuatu dahulu.",
+    "vi": "Chat này chưa có ảnh trước đó — hãy vẽ một thứ gì đó trước.",
+    "th": "ยังไม่มีรูปก่อนหน้าในแชทนี้ — วาดอะไรสักอย่างก่อนนะ",
+    "fa": "هنوز تصویر قبلی در این گفتگو وجود ندارد — اول چیزی بکش.",
+    "ur": "اس چیٹ میں ابھی کوئی پچھلی تصویر نہیں ہے — پہلے کچھ بنائیں۔",
+    "uz": "Bu chatda hali oldingi rasm yo'q — avval biror narsa chizing.",
+    "bn": "এই চ্যাটে এখনও আগের কোনো ছবি নেই — আগে কিছু আঁকো।",
+    "fil": "Wala pang nakaraang larawan sa chat na ito — gumuhit muna.",
+    "pl": "W tym czacie nie ma jeszcze wcześniejszego obrazka — najpierw coś narysuj.",
+    "nl": "Er is nog geen eerdere afbeelding in deze chat — teken eerst iets.",
+    "zu": "Akukho isithombe sangaphambilini kule ngxoxo okwamanje — dweba okuthile kuqala.",
+}
+STRINGS["draw_no_versions"] = {
+    lang: text for lang, text in _DRAW_NO_VERSIONS.items() if lang in ("be", "en", "es", "kk", "ru", "uk")
+}
+for _lang, _text in _DRAW_NO_VERSIONS.items():
+    if _lang not in STRINGS["draw_no_versions"]:
+        LANG_PACKS.setdefault(_lang, {})["draw_no_versions"] = _text

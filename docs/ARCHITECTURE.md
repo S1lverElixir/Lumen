@@ -74,6 +74,20 @@ asks for a description. Note that `_strip_reply_marker` removes the pointer
 word before the draw branch sees it, so what reaches the branch is an empty
 body, not the word «это» (10.11.2026).
 
+Picture versions work like the editor's Undo/Redo in ChatGPT (10.11.2026): every
+generation appends `{file_id, prompt, user, ts, message_id}` to `draw_versions`
+(capped at five) and clears `draw_redo`, because a redo after a new drawing would
+return a picture from another branch. «верни предыдущий вариант» / «undo» moves the
+last version to `draw_redo` and re-sends the new last one by its Telegram file_id —
+no provider call and no personal slot spent; «верни обратно» / «redo» walks back.
+The resend carries the «Ещё вариант» keyboard, strips it off the previous anchor,
+refreshes `last_draw_prompt`/`last_drawn_at` so a following «ещё вариант» repeats the
+restored subject, and puts the photo into the media history like any generation. A
+failed resend leaves both lists untouched, someone else's picture in a group is
+refused with the same `pick_not_yours` rule as the button, an empty history answers
+`draw_no_versions` (translated in all 25 languages), and `/reset` forgets both lists
+together with the rest of the chat memory.
+
 ## Streaming & typing pace
 
 For a plain-text route (no attachments, no links), Lumen streams the reply by repeatedly editing one message, the same mechanism for Gemini (`generate_content_stream`) and Munito (`_munito_stream_pieces` over the shared `_sse_pieces`, SSE on `chat/completions`). Streaming is attempted on every model in the route, not only on the first one: a failing head model no longer costs the chat its typing effect while a reserve model answers.

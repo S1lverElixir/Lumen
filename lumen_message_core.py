@@ -22,7 +22,9 @@ from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
     EDIT_TRIGGER_IMPLICIT,
     EDIT_TRIGGER_PREFIXES,
+    REDO_TRIGGER_PREFIXES,
     REPEAT_TRIGGER_PREFIXES,
+    REVERT_TRIGGER_PREFIXES,
     TTS_TRIGGER_PREFIXES,
     _detect_image_variants,
     _is_new_artifact_request,
@@ -733,6 +735,16 @@ async def _handle_message_core(
     if is_continuation:
         clean_prompt = continued_prompt
         lower_prompt = clean_prompt.lower().strip()
+
+    # Возврат к предыдущей версии картинки: раньше повтора и правки, иначе
+    # «верни предыдущий вариант» рисовал бы новый кадр вместо готового.
+    if not is_continuation:
+        _revert_core = _strip_trigger_fillers(lower_prompt)[0]
+        _revert_hit = _match_trigger_with_fillers(lower_prompt, _revert_core, REVERT_TRIGGER_PREFIXES)[0]
+        _redo_hit = _match_trigger_with_fillers(lower_prompt, _revert_core, REDO_TRIGGER_PREFIXES)[0]
+        if _revert_hit or _redo_hit:
+            await bot.revert_draw_version(message, state, redo=bool(_redo_hit and not _revert_hit))
+            return
 
     # «Ещё вариант»: повтор последней генерации тем же описанием. Только свежая
     # своя генерация — иначе «ещё раз» это обычный текст (шутка, повтор ответа).
