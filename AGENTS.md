@@ -217,7 +217,8 @@ Gemini is the unconditional reserve on every route where Munito answers.
   functions are not natively supported"). Every async path is driven from a plain `def test_*` that
   calls `asyncio.run(scenario())`: follow the shape the whole suite already uses.
 - `tests/conftest.py` stubs `BOT_TOKEN`, `GEMINI_API_KEY`, `BOT_LOG_PATH` and blanks the other
-  provider and experiment variables (Munito, Cloudflare, Groq, OpenRouter, Sentry), so a local `.env` cannot send a test to a live API. Because
+  provider and experiment variables (Munito, Cloudflare, Groq, OpenRouter, Sentry), so a local
+  `.env` cannot send a test to a live API. Because
   those keys stay empty, tests only see the Gemini and Pollinations branches: to exercise Munito or
   Cloudflare a fixture must set the key itself — a fake value for one test, never a real key in a
   test or a fixture. When a module starts reading a new key at import time, add it to that list.
