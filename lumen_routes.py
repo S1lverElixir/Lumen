@@ -35,7 +35,7 @@ from lumen_router_config import (
     _looks_like_heavy_query,
 )
 from lumen_search import _SearchRequested, search_marker_state, strip_search_marker
-from lumen_security import _scrub_identity_leak, _detect_garbled_mix, _is_garbled_echo
+from lumen_security import _polish_answer, _detect_garbled_mix, _is_garbled_echo
 from lumen_status import thought_block
 
 # Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
@@ -227,7 +227,7 @@ async def _chat_completion_chain(
                 bot._record_model_outcome(provider, model_trial, bad=True)
                 raise RuntimeError(f"Model {model_trial} returned an empty response")
 
-            answer = _scrub_identity_leak(answer, source=f"{provider}_chat_completion:{model_trial}")
+            answer = _polish_answer(answer, source=f"{provider}_chat_completion:{model_trial}")
             # Каша-каша тоже считается плохим (доставляется как есть, как раньше),
             # успех сбрасывает счётчик карантина. Повтор смешанных токенов за
             # пользователем — эхо, а не каша модели, в счётчик не идёт.
@@ -745,7 +745,7 @@ async def ask_gemini(
                    prompt=_gpt, completion=_gct, total=_gtt)
     _record_model_latency(_model_speed_key("gemini", curr_model_id), total_sec=time.monotonic() - attempt_start)
 
-    ans = _scrub_identity_leak(ans, source=f"ask_gemini:{curr_model_id}")
+    ans = _polish_answer(ans, source=f"ask_gemini:{curr_model_id}")
     bot._record_model_outcome("gemini", curr_model_id,
                               bad=_detect_garbled_mix(ans) and not _is_garbled_echo(ans, user_text))
     ans = _raise_if_search_requested(ans, "gemini", curr_model_id)

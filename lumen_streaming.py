@@ -39,7 +39,7 @@ from lumen_security import (
     _detect_garbled_mix,
     _is_garbled_echo,
     _detect_identity_leak,
-    _scrub_identity_leak,
+    _polish_answer,
 )
 from lumen_typing_pace import (
     speed_key as _typing_speed_key,
@@ -665,7 +665,7 @@ async def _run_streaming_reply(
 
         # Финальный скраб ДО последней правки: иначе пользователь видел ответ,
         # который в историю уже попал очищенным (аудит 28.10.2026).
-        full_text = _scrub_identity_leak(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
+        full_text = _polish_answer(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
         # "Довывод" остатка: бэкенды одним куском в конце показывали бы "…" до самого финала. Ограничено catchup-лимитом сверху.
         # Разбиение — только хвост от замороженной границы: пересчёт всего текста
         # сдвигал бы уже показанные границы (пункт 5; _resync_finalized удалён).
