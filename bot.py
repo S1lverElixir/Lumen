@@ -1461,6 +1461,55 @@ SETWEBHOOK_BACKOFF_SEC = 5.0
 _state_ready = True
 
 
+# Локали профиля: Bot API принимает только двухбуквенные ISO 639-1 (тот же гейт,
+# что у COMMAND_LOCALES), и 25*3 вызова на старте ни к чему — взяты самые ходовые
+# языки интерфейса Telegram из наших паков, остальные видят дефолт (en).
+PROFILE_LANGS: tuple[str, ...] = ("en", "ru", "uk", "be", "es", "de", "fr", "pl", "tr", "hi")
+
+# ключ STRINGS -> (метод Bot, имя аргумента с текстом)
+_PROFILE_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("profile_name", "set_my_name", "name"),
+    ("profile_short", "set_my_short_description", "short_description"),
+    ("profile_description", "set_my_description", "description"),
+)
+
+
+async def _register_bot_profile() -> int:
+    """Имя и «О себе» в профиле бота задаются из кода, а не только BotFather:
+    иначе тексты расходятся с lumen_lang и не закрыты тестами. Ничего не кидает:
+    профиль не влияет на приём сообщений, ронять из-за него старт нельзя."""
+    if bot is None:
+        log.warning("[webhook] Bot profile skipped: bot instance is not initialized")
+        return 0
+
+    payloads: list[tuple[str, dict[str, str]]] = []
+    for lang in PROFILE_LANGS:
+        where = {} if lang == DEFAULT_LANG else {"language_code": lang}
+        for key, method_name, arg_name in _PROFILE_FIELDS:
+            payloads.append((method_name, {arg_name: _lang_t(lang, key), **where}))
+
+    # Те же 4 параллельно, что у setMyCommands: быстрее и без flood-контроля.
+    _profile_sem = asyncio.Semaphore(4)
+
+    async def _one(method_name: str, kwargs: dict[str, str]) -> bool:
+        async with _profile_sem:
+            try:
+                return await _tg_call(getattr(bot, method_name), **kwargs, call_timeout=15.0) is not None
+            except Exception as exc:
+                log.warning(
+                    "[webhook] %s failed (%s): %s",
+                    method_name, kwargs.get("language_code", DEFAULT_LANG), exc,
+                )
+                return False
+
+    ok = sum(1 for done in await asyncio.gather(*(_one(m, kw) for m, kw in payloads)) if done)
+    if ok:
+        log.info("[webhook] Bot profile set for %d/%d field(s).", ok, len(payloads))
+    else:
+        log.warning("[webhook] Bot profile was not set for any language.")
+    return ok
+
+
 async def _webhook_startup() -> None:
     global _state_ready
     # Синхронное дисковое чтение в потоке: иначе старт стопорит приём /webhook.
@@ -1614,6 +1663,10 @@ async def _webhook_startup() -> None:
             log.info("[webhook] Bot commands set successfully.")
         else:
             log.warning("[webhook] Bot commands were not set for any language.")
+        # Профиль не влияет на приём сообщений, поэтому его провал не должен
+        # уходить в main(): любая ошибка старта там = выход контейнера с кодом 1.
+        with contextlib.suppress(Exception):
+            await _register_bot_profile()
         return webhook_ok
 
     setup_ok = await try_setup()

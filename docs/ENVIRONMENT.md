@@ -170,6 +170,8 @@ These ceilings are fixed in code; change them only with a code edit:
 | `MAX_TOTAL_MEMORY_MESSAGES` | `200` | Per-chat ceiling on stored history plus group background lines combined (lumen_memory.py, lumen_chat_state.py). |
 | `_ALBUM_EXTRA_MAX_BYTES` | `100 MB` | Cap on the combined size of extra files in a photo album. |
 | `_ALBUM_FETCH_CONCURRENCY` | `3` | Parallel downloads inside one album. |
+| Bot API profile caps (`profile_name` / `profile_short` / `profile_description`) | `64` / `120` / `500` | Field lengths Telegram accepts for the bot profile. Code does not re-check them — `test_profile_strings_fit_telegram_limits` does; above a cap the `setMy*` call answers 400 and the profile silently keeps the old text. |
+| `PROFILE_LANGS` | `10` locales | How many languages the profile is registered for; the other 15 packs of `lumen_lang.py` get the English default from Telegram. |
 
 ## Observability
 

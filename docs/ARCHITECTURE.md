@@ -10,6 +10,16 @@ This document goes one level deeper than the main [README](../README.md) into ho
 4. `_run_route` tries the first candidate. If a whole provider's chain fails, it falls back to the next provider in the route, except where that's physically impossible (only Gemini can read links or analyze video/audio).
 5. The reply streams into the chat if the request qualifies (see [Streaming](#streaming--typing-pace) below), or is sent as a single message otherwise.
 
+## Bot profile and command menu
+
+What a person sees before the first message — the bot's name, the "About" one-liner, the long description and the `/` menu — is registered from code on every startup, so the texts live in `lumen_lang.py`, are translated and covered by tests instead of drifting in BotFather (a BotFather edit is overwritten by the next deploy).
+
+- `setMyCommands` sends the five menu commands for the default locale plus one call per locale in `COMMAND_LOCALES`.
+- `_register_bot_profile` (`bot.py`) sends `setMyName`, `setMyShortDescription` and `setMyDescription` for the keys `profile_name`, `profile_short`, `profile_description`: one default set without `language_code` plus `PROFILE_LANGS` — the ten most common Telegram interface languages (en, ru, uk, be, es, de, fr, pl, tr, hi). The rest see the English default by Telegram's own fallback.
+- `language_code` here takes only two-letter ISO 639-1 codes, the same trap that made `setMyCommands` answer `400` for `fil`. Every call goes through the shared `_tg_call` seam with a semaphore of 4, so a dead proxy yields `None` rather than an exception.
+- The profile is not on the message path: a failed field is logged, an unexpected error is swallowed, and startup still serves `/webhook` — a container must not exit over an "About" text.
+- Field lengths are Bot API caps (64 / 120 / 500 characters), guarded by `test_profile_strings_fit_telegram_limits`: above the cap Telegram answers `400` and the profile silently keeps the old text.
+
 ## Automatic model routing
 
 Routing is fully automatic: the router builds a fresh candidate list for every message. Since 05.11.2026 the route has exactly two chat providers — Munito AI (`munito`) and Google Gemini (`gemini`) — plus Groq Whisper, which is not a chat provider but the cheap front door for voice notes (its transcription call is the only thing Groq is still used for):
