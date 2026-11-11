@@ -12,6 +12,7 @@ test_bot_search.py — сквозные тесты внешнего поиска
 import asyncio
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import bot
@@ -367,4 +368,155 @@ def test_anaphoric_followup_searches_with_previous_topic(rate_guard_setup, monke
     assert seen, "поиск на продолжении свежего вопроса обязан запускаться"
     assert "Центральный банк" in seen[0][1]
     assert "Web search results" in prompt
+    bot.chat_state.pop(123, None)
+
+
+# ── решение о поиске принимает сама модель: маркер [[SEARCH]] ──
+
+
+def _stream_turns(monkeypatch, turns):
+    """Куски Gemini-стрима по списку на каждый проход маршрута: первый ответ —
+    маркер, второй — заземлённый текст. Подменяется клиент, а не код стрима,
+    чтобы `_run_streaming_reply` шёл боевым путём."""
+    queue = [list(t) for t in turns]
+
+    async def _stream(*, model, contents, config=None):
+        pieces = queue.pop(0) if queue else []
+
+        async def gen():
+            for piece in pieces:
+                yield SimpleNamespace(text=piece)
+        return gen()
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _stream
+    monkeypatch.setattr(bot, "client", fake_client)
+
+
+def _outgoing_texts():
+    """Всё, что ушло в Telegram: к транспорту ведут только _tg_call и _safe_reply."""
+    out = []
+    for call in bot._tg_call.await_args_list:
+        for value in list(call.args[1:]) + list(call.kwargs.values()):
+            if isinstance(value, str):
+                out.append(value)
+    for call in bot._safe_reply.await_args_list:
+        for value in call.args[1:]:
+            if isinstance(value, str):
+                out.append(value)
+    return out
+
+
+def _routing_penalty_spies(monkeypatch):
+    """Счётчики всего, что вычёркивает модель из роутинга: просьба поиска — не
+    её отказ, ни один из этих хуков дёрнут быть не должен."""
+    import lumen_routes
+    marks: list = []
+    monkeypatch.setattr(bot, "_mark_rate_limited", lambda provider, model_id: marks.append("rate_limited"))
+    monkeypatch.setattr(bot, "_mark_quota_exhausted", lambda provider, model_id: marks.append("quota_exhausted"))
+    monkeypatch.setattr(lumen_routes, "_mark_model_unavailable",
+                        lambda provider, model_id, exc: marks.append("unavailable"))
+
+    def _outcome(provider, model_id, bad=False):
+        if bad:
+            marks.append("quarantine")
+
+    monkeypatch.setattr(bot, "_record_model_outcome", _outcome)
+    stats: list = []
+    monkeypatch.setattr(bot, "_record_stats_event", lambda name: stats.append(name))
+    return marks, stats
+
+
+def _route_spy(monkeypatch):
+    """Промпт и allow_stream каждого прохода маршрута под боевым _run_route."""
+    calls: list = []
+    real_run_route = bot._run_route
+
+    async def spy(chat_id, ai_prompt, route, message, **kwargs):
+        calls.append((ai_prompt, kwargs.get("allow_stream")))
+        return await real_run_route(chat_id, ai_prompt, route, message, **kwargs)
+
+    monkeypatch.setattr(bot, "_run_route", spy)
+    return calls
+
+
+def _kill_classifier(monkeypatch):
+    # Список слов глушим намеренно: проверяется второй механизм, он обязан
+    # работать и там, где классификатор формулировку не узнал.
+    monkeypatch.setattr("lumen_message_core._wants_web_search", lambda text, *, previous="": False)
+
+
+def test_model_search_marker_retries_with_snippets_and_shows_second_answer(rate_guard_setup, monkeypatch):
+    # Скрины из группы 11.11.2026: на «когда вышла Fable 5.2» был ответ «такой
+    # модели нет» без поиска. Модель теперь просит поиск сама маркером, и первый
+    # проход с маркером не имеет права показаться.
+    message = rate_guard_setup()
+    message.text = "когда вышла Fable 5.2"
+    _kill_classifier(monkeypatch)
+    _stream_turns(monkeypatch, [["[[SE", "ARCH]]"], ["Fable 5.2 вышла 3 ноября 2026"]])
+    seen_queries: list = []
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
+        seen_queries.append(query)
+        return [{"title": "Релиз", "url": "https://example.com/r", "snippet": "3 ноября 2026"}]
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    routes = _route_spy(monkeypatch)
+    marks, stats = _routing_penalty_spies(monkeypatch)
+    asyncio.run(bot._handle_message_core(message))
+
+    assert seen_queries == ["когда вышла Fable 5.2"]
+    assert len(routes) == 2, "дополнительный проход должен быть ровно один"
+    assert "[Web search results" in routes[1][0]
+    assert routes[1][1] is True, "на втором проходе человек ждёт живой набор"
+    texts = _outgoing_texts()
+    assert texts and not any("[[SE" in t for t in texts)
+    assert any("Fable 5.2 вышла 3 ноября 2026" in t for t in texts)
+    assert marks == [] and "model_failures" not in stats
+    bot.chat_state.pop(123, None)
+
+
+def test_model_search_marker_without_snippets_does_not_lose_the_answer(rate_guard_setup, monkeypatch):
+    # Поиск по маркеру пуст: человек всё равно обязан получить ответ, а не пустой
+    # пузырь и не служебную строку.
+    message = rate_guard_setup()
+    message.text = "когда вышла Fable 5.2"
+    _kill_classifier(monkeypatch)
+    _stream_turns(monkeypatch, [["[[SEARCH]]"], ["Точной даты у меня нет, не проверял"]])
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
+        return []
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    routes = _route_spy(monkeypatch)
+    marks, stats = _routing_penalty_spies(monkeypatch)
+    asyncio.run(bot._handle_message_core(message))
+
+    assert len(routes) == 2
+    assert "No web search is available" in routes[1][0]
+    texts = _outgoing_texts()
+    assert texts and not any("[[SE" in t for t in texts)
+    assert any("Точной даты у меня нет" in t for t in texts)
+    assert marks == [] and "model_failures" not in stats
+    bot.chat_state.pop(123, None)
+
+
+def test_answer_without_marker_streams_and_never_searches(rate_guard_setup, monkeypatch):
+    # Обычный ответ не должен ни дождаться поиска, ни лишиться живой печати:
+    # маркер ловится только в ответе, который состоит из маркера.
+    message = rate_guard_setup()
+    message.text = "объясни, как работает рекурсия"
+    _kill_classifier(monkeypatch)
+    _stream_turns(monkeypatch, [["Рекурсия — ", "функция, которая зовёт себя сама"]])
+
+    async def fake_fetch(query, **kwargs):
+        raise AssertionError("внешний поиск на обычном вопросе запускать нельзя")
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    routes = _route_spy(monkeypatch)
+    asyncio.run(bot._handle_message_core(message))
+
+    assert len(routes) == 1
+    texts = _outgoing_texts()
+    assert any("функция, которая зовёт себя сама" in t for t in texts)
     bot.chat_state.pop(123, None)

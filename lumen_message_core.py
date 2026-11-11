@@ -56,6 +56,7 @@ from lumen_router_config import (
     _looks_like_search_request,
 )
 from lumen_search import (
+    _SearchRequested,
     answered_with_live_search,
     clean_publisher,
     fetch_web_snippets,
@@ -84,6 +85,15 @@ def _fresh_date_context() -> str:
     """Однострочный контекст текущей даты для промптов свежих вопросов."""
     now = datetime.now(_MOSCOW_TZ)
     return f"[Context: today is {now.strftime('%d %B %Y')}, {now.strftime('%A')} (Europe/Moscow).]"
+
+
+# Модель попросила поиск ([[SEARCH]]), а искать нечем или нечего: без этой строки
+# второй проход вернул бы тот же маркер, и человек остался бы вовсе без ответа.
+_SEARCH_UNAVAILABLE_NOTE = (
+    "\n\n[No web search is available for this turn. Answer from what you already know, "
+    "in the user's language, and say in one plain line what you could not verify. "
+    "Do not ask for a search and do not refuse to answer.]"
+)
 
 
 def _media_prompt_lang(message: Any, state: dict | None) -> str | None:
@@ -1304,15 +1314,88 @@ async def _handle_message_core(
     state.pop("stream_interrupted", None)
     try:
         provenance: dict = {}
-        ans, reply_already_sent = await bot._run_route(
-            message.chat.id, ai_prompt, route, message,
-            media=gemini_media_list, media_filename=med_name,
-            youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
-            deadline=route_deadline, provenance=provenance, status=status,
-            history_text=history_text, history_meta=history_meta,
-        )
-        answered_grounded = answered_with_live_search(provenance)
-        if needs_freshness and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:
+        ans = ""
+        reply_already_sent = False
+        answered_grounded = False
+        # Маркер [[SEARCH]] от модели: она сама решила, что факт требует поиска,
+        # когда классификатор формулировки его не узнал (замер 11.11.2026).
+        search_requested = False
+        stream_bubble: Any = None
+        try:
+            ans, reply_already_sent = await bot._run_route(
+                message.chat.id, ai_prompt, route, message,
+                media=gemini_media_list, media_filename=med_name,
+                youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
+                deadline=route_deadline, provenance=provenance, status=status,
+                history_text=history_text, history_meta=history_meta,
+            )
+            answered_grounded = answered_with_live_search(provenance)
+        except _SearchRequested as req:
+            search_requested = True
+            stream_bubble = req.placeholder
+        if search_requested and not reply_already_sent:
+            # Единственный дополнительный проход на сообщение: тот же этап статуса,
+            # что у обычного поиска, один fetch в остаток бюджета и повтор тем же
+            # ai_prompt. Гостю стрим нельзя (ответ уходит через answerGuestQuery).
+            if status is None and stream_bubble is not None:
+                status = StatusMessage.from_message(stream_bubble, bot._chat_lang(message.chat.id), "progress_searching")
+            elif status is None and not is_guest:
+                status = await StatusMessage.start(message, bot._chat_lang(message.chat.id), "progress_searching")
+            elif status is not None and not snippets_injected:
+                await status.set_phase("progress_searching")
+            mark_snippets: list = []
+            if not snippets_injected:
+                # Вопрос по определению свежий: дата нужна и этому проходу.
+                ai_prompt += "\n\n" + _fresh_date_context()
+                mark_budget = web_search_timeout_sec()
+                if route_deadline is not None:
+                    mark_budget = min(mark_budget, max(0.0, route_deadline - time.monotonic()))
+                if mark_budget > 0 and web_search_is_enabled():
+                    try:
+                        mark_snippets = await fetch_web_snippets(
+                            clean_prompt, timeout_sec=mark_budget, max_results=web_search_max_results(),
+                            context=_previous_user_text(state),
+                        )
+                    except Exception as exc:
+                        log.warning("[web-search] Search requested by the model failed: %s", exc.__class__.__name__)
+            if mark_snippets:
+                ai_prompt += format_snippets_for_prompt(mark_snippets)
+                snippets_injected = True
+                # Сниппеты есть: пометка «без поиска» была бы ложью.
+                web_search_failed = False
+                no_search_note = False
+            else:
+                ai_prompt += _SEARCH_UNAVAILABLE_NOTE
+                web_search_failed = True
+            if status is not None:
+                if mark_snippets:
+                    status.add_done("progress_search_done", count=len(mark_snippets))
+                    status.set_sources([clean_publisher(item) for item in mark_snippets if clean_publisher(item)])
+                else:
+                    status.add_done("progress_search_empty")
+                await status.set_phase("progress_thinking", timed=True)
+            log.info("[web-search] The model asked for a search, retrying once (snippets=%d).", len(mark_snippets))
+            try:
+                # Стрим на втором проходе нужен: человек ждёт живого набора, а не
+                # мёртвого пузырька (allow_stream первого прохода тут ни при чём).
+                ans, reply_already_sent = await bot._run_route(
+                    message.chat.id, ai_prompt, route, message,
+                    media=gemini_media_list, media_filename=med_name,
+                    youtube_url=youtube_url_to_analyze, allow_stream=not is_guest,
+                    deadline=route_deadline, provenance=provenance, status=status,
+                    history_text=history_text, history_meta=history_meta,
+                )
+                answered_grounded = answered_with_live_search(provenance)
+            except _SearchRequested:
+                log.warning("[web-search] The model asked for a search again; answering as is.")
+                web_search_failed = True
+            except Exception as exc:
+                log.warning("[web-search] Retry after the model's search request failed: %s", exc.__class__.__name__)
+                web_search_failed = True
+            if not ans.strip() and not reply_already_sent:
+                # Второй проход текста не дал: пустое сообщение в чат не уходит.
+                ans = bot._model_error_text("fallback", bot._chat_lang(message.chat.id))
+        if needs_freshness and not search_requested and not snippets_injected and not answered_grounded and not reply_already_sent and not no_search_note:
             # Поиск до маршрута ничего не дал, а ответила модель без живого
             # поиска: пробуем ещё раз и один ретрай со сниппетами; не вышло —
             # честная пометка.
@@ -1348,7 +1431,7 @@ async def _handle_message_core(
                     web_search_failed = True
             else:
                 web_search_failed = True
-        elif needs_freshness and not snippets_injected and not answered_grounded:
+        elif needs_freshness and not search_requested and not snippets_injected and not answered_grounded:
             log.warning("[web-search] Answer already streamed without live search; cannot retry cleanly.")
         # Пометка «без поиска» — только если поиск реально не дал результата и
         # ответила модель без граундинга: при живом Gemini-поиске она была бы ложью.

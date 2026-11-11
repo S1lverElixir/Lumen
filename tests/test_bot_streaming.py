@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import asyncio
 import bot
 import lumen_router_config
+import lumen_search
 import lumen_streaming
 import pytest
 import time
@@ -1393,3 +1394,26 @@ def test_streaming_falls_back_to_reply_when_edits_die(monkeypatch):
     finally:
         bot.chat_state.pop(chat_id, None)
 
+
+
+def test_stream_search_marker_never_reaches_the_screen_and_keeps_the_bubble():
+    # Скрины из группы 11.11.2026: «когда вышла Fable 5.2» отвечали по памяти,
+    # потому что классификатор формулировки не узнаёт их. Решение отдано модели
+    # маркером [[SEARCH]] — он не имеет права мелькнуть на экране даже покусочно,
+    # а пузырёк «Думаю…» должен дожить до второго прохода со сниппетами.
+    chat_id = 999151
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream(
+        ["[[SE", "ARCH]]", " этот хвост не дойдёт"])
+    incoming = _FakeIncomingMessage(chat_id)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        with pytest.raises(lumen_search._SearchRequested) as caught:
+            asyncio.run(bot._try_gemini_streaming(chat_id, "когда вышла Fable 5.2", incoming, bot.DEFAULT_GEMINI_MODEL))
+        assert incoming.sent[0].edits == []
+        assert caught.value.placeholder is incoming.sent[0]
+        assert bot.chat_state[chat_id].get("history") == []
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)

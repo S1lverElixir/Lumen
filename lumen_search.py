@@ -108,6 +108,46 @@ def answered_with_live_search(provenance: dict | None) -> bool:
     return bool(GEMINI_MODELS.get(provenance.get("model") or "", {}).get("search_grounding"))
 
 
+# ─────────────────── маркер «модель сама просит поиск» ───────────────────
+# Регулярка по формулировке ловит только знакомые вопросы: на «когда вышла
+# Fable 5.2» (замер 11.11.2026) она молчала, и модель отвечала по памяти.
+# Решение о поиске отдаётся модели — как это делает Claude.
+SEARCH_REQUEST_MARKER = "[[SEARCH]]"
+# Хвост из одной пунктуации после маркера существенным не считается.
+_MARKER_TAIL_PUNCT = " \t\r\n.,:;!?-—–«»\"'`()[]{}*_~"
+
+
+class _SearchRequested(Exception):
+    """Ответ модели — ровно маркер [[SEARCH]]. Это не сбой: под него не должны
+    попадать остывка, карантин и model_failures. placeholder — пузырёк, который
+    стрим успел выставить: он остаётся живым для второго прохода."""
+
+    def __init__(self, placeholder=None) -> None:
+        super().__init__(SEARCH_REQUEST_MARKER)
+        self.placeholder = placeholder
+
+
+def search_marker_state(text: str) -> str:
+    """'' — обычный ответ; 'pending' — накопленное ещё может достроиться в
+    маркер, показывать его нельзя; 'requested' — ответ это только маркер."""
+    head = (text or "").strip()
+    if len(head) < len(SEARCH_REQUEST_MARKER):
+        if head and not SEARCH_REQUEST_MARKER.startswith(head):
+            return ""
+        return "pending"
+    if not head.startswith(SEARCH_REQUEST_MARKER):
+        return ""
+    return "" if head[len(SEARCH_REQUEST_MARKER):].strip(_MARKER_TAIL_PUNCT) else "requested"
+
+
+def strip_search_marker(text: str) -> str:
+    """Служебный маркер с начала строки: в чате его не должен видеть никто."""
+    head = (text or "").lstrip()
+    if head.startswith(SEARCH_REQUEST_MARKER):
+        return head[len(SEARCH_REQUEST_MARKER):].lstrip()
+    return text
+
+
 # ───────────────────────── подготовка запроса ─────────────────────────
 # Раньше в поисковый движок уходило всё сообщение целиком: «Привет! Подскажи,
 # пожалуйста, а кто сейчас возглавляет ЦБ…» находило Викисловарь по слову
