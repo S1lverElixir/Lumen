@@ -2346,6 +2346,9 @@ def test_lang_table_covers_all_keys_in_all_languages():
     # Байт-дубликат английского не перевод: такую строку удаляем, показ едет
     # фолбэком. Исключения с причиной — только здесь.
     allowed_en_duplicates = {("selftest_header", "fil")}
+    # Имя бота — бренд: во всех 25 паках одно и то же латиницей, дубликат en
+    # здесь и есть перевод (10.11.2026, профиль вместо BotFather).
+    allowed_en_duplicate_keys = {"profile_name"}
     for key, table in lumen_lang.STRINGS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
             explicit = lumen_lang.LANG_PACKS.get(lang, {}).get(key) or table.get(lang)
@@ -2353,7 +2356,8 @@ def test_lang_table_covers_all_keys_in_all_languages():
             # ключ обязан иметь явный перевод во всех 25 языках (аудит 28.10.2026).
             assert explicit, f"missing translation {key}[{lang}]"
             if lang != "en" and explicit == table.get("en"):
-                assert (key, lang) in allowed_en_duplicates, (
+                allowed = (key, lang) in allowed_en_duplicates or key in allowed_en_duplicate_keys
+                assert allowed, (
                     f"untranslated duplicate {key}[{lang}]: delete it, English fallback covers display"
                 )
     for lang in lumen_lang.SUPPORTED_LANGS:

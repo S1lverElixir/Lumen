@@ -3467,3 +3467,131 @@ STRINGS["draw_no_versions"] = {
 for _lang, _text in _DRAW_NO_VERSIONS.items():
     if _lang not in STRINGS["draw_no_versions"]:
         LANG_PACKS.setdefault(_lang, {})["draw_no_versions"] = _text
+
+# ── Профиль бота в Telegram: setMyName / setMyShortDescription / setMyDescription ──
+# «О себе» жил только в BotFather — вне репозитория, тестов и зеркал (10.11.2026).
+# Имя — бренд, оно латиницей во всех паках; лимиты Bot API (64/120/500) сторожит
+# тест: при превышении Telegram отвечает 400, и профиль молча остаётся старым.
+_PROFILE_NAME: dict[str, str] = {
+    "ar": "Lumen",
+    "be": "Lumen",
+    "bn": "Lumen",
+    "de": "Lumen",
+    "en": "Lumen",
+    "es": "Lumen",
+    "fa": "Lumen",
+    "fil": "Lumen",
+    "fr": "Lumen",
+    "hi": "Lumen",
+    "id": "Lumen",
+    "it": "Lumen",
+    "kk": "Lumen",
+    "ms": "Lumen",
+    "nl": "Lumen",
+    "pl": "Lumen",
+    "pt": "Lumen",
+    "ru": "Lumen",
+    "th": "Lumen",
+    "tr": "Lumen",
+    "uk": "Lumen",
+    "ur": "Lumen",
+    "uz": "Lumen",
+    "vi": "Lumen",
+    "zu": "Lumen",
+}
+
+_PROFILE_SHORT: dict[str, str] = {
+    "ar": "مساعد يجيب عن الأسئلة، ويبحث في الإنترنت، ويقرأ الروابط والملفات، ويرسم ويتكلم بصوت مسموع",
+    "be": "Асістэнт, які адказвае на пытанні, шукае ў інтэрнэце, чытае спасылкі і файлы, малюе і агучвае",
+    "bn": "প্রশ্নের উত্তর দেয়, ইন্টারনেটে খোঁজে, লিংক ও ফাইল পড়ে, ছবি আঁকে এবং জোরে পড়ে শোনায় এমন সহকারী",
+    "de": "Ein Assistent, der Fragen beantwortet, im Internet sucht, Links und Dateien liest, malt und vorliest",
+    "en": "An assistant that answers questions, searches the web, reads links and files, draws and speaks text aloud",
+    "es": "Un asistente que responde preguntas, busca en internet, lee enlaces y archivos, dibuja y habla en voz alta",
+    "fa": "دستیار شما: به پرسش‌ها جواب می‌دهد، در اینترنت می‌گردد، پیوند و فایل می‌خواند، نقاشی می‌کشد و بلند می‌خواند",
+    "fil": "Assistant na sumasagot sa mga tanong, naghahanap sa web, nagbabasa ng link at file, gumuguhit at nagsasalita",
+    "fr": "Un assistant qui répond aux questions, cherche sur internet, lit les liens et les fichiers, dessine et parle",
+    "hi": "असिस्टेंट जो सवालों के जवाब देता है, इंटरनेट पर खोजता है, लिंक और फ़ाइलें पढ़ता है, चित्र बनाता और बोलता है",
+    "id": "Asisten yang menjawab pertanyaan, mencari di internet, membaca tautan dan berkas, menggambar dan bersuara",
+    "it": "Un assistente che risponde alle domande, cerca su internet, legge link e file, disegna e parla ad alta voce",
+    "kk": "Сұрақтарға жауап беретін, интернеттен іздейтін, сілтеме мен файлдарды оқитын, сурет салып дауыстайтын көмекші",
+    "ms": "Seorang pembantu yang menjawab soalan, mencari di internet, membaca pautan dan fail, melukis dan bersuara",
+    "nl": "Een assistent die vragen beantwoordt, op internet zoekt, links en bestanden leest, tekent en voorleest",
+    "pl": "Asystent, który odpowiada na pytania, szuka w internecie, czyta linki i pliki, rysuje i czyta na głos",
+    "pt": "Um assistente que responde perguntas, pesquisa na internet, lê links e arquivos, desenha e fala em voz alta",
+    "ru": "Ассистент, который отвечает на вопросы, ищет в интернете, читает ссылки и файлы, рисует и озвучивает",
+    "th": "ผู้ช่วยตอบคำถาม ค้นหาในอินเทอร์เน็ต อ่านลิงก์และไฟล์ วาดรูป และอ่านข้อความออกเสียง",
+    "tr": "Soruları yanıtlayan, internette arayan, bağlantı ve dosyaları okuyan, çizen ve sesiyle okuyan asistan",
+    "uk": "Асистент, що відповідає на запитання, шукає в інтернеті, читає посилання й файли, малює й озвучує",
+    "ur": "مددگار جو سوالات کے جواب دیتا ہے، انٹرنیٹ پر تلاش کرتا ہے، لنک اور فائلیں پڑھتا ہے، تصویر بناتا اور بولتا ہے",
+    "uz": "Savollarga javob beradigan, internetdan qidiradigan, havola va fayl o‘qiydigan, rasm chizadigan yordamchi",
+    "vi": "Trợ lý trả lời câu hỏi, tìm trên mạng, đọc liên kết và tệp, vẽ hình và đọc to văn bản",
+    "zu": "Usizakala ophendula imibuzo, osesha ku-inthanethi, ofunda izixhumanisi namafayela, odweba futhi akhulume",
+}
+
+_PROFILE_DESCRIPTION: dict[str, str] = {
+    "ar": "أجيب عن الأسئلة، وأبحث في الإنترنت، وأقرأ الروابط والملفات، وأحلل الصور والفيديو والصوت والمستندات، "
+           "وأرسم وأحوّل النص إلى كلام. رابط تيك توك يعود بدون علامة مائية. الأوامر ليست إلزامية — اكتب بكلمات عادية. صنعه: @SilverElixir",
+    "be": "Адказваю на пытанні, шукаю ў інтэрнэце, чытаю спасылкі і файлы, разбіраю фота, відэа, галасы і дакументы, малюю і агучваю. "
+           "TikTok па спасылцы аддаю без вадзяных знакаў. Каманды не абавязковыя — можна пісаць словамі. Аўтар — @SilverElixir",
+    "bn": "আমি প্রশ্নের উত্তর দিই, ইন্টারনেটে খুঁজি, লিংক ও ফাইল পড়ি, ছবি, ভিডিও, অডিও ও নথি বুঝি, "
+           "ছবি আঁকি ও টেক্সট পড়ে শোনাই। টিকটক লিংক জলছাপ ছাড়া ফেরত পাও। কমান্ড বাধ্যতামূলক নয় — কথা লিখলেই চলবে। তৈরি করেছেন @SilverElixir",
+    "de": "Ich beantworte Fragen, suche im Internet, lese Links und Dateien, analysiere Fotos, Videos, Audio und Dokumente, male und spreche. "
+           "Ein TikTok-Link kommt ohne Wasserzeichen zurück. Befehle sind nicht nötig — schreib in Worten. Erstellt von @SilverElixir",
+    "en": "I answer questions, search the web, read links and files, analyze photos, videos, voice notes and documents, "
+           "draw and voice text. A TikTok link comes back without a watermark. Commands are optional — just write in words. Made by @SilverElixir",
+    "es": "Respondo preguntas, busco en internet, leo enlaces y archivos, analizo fotos, videos, audios y documentos, dibujo y doy voz. "
+           "Un enlace de TikTok lo devuelvo sin marca de agua. Los comandos no son obligatorios: escribe con palabras. Autor: @SilverElixir",
+    "fa": "به پرسش‌ها جواب می‌دهم، در اینترنت جست‌وجو می‌کنم، پیوند و فایل می‌خوانم، عکس، ویدیو، ویس و سند را تحلیل می‌کنم، نقاشی می‌کشم و متن را بلند می‌خوانم. "
+           "لینک تیک‌تاک بدون واترمارک برمی‌گردد. دستور لازم نیست — ساده با کلمه بنویس. سازنده: @SilverElixir",
+    "fil": "Sumasagot ako sa mga tanong, naghahanap sa web, nagbabasa ng link at file, nagsusuri ng larawan, video, audio at dokumento, "
+           "gumuguhit at nagsasalita. TikTok link, ibinabalik kong walang watermark. Hindi kailangan ng command — sulatin mo lang. Gawa ni @SilverElixir",
+    "fr": "Je réponds aux questions, cherche sur internet, lis liens et fichiers, analyse photos, vidéos, audios et documents, dessine et donne la voix. "
+           "Un lien TikTok revient sans filigrane. Les commandes sont facultatives — écris avec des mots. Créé par @SilverElixir",
+    "hi": "मैं सवालों के जवाब देता हूं, इंटरनेट पर खोजता हूं, लिंक और फ़ाइलें पढ़ता हूं, फ़ोटो, वीडियो, ऑडियो और दस्तावेज़ समझता हूं, "
+           "चित्र बनाता हूं और बोलकर सुनाता हूं। TikTok लिंक बिना वॉटरमार्क के मिलता है। कमांड ज़रूरी नहीं — बस शब्दों में लिखो। बनानेवाले — @SilverElixir",
+    "id": "Aku menjawab pertanyaan, mencari di internet, membaca tautan dan berkas, menganalisis foto, video, audio, dan dokumen, "
+           "menggambar serta membacakan teks. Tautan TikTok kukembalikan tanpa tanda air. Perintah tidak wajib — tulis dengan kata. Dibuat oleh @SilverElixir",
+    "it": "Rispondo alle domande, cerco su internet, leggo link e file, analizzo foto, video, audio e documenti, disegno e do voce. "
+           "Un link di TikTok torna senza filigrana. I comandi non sono obbligatori: puoi scrivere a parole. Creato da @SilverElixir",
+    "kk": "Сұрақтарға жауап беремін, интернеттен іздеймін, сілтеме мен файлдарды оқимын, фото, видео, дауыс пен құжаттарды талдаймын, "
+           "сурет салып, мәтінді дауыстаймын. TikTok сілтемесін су таңбасыз беремін. Командалар шарт емес — жай сөзбен жазсаң болады. Автор — @SilverElixir",
+    "ms": "Saya menjawab soalan, mencari di internet, membaca pautan dan fail, menganalisis foto, video, audio dan dokumen, melukis serta membacakan teks. "
+           "Pautan TikTok dikembalikan tanpa tanda air. Perintah tidak wajib — tulis sahaja dengan kata. Dibuat oleh @SilverElixir",
+    "nl": "Ik beantwoord vragen, zoek op internet, lees links en bestanden, analyseer foto's, video's, audio en documenten, teken en lees voor. "
+           "Een TikTok-link komt terug zonder watermerk. Commando's zijn niet nodig — schrijf gewoon in woorden. Gemaakt door @SilverElixir",
+    "pl": "Odpowiadam na pytania, szukam w internecie, czytam linki i pliki, analizuję zdjęcia, filmy, audio i dokumenty, rysuję i czytam na głos. "
+           "Link do TikToka zwracam bez znaku wodnego. Komendy nie są obowiązkowe — możesz pisać słowami. Autor: @SilverElixir",
+    "pt": "Respondo perguntas, pesquiso na internet, leio links e arquivos, analiso fotos, vídeos, áudios e documentos, desenho e dou voz. "
+           "Um link do TikTok volta sem marca d'água. Comandos não são obrigatórios — escreva com palavras. Autoria: @SilverElixir",
+    "ru": "Отвечаю на вопросы, ищу в интернете, читаю ссылки и файлы, разбираю фото, видео, голоса и документы, рисую и озвучиваю текст. "
+           "TikTok по ссылке отдаю без водяного знака. Команды не обязательны — можно писать просто словами. Автор — @SilverElixir",
+    "th": "ตอบคำถาม ค้นหาในอินเทอร์เน็ต อ่านลิงก์และไฟล์ วิเคราะห์รูป วิดีโอ เสียง และเอกสาร วาดรูป และอ่านข้อความออกเสียง "
+           "ลิงก์ TikTok ส่งกลับแบบไม่มีลายน้ำ ไม่ต้องใช้คำสั่งก็ได้ พิมพ์เป็นคำธรรมดา ผู้สร้าง: @SilverElixir",
+    "tr": "Soruları yanıtlarım, internette ararım, bağlantıları ve dosyaları okurum, fotoğraf, video, ses ve belgeyi çözerim, çizerim ve metni seslendiririm. "
+           "TikTok bağlantısı filigransız döner. Komut zorunlu değil — düz kelimelerle yazabilirsin. Yapan: @SilverElixir",
+    "uk": "Відповідаю на запитання, шукаю в інтернеті, читаю посилання й файли, розбираю фото, відео, голоси й документи, малюю й озвучую. "
+           "TikTok за посиланням віддаю без водяного знаку. Команди не обов’язкові — можна писати словами. Автор — @SilverElixir",
+    "ur": "میں سوالات کے جواب دیتا ہوں، انٹرنیٹ پر تلاش کرتا ہوں، لنک اور فائلیں پڑھتا ہوں، تصاویر، ویڈیوز، آڈیو اور دستاویزات سمجھتا ہوں، "
+           "تصویر بناتا اور متن بول کر سناتا ہوں۔ TikTok لنک بغیر واٹر مارک ملتا ہے۔ کمانڈز ضروری نہیں — سادہ الفاظ لکھ سکتے ہیں۔ بنانے والے: @SilverElixir",
+    "uz": "Savollarga javob beraman, internetdan qidiraman, havola va fayllarni o‘qiyman, foto, video, audio va hujjatlarni tahlil qilaman, "
+           "rasm chizaman va matnni o‘qib beraman. TikTok havolasi suv belgisiz qaytadi. Buyruqlar shart emas — oddiy so‘z bilan yozsa ham bo‘ladi. Yaratgan: @SilverElixir",
+    "vi": "Mình trả lời câu hỏi, tìm trên mạng, đọc liên kết và tệp, phân tích ảnh, video, âm thanh và tài liệu, vẽ hình và đọc to văn bản. "
+           "Link TikTok trả về không có hình mờ. Không bắt buộc dùng lệnh — cứ viết bằng lời. Tác giả: @SilverElixir",
+    "zu": "Ngiphendula imibuzo, ngisesha ku-inthanethi, ngifunda izixhumanisi namafayela, ngihlaziya izithombe, amavidiyo, umsindo nemibhalo, "
+           "ngidweba futhi ngikhulume. I-TikTok link ibuyela ingenawo umaka wamanzi. Imiyalo ayiphoqelele — bhala ngamagama. Yakhelwe ngu-@SilverElixir",
+}
+
+# Тот же порядок, что у _DRAW_NO_VERSIONS выше: 6 старых языков в STRINGS,
+# остальные 19 — паками в LANG_PACKS.
+_PROFILE_CORE = tuple(c for c in SUPPORTED_LANGS if c not in LANG_PACKS)
+for _profile_key, _profile_table in (
+    ("profile_name", _PROFILE_NAME),
+    ("profile_short", _PROFILE_SHORT),
+    ("profile_description", _PROFILE_DESCRIPTION),
+):
+    STRINGS[_profile_key] = {
+        lang: text for lang, text in _profile_table.items() if lang in _PROFILE_CORE
+    }
+    for _lang, _text in _profile_table.items():
+        if _lang not in STRINGS[_profile_key]:
+            LANG_PACKS.setdefault(_lang, {})[_profile_key] = _text
