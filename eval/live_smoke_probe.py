@@ -76,7 +76,7 @@ def drain(offset):
             return offset, events
 
 
-def ask(offset, question, *, wait_sec=60):
+def ask(offset, question, *, wait_sec=180):
     sent = call("sendMessage", chat_id=TARGET, text=question)
     if not sent.get("ok"):
         raise SystemExit(f"sendMessage failed: {sent.get('description')}")
@@ -117,8 +117,9 @@ def main():
         "Привет! Подскажи, пожалуйста, кто сейчас возглавляет Центральный банк России и какая ключевая ставка?",
         "А кто был на этой должности до неё?",
     ]
-    offset = 0
-    _, backlog = drain(-1)
+    # Хвост прошлых обновлений снимаем с его же offset: иначе старый ответ
+    # засчитывается новым вопросом (ловушка 11.11.2026).
+    offset, backlog = drain(0)
     print(f"[probe] backlog drained: {len(backlog)}")
     report = {"backlog": len(backlog)}
     for q in questions:
