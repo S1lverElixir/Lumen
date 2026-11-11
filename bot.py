@@ -426,6 +426,10 @@ STREAM_TYPING_MAX_CATCHUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_SEC", 20,
 # В группе лок чата общий: 20 секунд довывода одного длинного ответа
 # задерживали бы всех, поэтому там потолок короче.
 STREAM_TYPING_MAX_CATCHUP_GROUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_GROUP_SEC", 8, min_value=1)
+# Шаг довывода — это пауза ПЛЮС правка: через реле она стоит 0,5-0,7 с, и
+# считать бюджет только по сну значило бы уйти за дедлайн сообщения
+# (ревью 11.11.2026: 40 тиков по 0,5 с = 20 с сна это ~40 с стеновых).
+STREAM_TYPING_STEP_RTT_SEC = _env_number("STREAM_TYPING_STEP_RTT_SEC", 0.7, min_value=0)
 # FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска (см.
 # lumen_model_speed.first_chunk_limit_sec): быструю зависшую модель бросаем рано.
 # Предел только укорачивает ожидание: первым сработает минимум из двух таймаутов.

@@ -82,6 +82,17 @@ def record_observed_speed(key: str, elapsed_sec: float, chars_len: int) -> None:
     _speed_ema[key] = observed if prev is None else (_EMA_ALPHA * observed + (1 - _EMA_ALPHA) * prev)
 
 
+def catchup_tick_budget(catchup_sec: float, step_sec: float) -> int:
+    """Сколько пауз довывода помещается в остаток бюджета. Шаг — это пауза
+    ПЛЮС правка, иначе бюджет считается только по сну. Нет времени — нет и
+    паузы: хвост показывает финальная правка (ревью 11.11.2026: max(1, ...)
+    спал ещё тик сверх дедлайна, а STREAM_TYPING_TICK_SEC=0 давал
+    ZeroDivisionError и пометку «Соединение прервалось» на весь ответ)."""
+    if step_sec <= 0 or catchup_sec <= 0:
+        return 0
+    return int(catchup_sec / step_sec)
+
+
 def catchup_reveal_steps(remaining_len: int, chars_per_sec: float, tick_interval_sec: float, max_ticks: int) -> list[int]:
     """Довывод остатка шагами; задержка не больше max_ticks × tick.
     Без обращения к часам: в тестах ожидание подменено no-op, цикл на monotonic завис бы."""

@@ -1449,6 +1449,8 @@ def test_live_stream_is_not_cut_by_the_route_budget(monkeypatch):
         assert not any("interrupted" in (t or "").lower() for t, _ in incoming.sent[0].edits)
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
 def test_group_catchup_uses_the_shorter_ceiling():
     # В группе лок чата общий: длинный хвост не должен держать его 20 секунд.
     import lumen_typing_pace
@@ -1479,6 +1481,82 @@ def test_group_catchup_uses_the_shorter_ceiling():
         else:
             lumen_typing_pace._speed_ema.pop(pace_key, None)
 
-    group_ceiling = max(1, int(bot.STREAM_TYPING_MAX_CATCHUP_GROUP_SEC / bot.STREAM_TYPING_TICK_SEC))
-    private_ceiling = max(1, int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / bot.STREAM_TYPING_TICK_SEC))
+    step_sec = bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC
+    group_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_GROUP_SEC / step_sec)
+    private_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / step_sec)
     assert len(sleep_calls) <= group_ceiling < private_ceiling
+def test_catchup_tick_budget_arithmetic():
+    import lumen_typing_pace
+    # Ревью 11.11.2026: потолок тиков = секунды бюджета / реальный шаг (пауза
+    # + правка). Нулевой бюджет и нулевой шаг не имеют права ни на одну паузу.
+    assert lumen_typing_pace.catchup_tick_budget(20.0, 1.2) == 16
+    assert lumen_typing_pace.catchup_tick_budget(8.0, 1.2) == 6
+    assert lumen_typing_pace.catchup_tick_budget(0.0, 1.2) == 0
+    assert lumen_typing_pace.catchup_tick_budget(20.0, 0.0) == 0
+
+
+def test_catchup_tick_count_follows_the_real_step_not_the_sleep_only():
+    # РЕГРЕССИЯ на ревью 11.11.2026: бюджет довывода делился только на паузу,
+    # хотя каждый тик стоит ещё и правку (0,5-0,7 с через реле). 20 секунд
+    # бюджета при шаге 1,2 с — это 16 тиков, а не 40: раньше длинный хвост
+    # держал лок чата вдвое дольше разрешённого и уходил за бюджет сообщения.
+    import lumen_typing_pace
+    chat_id = 999312
+    pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
+    saved_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC
+    text = "Буква " * 500
+    incoming = _FakeIncomingMessage(chat_id)
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream([text])
+    sleeps: list[float] = []
+
+    async def counting_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    saved_client, saved_sleep = bot.client, bot._typing_sleep
+    bot.client, bot._typing_sleep = fake_client, counting_sleep
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
+        assert answer == text.strip()
+        step_sec = bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC
+        ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / step_sec)
+        assert len(sleeps) <= ceiling, (len(sleeps), ceiling)
+        assert len(sleeps) > 8, "хвост длинного ответа всё ещё доводится плавно, а не одним куском"
+    finally:
+        bot.client, bot._typing_sleep = saved_client, saved_sleep
+        bot.chat_state.pop(chat_id, None)
+        if saved_ema is not None:
+            lumen_typing_pace._speed_ema[pace_key] = saved_ema
+        else:
+            lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+
+def test_catchup_survives_zero_typing_tick_setting(monkeypatch):
+    # Ревью 11.11.2026: STREAM_TYPING_TICK_SEC допускает 0, и деление бюджета
+    # на ноль уводило целый ответ в ветку сбоя с пометкой «Соединение
+    # прервалось». Конфиг-опечатка не должна ломать доставку.
+    import lumen_typing_pace
+    chat_id = 999313
+    pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
+    saved_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC
+    monkeypatch.setattr(bot, "STREAM_TYPING_TICK_SEC", 0.0)
+    text = "Буква " * 300
+    incoming = _FakeIncomingMessage(chat_id)
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream([text])
+    saved_client = bot.client
+    bot.client = fake_client
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(
+            chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL,
+        ))
+        assert answer == text.strip()
+    finally:
+        bot.client = saved_client
+        bot.chat_state.pop(chat_id, None)
+        if saved_ema is not None:
+            lumen_typing_pace._speed_ema[pace_key] = saved_ema
+        else:
+            lumen_typing_pace._speed_ema.pop(pace_key, None)

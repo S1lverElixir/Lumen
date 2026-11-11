@@ -46,6 +46,7 @@ from lumen_typing_pace import (
     speed_key as _typing_speed_key,
     record_observed_speed as _record_typing_speed,
     catchup_reveal_steps as _typing_catchup_steps,
+    catchup_tick_budget as _catchup_tick_budget,
     blend_arrival_speed as _typing_arrival_update,
     display_speed_for as _typing_display_speed,
     arm_edit_gate as _pace_arm_edit_gate,
@@ -731,8 +732,15 @@ async def _run_streaming_reply(
                              else bot.STREAM_TYPING_MAX_CATCHUP_SEC)
             if deadline is not None:
                 catchup_sec = min(catchup_sec, max(0.0, deadline - time.monotonic()))
-            max_ticks = max(1, int(catchup_sec / bot.STREAM_TYPING_TICK_SEC))
+            # Тик = пауза + правка: правка через реле стоит 0,5-0,7 с, и без
+            # этого шага бюджет считался только по сну (ревью 11.11.2026).
+            step_sec = bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC
+            max_ticks = _catchup_tick_budget(catchup_sec, step_sec)
+            # Времени не осталось вовсе — довывода не будет: финальная правка
+            # покажет ответ целиком сразу, без паузы сверх бюджета.
             for step_len in _typing_catchup_steps(remaining_len, typing_speed, bot.STREAM_TYPING_TICK_SEC, max_ticks):
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
                 await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
                 # Довывод идёт тем же маляром: тот же coalescing, partial-safe
                 # разметка и общий бюджет правок на чат (пункты 1 и 12).
