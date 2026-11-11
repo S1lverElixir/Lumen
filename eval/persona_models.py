@@ -512,6 +512,10 @@ def style_flags(question: dict, answer: str) -> list[str]:
     if heads > style.get("heads_max", 2):
         flags.append(f"headings-{heads}")
     marks = text.count("?") + text.count("\u061f") + text.count("\uff1f")
+    # Считаем знаки, а не вопросы: персидский ответ на «что делать после
+    # увольнения» задал ОДИН вопрос дважды («сколько у тебя запас? то есть
+    # сколько месяцев ты продержишься без дохода?») — questions-2 там ложный
+    # (замер 12.11.2026 по собранному корпусу, язык fa).
     if "questions_max" in style and marks > style["questions_max"]:
         flags.append(f"questions-{marks}")
     if "questions_min" in style and marks < style["questions_min"]:
