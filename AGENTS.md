@@ -158,7 +158,9 @@ Gemini is the unconditional reserve on every route where Munito answers.
   still costs the person their personal slot.
 - Freshness: no Munito model has web search, so every provider also gets an external snippet block
   built by `lumen_search.py` from three layers — exact fact APIs (Wikipedia, crypto, FX, weather), dated news feeds and the general web (DuckDuckGo lite then its HTML endpoint, Bing RSS) — after the user's wording is cleaned into search forms; an optional keyed provider (Tavily/Brave/Exa) replaces the scraping layer. Without a key there is no reliable general engine: measured 11.11.2026, DuckDuckGo lite returned an anomaly page 8/8 and Brave/Ecosia/Qwant/Yandex/Startpage/SearxNG are all blocked. The order and merge rules are in
-  `docs/ARCHITECTURE.md`.
+  `docs/ARCHITECTURE.md`. A model unsure about a post-cutoff fact may instead answer with the bare
+  marker `[[SEARCH]]`: it is intercepted before anything is shown and buys one searched retry, so
+  that exception must never reach the model-failure marks (mechanics in `docs/ARCHITECTURE.md`).
 - Limits are derived, not picked: a daily cap sits under the provider's real free-tier budget with
   headroom, and per-user caps follow the existing family (one for messages, one per heavy feature).
   The global cap is what protects a shared provider, so a reflexively small number is not safety.
