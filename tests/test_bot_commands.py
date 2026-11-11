@@ -2619,6 +2619,13 @@ def test_profile_locales_are_iso_639_1_codes():
         assert len(code) == 2 and code in lumen_lang.SUPPORTED_LANGS
 
 
+def test_profile_locales_match_command_locales():
+    # РЕГРЕССИЯ на 11.11.2026: профиль заводили за десять «ходовых» локалей, а
+    # меню команд — за все 23. Тайец, урду и зулу видели английское «О себе»
+    # при описаниях команд на своём языке.
+    assert set(bot.PROFILE_LANGS) == set(bot.COMMAND_LOCALES) | {bot.DEFAULT_LANG}
+
+
 def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
     # Без этих вызовов «О себе» живёт только в BotFather и расходится с
     # lumen_lang (10.11.2026).
