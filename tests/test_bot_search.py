@@ -60,7 +60,7 @@ def test_empty_fallback_search_marks_reply_without_live_search(rate_guard_setup,
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
     sent_text = bot._safe_reply.await_args[0][1]
-    assert "without live web search" in sent_text
+    assert "Answering without the web" in sent_text
     bot.chat_state.pop(123, None)
 
 
@@ -81,7 +81,7 @@ def test_disabled_search_marks_reply_without_live_search(rate_guard_setup, monke
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
     sent_text = bot._safe_reply.await_args[0][1]
-    assert "without live web search" in sent_text
+    assert "Answering without the web" in sent_text
     bot.chat_state.pop(123, None)
 
 

@@ -37,10 +37,10 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     assert status.message is sent
     text = sent.edits[-1][0]
     assert "✓ Searched the web · found 5" in text
-    assert "Thinking… 0s" in text
+    assert "Thinking… 0 seconds" in text
     html_block, plain_block = status.activity_prefix()
     assert html_block.startswith("<blockquote expandable>") and html_block.endswith("</blockquote>")
-    assert "Thought for 0s" in plain_block
+    assert "Thought for 0 seconds" in plain_block
     assert "✓ Searched the web · found 5" in plain_block
     assert plain_block.count("· example.com") == 1
     assert "· second.example" in plain_block
@@ -84,7 +84,7 @@ def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
     status = asyncio.run(scenario())
     live = incoming.sent[0].edits[-1][0]
     assert "✓ Looking at the image" in live
-    assert "Thinking… 0s" in live
+    assert "Thinking… 0 seconds" in live
     _, plain = status.activity_prefix()
     assert "✓ Looking at the image" in plain
     assert "Thought for" in plain
@@ -117,7 +117,7 @@ def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
     assert status.message is incoming.sent[0]
     live = incoming.sent[0].edits[-1][0]
     assert "Taking a little longer" in live
-    assert "0s" in live
+    assert "0 seconds" in live
     import lumen_status
     assert live[0] in lumen_status._TRIO_FRAMES
     bot.chat_state.pop(999904, None)

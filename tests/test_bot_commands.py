@@ -603,7 +603,7 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones(monkeypat
     (bot.ChatType.SUPERGROUP, True),
 ])
 def test_cmd_start_group_notice_only_in_groups(monkeypatch, chat_type, is_group):
-    # Пометка про фон группы (до 100 сообщений уходит провайдерам) терялась бы молча:
+    # Пометка про фон группы терялась бы молча:
     # старые тесты гоняли /start только в личке.
     captured = {}
 
@@ -622,7 +622,6 @@ def test_cmd_start_group_notice_only_in_groups(monkeypatch, chat_type, is_group)
         notice = _lang_t_direct("en", "group_history_notice")
         if is_group:
             assert notice in text
-            assert "100" in text
         else:
             assert notice not in text
     finally:
@@ -2130,7 +2129,7 @@ def test_pick_callback_second_tap_reports_expired(monkeypatch):
     fake_core = AsyncMock()
     monkeypatch.setattr(bot, "_handle_message_core", fake_core)
     asyncio.run(bot.handle_pick_callback(q))
-    assert any("expired" in (text or "").lower() for text, _ in q.answered)
+    assert any("aren't active" in (text or "").lower() or "не активны" in (text or "").lower() for text, _ in q.answered)
     fake_core.assert_not_awaited()
 
 
@@ -2213,10 +2212,10 @@ def test_pick_callback_expired_known_token_reissues_buttons_once(monkeypatch):
         asyncio.run(bot.handle_pick_callback(q2))
         assert "Триллер" in q2.message.edits[0][0]
         fake_core.assert_awaited_once()
-        # А вот теперь токен и правда сгорел — дальше честное expired.
+        # А вот теперь токен и правда сгорел — дальше честное «кнопки не активны».
         q3 = _make_pick_query(f"pick:{fresh}:0")
         asyncio.run(bot.handle_pick_callback(q3))
-        assert any("expired" in (text or "").lower() or "протух" in (text or "").lower() for text, _ in q3.answered)
+        assert any("aren't active" in (text or "").lower() or "не активны" in (text or "").lower() for text, _ in q3.answered)
         fake_core.assert_awaited_once()
     finally:
         bot._pending_picks.clear()
@@ -2346,6 +2345,9 @@ def test_lang_table_covers_all_keys_in_all_languages():
     # Байт-дубликат английского не перевод: такую строку удаляем, показ едет
     # фолбэком. Исключения с причиной — только здесь.
     allowed_en_duplicates = {("selftest_header", "fil")}
+    # Имя собственное: заголовок inline-ответа одинаков во всех языках.
+    allowed_en_duplicates |= {("inline_answer_title", lang)
+                              for lang in lumen_lang.SUPPORTED_LANGS if lang != "en"}
     for key, table in lumen_lang.STRINGS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
             explicit = lumen_lang.LANG_PACKS.get(lang, {}).get(key) or table.get(lang)
@@ -2420,14 +2422,19 @@ def test_command_locales_excludes_filipino_without_iso_639_1_code():
 
 
 def test_ru_system_messages_use_informal_ty():
-    # Стиль бота — на "ты" везде: формальное "вы" в русских строках — баг стиля.
+    # Стиль бота — на "ты" везде: вежливые формы в русских строках — баг стиля
+    # (аудит 11.11.2026: в tiktok-подсказках проскакивали "Попробуйте/Пришлите").
+    import re
     import lumen_lang
     too_big = lumen_lang.STRINGS["tiktok_too_big"]["ru"]
-    assert "Попробуй скачать" in too_big
-    assert "Попробуйте" not in too_big
+    assert "попробуй скачать" in too_big
     no_sep = lumen_lang.STRINGS["tiktok_sound_no_separate"]["ru"]
-    assert "Пришли, пожалуйста" in no_sep
-    assert "Пришлите" not in no_sep
+    assert "пришли ссылку" in no_sep
+    for key, table in lumen_lang.STRINGS.items():
+        ru = table.get("ru")
+        if not ru or key.startswith(("owner_", "selftest_", "stats_", "logs_")):
+            continue
+        assert not re.search(r"\b(Попробуйте|Пришлите|Выберите|Дождитесь|Подождите|Попросите)\b", ru), key
 
 
 def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
