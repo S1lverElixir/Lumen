@@ -257,15 +257,17 @@ _LEGEND_AFTER_RE = re.compile(r"\s*(?:[—–-]|:|•|\d{1,2}[.)])")
 
 # Только закрытые классы: предлоги, союзы, местоимения, служебные глаголы,
 # квантификаторы, наречия места/времени/меры. Существительные и полные глаголы —
-# открытые: в техническом русском это обычные термины (dict, asyncio, get).
+# открытые: в техническом русском это обычные термины (dict, asyncio, get). Из
+# закрытых убраны not, all, any, each, both: они сохнут в коде как ключевые слова
+# и человек пишет их без обратных кавычек, а вычистить их — испортить ответ.
 _FOREIGN_FUNC_WORDS = frozenset({
-    "the", "and", "but", "for", "not", "you", "your", "yours", "with", "within",
+    "the", "and", "but", "for", "you", "your", "yours", "with", "within",
     "without", "from", "have", "has", "had", "was", "were", "are", "been",
     "being", "will", "would", "could", "should", "shall", "must", "might",
     "this", "that", "these", "those", "them", "they", "their", "theirs", "there",
     "then", "than", "very", "quite", "rather", "almost", "enough", "much",
-    "many", "more", "most", "other", "another", "such", "some", "every", "each",
-    "all", "both", "few", "less", "least", "any", "anything", "something",
+    "many", "more", "most", "other", "another", "such", "some", "every",
+    "few", "less", "least", "anything", "something",
     "everything", "nothing", "none", "because", "although", "though", "however",
     "therefore", "otherwise", "where", "wherever", "when", "whenever", "which",
     "what", "whatever", "who", "whom", "whose", "why", "how", "into", "onto",

@@ -427,3 +427,16 @@ def test_polish_answer_logs_counts_not_answer_text(caplog):
     joined = " ".join(rec.getMessage() for rec in caplog.records)
     assert "[lang-mix]" in joined
     assert "everywhere" not in joined
+
+def test_polish_answer_leaves_programming_keywords_alone():
+    # not/all/any/each/both сняты со списка служебных слов: в ответах про код их
+    # пишут и без обратных кавычек, а вычистить их — испортить ответ (review 11.11.2026).
+    text = (
+        "В Python оператор not инвертирует значение, all и any проверяют весь итератор, "
+        "each и both часто встречаются в чужих библиотеках и в документации на English. "
+        "А вот because модель сюда вставила по ошибке, и фильтр обязан его убрать."
+    )
+    out = lumen_security._polish_answer(text, source="test")
+    for word in ("not", "all", "any", "each", "both"):
+        assert word in out, word
+    assert "because" not in out
