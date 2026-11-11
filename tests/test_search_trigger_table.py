@@ -78,3 +78,17 @@ def test_knowledge_and_memory_questions_do_not_want_web_search(text):
 def test_empty_text_never_searches():
     # Пустой текст не должен гнать в поиск и тратить бюджет сообщения.
     assert _wants_web_search("") is False
+
+def test_followup_question_searches_only_when_there_is_a_topic():
+    # «а кто был до неё» само по себе искать нечего: без прошлого вопроса бот
+    # не гоняет поиск в пустоту, с прошлым — ищет по теме (замер 11.11.2026).
+    follow_up = "а кто был до неё"
+    assert _wants_web_search(follow_up) is False
+    assert _wants_web_search(follow_up, previous="кто сейчас возглавляет Центральный банк России") is True
+
+
+def test_followup_predicate_recognizes_pronouns_only():
+    from lumen_search import is_anaphoric_followup
+    assert is_anaphoric_followup("а у него как?") is True
+    assert is_anaphoric_followup("а какая погода в Минске") is False
+    assert is_anaphoric_followup("какой процессор лучше купить для игр") is False

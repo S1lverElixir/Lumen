@@ -61,6 +61,8 @@ from lumen_search import (
     fetch_web_snippets,
     format_snippets_for_prompt,
     route_has_live_search,
+
+    is_anaphoric_followup,
     web_search_is_enabled,
     web_search_max_results,
     web_search_timeout_sec,
@@ -100,15 +102,32 @@ def _media_prompt_lang(message: Any, state: dict | None) -> str | None:
     return base if base in LANG_NAMES else None
 
 
-def _wants_web_search(text: str) -> bool:
+def _previous_user_text(state: dict) -> str:
+    """Последний вопрос того же чата: короткий ответный запрос („а кто был до неё“)
+    ищется по теме прошлого вопроса, а не по местоимению (замер 11.11.2026)."""
+    for entry in reversed(state.get("history") or []):
+        if not isinstance(entry, dict) or entry.get("role") != "user":
+            continue
+        text = (entry.get("content") or entry.get("text") or "").strip()
+        if len(text) >= 12:
+            return text[:300]
+    return ""
+
+
+def _wants_web_search(text: str, *, previous: str = "") -> bool:
     """Ищет ли бот так же, как искал бы Claude: нужны свежие данные либо явная
     просьба искать. Ссылка на прошлый разговор («помнишь, мы вчера обсуждали») —
-    вопрос к памяти чата, поиск по ней запускался зря (замер 11.11.2026)."""
+    вопрос к памяти чата, поиск по ней запускался зря (замер 11.11.2026).
+
+    previous — вопрос до этого: «а кто был до неё» своей темы не имеет, но это
+    продолжение свежего вопроса, и на таком Claude ищет."""
     if not text:
         return False
     if _PAST_CHAT_RE.search(text):
         return False
-    return _looks_like_freshness_query(text) or _looks_like_search_request(text)
+    if _looks_like_freshness_query(text) or _looks_like_search_request(text):
+        return True
+    return bool(previous) and is_anaphoric_followup(text)
 
 
 def _initial_status(needs_youtube: bool, needs_website: bool, media_mime: str | None,
@@ -1096,7 +1115,7 @@ async def _handle_message_core(
     # Явная просьба искать тоже ведёт на свежий маршрут: иначе "погугли" без слов-маркеров уходило на модели без поиска (прод 11.10.2026).
     # «помнишь, мы вчера обсуждали» — вопрос к памяти чата, а не к вебу: из-за слова
     # «вчера» запускался поиск и ответ получал пометку «без интернета» (замер 11.11.2026).
-    needs_freshness = _wants_web_search(clean_prompt)
+    needs_freshness = _wants_web_search(clean_prompt, previous=_previous_user_text(state))
     route = _build_route(
         needs_youtube=needs_youtube, needs_website=needs_website,
         media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
@@ -1184,6 +1203,7 @@ async def _handle_message_core(
             try:
                 snippets = await fetch_web_snippets(
                     clean_prompt, timeout_sec=search_budget, max_results=web_search_max_results(),
+                    context=_previous_user_text(state),
                 )
             except Exception as exc:
                 log.warning("[web-search] Snippet fetch failed, answering with a no-search note: %s", exc.__class__.__name__)
@@ -1304,6 +1324,7 @@ async def _handle_message_core(
                 if retry_budget > 0 and web_search_is_enabled():
                     retry_snippets = await fetch_web_snippets(
                         clean_prompt, timeout_sec=retry_budget, max_results=web_search_max_results(),
+                        context=_previous_user_text(state),
                     )
             except Exception as exc:
                 log.warning("[web-search] Post-hoc snippet fetch failed: %s", exc.__class__.__name__)

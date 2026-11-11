@@ -183,13 +183,45 @@ def keyword_form(text: str) -> str:
     return " ".join(kept).strip()
 
 
-def plan_search_queries(text: str) -> list[str]:
+# «а кто был до неё», «а у него?»: короткий вопрос с местоимением не описывает тему,
+# и движок ищет по местоимению.Claude в таком случае продолжает прошлый вопрос.
+_ANAPHORA_RE = re.compile(
+    r"\b(?:а\s+(?:он|она|оно|они|оно|у\s+него|у\s+неё|у\s+нее|до\s+него|до\s+неё|до\s+нее)"
+    r"|кто\s+(?:был|было|была)?\s*(?:до|ранее|раньше)"
+    r"|что\s+по\s+(?:нему|ней|ним)|а\s+(?:как|сколько)\s+(?:он|она|оно|они)"
+    r"|the\s+former|and\s+(?:him|her|them|it)\b|what\s+about\s+(?:him|her|it|that|them)"
+    r"|previous(?:ly)?|earlier|\b(?:у|до|к|над|про)\s+(?:него|нея|ней|нее|них)\b)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_thin_or_anaphoric(core: str) -> bool:
+    """Запрос, который сам тему не называет: местоимение («а кто был до неё») или
+    одни служебные слова («продолжи», «и что»). Короткий, но самостоятельный вопрос
+    («погода в Минске») подменяемым не считается — склейка с прошлой темой его портит."""
+    if not core:
+        return True
+    if _ANAPHORA_RE.search(core):
+        return True
+    content_words = [w for w in re.findall(r"[\wА-ЯЁа-яё]{3,}", core) if not _STOPWORDS_RE.fullmatch(w)]
+    return not content_words
+
+
+def plan_search_queries(text: str, *, context: str = "") -> list[str]:
     """Один запрос пользователя -> формы для движков: ядро вопроса и ключевая форма.
     Две формы, а не одна: разговорный вопрос хорош для новостных движков, ключевая
-    форма — для Википедии и общих выдачи."""
+    форма — для Википедии и общих выдачи.
+
+    context — предыдущий вопрос того же чата: если текущий сообщение только
+    местоимение («а кто был до неё»), тема берётся из него, иначе движок ищет по
+    слову «неё» (замер 11.11.2026)."""
     core = clean_search_text(text)
     if not core:
         return []
+    if context and _is_thin_or_anaphoric(core):
+        topic = clean_search_text(context)
+        if topic:
+            core = f"{topic} {core}".strip()[:400]
     forms = [core]
     keys = keyword_form(core)
     if keys and keys.lower() != core.lower():
@@ -323,6 +355,12 @@ def _cities_in(text: str) -> list[str]:
             return [token]
     return []
 
+
+def is_anaphoric_followup(text: str) -> bool:
+    """Вопрос без собственной темы: местоимение («а кто был до неё») или одни
+    служебные слова. Сам по себе в поиске бесполезен, с темой прошлого вопроса —
+    это ровно тот же поиск, что делает Claude."""
+    return _is_thin_or_anaphoric(clean_search_text(text))
 
 def detect_intents(text: str) -> dict[str, bool]:
     """Что из безключевых источников стоит спросить. Дешёвый regex-слой:
@@ -920,7 +958,7 @@ def _rank(items: list[dict], *, wants_fresh: bool, wants_entity: bool) -> list[d
 
 
 async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
-                             max_results: int | None = None) -> list[dict]:
+                             max_results: int | None = None, context: str = "") -> list[dict]:
     """Внешний поиск целиком: формы запроса -> параллельные источники -> ранжированный
     список сниппетов. Пусто везде — [] и честная пометка на стороне вызывающего кода.
 
@@ -932,7 +970,7 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
     text = (text or "").strip()[:500]
     if not text:
         return []
-    queries = plan_search_queries(text) or [text]
+    queries = plan_search_queries(text, context=context) or [text]
     timeout = timeout_sec if timeout_sec else web_search_timeout_sec()
     limit = max_results if max_results else web_search_max_results()
     deadline = time.monotonic() + max(1.0, timeout)

@@ -34,7 +34,7 @@ def test_explicit_search_request_gets_snippets_without_live_search(rate_guard_se
     message.text = "погугли что происходит с ДЦ Яндекса"
     _kill_search_quota(monkeypatch)
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         assert "ДЦ" in query
         return [{"title": "Новость", "url": "https://example.com/n", "snippet": "Свежие данные"}]
 
@@ -54,7 +54,7 @@ def test_past_chat_reference_does_not_run_external_search(rate_guard_setup, monk
     _kill_search_quota(monkeypatch)
     calls = []
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         calls.append(query)
         return []
 
@@ -76,7 +76,7 @@ def test_release_status_question_runs_external_search(rate_guard_setup, monkeypa
     message.text = "что нового в пятом сезоне очень странных дел, вышел ли финал"
     seen = []
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         seen.append(query)
         return [{"title": "Финал вышел", "url": "https://example.com/final", "snippet": "2026"}]
 
@@ -92,7 +92,7 @@ def test_empty_fallback_search_marks_reply_without_live_search(rate_guard_setup,
     message.text = "погугли что происходит с ДЦ Яндекса"
     _kill_search_quota(monkeypatch)
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return []
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -113,7 +113,7 @@ def test_disabled_search_marks_reply_without_live_search(rate_guard_setup, monke
     _kill_search_quota(monkeypatch)
     monkeypatch.setenv("WEB_SEARCH_ENABLED", "0")
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         raise AssertionError("fetch must not run while disabled")
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -135,7 +135,7 @@ def test_fresh_query_with_live_gemini_still_gets_external_snippets(rate_guard_se
     message.text = "погугли что происходит с ДЦ Яндекса"
     captured: dict = {}
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return [{"title": "Новость", "url": "https://example.com/grounded", "snippet": "Данные"}]
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -191,7 +191,7 @@ def test_fresh_query_status_shows_search_then_thinking(rate_guard_setup, monkeyp
         captured["initial"] = (key, timed)
         return fake_status
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return [{"title": "T", "url": "https://example.com/1", "snippet": "S"},
                 {"title": "T2", "url": "https://example.com/2", "snippet": "S2"}]
 
@@ -217,7 +217,7 @@ def test_empty_external_search_with_grounded_answer_has_no_note(rate_guard_setup
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return []
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -244,7 +244,7 @@ def test_daily_limit_still_gets_external_search_snippets(rate_guard_setup, monke
     monkeypatch.setattr(bot, "_user_daily_gemini_exhausted", lambda uid, entry: True)
     captured: dict = {}
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return [{"title": "Новость", "url": "https://example.com/daily", "snippet": "Свежие данные"}]
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -271,7 +271,7 @@ def test_daily_limit_with_empty_search_keeps_no_search_note(rate_guard_setup, mo
     monkeypatch.setattr(bot, "_user_daily_gemini_exhausted", lambda uid, entry: True)
     captured: dict = {}
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return []
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -315,7 +315,7 @@ def test_freshness_prompt_carries_today_date(rate_guard_setup, monkeypatch):
     message.text = "какая сегодня погода в Москве"
     captured: dict = {}
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return []
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -346,4 +346,25 @@ def test_non_freshness_prompt_has_no_date_context(rate_guard_setup, monkeypatch)
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
     assert "[Context: today is" not in captured["prompt"]
+    bot.chat_state.pop(123, None)
+
+def test_anaphoric_followup_searches_with_previous_topic(rate_guard_setup, monkeypatch):
+    # Замер 11.11.2026: на «а кто был до неё» движок получало местоимение и не находил
+    # ничего. Тема продолжения — из прошлого вопроса того же чата, и сам такой
+    # вопрос тоже обязан запускать поиск, иначе ответ строится по памяти.
+    message = rate_guard_setup()
+    message.text = "а кто был до неё"
+    state = {"history": [{"role": "user", "content": "кто сейчас возглавляет Центральный банк России"}]}
+    monkeypatch.setattr(bot, "get_state", lambda chat_id: state)
+    seen = []
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
+        seen.append((query, context))
+        return [{"title": "Предшественник", "url": "https://ru.wikipedia.org/wiki/x", "snippet": "с 2013"}]
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    prompt = _run_core_capturing_prompt(message, monkeypatch)
+    assert seen, "поиск на продолжении свежего вопроса обязан запускаться"
+    assert "Центральный банк" in seen[0][1]
+    assert "Web search results" in prompt
     bot.chat_state.pop(123, None)

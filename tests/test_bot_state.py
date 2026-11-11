@@ -3655,7 +3655,7 @@ def test_core_falls_back_without_gemini_and_marks_no_search(rate_guard_setup, mo
     captured = {}
     replies = []
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return []
 
     async def fake_route(chat_id, ai_prompt, route, msg, **kwargs):
