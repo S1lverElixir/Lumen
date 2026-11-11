@@ -26,9 +26,9 @@ from lumen_model_speed import (
 )
 from lumen_router_config import GEMINI_MODELS
 from lumen_search import (
-    SEARCH_REQUEST_MARKER,
     _SearchRequested,
     search_marker_state,
+    has_leading_search_marker,
     strip_search_marker,
 )
 from lumen_security import (
@@ -555,7 +555,7 @@ async def _run_streaming_reply(
                 # с маркером, пузырёк остаётся живым для прохода со сниппетами.
                 log.info('[stream] %s/%s asked for a web search instead of answering', provider, model_id)
                 raise _SearchRequested(sent_messages[-1] if sent_messages else None)
-            if full_text.lstrip().startswith(SEARCH_REQUEST_MARKER):
+            if has_leading_search_marker(full_text):
                 # Маркер плюс текст: служебную строку не показываем, ответ остаётся.
                 full_text = strip_search_marker(full_text)
 

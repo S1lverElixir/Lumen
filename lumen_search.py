@@ -9,6 +9,7 @@ import contextlib
 import html
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -114,7 +115,19 @@ def answered_with_live_search(provenance: dict | None) -> bool:
 # Решение о поиске отдаётся модели — как это делает Claude.
 SEARCH_REQUEST_MARKER = "[[SEARCH]]"
 # Хвост из одной пунктуации после маркера существенным не считается.
-_MARKER_TAIL_PUNCT = " \t\r\n.,:;!?-—–«»\"'`()[]{}*_~"
+_MARKER_TAIL_PUNCT = " \t\r\n.,:;!?-—–«»\"'`()[]{}*_~。、，！？：；"
+# Модель могла обернуть маркер в кавычки, звёздочки или «ёжик» — с начала
+# строки эти знаки снимаем, иначе служебная строка ушла бы в чат.
+_MARKER_WRAP_BEFORE = " \t\r\n`*_~\"'“”«»"
+# Сам маркер: скобок может быть и одна, и две, регистр любой.
+# Накопленное ещё может достроиться в маркер, если в нём только обрамление
+# и начало слова search: показывать рано.
+_MARKER_ALLOWED_RE = re.compile(r"^[\[\](){}\s\"'`*_~«»“”search]*$", re.IGNORECASE)
+_MARKER_NONLETTER_RE = re.compile(r"[^a-z]")
+_SEARCH_MARKER_LEADING_RE = re.compile(
+    r"^[\s`*_~\"'“”«»([{<]*\[\s*search\s*\][\s`*_~\"'“”«»)}\],.;:!?"    r"\u3002\u3001\uff0c\uff1f\uff01\uff1a\uff1b]*",
+    re.IGNORECASE,
+)
 
 
 class _SearchRequested(Exception):
@@ -127,25 +140,44 @@ class _SearchRequested(Exception):
         self.placeholder = placeholder
 
 
+def _marker_head(text: str) -> str:
+    """Начало ответа без обрамления и в нижнем регистре: «[[SEARCH]]», "[[search]]»
+    и **[[search]]** для детекта одинаковы."""
+    return (text or "").strip().lstrip(_MARKER_WRAP_BEFORE).strip().lower()
+
+
+def _could_grow_into_marker(head: str) -> bool:
+    """Короткое накопленное всё ещё может стать маркером: символы только
+    из его обрамления, а буквы — префиксом слова search. «Sea,» уже нет
+    (запятая не входит), «Sure» тоже."""
+    if len(head) > len(SEARCH_REQUEST_MARKER) + 2 or not _MARKER_ALLOWED_RE.match(head):
+        return False
+    return "search".startswith(_MARKER_NONLETTER_RE.sub("", head))
+
+
+def has_leading_search_marker(text: str) -> bool:
+    """Ответ начинается со служебного маркера (в любом обрамлении)."""
+    return bool(_SEARCH_MARKER_LEADING_RE.match(text or ""))
+
+
 def search_marker_state(text: str) -> str:
     """'' — обычный ответ; 'pending' — накопленное ещё может достроиться в
-    маркер, показывать его нельзя; 'requested' — ответ это только маркер."""
-    head = (text or "").strip()
-    if len(head) < len(SEARCH_REQUEST_MARKER):
-        if head and not SEARCH_REQUEST_MARKER.startswith(head):
-            return ""
-        return "pending"
-    if not head.startswith(SEARCH_REQUEST_MARKER):
-        return ""
-    return "" if head[len(SEARCH_REQUEST_MARKER):].strip(_MARKER_TAIL_PUNCT) else "requested"
+    маркер, показывать его нельзя; 'requested' — ответ это только маркер.
+    Прежняя версия сверяла точную строку со строчными скобками: «[[search]]»,
+    маркер в кавычках или в звёздочках ушёл бы в чат служебным текстом
+    (ревью 11.11.2026). Pending остаётся узким — скобки плюс начало слова search,
+    иначе английский ответ на «S…» висел бы до второго куска."""
+    if has_leading_search_marker(text):
+        rest = _SEARCH_MARKER_LEADING_RE.sub("", text or "", count=1)
+        return "requested" if not rest.strip(_MARKER_TAIL_PUNCT) else ""
+    return "pending" if _could_grow_into_marker(_marker_head(text)) else ""
 
 
 def strip_search_marker(text: str) -> str:
     """Служебный маркер с начала строки: в чате его не должен видеть никто."""
-    head = (text or "").lstrip()
-    if head.startswith(SEARCH_REQUEST_MARKER):
-        return head[len(SEARCH_REQUEST_MARKER):].lstrip()
-    return text
+    if not has_leading_search_marker(text):
+        return text
+    return _SEARCH_MARKER_LEADING_RE.sub("", text or "", count=1).lstrip(_MARKER_WRAP_BEFORE).lstrip()
 
 
 # ───────────────────────── подготовка запроса ─────────────────────────
@@ -312,6 +344,15 @@ _CURRENCY_ALIASES = {
     "BYN": ("белорусский рубль", "byn"),
 }
 _WEATHER_RE = re.compile(r"\bпогод\w*|temperatur\w*|weather|дожд\w*|снег\w*|мороз|ветер|жарк\w*|прогноз\w*\s+погоде?", re.IGNORECASE)
+# Астрономика по дату: слой open-meteo давал рассвет/закат только когда в
+# вопросе стояло слово «погода», а «во сколько завтра рассвет в Москве»
+# искался как свежее — и без единой минуты в сниппетах (офлайн-замер
+# 11.11.2026, вопрос 6: модель считала время по памяти).
+_SKY_ASK_RE = re.compile(
+    r"рассвет|закат|восход|заход\s+светил|лун\w*|полнолуни\w*|новолуни\w*|"
+    r"sunrise|sunset|moonrise|moon\s+phase",
+    re.IGNORECASE,
+)
 _FX_RE = re.compile(r"\bкурс\w*\s+(?:валют|доллара|евро|рубл\w*|юаня|лиры|тенге|гривн\w*)|сколько\s+стоит\s+(доллар|евро|юань|валюта)|обмен\w*\s+(валют|доллара)|exchange\s+rate|currency\s+rate", re.IGNORECASE)
 _CRYPTO_RE = re.compile(r"\b(?:биткоин|bitcoin|btc|эфир|ethereum|eth|крипт\w*|токен\w*|монета|solana|toncoin|xrp|doge|лайткоин|cardano|tron)\b", re.IGNORECASE)
 _PRICE_RE = re.compile(r"\b(?:цена|цен\w*|стоимост\w*|сколько\s+стоит|price|cost)\b", re.IGNORECASE)
@@ -430,7 +471,7 @@ def detect_intents(text: str) -> dict[str, bool]:
         "news": _looks_like_news_query(t),
         "crypto": bool(_CRYPTO_RE.search(t)),
         "fx": bool(_FX_RE.search(t)) or bool(re.search(r"\b(?:курс|стоимость)\b.{0,24}\b(?:доллар|евро|рубл|юан|лир|тенге|гривн)", t, re.I)),
-        "weather": bool(_WEATHER_RE.search(t)),
+        "weather": bool(_WEATHER_RE.search(t) or _SKY_ASK_RE.search(t)),
         "entity": bool(_ENTITY_RE.search(t)),
     }
 
@@ -1134,6 +1175,85 @@ async def _fx_snippets(session: aiohttp.ClientSession, text: str, deadline: floa
              "date": date_iso, "kind": "live"}]
 
 
+# Луна — часть того же неба, что и _SKY_ASK_RE: fields просим только когда
+# о ней спрашивают.
+_MOON_ASK_RE = re.compile(r"лун\w*|полнолуни\w*|новолуни\w*|\bmoon\w*", re.IGNORECASE)
+# Горизонт open-meteo — сегодня и завтра: «рассвет послезавтра» в запросах не
+# встречался, а лишние дни раздували бы блок сниппетов.
+_SKY_DAYS = 2
+
+
+def _hhmm(value: object) -> str:
+    """«2026-11-12T07:58» → «07:58»; null на полярный день — пустая строка."""
+    return value[11:16] if isinstance(value, str) and len(value) >= 16 else ""
+
+
+def _moon_illumination(value: object) -> int | None:
+    """Процент освещённого диска из фазы (доли цикла 0..1): у open-meteo
+    illumination нет как daily-поля, а фаза есть (замер 11.11.2026)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(100 * (1 - math.cos(2 * math.pi * v)) / 2)
+
+
+def _moon_phase_label(value: object) -> str:
+    """Фаза из open-meteo — доля цикла 0..1; в блок человек должен читать словами."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if v < 0.03 or v > 0.97:
+        return "новолуние"
+    if abs(v - 0.25) <= 0.03:
+        return "первая четверть"
+    if abs(v - 0.5) <= 0.03:
+        return "полнолуние"
+    if abs(v - 0.75) <= 0.03:
+        return "последняя четверть"
+    return "растущая луна" if v < 0.5 else "убывающая луна"
+
+
+def _sky_bits(daily: dict, need_moon: bool) -> tuple[list[str], list[str]]:
+    """Строки «солнце» и «луна» для сниппета: точные минуты из того же запроса,
+    что и температура. Без них вопрос о рассвете оставался без числа, и модель
+    считала время по памяти (офлайн-замер 11.11.2026, вопрос 6)."""
+    times = daily.get("time") or []
+    sunrise, sunset = daily.get("sunrise") or [], daily.get("sunset") or []
+    day_bits: list[str] = []
+    for i, day in enumerate(times[:_SKY_DAYS]):
+        parts = [f"{day[8:10]}.{day[5:7]}"]
+        rise, set_ = _hhmm(sunrise[i]) if i < len(sunrise) else "", _hhmm(sunset[i]) if i < len(sunset) else ""
+        if rise:
+            parts.append(f"рассвет {rise}")
+        if set_:
+            parts.append(f"закат {set_}")
+        if len(parts) > 1:
+            day_bits.append(" ".join(parts))
+    moon_bits: list[str] = []
+    if not need_moon:
+        return day_bits, moon_bits
+    phase = daily.get("moon_phase") or []
+    illum = [_moon_illumination(v) for v in phase]
+    m_rise, m_set = daily.get("moonrise") or [], daily.get("moonset") or []
+    for i, day in enumerate(times[:_SKY_DAYS]):
+        parts = [f"{day[8:10]}.{day[5:7]}"]
+        label = _moon_phase_label(phase[i]) if i < len(phase) else ""
+        if label:
+            parts.append(label)
+        if i < len(illum) and illum[i] is not None:
+            parts.append(f"освещённость {illum[i]}%")
+        rise, set_ = _hhmm(m_rise[i]) if i < len(m_rise) else "", _hhmm(m_set[i]) if i < len(m_set) else ""
+        if rise:
+            parts.append(f"восход луны {rise}")
+        if set_:
+            parts.append(f"закат луны {set_}")
+        if len(parts) > 1:
+            moon_bits.append(" ".join(parts))
+    return day_bits, moon_bits
+
+
 async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline: float) -> list[dict]:
     """Погода: open-meteo (геокодер + прогноз) — единственный источник, дающий
     точное число с меткой измерения без ключа."""
@@ -1141,6 +1261,10 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
     if not cities:
         return []
     budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
+    need_moon = bool(_MOON_ASK_RE.search(text or ""))
+    daily_fields = "temperature_2m_max,temperature_2m_min,precipitation_sum,sunrise,sunset"
+    if need_moon:
+        daily_fields += ",moonrise,moonset,moon_phase"
     out: list[dict] = []
     for city in cities[:2]:
         try:
@@ -1156,7 +1280,7 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
             async with session.get(_WEATHER_URL, params={
                 "latitude": lat, "longitude": lon,
                 "current": "temperature_2m,precipitation,weather_code,wind_speed_10m",
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum",
+                "daily": daily_fields,
                 "timezone": "auto", "forecast_days": 2,
             }, headers=_SEARCH_HEADERS, timeout=budget) as resp:
                 resp.raise_for_status()
@@ -1178,6 +1302,11 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
             bits.append(f"день до {daily['temperature_2m_max'][0]}°C")
         if daily.get("temperature_2m_min"):
             bits.append(f"ночь {daily['temperature_2m_min'][0]}°C")
+        sky_bits, moon_bits = _sky_bits(daily, need_moon)
+        if sky_bits:
+            bits.append("солнце: " + "; ".join(sky_bits))
+        if moon_bits:
+            bits.append("луна: " + "; ".join(moon_bits))
         when = cur.get("time") or ""
         out.append({"title": f"Погода: {name} на {when}", "url": "https://open-meteo.com/",
                     "snippet": ", ".join(str(b) for b in bits),

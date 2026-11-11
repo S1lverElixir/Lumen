@@ -11,11 +11,13 @@ fetch на [] без сети.
     pytest tests/test_lumen_search.py -v
 """
 import asyncio
+import json
 import logging
 import time
 from types import SimpleNamespace
 
 import aiohttp
+import pytest
 import lumen_search
 
 
@@ -673,3 +675,128 @@ def test_clean_publisher_normalizes_urls_and_drops_aggregators():
     assert lumen_search.clean_publisher({"publisher": "Газета.Ру"}) == "Газета.Ру"
     label = lumen_search._source_label({"publisher": "https://www.championat.ru/", "url": "", "date": "2026-11-11"})
     assert label == "championat.ru, 2026-11-11"
+
+class _ParamsRoutedSession(_RoutedSession):
+    """То же, что _RoutedSession, но помнит params каждого запроса: у open-meteo
+    вывод зависит от того, какие поля мы вообще попросили."""
+
+    def __init__(self, pages):
+        super().__init__(pages)
+        self.params: list[dict] = []
+
+    def get(self, url, *args, **kwargs):
+        self.params.append(kwargs.get("params") or {})
+        return super().get(url, *args, **kwargs)
+
+
+_FORECAST_FIXTURE = {
+    "current": {"time": "2026-11-11T18:00", "temperature_2m": 1.3, "precipitation": 0.0,
+                "weather_code": 1, "wind_speed_10m": 6.9},
+    "current_units": {"temperature_2m": "°C"},
+    "daily": {
+        "time": ["2026-11-11", "2026-11-12"],
+        "temperature_2m_max": [3.0, 2.1],
+        "temperature_2m_min": [1.0, -0.5],
+        "precipitation_sum": [0.0, 0.0],
+        "sunrise": ["2026-11-11T07:56", "2026-11-12T07:58"],
+        "sunset": ["2026-11-11T16:30", "2026-11-12T16:28"],
+        "moonrise": ["2026-11-11T11:25", "2026-11-12T12:24"],
+        "moonset": ["2026-11-11T17:38", None],
+        "moon_phase": [0.065, 0.5],
+    },
+}
+
+
+def _weather_pages():
+    return {
+        lumen_search._GEOCODE_URL: json.dumps(
+            {"results": [{"name": "Москва", "latitude": 55.75, "longitude": 37.62}]}),
+        lumen_search._WEATHER_URL: json.dumps(_FORECAST_FIXTURE),
+    }
+
+
+def _run_weather(monkeypatch, text):
+    """Один прогон погоды через боевой fetch_web_snippets: возвращает сниппеты и
+    строку daily-полей, которые реально ушли в open-meteo."""
+    session = _ParamsRoutedSession(_weather_pages())
+    monkeypatch.setattr(
+        lumen_search, "aiohttp",
+        SimpleNamespace(ClientSession=lambda *a, **k: session, ClientTimeout=aiohttp.ClientTimeout),
+    )
+    out = asyncio.run(lumen_search.fetch_web_snippets(text))
+    daily = " ".join(str(p.get("daily", "")) for p in session.params if p.get("latitude") is not None)
+    return out, daily
+
+
+def test_weather_snippets_carry_exact_sunrise_and_sunset(monkeypatch):
+    # Офлайн-замер 11.11.2026, вопрос 6: «во сколько завтра рассвет в Москве» —
+    # open-meteo спрашивался только про температуру, минут не было ни в одном
+    # сниппете, и модель отвечала расчётом по памяти с оговоркой.
+    out, daily = _run_weather(monkeypatch, "во сколько завтра рассвет в москве?")
+    assert "sunrise" in daily and "sunset" in daily
+    sky = [item["snippet"] for item in out if "рассвет" in item["snippet"]]
+    assert sky, [item["snippet"] for item in out]
+    # Завтрашний день обязан быть в строке: вопрос был про «завтра».
+    assert "12.11 рассвет 07:58" in sky[0] and "закат 16:28" in sky[0]
+
+
+def test_weather_snippets_add_moon_only_for_a_moon_question(monkeypatch):
+    _, plain_daily = _run_weather(monkeypatch, "погода в москве сегодня")
+    moon, moon_daily = _run_weather(monkeypatch, "во сколько всходит луна в москве и какая фаза")
+    assert "moon_phase" not in plain_daily
+    assert "moon_phase" in moon_daily
+    line = [item["snippet"] for item in moon if "луна:" in item["snippet"]]
+    assert line, [item["snippet"] for item in moon]
+    # 0.065 цикла — растущая луна на 4%, 0.5 — полнолуние; освещённость выводится
+    # из фазы, потому что illumination как daily-поле open-meteo отвергает.
+    assert "восход луны 11:25" in line[0] and "полнолуние" in line[0]
+    assert "освещённость 4%" in line[0] and "освещённость 100%" in line[0]
+    # Пустой закат (null) в строку не попадает, «None» человек не увидит.
+    assert "закат луны 17:38" in line[0] and "None" not in line[0]
+
+# ─────────────────── маркер «мне нужен поиск»: ни одного знака в чате ───────────────────
+
+
+@pytest.mark.parametrize("text, expected", [
+    # Модель пишет маркер по-разному — регистр, одна пара скобок, кавычки,
+    # звёздочки, «ёжик». Прежний детект сверял точную строку со строгими
+    # скобками, и вариант ушёл бы в чат служебным текстом (ревью 11.11.2026).
+    ("[[SEARCH]]", "requested"),
+    ("[[search]]", "requested"),
+    ('"[[SEARCH]]"', "requested"),
+    ("**[[Search]]**", "requested"),
+    ("[SEARCH]", "requested"),
+    ("[[ SEARCH ]]", "requested"),
+    ("«[[search]]»", "requested"),
+    ("([[SEARCH]])", "requested"),
+    # Накопленное ещё может достроиться в маркер — показывать нельзя.
+    ("[[SEAR", "pending"),
+    ("[[", "pending"),
+    ("", "pending"),
+    # А обычный ответ не должен зависнуть в ожидании: тут нет ни обрамления
+    # маркера, ни префикса слова search.
+    ("Sure, вот что известно", ""),
+    ("Sea, и ещё про закат", ""),
+    ("Полнолуние 11.11", ""),
+    ("[[Термин]] — это ссылка", ""),
+    ("[[search]] и дальше текст", ""),
+])
+def test_search_marker_state_covers_wrapped_marker_variants(text, expected):
+    assert lumen_search.search_marker_state(text) == expected
+    if expected == "requested":
+        assert lumen_search.has_leading_search_marker(text) is True
+        assert lumen_search.strip_search_marker(text).strip() == ""
+
+
+def test_strip_search_marker_keeps_answer_after_marker():
+    assert lumen_search.strip_search_marker("«[[search]]» Москва — столица России") == "Москва — столица России"
+    assert lumen_search.strip_search_marker("Закат в 16:28") == "Закат в 16:28"
+
+
+def test_detect_intents_sends_astronomy_to_the_weather_layer():
+    # Офлайн-замер 11.11.2026, вопрос 6: «во сколько завтра рассвет в Москве»
+    # искалось как свежее, но слой open-meteo запускался только на слово «погода»,
+    # и точных минут в сниппетах не было ни у одной модели.
+    assert lumen_search.detect_intents("во сколько завтра рассвет в москве")["weather"] is True
+    assert lumen_search.detect_intents("какая фаза луны сегодня в минске")["weather"] is True
+    assert lumen_search.detect_intents("почему небо голубое")["weather"] is False
