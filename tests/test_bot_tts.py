@@ -421,7 +421,7 @@ def test_inline_tts_refuses_when_user_tts_limit_exhausted(monkeypatch):
     monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
     try:
         asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
-        assert len(replies) == 1 and "1/1" in replies[0]
+        assert len(replies) == 1 and "Daily voicing limit" in replies[0]
         # Отказ не считается: счётчик не вырос.
         assert bot._user_daily_entry(777013)["tts"] == 1
     finally:

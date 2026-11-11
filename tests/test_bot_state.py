@@ -3601,7 +3601,7 @@ def test_core_refuses_when_user_daily_total_exhausted(rate_guard_setup, monkeypa
     monkeypatch.setattr(bot, "_run_route", fail_route)
     try:
         asyncio.run(bot._handle_message_core(message))
-        assert len(replies) == 1 and "1/1" in replies[0]
+        assert len(replies) == 1 and "Daily message limit" in replies[0]
         # Отказ не считается: счётчик не вырос.
         assert bot._user_daily_entry(456)["total"] == 1
     finally:
@@ -3699,7 +3699,7 @@ def test_core_refuses_youtube_when_gemini_exhausted(rate_guard_setup, monkeypatc
     monkeypatch.setattr(bot, "_run_route", fail_route)
     try:
         asyncio.run(bot._handle_message_core(message))
-        assert len(replies) == 1 and "1/1" in replies[0]
+        assert len(replies) == 1 and "Daily limit for complex requests" in replies[0]
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
         bot.chat_state.pop(123, None)
@@ -3732,7 +3732,7 @@ def test_core_refuses_video_before_download_when_gemini_exhausted(rate_guard_set
     monkeypatch.setattr(bot, "_fetch_media", fail_download)
     try:
         asyncio.run(bot._handle_message_core(message))
-        assert len(replies) == 1 and "1/1" in replies[0]
+        assert len(replies) == 1 and "Daily limit for complex requests" in replies[0]
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
         bot.chat_state.pop(123, None)
