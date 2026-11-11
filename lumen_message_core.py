@@ -568,6 +568,11 @@ async def _refuse_daily_total(message: Message, uid: int | None, entry: dict | N
     hours, mins = bot._user_daily_reset_in()
     # Суточный счётчик /stats: отказ по лимиту, ответа модели не будет.
     bot._record_stats_event("daily_limit_denials")
+    # Отказ обязан быть виден в логе: прод 11.11.2026 — чат получил отказ по
+    # лимиту, и в логах Space не было ни строки, поэтому «бот молчит» было
+    # неотличимо от «бот отказал по квоте». Только счётчики: ни id, ни текста.
+    log.info("[quota] daily message limit reached (used=%s, limit=%s, reset in %dh%dm) — refused before the model",
+             (entry or {}).get("total", 0), bot._user_daily_limit(uid, "total", entry), hours, mins)
     await bot._safe_reply(message, bot._t(
         message.chat.id, "user_daily_total",
         used=(entry or {}).get("total", 0), limit=bot._user_daily_limit(uid, "total", entry),
@@ -582,6 +587,8 @@ async def _refuse_daily_gemini(message: Message, uid: int | None, entry: dict | 
     if not bot._user_daily_gemini_exhausted(uid, entry):
         return False
     bot._record_stats_event("daily_limit_denials")
+    log.info("[quota] daily heavy-model limit reached (used=%s, limit=%s) — refused before the model",
+             (entry or {}).get("gemini", 0), bot._user_daily_limit(uid, "gemini", entry))
     await bot._safe_reply(message, bot._t(
         message.chat.id, "user_daily_gemini",
         used=(entry or {}).get("gemini", 0), limit=bot._user_daily_limit(uid, "gemini", entry),
@@ -595,6 +602,9 @@ async def _reject_rate_limited_message(message: Message) -> bool:
         return False
     # Ответ без создания чата: обычный _t через _chat_lang заводил бы запись даже
     # отклонённому сообщению. Язык уже существующего чата подхватывается так же.
+    # Строка лога — как у двух отказов выше: без неё отказ по окну 5/30с выглядит
+    # в проде как молчание бота.
+    log.info("[rate-limit] replied with the flood notice (window 5 req / 30 s)")
     await bot._tg_call(bot._answer_sender(message), bot._t_no_create(message.chat.id, "rate_limited"))
     return True
 

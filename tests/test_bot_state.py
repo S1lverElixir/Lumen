@@ -3997,3 +3997,49 @@ def test_answer_cut_by_output_cap_is_continued_too(rate_guard_setup, monkeypatch
     assert len(calls) == 2, [c[:60] for c in calls]
     assert "места обрыва" in calls[1]
     bot.chat_state.pop(123, None)
+def test_daily_refusals_leave_a_log_line(monkeypatch, caplog):
+    # Прод 11.11.2026: смоук-чат получал отказ, и в логах Space не было ни строки
+    # — «бот не ответил» и «бот отказал по лимиту» нельзя было отличить. Логируем
+    # только счётчики: идентификаторов и текста человека в строке нет.
+    import lumen_message_core as core
+
+    def _calls(records, tag):
+        return [r.getMessage() for r in records if tag in r.getMessage()]
+
+    monkeypatch.setattr(bot, "_user_daily_total_exhausted", lambda uid, entry: True)
+    monkeypatch.setattr(bot, "_user_daily_reset_in", lambda: (3, 12))
+    monkeypatch.setattr(bot, "_user_daily_limit", lambda uid, kind, entry: 30)
+    monkeypatch.setattr(bot, "_t", lambda chat_id, key, **kw: "лимит исчерпан")
+    replies = []
+
+    async def fake_safe_reply(message, text, **kwargs):
+        replies.append(text)
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    with caplog.at_level(logging.INFO, logger="bot"):
+        incoming = _FakeIncomingMessage(999801)
+        assert asyncio.run(core._refuse_daily_total(incoming, 777, {"total": 30})) is True
+    assert replies == ["лимит исчерпан"]
+    assert _calls(caplog.records, "[quota] daily message limit reached"), caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(bot, "_user_daily_gemini_exhausted", lambda uid, entry: True)
+    with caplog.at_level(logging.INFO, logger="bot"):
+        assert asyncio.run(core._refuse_daily_gemini(_FakeIncomingMessage(999802), 777, {"gemini": 5})) is True
+    assert _calls(caplog.records, "[quota] daily heavy-model limit reached"), caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda key: True)
+    monkeypatch.setattr(bot, "_rate_limit_key_for_message", lambda message: 777)
+    monkeypatch.setattr(bot, "_t_no_create", lambda chat_id, key: "помедленнее")
+
+    async def fake_tg_call(fn, *args, **kwargs):
+        await fn(*args, **kwargs)
+        return object()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    with caplog.at_level(logging.INFO, logger="bot"):
+        slow = _FakeIncomingMessage(999803)
+        assert asyncio.run(core._reject_rate_limited_message(slow)) is True
+    assert slow.sent, "отказ обязан дойти до человека"
+    assert _calls(caplog.records, "[rate-limit] replied with the flood notice"), caplog.text
