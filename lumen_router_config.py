@@ -502,6 +502,10 @@ _NAMED_VERSION_RE = re.compile(
     r"|\d+\s*(?i:pro|max|ultra|mini|plus)\b"
     r"|(?i:поколен\w*|gen)\s*№?\s*\d+"
     r"|\d+\s*(?:[-—–]\s*(?:е|й))?\s*(?i:поколен\w*|gen\b)"
+    # Название с однобуквенным хвостом: «Silent Hill f», «Wolverine X» — у такой
+    # сущности нет номера версии, но её точно не было в обучающей выборке
+    # (замер корпуса 11.11.2026: «расскажи про Silent Hill f» отвечали по памяти).
+    rf"|\b(?:{_NAME_TOK})\b\s+\b(?:{_NAME_TOK})\b\s+[A-Za-z]\b"
 )
 # «модель claude», «фильм „Аватар“», «сезон 3 The Bear»: класс артефакта или события рядом с именем.
 _EVENT_CLASS = (
@@ -534,7 +538,7 @@ def _looks_like_release_question(text: str) -> bool:
         return False
     if not _RELEASE_LEX_RE.search(text):
         return False
-    return bool(_QUESTION_MARK_RE.search(text)) or bool(_HAS_DIGIT_RE.search(text))
+    return bool(_QUESTION_MARK_RE.search(text)) or bool(_HAS_DIGIT_RE.search(text)) or _is_bare_question(text)
 
 def _looks_like_named_version_query(text: str) -> bool:
     """Неизвестная сущность с номером версии — самый важный сигнал: ловит «Fable 5.2» без слов-триггеров."""
@@ -547,6 +551,32 @@ def _looks_like_en_freshness_query(text: str) -> bool:
     if _SELF_MODEL_RE.search(text):
         return False
     return bool(_EN_RELEASE_RE.search(text))
+
+# Должности, спортивные результаты и счётчики серий протухают независимо от слова
+# «сейчас»: на «кто канцлер Германии» и «кто выиграл Лигу наций» Claude ищет, а
+# списочный детект пропускал (замер корпуса eval/search_trigger_corpus.py
+# 11.11.2026: 7 промахов из 35). Имя собственное рядом обязательно — иначе «кто
+# главный в семье» уезжал бы в веб.
+_OFFICE_OR_RESULT_RE = re.compile(
+    r"\b(?:кто|какой|какая|какие|каков|чем|за\s+кого)\b[^.?]{0,40}"
+    r"\b(?:канцлер\w*|президент\w*|премьер\w*|глава\w*|главн\w*|руководител\w*|председател\w*"
+    r"|директор\w*|ректор\w*|спикер\w*|мэр\w*|губернатор\w*|сенатор\w*|министр\w*|monarch\w*"
+    r"|king|queen|pm|ceo|founder|основател\w*)\b[^.?]{0,40}"
+    r"(?:[A-ZА-ЯЁ][\wА-ЯЁ-]{2,}|\b(?:германи|франци|великобритани|сша|америк|росси|украин|белорусси"
+    r"|польши|поли|итали|испани|китая|китай|турци|турции|казаш|беларус)\w*)",
+    re.IGNORECASE,
+)
+_SPORT_RESULT_RE = re.compile(
+    r"\b(?:выиграл\w*|выигрыва\w*|победил\w*|побежда\w*|чемпион\w*|призёр\w*|обладател\w*"
+    r"|финалист\w*|полуфинал\w*)\b[^.?]{0,40}"
+    r"(?:[A-ZА-ЯЁ][\wА-ЯЁ-]{2,}|\b(?:лиг\w*|кубк\w*|турнир\w*|олимпиад\w*|чемпионат\w*)\b)",
+    re.IGNORECASE,
+)
+# Счётчик эпизодов и сезонов: меняется с каждым показом, памяти не доверять.
+_EPISODE_COUNT_RE = re.compile(
+    r"\b(?:сколько|какой|какие|когда)\b[^.?]{0,40}\b(?:эпизод\w*|серий|серия|серии|выпуск\w*|сезон\w*|трейлер\w*)",
+    re.IGNORECASE,
+)
 
 # ── Явная просьба искать в вебе — отдельно от свежести.
 # Голые "найди/ищи" без упоминания поиска не ловим: "найди баг" про код, а не про веб (прод 11.10.2026).
@@ -562,11 +592,42 @@ def _looks_like_search_request(text: str) -> bool:
     return bool(text) and bool(_SEARCH_REQUEST_RE.search(text))
 
 
+def _is_bare_question(text: str) -> bool:
+    """Реплика без точки в конце — в мессенджере это вопрос по умолчанию:
+    «обновление прошивки на телефоне вышло» без вопросительного знака (замер
+    корпуса 11.11.2026). Работает только вместе с релизным или событийным глаголом,
+    поэтому на болтовне без такого глагола не срабатывает вовсе."""
+    stripped = (text or "").strip()
+    return bool(stripped) and stripped[-1] not in ".!…?"
+
+
+# Состояние дела, которое меняется: «забастовка закончилась», «переговоры продолжаются»,
+# «суд идёт». Память модели здесь всегда устаревшая, а слов свежести в фразе нет.
+_STATE_CHANGE_RE = re.compile(
+    r"\b(?:забастовк\w*|переговор\w*|перемири\w*|оружие|санкци\w*|дело|суд|процесс|"
+    r"режим|договор|контракт|сделка|стачка|выборы|референдум)\b[^.?]{0,40}"
+    r"\b(?:законч\w*|прекрат\w*|возобнов\w*|продолжа\w*|заверш\w*|идёт|идут|действу\w*|"
+    r"подписан\w*|введён\w*|снят\w*|продлён\w*|истёк\w*|истёкш\w*|достигнут\w*)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_office_or_state_query(text: str) -> bool:
+    """Должность, результат турнира, счётчик серий и текущее состояние события —
+    классы вопросов, которые Claude ищет всегда, независимо от слов «сейчас»."""
+    if _SELF_MODEL_RE.search(text):
+        return False
+    if _OFFICE_OR_RESULT_RE.search(text) or _SPORT_RESULT_RE.search(text) or _EPISODE_COUNT_RE.search(text):
+        return True
+    return bool(_STATE_CHANGE_RE.search(text)) and (bool(_QUESTION_MARK_RE.search(text)) or _is_bare_question(text))
+
+
 def _looks_like_freshness_query(text: str) -> bool:
     if not text:
         return False
     return bool(_FRESHNESS_QUERY_RE.search(text)) or _looks_like_release_question(text) \
-        or _looks_like_named_version_query(text) or _looks_like_en_freshness_query(text)
+        or _looks_like_named_version_query(text) or _looks_like_en_freshness_query(text) \
+        or _looks_like_office_or_state_query(text)
 
 
 def _gemini_text_chain(*, needs_freshness: bool) -> list[str]:

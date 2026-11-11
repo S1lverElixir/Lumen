@@ -7,8 +7,10 @@ Claude ищет, бот искал только 18 — «когда вышла F
 Запуск:  python eval/search_trigger_corpus.py
 """
 import io
+import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 import lumen_message_core as M
