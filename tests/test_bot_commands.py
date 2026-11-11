@@ -3231,6 +3231,38 @@ def test_banned_user_commands_send_nothing(monkeypatch):
         bot._unban_user(banned_id)
 
 
+def test_help_command_opens_the_start_screen(rate_guard_setup):
+    # Регресс: без алиаса /help уходил в catch-all и уезжал в модель как текст,
+    # а человек, печатающий /help по привычке, получал выдуманный ответ.
+    import datetime
+    from aiogram import Bot
+    from aiogram.types import Chat as TgChat
+    from aiogram.types import Message as TgMessage
+    real_bot = Bot(token="123456:" + "x" * 35)
+
+    def resolved(text):
+        # Матчит сам реестр dp и aiogram, а не копия правил Command.
+        message = TgMessage(
+            message_id=1, date=datetime.datetime.now(),
+            chat=TgChat(id=999812, type="private"), text=text,
+        )
+        for handler in bot.dp.message.handlers:
+            if asyncio.run(handler.check(message, bot=real_bot))[0]:
+                return handler.callback
+        return None
+
+    assert resolved("/help") is resolved("/start") is bot.cmd_start
+    sent = []
+    for text in ("/start", "/help"):
+        incoming = rate_guard_setup()
+        incoming.text = text
+        asyncio.run(bot.cmd_start(incoming))
+        # фикстура ставит свой AsyncMock на каждый вызов — смотрим его аргументы
+        sent.append(bot._tg_call.await_args.args[1])
+    assert sent[0] == sent[1] == bot._t(123, "start_text")
+
+
+
 def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(monkeypatch):
     # Проба Gemini: исход в счётчик карантина сбрасывается, но квота и EMA латентности
     # не двигаются — это служебный пинг, а не ответ пользователю.
