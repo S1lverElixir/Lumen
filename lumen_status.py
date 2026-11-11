@@ -145,6 +145,15 @@ class StatusMessage:
     async def set_action_key(self, key: str) -> None:
         await self.set_action(_lang_t(self.lang, key), timed=self._literal_timed)
 
+    @classmethod
+    def from_message(cls, message: Message, lang: str, key: str) -> "StatusMessage":
+        """Статус поверх пузыря, который УЖЕ в чате (плейсхолдер стрима): новой
+        отправки нет, иначе рядом встанут два «Думаю…» (замер 11.11.2026)."""
+        status = cls(message=message, lang=lang)
+        status._set_phrase(key, timed=False)
+        status._task = asyncio.create_task(status._tick())
+        return status
+
     async def finish(self) -> None:
         """Фиксирует длительность ожидания и останавливает анимацию."""
         if self._thought_seconds is None:
