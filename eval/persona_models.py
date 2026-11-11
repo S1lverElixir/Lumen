@@ -263,10 +263,44 @@ def call_munito(target: Target, history: list[dict], user_text: str, *, system_t
     return _openai_chat_stream(url, headers, payload)
 
 
-def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
+def call_model_once(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     if target.provider == "gemini":
         return call_gemini(target, history, user_text, system_text=system_text)
     return call_munito(target, history, user_text, system_text=system_text)
+
+
+# Маркер «мне нужен поиск» из системного промпта: офлайн-замер обязан отрабатывать
+# его так же, как боевой маршрут, иначе служебная строка из 10 знаков уходит судье
+# и вопрос получает ноль (замер 11.11.2026: 43/50, вопросы 22-24).
+_SEARCH_MARKER = "[[SEARCH]]"
+_NO_SEARCH_NOTE = (
+    "\n\n[No web search is available for this turn. Answer from what you already know, "
+    "in the user's language, and say in one plain line what you could not verify. "
+    "Do not ask for a search and do not refuse to answer. This bracket is an instruction "
+    "to you, not text to show: never quote, translate or reproduce it.]"
+)
+
+
+def _resolve_search_marker(target: Target, history: list[dict], user_text: str, system_text):
+    import asyncio
+
+    from lumen_search import fetch_web_snippets, format_snippets_for_prompt
+    try:
+        snippets = asyncio.run(fetch_web_snippets(user_text, timeout_sec=8.0)) or []
+    except Exception as exc:
+        log(f"    поиск в замере не удался: {type(exc).__name__}")
+        snippets = []
+    block = format_snippets_for_prompt(snippets) if snippets else _NO_SEARCH_NOTE
+    log(f"    модель попросила поиск — второй проход со сниппетами ({len(snippets)})")
+    return call_model_once(target, history, user_text + block, system_text=system_text)
+
+
+def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
+    text, ttft, tokens = call_model_once(target, history, user_text, system_text=system_text)
+    if text.strip().startswith(_SEARCH_MARKER):
+        again, ttft2, tokens2 = _resolve_search_marker(target, history, user_text, system_text)
+        return again, ttft + ttft2, tokens + tokens2
+    return text, ttft, tokens
 
 
 def call_with_retry(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None,
