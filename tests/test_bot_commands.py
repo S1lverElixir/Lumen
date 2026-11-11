@@ -2448,6 +2448,18 @@ def test_service_command_deny_reveals_no_internals():
                 assert v != en, (key, lang, v)
 
 
+def test_tiktok_processing_phase_matches_the_live_status_family():
+    # Ревью 11.11.2026: этот ключ живёт в спиннере так же, как status_* и
+    # progress_*, но скачивание TikTok не носило многоточия — в одном блоке
+    # активности phases выглядели по-разному во всех 25 языках.
+    import lumen_lang
+    for lang in lumen_lang.SUPPORTED_LANGS:
+        v = (lumen_lang.LANG_PACKS.get(lang, {}).get("tiktok_processing")
+             or lumen_lang.STRINGS["tiktok_processing"][lang])
+        assert "…" in v, (lang, v)
+        assert not v.rstrip().endswith((".", "।", "۔", "。")), (lang, v)
+
+
 def test_status_and_progress_punctuation_is_consistent():
     # Регрессия: «Слушаю.» с точкой и фазы без многоточия ломают вид статусного
     # блока Claude. Живые media/поиск-фазы вне правила: lumen_status ставит им

@@ -116,10 +116,10 @@ def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
 
     status = asyncio.run(scenario())
     live = incoming.sent[0].edits[-1][0]
-    assert "✓ Looking at the image" in live
+    assert "✓ Viewed the image" in live
     assert "Thinking…" in live and "0 seconds" not in live
     _, plain = status.activity_prefix()
-    assert "✓ Looking at the image" in plain
+    assert "✓ Viewed the image" in plain
     assert "Thought for 2 seconds" in plain
     bot.chat_state.pop(999903, None)
 
@@ -241,3 +241,28 @@ def test_subsecond_answer_shows_no_thought_line(monkeypatch):
     html_block, plain_block = status.compose_answer("ответ")
     assert html_block is None and plain_block == "ответ"
     bot.chat_state.pop(999905, None)
+def test_done_stage_phrase_is_past_tense_in_every_language():
+    # Ревью 11.11.2026: закрытый этап брал тот же ключ, что и живой, и в 25
+    # языках показывал «✓ Смотрю изображение» вместо сделанного действия.
+    import lumen_lang
+    pairs = {
+        "progress_viewing_image": "progress_image_done",
+        "progress_watching_video": "progress_video_done",
+        "progress_reading_link": "progress_link_done",
+    }
+    for live_key, done_key in pairs.items():
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            live = lumen_lang.t(lang, live_key)
+            done = lumen_lang.t(lang, done_key)
+            assert done != live, (lang, live_key, done)
+            assert done != done_key and live != live_key, (lang, done)
+
+
+def test_search_done_count_agrees_in_singular():
+    # Ревью 11.11.2026: «1 resultados», «1 trouvés», «1 trovati» — счётчик
+    # стоит существительным, и единственное число нужно языкам с флексией.
+    import lumen_lang
+    assert lumen_lang.t("es", "progress_search_done", count=1) == "Búsqueda en internet · 1 resultado"
+    assert lumen_lang.t("fr", "progress_search_done", count=1) == "Recherche web · 1 trouvé"
+    assert lumen_lang.t("it", "progress_search_done", count=1) == "Ricerca web · 1 trovato"
+    assert lumen_lang.t("en", "progress_search_done", count=1) == "Searched the web · found 1"

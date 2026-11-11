@@ -26,6 +26,15 @@ def _spinner_glyph(frame_idx: int) -> str:
 # Страховка от утечки тикера, если обработчик упал между созданием статуса и
 # маршрутом: дольше этого статус сам себя останавливает.
 _STATUS_MAX_LIFETIME_SEC = 300.0
+# Закрытый этап в Claude стоит в прошедшем времени, а живая фаза — в
+# настоящем: у этапов медиа и ссылки есть отдельные ключи, иначе в трейсе
+# висело «✓ Смотрю изображение» (ревью 11.11.2026).
+_DONE_KEY_BY_PHASE = {
+    "progress_viewing_image": "progress_image_done",
+    "progress_watching_video": "progress_video_done",
+    "progress_reading_link": "progress_link_done",
+    "progress_searching": "progress_search_done",
+}
 
 
 def thought_line_html(lang: str, sec: int) -> str:
@@ -166,7 +175,7 @@ class StatusMessage:
         секунд, пока модель отвечает (ревью 28.10.2026)."""
         if self._phrase_key and not self._timed and self._phrase_key not in (
                 "progress_thinking", "progress_retry"):
-            self.add_done(self._phrase_key)
+            self.add_done(_DONE_KEY_BY_PHASE.get(self._phrase_key, self._phrase_key))
             await self.set_phase("progress_thinking", timed=True)
 
     def _elapsed_seconds(self) -> int:
