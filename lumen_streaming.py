@@ -348,6 +348,11 @@ async def _run_streaming_reply(
     # отбивает и повторные правки (coalescing), и заведомый «message is not modified».
     last_painted_plain = ""
     last_painted_html = ""
+    # Счётчики плавности для прода: сколько кадров реально доехало и каким был
+    # самый большой шаг. По ним судим, похож набор на Claude или идёт рывками
+    # (кадры getUpdates свёрнуты Telegram в один, локально это не измерить).
+    paint_frames = 0
+    paint_max_step = 0
     paint_html_broken = False
     first_piece_ts: float | None = None
     # header_md — короткая activity-строка «✻ Думал N с» над первым пузырём с
@@ -388,7 +393,7 @@ async def _run_streaming_reply(
         (пункт 1). Правки последовательны в этом цикле: пока одна в пути, новых не
         начинается, а следующий кадр берёт самое свежее состояние — coalescing,
         он же защита от мигания и лишних 429."""
-        nonlocal edit_fail_streak, edits_dead, last_painted_plain, last_painted_html, paint_html_broken
+        nonlocal edit_fail_streak, edits_dead, last_painted_plain, last_painted_html, paint_html_broken, paint_frames, paint_max_step
         if edits_dead or not tail_chunks:
             return
         target = tail_chunks[-1]
@@ -411,6 +416,8 @@ async def _run_streaming_reply(
         edit_ok = await bot._tg_call(_stream_editor(sent_messages[-1]), payload, parse_mode=parse_mode, call_timeout=15.0)
         if edit_ok is not None:
             edit_fail_streak = 0
+            paint_frames += 1
+            paint_max_step = max(paint_max_step, len(slice_md) - len(last_painted_plain))
             last_painted_plain = slice_md
             last_painted_html = html_out
             return
@@ -789,6 +796,8 @@ async def _run_streaming_reply(
                               bad=_detect_garbled_mix(full_text.strip()) and not _is_garbled_echo(full_text.strip(), user_text))
     await _remember_turn(state, history_text, user_text, final_answer, history_meta)
     bot._record_quota_usage(provider, model_id)
+    log.info("[stream] smoothness frames=%d max_step=%d chars=%d sec=%.1f",
+             paint_frames, paint_max_step, len(final_answer), time.monotonic() - overall_start_ts)
     return final_answer, None
 
 async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None, history_meta=None) -> tuple[str | None, Message | None]:

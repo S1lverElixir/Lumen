@@ -363,6 +363,25 @@ def is_anaphoric_followup(text: str) -> bool:
     это ровно тот же поиск, что делает Claude."""
     return _is_thin_or_anaphoric(clean_search_text(text))
 
+
+def _filter_other_city(items: list[dict], text: str) -> list[dict]:
+    """Погодный запрос: выдача чужого города уводит модель с числом (замер
+    11.11.2026: на «погода в Гомеле» веб-слой отдал три страницы Могилёва)."""
+    wanted = set(_cities_in(text))
+    if not wanted:
+        return items
+    out: list[dict] = []
+    for item in items:
+        if item.get("kind") in ("live", "fact"):
+            out.append(item)
+            continue
+        found = set(_cities_in(f"{item.get('title') or ''} {item.get('snippet') or ''}"))
+        if found and not found & wanted:
+            continue
+        out.append(item)
+    return out
+
+
 def detect_intents(text: str) -> dict[str, bool]:
     """Что из безключевых источников стоит спросить. Дешёвый regex-слой:
     ошибиться здесь безопасно — лишний источник просто не найдёт совпадений."""
@@ -775,6 +794,9 @@ _ROLE_WORDS_RE = re.compile(
 )
 # Постоянные места утверждений: «действующий» — это без P582 (конец) или с далёким будущим.
 _OPEN_END_PREFIXES = ("+2099", "+2100", "+9999", "-9999")
+# Потолок времени на подбор сущности: перебор кандидатов полезнее молчания, но
+# не должен превращать поиск в шестисекундное ожидание (замер 11.11.2026).
+_LEADER_BUDGET_SEC = 3.0
 # Потолок цикла кандидатов: больше восьми поисков и пяти сущностей слой не жевает —
 # бюджет сообщения общий, а промах одного кандидата не стоит задержки всего поиска.
 _WD_MAX_SEARCHES = 8
@@ -1378,7 +1400,10 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
             jobs.append(_task("wikipedia", _wikipedia_snippets(session, queries, limit, deadline)))
             # Кандидаты Wikidata строятся из разговорной формы: в ключевой уже
             # выбросили «of»/«the» и союз «и», а по ним режут хвост и сохраняют имя (prod 11.11.2026).
-            jobs.append(_task("wikidata", _wikidata_leader_snippets(session, queries[0], limit, deadline)))
+            # Перебор кандидатов не имеет права съедать весь бюджет поиска:
+            # 8 попыток подряд давали 6.0 с на составном вопросе (замер 11.11.2026).
+            _wd_deadline = min(deadline, time.monotonic() + _LEADER_BUDGET_SEC)
+            jobs.append(_task("wikidata", _wikidata_leader_snippets(session, queries[0], limit, _wd_deadline)))
 
         if intents["news"] or wants_fresh or _ADVICE_RE.search(text):
             # Советы по покупке живут в обзорах, а не в энциклопедии: для «что купить
@@ -1403,6 +1428,8 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
 
         merged = _rank(_limit_per_publisher(_dedupe([item for group in groups for item in group])),
                        wants_fresh=wants_fresh, wants_entity=intents["entity"])
+        if intents["weather"]:
+            merged = _filter_other_city(merged, text)
         if merged:
             log.info("[web-search] Snippets: %s (query_forms=%d)",
                      " ".join(f"{name}={count}" for name, count in sorted(diagnostics.items())),

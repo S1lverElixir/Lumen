@@ -12,6 +12,7 @@ fetch на [] без сети.
 """
 import asyncio
 import logging
+import time
 from types import SimpleNamespace
 
 import aiohttp
@@ -606,3 +607,57 @@ def test_weather_source_resolves_declined_city(monkeypatch):
     out = asyncio.run(lumen_search.fetch_web_snippets("какая сейчас погода в Минске"))
     live = [item for item in out if item["kind"] == "live"]
     assert live and "3.7°C" in live[0]["snippet"]
+
+
+def test_weather_query_drops_snippets_about_another_city(monkeypatch):
+    # Замер 11.11.2026: на «погода в Гомеле» веб-слой отдал три страницы Могилёва —
+    # модель получила чужой город рядом с живым числом своего.
+    async def live(session, text, deadline):
+        return [{"title": "Погода: Гомель", "url": "https://open-meteo.com/1", "snippet": "+7°C",
+                 "publisher": "open-meteo.com", "date": "2026-11-11", "kind": "live"}]
+
+    async def web(session, query, budget, limit):
+        return [
+            {"title": "Погода в Могилёве", "url": "https://yandex.by/mogilev",
+             "snippet": "Погода в Могилёве сегодня", "publisher": "yandex.by", "date": "", "kind": "web"},
+            {"title": "Погода в Гомеле", "url": "https://yandex.by/gomel",
+             "snippet": "Погода в Гомеле сегодня", "publisher": "yandex.by", "date": "", "kind": "web"},
+        ]
+
+    async def empty(*args, **kwargs):
+        return []
+
+    for name in ("_wikipedia_snippets", "_wikidata_leader_snippets", "_crypto_snippets",
+                 "_fx_snippets", "_google_news_snippets", "_bing_news_snippets", "_ddg_source"):
+        monkeypatch.setattr(lumen_search, name, empty)
+    monkeypatch.setattr(lumen_search, "_weather_snippets", live)
+    monkeypatch.setattr(lumen_search, "_bing_web_snippets", web)
+    monkeypatch.setattr(lumen_search, "aiohttp", SimpleNamespace(
+        ClientSession=lambda *a, **k: _RoutedSession({}), ClientTimeout=aiohttp.ClientTimeout))
+    titles = [item["title"] for item in asyncio.run(lumen_search.fetch_web_snippets("погода в Гомеле сегодня"))]
+    assert "Погода в Могилёве" not in titles
+    assert "Погода в Гомеле" in titles
+    assert "Погода: Гомель" in titles
+
+
+def test_wikidata_layer_gets_its_own_slice_of_the_search_budget(monkeypatch):
+    # Кандидаты подбора сущности могут перебирать долго, но не за весь бюджет:
+    # составной вопрос ждал поиска 6.0 с (замер 11.11.2026) — это видно по left.
+    seen: dict[str, float] = {}
+
+    async def spy(session, query, limit, deadline):
+        seen["left"] = deadline - time.monotonic()
+        return []
+
+    async def empty(*args, **kwargs):
+        return []
+
+    for name in ("_wikipedia_snippets", "_crypto_snippets", "_fx_snippets", "_weather_snippets",
+                 "_google_news_snippets", "_bing_news_snippets", "_ddg_source", "_bing_web_snippets"):
+        monkeypatch.setattr(lumen_search, name, empty)
+    monkeypatch.setattr(lumen_search, "_wikidata_leader_snippets", spy)
+    monkeypatch.setattr(lumen_search, "aiohttp", SimpleNamespace(
+        ClientSession=lambda *a, **k: _RoutedSession({}), ClientTimeout=aiohttp.ClientTimeout))
+    asyncio.run(lumen_search.fetch_web_snippets(
+        "кто сейчас возглавляет Центральный банк России и какая ключевая ставка", timeout_sec=6.0))
+    assert seen["left"] <= lumen_search._LEADER_BUDGET_SEC + 0.5
