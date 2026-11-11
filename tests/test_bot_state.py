@@ -3935,3 +3935,37 @@ def test_draw_context_restart_rejects_dirty_types(field, raw, expected):
         assert bot.chat_state[cid][field] == expected
     finally:
         bot.chat_state.pop(cid, None)
+
+
+def test_cut_stream_is_continued_automatically_once(rate_guard_setup, monkeypatch):
+    # Регрессия на прод 11.11.2026: «generation failed» и потолок бюджета резали
+    # ответ на середине фразы, человек видел «Соединение прервалось» и должен был
+    # сам писать «продолжи». Теперь бот договаривает сам, один раз.
+    message = rate_guard_setup()
+    message.text = "расскажи про устройство ФРС"
+    state = _continue_state()
+    state["stream_interrupted"] = True
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+
+    calls = []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        calls.append(ai_prompt)
+        partial = "Первая часть ответа. " * 20
+        if len(calls) == 1:
+            # Так ведёт себя оборванный стрим: lumen_streaming ставит пометку.
+            state["stream_interrupted"] = True
+            state["interrupted"] = True
+        return (partial if len(calls) == 1 else "вторая часть"), True
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    asyncio.run(bot._handle_message_core(message))
+
+    assert len(calls) == 2, [c[:60] for c in calls]
+    assert "места обрыва" in calls[1], calls[1][:120]
+    bot.chat_state.pop(123, None)

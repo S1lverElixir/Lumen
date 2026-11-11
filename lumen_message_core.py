@@ -163,6 +163,10 @@ def _initial_status(needs_youtube: bool, needs_website: bool, media_mime: str | 
 
 # Суммарный кап extra-файлов альбома: 9 файлов по 20МБ + base64 давали ~250МБ
 # в RAM (аудит D1, 30.09.2026). Обычный альбом — десятки МБ.
+# Продолжение оборванного ответа имеет смысл, только если в бюджете сообщения
+# ещё остаётся хотя бы столько секунд на один проход маршрута.
+_CONTINUE_MIN_BUDGET_SEC = 12.0
+
 _ALBUM_EXTRA_MAX_BYTES = 100 * 1024 * 1024
 # Параллельных скачиваний альбома: ограничивает in-flight память (3×20МБ).
 _ALBUM_FETCH_CONCURRENCY = 3
@@ -1435,6 +1439,30 @@ async def _handle_message_core(
                 web_search_failed = True
         elif needs_freshness and not search_requested and not snippets_injected and not answered_grounded:
             log.warning("[web-search] Answer already streamed without live search; cannot retry cleanly.")
+        # Обрывок посреди ответа — так не делает Claude: он договаривает. Если
+        # стрим оборвался уже после того, как часть показана, пробуем один раз
+        # продолжить с места обрыва (прод 11.11.2026: «generation failed» и
+        # потолок бюджета резали ответ на середине фразы).
+        _cut_mid_stream = bool(state.get("stream_interrupted"))
+        _left_sec = (route_deadline - time.monotonic()) if route_deadline is not None else None
+        if (_cut_mid_stream and not is_continuation and reply_already_sent and not is_guest
+                and len((ans or "")) > 200 and (_left_sec is None or _left_sec > _CONTINUE_MIN_BUDGET_SEC)):
+            continued_prompt = _continue_after_interrupt(state, "продолжи")
+            if continued_prompt:
+                log.info("[stream] Answer cut mid-stream, continuing once (left=%s).",
+                         "none" if _left_sec is None else round(_left_sec, 1))
+                try:
+                    ans, reply_already_sent = await bot._run_route(
+                        message.chat.id, continued_prompt, route, message,
+                        allow_stream=True, deadline=route_deadline,
+                        provenance=provenance, history_text=continued_prompt,
+                        history_meta=history_meta,
+                    )
+                    web_search_failed = False
+                except Exception as exc:
+                    log.warning("[stream] Auto-continuation failed, keeping the partial answer: %s",
+                                exc.__class__.__name__)
+
         # Пометка «без поиска» — только если поиск реально не дал результата и
         # ответила модель без граундинга: при живом Gemini-поиске она была бы ложью.
         note_text = ""
