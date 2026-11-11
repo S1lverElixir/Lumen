@@ -373,7 +373,7 @@ def test_polish_answer_keeps_english_terms_code_and_quotes():
     assert lumen_security._polish_answer(text, source="test") == text
 
 
-def test_polish_answer_removes_decorative_emoji_over_the_norm():
+def test_polish_answer_caps_prose_emoji_at_two():
     text = (
         "С днём рождения! 🎉✨\n\n"
         "Пусть этот год будет щедрым на поводы для улыбки 😊, лёгким на подъём 🚀 "
@@ -382,10 +382,11 @@ def test_polish_answer_removes_decorative_emoji_over_the_norm():
         "Обнимаю — и поднимаю бокал за тебя 🥂🎂"
     )
     out = lumen_security._polish_answer(text, source="test")
-    # Ревью 11.11.2026: раньше снимались только «лишние», и ответ оставался в
-    # двух стилях сразу — у двух фраз значок, у восьми нет. Теперь выше нормы
-    # украшательства не остаётся вообще: это и есть манера Claude.
-    for glyph in ("🎉", "✨", "😊", "🚀", "🤗", "🌟", "💪", "💸", "😴", "🥂", "🎂"):
+    # В прозе норма промпта — «1-2 на ответ»: первые два значка остаются,
+    # остальные снимаются. Тотальная зачистка прозы регрессировала на замере
+    # 12.11.2026: эмодзи держит границу предложения, и без него фразы слипаются.
+    assert "🎉" in out and "✨" in out
+    for glyph in ("😊", "🚀", "🤗", "🌟", "💪", "💸", "😴", "🥂", "🎂"):
         assert glyph not in out
     assert "улыбки, лёгким" in out and "крепкого, денег" in out
     assert out.rstrip().endswith("за тебя")
@@ -482,10 +483,27 @@ def test_answer_polish_keeps_content_shapes():
     assert lumen_security._polish_answer(family, source="review") == family
     # Ответ из одних эмодзи остаётся ответом: пустой текст ушёл бы в edit_text.
     assert lumen_security._polish_answer("🎉🎊🥳🎈🍾🎁🍰", source="review") == "🎉🎊🥳🎈🍾🎁🍰"
-    # Частичная правка выглядела бы как два стиля в одном списке: снимаются все.
+    # Три и больше значков в начале строк — маркеры списка: снимаются все,
+    # иначе половина пунктов с галкой, половина без (ревью 11.11.2026).
     checklist = "\n".join("✔ Пункт %d" % i for i in range(1, 8))
     polished = lumen_security._polish_answer(checklist, source="review")
     assert "✔" not in polished and polished.splitlines()[0] == "Пункт 1"
+
+
+def test_prose_emoji_keeps_the_norm_and_the_sentence_break():
+    # Замер 12.11.2026 на вопросе про поздравление с эмодзи: тотальная
+    # зачистка оставляла НОЛЬ значков при явной просьбе и склеивала
+    # предложения, где границу держал эмодзи. В прозе снимаются только лишние.
+    import lumen_security
+    prose = ("С днём рождения! Пусть год будет щедрым 🎉 Желаю, чтобы проблемы "
+             "решались звонком 🚀 А планы срывались только в сторону хорошего 💪 "
+             "Здоровья крепкого и сна сладкого 😴")
+    out = lumen_security._polish_answer(prose, source="review")
+    # Норма «1-2 на ответ»: первые два значка остаются и держат границы
+    # предложений, остальные три снимаются.
+    assert "щедрым 🎉 Желаю" in out and "звонком 🚀 А планы" in out, out
+    assert "💪" not in out and "😴" not in out, out
+    assert out.count("Желаю") == 1 and out.count("Здоровья") == 1, out
 
 
 def test_answer_polish_keeps_latin_terms_and_still_drops_intruders():

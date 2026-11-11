@@ -248,9 +248,13 @@ _PROTECTED_SPANS_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`|https?://\S+", 
 # под снятие не попадают.
 # Потолок 2 — норма промпта для украшательства; легенда (значок в начале строки
 # с разделителем: «🔍 — лупа») — это контент, промпт допускает до пяти таких.
-# Свыше потолка украшательства снимаются ВСЕ, а не лишние: частичная правка
-# оставляла ответ в двух стилях сразу (ревью 11.11.2026).
+# У значков-маркеров списка (три и больше в начале строк) правка тоже
+# одновременная: половина пунктов со значком, половина без — два стиля в одном
+# списке (ревью 11.11.2026). В прозе же сверх потолка снимаются только лишние:
+# эмодзи там держит границу предложения, и замеры 12.11.2026 на вопросе «с
+# эмодзи» показали слитые без точки фразы после тотальной зачистки.
 _EMOJI_MAX_PER_ANSWER = 2
+_EMOJI_MIN_LIST_MARKERS = 3
 _EMOJI_MAX_LEGEND = 5
 # Значок в ячейке таблицы — это значение столбца, а не декор.
 _TABLE_CELL_CH = "|"
@@ -404,10 +408,23 @@ def _trim_decoration_emoji(text: str, *, source: str) -> str:
         if at_line_head and _LEGEND_AFTER_RE.match(visible, m.end()):
             legend.append((m.span(), size))
         else:
-            flourish.append((m.span(), size))
+            flourish.append((m.span(), size, at_line_head))
     cut: list[tuple[int, int]] = []
-    if sum(size for _, size in flourish) > _EMOJI_MAX_PER_ANSWER:
-        cut.extend(span for span, _ in flourish)
+    markers = [span for span, _size, head in flourish if head]
+    if len(markers) < _EMOJI_MIN_LIST_MARKERS:
+        # Один-два значка в начале строк — это проза, а не список: режем по
+        # потолку, иначе одинокий маркер строки вообще не снимался бы.
+        markers = []
+    else:
+        cut.extend(markers)
+    kept_flow = 0
+    for span, size, _head in flourish:
+        if span in markers:
+            continue
+        if kept_flow + size > _EMOJI_MAX_PER_ANSWER:
+            cut.append(span)
+        else:
+            kept_flow += size
     kept = 0
     for span, size in legend:
         if kept + size > _EMOJI_MAX_LEGEND:
