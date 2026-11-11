@@ -2415,6 +2415,39 @@ def test_user_facing_strings_name_no_provider_or_model():
             assert not _EMOJI_RE.search(cb["q"])
 
 
+# Отказ на служебные команды (logs_deny/stats_deny) читает человек без прав.
+# Старая форма «No access to this command.» подтверждала, что команда существует
+# и что у бота есть владелец, — то есть что бот не Claude (решение владельца
+# 11.11.2026). Стоп-слова взяты из всех 25 прежних формулировок, поэтому тест
+# падает на любом возврате к ним.
+_DENY_KEYS = ("logs_deny", "stats_deny")
+_DENY_LEAK_WORDS = [
+    # доступ / права
+    r"\bacces", r"accès", r"\bdost", r"\bдост", r"toegang", r"erişim",
+    r"akses", r"สิทธิ์", r"पहुंच", r"প্রবেশাধিকার", r"رسائی", r"دسترسی",
+    r"kirish", r"ilungelo", r"صلاحية", r"қолжетімділік", r"\bправ", r"quyền",
+    # команда
+    r"\bcommand", r"\bcomand", r"\bkomand", r"\bкоманд", r"\bкаманд",
+    r"befehl", r"komut", r"perintah", r"คำสั่ง", r"कमांड", r"কমান্ড", r"کمانڈ",
+    r"دستور", r"buyruq", r"myalo", r"الأمر", r"lệnh",
+    # владелец / админ: отказ не должен указывать, кому принадлежит команда
+    r"\bowner", r"\badmin", r"админ", r"владели", r"власник", r"ўладальнік",
+]
+
+
+def test_service_command_deny_reveals_no_internals():
+    import lumen_lang
+    for key in _DENY_KEYS:
+        en = _string_value(lumen_lang, key, "en")
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            hits = [w for w in _DENY_LEAK_WORDS if re.search(w, v, re.IGNORECASE)]
+            assert not hits, (key, lang, hits, v)
+            # Калька с английского — не перевод: форма обязана быть своей.
+            if lang != "en":
+                assert v != en, (key, lang, v)
+
+
 def test_status_and_progress_punctuation_is_consistent():
     # Регрессия: «Слушаю.» с точкой и фазы без многоточия ломают вид статусного
     # блока Claude. Живые media/поиск-фазы вне правила: lumen_status ставит им
