@@ -6,6 +6,7 @@ test_bot_commands.py — Команды и триггеры: /draw//tts//reset//
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
+import re
 import bot
 import contextlib
 import lumen_chat_state
@@ -2421,6 +2422,111 @@ def test_command_locales_excludes_filipino_without_iso_639_1_code():
     # двухбуквенные ISO 639-1 коды, которых у филиппинского нет).
     assert "fil" not in bot.COMMAND_LOCALES
     assert set(bot.COMMAND_LOCALES) == (set(bot.SUPPORTED_LANGS) - {bot.DEFAULT_LANG, "fil"})
+
+
+# Лимиты Bot API на поля профиля и разбор method -> (ключ, аргумент).
+_PROFILE_LIMITS = {"profile_name": 64, "profile_short": 120, "profile_description": 500}
+_PROFILE_ARG_BY_METHOD = {
+    "set_my_name": ("profile_name", "name"),
+    "set_my_short_description": ("profile_short", "short_description"),
+    "set_my_description": ("profile_description", "description"),
+}
+# Политика репо: пользовательский текст не называет провайдера и модель.
+_PROFILE_STOPWORDS = (
+    "gemini", "gemma", "openai", "claude", "anthropic", "munito", "groq",
+    "pollinations", "cloudflare", "chatgpt", "gpt", "llama", "qwen", "deepseek",
+    "glm", "openrouter", "mistral", "hermes", "nemotron", "google",
+)
+# Эмодзи ловим диапазоном Unicode, а не списком знаков: список устаревает.
+_PROFILE_EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF), (0xFE0F, 0xFE0F))
+
+
+def _has_emoji(text: str) -> bool:
+    return any(lo <= ord(ch) <= hi for ch in text for lo, hi in _PROFILE_EMOJI_RANGES)
+
+
+def test_profile_strings_fit_telegram_limits():
+    # Что сторожим: жёсткие лимиты setMyName/setMyShortDescription/
+    # setMyDescription. При превышении Telegram отвечает 400, и «О себе» молча
+    # остаётся старым — ни один другой тест строки профиля не читает.
+    import lumen_lang
+    for key, cap in _PROFILE_LIMITS.items():
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            text = lumen_lang.t(lang, key)
+            assert text and text != key, f"missing {key}[{lang}]"
+            assert len(text) <= cap, f"{key}[{lang}] = {len(text)} > {cap}"
+            assert not _has_emoji(text), f"{key}[{lang}]: {text}"
+            assert "!" not in text and "!" not in text, f"{key}[{lang}]: {text}"
+
+
+def test_profile_texts_never_name_a_provider_or_model():
+    # То же требование, что к текстам ошибок, но к профилю: его видит каждый, кто
+    # открывает бота, ещё до /start.
+    import lumen_lang
+    for key in _PROFILE_LIMITS:
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            text = lumen_lang.t(lang, key).lower()
+            for word in _PROFILE_STOPWORDS:
+                assert not re.search(rf"(?<![a-z]){word}(?![a-z])", text), f"{key}[{lang}] names {word}"
+
+
+def test_profile_locales_are_iso_639_1_codes():
+    # Прод-инцидент setMyCommands с "fil": Bot API принимает только двухбуквенные
+    # коды, а language_code из трёх букв дал бы 400 на всех трёх вызовах профиля.
+    import lumen_lang
+    assert len(set(bot.PROFILE_LANGS)) == len(bot.PROFILE_LANGS)
+    assert bot.DEFAULT_LANG in bot.PROFILE_LANGS
+    for code in bot.PROFILE_LANGS:
+        assert len(code) == 2 and code in lumen_lang.SUPPORTED_LANGS
+
+
+def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
+    # Без этих вызовов «О себе» живёт только в BotFather и расходится с
+    # lumen_lang (10.11.2026).
+    from collections import Counter
+    import lumen_lang
+    calls = []
+
+    def _spy(method_name):
+        async def _method(**kwargs):
+            calls.append((method_name, kwargs))
+            return True
+        return _method
+
+    async def fake_tg_call(method, *args, call_timeout=None, **kwargs):
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _spy(m) for m in _PROFILE_ARG_BY_METHOD}))
+    assert asyncio.run(bot._register_bot_profile()) == 3 * len(bot.PROFILE_LANGS)
+    assert Counter(name for name, _ in calls) == Counter({m: len(bot.PROFILE_LANGS) for m in _PROFILE_ARG_BY_METHOD})
+    for name, kwargs in calls:
+        key, arg = _PROFILE_ARG_BY_METHOD[name]
+        lang = kwargs.get("language_code") or bot.DEFAULT_LANG
+        assert set(kwargs) - {"language_code"} == {arg}, (name, kwargs)
+        assert kwargs[arg] == lumen_lang.t(lang, key), (name, lang)
+    assert {kw.get("language_code") for _, kw in calls} == (set(bot.PROFILE_LANGS) - {bot.DEFAULT_LANG}) | {None}
+    # Дефолт (без language_code) — ровно по одному полю: он же только один.
+    assert sorted(name for name, kw in calls if "language_code" not in kw) == sorted(_PROFILE_ARG_BY_METHOD)
+
+
+def test_register_bot_profile_survives_dead_telegram(monkeypatch, caplog):
+    # _tg_call при недоступном прокси отдаёт None вместо исключения: профиль не
+    # критичен, старт из-за него падать не вправе, а лог обязан быть честным.
+    import logging
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=None))
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: AsyncMock() for m in _PROFILE_ARG_BY_METHOD}))
+    with caplog.at_level(logging.INFO, logger="bot"):
+        assert asyncio.run(bot._register_bot_profile()) == 0
+    assert "Bot profile was not set" in caplog.text
+    assert "Bot profile set" not in caplog.text
+
+
+def test_register_bot_profile_survives_missing_method(monkeypatch):
+    # Старый aiogram без set_my_name давал бы AttributeError внутри стартапа.
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=True))
+    monkeypatch.setattr(bot, "bot", SimpleNamespace())
+    assert asyncio.run(bot._register_bot_profile()) == 0
 
 
 def test_ru_system_messages_use_informal_ty():
