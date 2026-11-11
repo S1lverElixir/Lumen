@@ -467,6 +467,17 @@ def _rate_limit_key_for_message(message: Message) -> int:
     return sender_chat.id if sender_chat else message.chat.id
 
 
+# Ссылка на прошлый разговор, а не на внешний мир: такие фразы не должны гнать запрос
+# в поиск даже со словами «вчера/раньше» (замер 11.11.2026).
+_PAST_CHAT_RE = re.compile(
+    r"\b(?:помнишь|помните|помнится)\b"
+    r"|\bмы\s+(?:вчера|раньше|ранее|позавчера|в\s+прошлый\s+раз)\s+(?:обсуждали|говорили|сказали|рассматривали)"
+    r"|\bкак\s+(?:вчера|раньше|в\s+прошлый\s+раз)\s+(?:говорили|обсуждали|решили)"
+    r"|\bты\s+(?:вчера|раньше|earlier)\s+(?:говорил|сказал|упоминал)"
+    r"|\bdo\s+you\s+remember\b|\bwe\s+(?:talked|discussed|spoke)\s+(?:yesterday|before|earlier)",
+    re.IGNORECASE,
+)
+
 _CONTINUE_RE = re.compile(
     r"^(продолжи(ть)?|продолжай|дальше|договори|continue)\s*,?\s*(пожалуйста)?\s*[.!…]*$",
     re.IGNORECASE,
@@ -1072,7 +1083,12 @@ async def _handle_message_core(
                 break
     is_heavy = _looks_like_heavy_query(clean_prompt)
     # Явная просьба искать тоже ведёт на свежий маршрут: иначе "погугли" без слов-маркеров уходило на модели без поиска (прод 11.10.2026).
-    needs_freshness = _looks_like_freshness_query(clean_prompt) or _looks_like_search_request(clean_prompt)
+    # «помнишь, мы вчера обсуждали» — вопрос к памяти чата, а не к вебу: из-за слова
+    # «вчера» запускался поиск и ответ получал пометку «без интернета» (замер 11.11.2026).
+    needs_freshness = (
+        (_looks_like_freshness_query(clean_prompt) or _looks_like_search_request(clean_prompt))
+        and not _PAST_CHAT_RE.search(clean_prompt)
+    )
     route = _build_route(
         needs_youtube=needs_youtube, needs_website=needs_website,
         media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
@@ -1172,7 +1188,7 @@ async def _handle_message_core(
         if status is not None:
             if snippets:
                 status.add_done("progress_search_done", count=len(snippets))
-                status.set_sources([urlparse(item.get("url") or "").netloc for item in snippets])
+                status.set_sources([item.get("publisher") or urlparse(item.get("url") or "").netloc for item in snippets])
             else:
                 status.add_done("progress_search_empty")
             await status.set_phase("progress_thinking", timed=True)

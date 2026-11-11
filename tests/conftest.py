@@ -24,7 +24,9 @@ os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
 # .env иначе уводил бы тесты на живой Workers AI (сеть, чужая квота, нестабильность).
 for _provider_key in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY", "SENTRY_DSN",
                       "MUNITO_API_KEY", "MUNITO_ENABLED", "MUNITO_KEEP_FALLBACKS", "MUNITO_REASONING_EFFORT",
-                      "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"):
+                      "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
+                      # Ключи агентского поиска: с локальным .env тест ушёл бы в платный API.
+                      "TAVILY_API_KEY", "BRAVE_API_KEY", "EXA_API_KEY", "SEARCH_API_PROVIDER"):
     os.environ[_provider_key] = ""
 
 import copy

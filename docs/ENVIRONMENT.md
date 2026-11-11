@@ -64,7 +64,10 @@ Before publishing, configure the same `LUMEN_PROXY_SECRET` on HF and every Deno 
 | `VOICE_TRANSCRIBE_MAX_BYTES` | `10485760` (10 MB) | Voice/audio attachments larger than this skip Whisper transcription and go straight to Gemini audio, as before. |
 | `WEB_SEARCH_ENABLED` | `1` | Free external snippets for every fresh-info request, regardless of whether the route contains a grounded Gemini model. News queries merge DuckDuckGo with Google News (freshness-filtered, publication dates included). Set to `0` (plus restart) to answer from knowledge with an honest "without live search" note instead. |
 | `WEB_SEARCH_TIMEOUT_SEC` | `8s` | Cap for the whole external search phase (DuckDuckGo plus RSS fallbacks), inside the shared `ROUTE_TOTAL_BUDGET_SEC`. |
-| `WEB_SEARCH_MAX_RESULTS` | `5` | How many snippets are attached to the prompt (each capped, whole block capped). |
+| `WEB_SEARCH_MAX_RESULTS` | `5` | How many results are attached to the prompt (each snippet capped at 300 chars, the whole block at 2000 — `_BLOCK_MAX_CHARS` in `lumen_search.py`, cut on whole lines so a URL is never truncated).
+| `WEB_SEARCH_FACT_APIS` | `1` | Exact-fact layer: Wikipedia for who/what questions, CoinGecko for crypto, exchangerate-api for FX, open-meteo for weather. Keyless and free; set to `0` (plus restart) to keep only news and web layers.
+| `SEARCH_API_PROVIDER` | empty | Which keyed agentic search API to use: `tavily`, `brave` or `exa`. Empty means auto-detect from whichever key is present; no key means the scraping layers only.
+| `TAVILY_API_KEY` / `BRAVE_API_KEY` / `EXA_API_KEY` | empty | Secrets, none required. Free tiers: Tavily 1000 credits/month (a search is 2), Brave 2000 queries/month. While a key is set this provider replaces DuckDuckGo/Bing for the general web layer; its quota is not derived anywhere, so the caps below do not cover it.
 
 ## Timeouts, rate limiting & routing budgets
 

@@ -457,7 +457,7 @@ def _history_user_text(user_text: str) -> str:
 # текущей даты и выдачу поиска (выборка бэкапа: 19 реплик из 210, до 68% объёма
 # user-контекста). Плейсхолдер вместо ответа тоже осел в истории.
 _HISTORY_SERVICE_RE = re.compile(
-    r"\s*\[Context: today[^\]]*\]|\s*\[Web search snippets[\s\S]*$", re.IGNORECASE)
+    r"\s*\[Context: today[^\]]*\]|\s*\[Web search (?:snippets|results)[\s\S]*$", re.IGNORECASE)
 
 
 def _clean_history_entry(item: dict) -> dict | None:

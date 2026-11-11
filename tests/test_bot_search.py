@@ -40,8 +40,50 @@ def test_explicit_search_request_gets_snippets_without_live_search(rate_guard_se
 
     monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
     prompt = _run_core_capturing_prompt(message, monkeypatch)
-    assert "Web search snippets" in prompt
+    assert "Web search results" in prompt
     assert "https://example.com/n" in prompt
+    bot.chat_state.pop(123, None)
+
+
+def test_past_chat_reference_does_not_run_external_search(rate_guard_setup, monkeypatch):
+    # Замер 11.11.2026: «помнишь, мы вчера обсуждали ремонт?» считалось свежим
+    # вопросом из-за слова «вчера» — поиск запускался и ответ получал пометку
+    # «без интернета». Ссылка на прошлый разговор — это вопрос к памяти чата.
+    message = rate_guard_setup()
+    message.text = "помнишь, мы вчера обсуждали ремонт? что ты советовал про плитку"
+    _kill_search_quota(monkeypatch)
+    calls = []
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        calls.append(query)
+        return []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        return "ok", False
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert calls == []
+    assert "without live web search" not in bot._safe_reply.await_args[0][1]
+    bot.chat_state.pop(123, None)
+
+
+def test_release_status_question_runs_external_search(rate_guard_setup, monkeypatch):
+    # Тот же замер: «вышёл ли финал» — вопрос о текущем состоянии дела, на таком
+    # ищут, а классификатор молчал, и модель отвечала по памяти.
+    message = rate_guard_setup()
+    message.text = "что нового в пятом сезоне очень странных дел, вышел ли финал"
+    seen = []
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        seen.append(query)
+        return [{"title": "Финал вышел", "url": "https://example.com/final", "snippet": "2026"}]
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    prompt = _run_core_capturing_prompt(message, monkeypatch)
+    assert seen
+    assert "Web search results" in prompt
     bot.chat_state.pop(123, None)
 
 
