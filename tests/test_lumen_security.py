@@ -536,3 +536,21 @@ def test_polished_prefix_len_maps_painted_boundary_exactly():
     # Прежний срез по covered_len терял начало хвоста: по разнице границ видно,
     # что без отображения смещений текст не совпадает.
     assert polished[cut:] != polished[shown:]
+
+def test_answer_polish_is_a_fixpoint_on_every_shape_it_edits():
+    # Замер 12.11.2026 на 673 исторических ответах замера: повторный проход ни
+    # одного не изменил. Свойство нужно стриму (финальный полируется заново при
+    # правке пузыря) и второму проходу после [[SEARCH]]: без него каждый проход
+    # снимал бы по эмодзи, и ответ съезжал бы к нулю.
+    samples = [
+        "🎉✨🔥 🚀 Пиратский флаг! {flag} Красивый, но выдуманный символ.",
+        "С днём рождения! Пусть год будет щедрым 🎉 Желаю удачи 🚀 И здоровья 💪 Ещё раз 😴",
+        "В нём everywhere плавают частички пыли, и это видно даже невооружённым глазом утром.",
+        "Как язык модели? Я Lumen, ассистент в Telegram. Говорите со мной как с человеком.",
+        "| Модель | Скорость |\n|---|---|\n| 🐍 Python | средняя |\n| 🐹 Go | высокая |",
+    ]
+    for text in samples:
+        once = lumen_security._polish_answer(text, source="review")
+        twice = lumen_security._polish_answer(once, source="review")
+        assert twice == once, text
+        assert lumen_security._polish_answer(twice, source="review") == once, text
