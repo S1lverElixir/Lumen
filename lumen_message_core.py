@@ -1444,8 +1444,13 @@ async def _handle_message_core(
         # продолжить с места обрыва (прод 11.11.2026: «generation failed» и
         # потолок бюджета резали ответ на середине фразы).
         _cut_mid_stream = bool(state.get("stream_interrupted"))
+        # Потолок вывода провайдера — тот же оборванный ответ: Claude договаривает
+        # сам, поэтому и бот продолжает, а не оставляет обрывок без объяснения.
+        _cut_by_cap_now = provenance.get("finish_reason") == "length"
+        if _cut_by_cap_now and reply_already_sent:
+            state["interrupted"] = True
         _left_sec = (route_deadline - time.monotonic()) if route_deadline is not None else None
-        if (_cut_mid_stream and not is_continuation and reply_already_sent and not is_guest
+        if ((_cut_mid_stream or _cut_by_cap_now) and not is_continuation and reply_already_sent and not is_guest
                 and len((ans or "")) > 200 and (_left_sec is None or _left_sec > _CONTINUE_MIN_BUDGET_SEC)):
             continued_prompt = _continue_after_interrupt(state, "продолжи")
             if continued_prompt:

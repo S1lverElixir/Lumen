@@ -3969,3 +3969,31 @@ def test_cut_stream_is_continued_automatically_once(rate_guard_setup, monkeypatc
     assert len(calls) == 2, [c[:60] for c in calls]
     assert "места обрыва" in calls[1], calls[1][:120]
     bot.chat_state.pop(123, None)
+
+
+def test_answer_cut_by_output_cap_is_continued_too(rate_guard_setup, monkeypatch):
+    # Потолок вывода провайдера: раньше оставался обрывок без объяснения, и
+    # добивка была возможна только по ручному «продолжи».
+    message = rate_guard_setup()
+    message.text = "составь подробный план похода в Карпаты на неделю"
+    state = _continue_state()
+    state.pop("interrupted", None)
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+
+    calls = []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        calls.append(ai_prompt)
+        prov = kwargs.get("provenance")
+        if isinstance(prov, dict) and len(calls) == 1:
+            prov["finish_reason"] = "length"
+        return ("План. " * 80, True) if len(calls) == 1 else ("продолжение плана", True)
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+    monkeypatch.setattr(bot, "_edit_message_quietly", AsyncMock(return_value=True))
+    asyncio.run(bot._handle_message_core(message))
+
+    assert len(calls) == 2, [c[:60] for c in calls]
+    assert "места обрыва" in calls[1]
+    bot.chat_state.pop(123, None)
