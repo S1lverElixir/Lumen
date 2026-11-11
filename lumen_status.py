@@ -225,7 +225,9 @@ class StatusMessage:
             line = glyph + " " + self._literal
             if self._literal_timed:
                 elapsed = max(0, int(time.monotonic() - self._created))
-                line += " · " + _lang_t(self.lang, "progress_seconds", sec=elapsed)
+                # При 0 с счётчик не показываем вовсе, как в Claude (smoke 11.11.2026).
+                if elapsed:
+                    line += " · " + _lang_t(self.lang, "progress_seconds", sec=elapsed)
             lines.append(line)
         elif self._timed:
             elapsed = max(0, int(time.monotonic() - self._phase_started))
