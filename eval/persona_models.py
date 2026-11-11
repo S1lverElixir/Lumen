@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -37,7 +38,7 @@ sys.path.insert(0, str(REPO))
 
 from lumen_errors import get_system_prompt  # noqa: E402
 from lumen_router_config import _looks_like_heavy_query  # noqa: E402
-from lumen_security import _polish_answer  # noqa: E402
+from lumen_security import _LATIN_LETTERS_RE, _polish_answer  # noqa: E402
 
 # Munito: тот же дефолт, что в bot.MUNITO_BASE_URL (значение берём из окружения/.env).
 MUNITO_BASE_URL = "https://api.munito.ai/inference/v1"
@@ -73,6 +74,61 @@ JUDGE_SYSTEM_PROMPT = (
     "You are a strict evaluator of chatbot answers. You score answers against a "
     "given rubric and reply with JSON only. You never roleplay as the assistant."
 )
+
+
+# Ответ обязан приходить на языке человека: судья это оценивает «на вкус»,
+# а замер 12.11.2026 по всем 25 SUPPORTED_LANGS требует детерминированной
+# сверки по графике. Вьетнамский, узбекский, турецкий, филиппинский, зулу и
+# европейские паки пишут латиницей — для них латиница и есть свой алфавит,
+# а не утечка языка.
+_LATIN_SCRIPT_LANGS = frozenset({
+    "en", "de", "es", "fr", "it", "nl", "id", "ms", "pt", "fil", "tr", "uz",
+    "vi", "pl", "zu",
+})
+_SCRIPT_BLOCKS = {
+    "cyrillic": (0x0400, 0x04FF),
+    "arabic": (0x0600, 0x06FF),
+    "devanagari": (0x0900, 0x097F),
+    "bengali": (0x0980, 0x09FF),
+    "thai": (0x0E00, 0x0E7F),
+}
+_SCRIPT_BY_LANG = {
+    "ru": "cyrillic", "uk": "cyrillic", "be": "cyrillic", "kk": "cyrillic",
+    "ar": "arabic", "fa": "arabic", "ur": "arabic",
+    "hi": "devanagari", "bn": "bengali", "th": "thai",
+}
+
+
+def _script_share(text: str, block: str) -> float:
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return 0.0
+    lo, hi = _SCRIPT_BLOCKS[block]
+    return sum(1 for ch in letters if lo <= ord(ch) <= hi) / len(letters)
+
+
+def _latin_share(text: str) -> float:
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(len(_LATIN_LETTERS_RE.findall(ch)) for ch in letters) / len(letters)
+
+
+def answer_script_ok(lang: str | None, answer: str) -> bool:
+    """Своя ли графика у ответа: не меньше половины букв в алфавите языка.
+    Имя бота в латинице в знаменатель не входит — «Нет, я Lumen.» это русский
+    ответ, а не смешение языков (замер 12.11.2026)."""
+    if not lang or not answer.strip():
+        return False
+    text = re.sub(r"(?i)lumen", "", answer)
+    if not any(ch.isalpha() for ch in text):
+        return True
+    if lang in _LATIN_SCRIPT_LANGS:
+        return _latin_share(text) >= 0.6
+    block = _SCRIPT_BY_LANG.get(lang)
+    if block is None:
+        return True
+    return _script_share(text, block) >= 0.5
 
 
 def log(msg: str) -> None:
@@ -385,11 +441,15 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
                 "ttft": round(ttft_last, 2),
                 "chars": len(last),
                 "tokens": tokens_seen,
+                "script_ok": answer_script_ok(question.get("lang"), last),
             }
             log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., {tokens_seen} токенов, первый токен {ttft_last:.1f}с, всего {elapsed:.1f}с")
         # Пауза под фактический расход токенов: окно TPM у обеих голов считается по нему,
         # а не по оценке промпта.
         gap = call_gap(target, tokens_seen)
+    wrong = sorted((qid for qid, item in answers.items() if item.get("script_ok") is False), key=int)
+    if wrong:
+        log(f"  язык ответа не совпал с языком вопроса в вопросах: {', '.join(wrong)}")
     return answers
 
 

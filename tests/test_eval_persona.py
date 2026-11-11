@@ -11,6 +11,7 @@
 с самой Gemma из маршрута: боевой функции, с которой сверялась копия, больше нет.
 """
 
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -42,3 +43,23 @@ def test_multilingual_questions_cover_every_supported_language():
     for question in data["questions"]:
         assert question.get("expect"), f"вопрос {question['id']} без ожидания"
         assert question.get("turns"), f"вопрос {question['id']} без текста"
+def test_answer_script_check_follows_the_question_language():
+    # Детерминированная сверка языка ответа (замер 12.11.2026 по всем
+    # SUPPORTED_LANGS): ответ не на языке человека — это провал паритета,
+    # и судья его ловит не всегда. Отдельная проверка имени бота: «Нет, я
+    # Lumen.» — русский ответ, а не смешение алфавитов.
+    sys.path.insert(0, str(REPO / "eval"))
+    import persona_models
+
+    assert persona_models.answer_script_ok("ru", "Нет, я Lumen.") is True
+    assert persona_models.answer_script_ok("ru", "No, I am Lumen.") is False
+    assert persona_models.answer_script_ok("th", "กรุงเทพฯ เป็นเมืองหลวงของไทย") is True
+    assert persona_models.answer_script_ok("th", "Bangkok is the capital of Thailand") is False
+    assert persona_models.answer_script_ok("ar", "العاصمة هي كانبيرا") is True
+    assert persona_models.answer_script_ok("hi", "नई दिल्ली भारत की राजधानी है") is True
+    assert persona_models.answer_script_ok("hi", "New Delhi is the capital") is False
+    assert persona_models.answer_script_ok("vi", "Thủ đô của Úc là Canberra.") is True
+    assert persona_models.answer_script_ok("pl", "Stolicą Australii jest Canberra.") is True
+    assert persona_models.answer_script_ok("kk", "Австралияның астанасы — Канберра.") is True
+    assert persona_models.answer_script_ok("en", "The capital of Australia is Canberra.") is True
+    assert persona_models.answer_script_ok("ru", "") is False
