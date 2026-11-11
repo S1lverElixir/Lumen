@@ -63,7 +63,8 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     assert status.message is sent
     text = sent.edits[-1][0]
     assert "✓ Searched the web · found 5" in text
-    assert "Thinking… 0 seconds" in text
+    # При 0 с живая строка без числа (smoke 11.11.2026: было «Thinking… 0 seconds»).
+    assert "Thinking…" in text and "0 seconds" not in text
     html_block, plain_block = status.activity_prefix()
     assert html_block.startswith("<blockquote expandable>") and html_block.endswith("</blockquote>")
     assert "Thought for 3 seconds" in plain_block
@@ -116,7 +117,7 @@ def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
     status = asyncio.run(scenario())
     live = incoming.sent[0].edits[-1][0]
     assert "✓ Looking at the image" in live
-    assert "Thinking… 0 seconds" in live
+    assert "Thinking…" in live and "0 seconds" not in live
     _, plain = status.activity_prefix()
     assert "✓ Looking at the image" in plain
     assert "Thought for 2 seconds" in plain
@@ -149,7 +150,9 @@ def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
     assert status.message is incoming.sent[0]
     live = incoming.sent[0].edits[-1][0]
     assert "Taking a little longer" in live
-    assert "0 seconds" in live
+    # При 0 с счётчик действия убирается целиком, не печатая «· 0 seconds»
+    # (smoke 11.11.2026).
+    assert "0 seconds" not in live
     import lumen_status
     assert live[0] in lumen_status._TRIO_FRAMES
     bot.chat_state.pop(999904, None)
@@ -176,6 +179,50 @@ def test_retry_phase_is_not_a_completed_step(monkeypatch):
     assert "Trying again" not in plain
     assert "Thought for 2 seconds" in plain
     bot.chat_state.pop(999901, None)
+
+def test_progress_strings_plural_and_zero_across_languages():
+    # Регрессия smoke 11.11.2026: «Thought for 1 seconds» и живое
+    # «Thinking… 0 seconds». Склоняются только en и zu; ru остаётся с
+    # сокращением «с», компактные паки тест не трогает.
+    from lumen_lang import t
+    assert t("en", "progress_thought_for", sec=1) == "Thought for 1 second"
+    assert t("en", "progress_thought_for", sec=2) == "Thought for 2 seconds"
+    assert t("en", "progress_thought_for", sec=5) == "Thought for 5 seconds"
+    assert t("en", "progress_thinking", sec=1) == "Thinking… 1 second"
+    assert t("en", "progress_seconds", sec=1) == "1 second"
+    assert t("en", "progress_seconds", sec=5) == "5 seconds"
+    # Ноль: фраза без числа и в развёрнутом, и в компактном паке.
+    assert t("en", "progress_thinking", sec=0) == "Thinking…"
+    assert t("ru", "progress_thinking", sec=0) == "Думаю…"
+    assert t("ru", "progress_thinking", sec=1) == "Думаю… 1 с"
+    assert t("ru", "progress_thinking", sec=2) == "Думаю… 2 с"
+    assert t("ru", "progress_thought_for", sec=5) == "Обдумывание: 5 с"
+    assert t("zu", "progress_thought_for", sec=1) == "Ngicabange umzuzwana ongu-1"
+    assert t("zu", "progress_thought_for", sec=5) == "Ngicabange imizuzwana engu-5"
+    assert t("uz", "progress_thinking", sec=0) == "O'ylayapman…"
+
+
+def test_live_thinking_line_no_number_at_zero_singular_at_one(monkeypatch):
+    # Тот же регресс на уровне живого статуса: кадры тикера при 0 и 1 с.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999906)
+    clock = _fixed_clock(monkeypatch)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
+        # _render — ровно то, что пишет тикер между правками; set_phase
+        # сбрасывает фазу на тех же часах и всегда даёт нулевой кадр.
+        zero = status._render(0)
+        clock.advance(1)
+        one = status._render(1)
+        await status.finish()
+        return zero, one
+
+    zero, one = asyncio.run(scenario())
+    assert zero.endswith("Thinking…") and "0" not in zero
+    assert one.endswith("Thinking… 1 second") and "1 seconds" not in one
+    bot.chat_state.pop(999906, None)
+
 
 def test_subsecond_answer_shows_no_thought_line(monkeypatch):
     # Claude не пишет «Thought for 0 seconds». Ревью 11.11.2026: строка активности
