@@ -25,3 +25,20 @@ def test_persona_questions_cover_eval_rubric():
     assert ids == list(range(1, 26))
     for question in data["questions"]:
         assert question.get("expect"), f"вопрос {question['id']} без ожидания"
+
+
+def test_multilingual_questions_cover_every_supported_language():
+    # Ветка замера «каждый ответ как у Claude» на всех языках: без сверки
+    # язык тихо выпадает из проверки, а владелец считает его проверенным.
+    import json
+
+    import lumen_lang
+
+    data = json.loads((REPO / "eval" / "persona_questions_multilingual.json").read_text(encoding="utf-8"))
+    ids = sorted(q["id"] for q in data["questions"])
+    assert ids == list(range(1, len(data["questions"]) + 1))
+    assert {q["lang"] for q in data["questions"]} == set(lumen_lang.SUPPORTED_LANGS), \
+        sorted({q["lang"] for q in data["questions"]} ^ set(lumen_lang.SUPPORTED_LANGS))
+    for question in data["questions"]:
+        assert question.get("expect"), f"вопрос {question['id']} без ожидания"
+        assert question.get("turns"), f"вопрос {question['id']} без текста"
