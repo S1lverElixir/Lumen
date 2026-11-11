@@ -706,8 +706,9 @@ def test_streaming_fast_path_shows_no_dots_frames():
 
 
 def test_streaming_plain_text_adds_subtle_thought_line():
-    # Даже без раннего статуса обычный ответ получает «✻ Thought for Ns»,
-    # как в Claude: без рамки-цитаты, одной курсивной строкой.
+    # Мгновенный ответ (<1 с) activity-строку не получает — как в Claude
+    # (ревью 11.11.2026); «✻ Thought for Ns» появляется только когда модель
+    # реально думала секунду и больше (см. медленный вариант ниже).
     chat_id = 999321
 
     async def pieces():
@@ -722,9 +723,39 @@ def test_streaming_plain_text_adds_subtle_thought_line():
         assert answer == "Привет"
         final_text, parse_mode = incoming.sent[0].edits[-1]
         assert parse_mode == bot.ParseMode.HTML
-        assert final_text.startswith("<i>✻ Thought for")
-        assert "<blockquote" not in final_text
-        assert "Привет" in final_text
+        assert "✻" not in final_text
+        assert final_text.strip() == "Привет"
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_slow_first_chunk_puts_thought_line_on_first_edit():
+    # Регрессия на п.8/п.11 ревью 11.11.2026: заголовок «✻ Thought for Ns»
+    # обязан стоять с ПЕРВОЙ правки текста и не появляться только в последней
+    # (так же живёт activity-строка у Claude). Старый код ставил его лишь в
+    # финальной правке — здесь первый content-edit не имел заголовка.
+    chat_id = 999322
+
+    async def pieces():
+        await asyncio.sleep(1.05)
+        yield "Привет"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-slow",
+            piece_agen=pieces(),
+        ))
+        assert answer == "Привет"
+        # Кадр 0 с заголовком — первая HTML-правка: до неё в пузыре только
+        # тикер «Думаю…», который текст ещё не показывал.
+        html_edits = [t for t, pm in incoming.sent[0].edits if pm == bot.ParseMode.HTML]
+        # Два HTML-кадра: промежуточный с заголовком (маляр) и финальный compose.
+        # Старый код давал единственный HTML-кадр — финал, заголовок только в нём.
+        assert len(html_edits) >= 2
+        assert html_edits[0].startswith("<i>✻ Thought for")
+        assert "Привет" in html_edits[0]
+        assert incoming.sent[0].edits[-1][0].startswith("<i>✻ Thought for")
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -773,10 +804,11 @@ def test_streaming_final_split_sends_missing_continuation(monkeypatch):
 
 
 def test_streaming_resplit_shifted_boundary_re_edits_shown_message(monkeypatch):
-    # Границы _split_text_chunks зависят от всего текста (соседние куски склеиваются
-    # по итоговому HTML), поэтому рост ответа сдвигает границу УЖЕ показанного куска.
-    # Старый код финализированные сообщения не трогал, и символы между старой и новой
-    # границей не попадали в чат вовсе (аудит 01.11.2026).
+    # Границы _split_text_chunks зависят от всего текста (склейка соседей по
+    # итоговому HTML), поэтому рост ответа сдвигал границу УЖЕ показанного куска,
+    # старый код дописывал за этим правку финализированного сообщения, и видимый
+    # текст перетекал между пузырями (аудит 01.11.2026; ревью 11.11.2026 п.5
+    # против: граница замораживается один раз, пересчитывается только хвост).
     from lumen_formatting import _md_to_html, _split_text_chunks
 
     chat_id = 999326
@@ -806,10 +838,23 @@ def test_streaming_resplit_shifted_boundary_re_edits_shown_message(monkeypatch):
         ))
         final = _split_text_chunks(answer, bot.TG_MAX_LEN)
         assert len(final) > 1
-        # На первой итерации разбиения границ был левее — иначе тест ничего не проверяет.
-        assert len(_split_text_chunks(base, bot.TG_MAX_LEN)[0]) < len(final[0])
+        # На первом куске граница была левее — иначе тест ничего не проверяет.
+        frozen_boundary = _split_text_chunks(base, bot.TG_MAX_LEN)
+        assert len(frozen_boundary) > 1, "первое разбиение обязано дать >1 куска"
+        assert len(frozen_boundary[0]) < len(final[0])
         shown_first = incoming.sent[0].edits[-1][0]
-        assert shown_first == _md_to_html(final[0])
+        # Первый пузырь остался на замороженной границе: old-код переставил бы
+        # его на финальную (сдвинутую) границу.
+        assert shown_first == _md_to_html(frozen_boundary[0])
+        # Покрытие не потерялось: хвост ушёл в продолжения, последнее показанное
+        # сообщение заканчивается фразой модели; «…» среди продолжений не слан.
+        cont_texts = [str(kw.get("text", "")) for kw, _m in bot.bot.sent]
+        assert cont_texts and "…" not in cont_texts
+        last_shown = cont_texts[-1] or ""
+        for _kw, msg in bot.bot.sent:
+            if msg.edits:
+                last_shown = msg.edits[-1][0]
+        assert "который дописала модель" in last_shown
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -848,6 +893,11 @@ def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
 
         async def finish(self):
             self.finished = True
+
+        def paint_header_md(self):
+            # Стрим нарисовал бы под этой строкой тело ответа; здесь ответ
+            # мгновенный, секунд 0 — строки нет (ревью 11.11.2026).
+            return ""
 
         def compose_answer(self, answer_md):
             return ("<blockquote expandable>✻ Thought for 1s</blockquote>\n\n" + answer_md,
@@ -985,11 +1035,14 @@ def test_run_streaming_reply_paces_reveal_for_burst_instead_of_dumping_full_text
         answer, placeholder = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == long_text.strip()
         assert placeholder is None
-        plain_edits = [text for text, parse_mode in incoming.sent[0].edits if parse_mode is None]
+        partial_edits = [text for text, parse_mode in incoming.sent[0].edits if parse_mode is bot.ParseMode.HTML]
         # Хотя бы одна промежуточная правка должна была показать ЧАСТЬ текста, а
         # не весь ответ разом — иначе пейсинг не сработал (регрессия на исходную
-        # проблему: "скачками по 15-20 слов" вместо плавного набора).
-        assert any(0 < len(p) < len(long_text) for p in plain_edits)
+        # проблему: "скачками по 15-20 слов" вместо плавного набора). С ревью
+        # 11.11.2026 п.4 промежуточные кадры идут HTML с закрытой разметкой, а
+        # не голым текстом, поэтому фильтр по HTML, а не по None.
+        assert any(0 < len(p) < len(long_text) for p in partial_edits)
+        assert all("**" not in p for p in partial_edits)
         # Финальная правка — уже HTML с полным текстом, как и раньше.
         assert incoming.sent[0].edits[-1][1] == bot.ParseMode.HTML
         history = bot.chat_state[chat_id]["history"]

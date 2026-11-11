@@ -10,6 +10,7 @@ from aiogram.types import Message
 
 from lumen_formatting import _is_table_separator, _md_to_html
 from lumen_lang import t as _lang_t
+from lumen_typing_pace import take_edit_slot
 
 # Индикатор Claude: три точки в треугольнике, вращающиеся вокруг центра.
 # Одиночные глифы вместо ASCII-рисунка — не разъезжаются на пропорциональном
@@ -27,15 +28,27 @@ def _spinner_glyph(frame_idx: int) -> str:
 _STATUS_MAX_LIFETIME_SEC = 300.0
 
 
+def thought_line_html(lang: str, sec: int) -> str:
+    """Одна курсивная строка «✻ Thought for Ns» — как в Claude. Пустая строка при
+    sec < 1: быстрый ответ без размышления activity-строку не получает
+    (ревью 11.11.2026). Общая для финала и для шапки первой правки стрима."""
+    if sec < 1:
+        return ""
+    return "<i>✻ " + html.escape(_lang_t(lang, "progress_thought_for", sec=sec)) + "</i>"
+
+
 def thought_block(lang: str, sec: int, answer_md: str) -> tuple[str | None, str]:
     """Свёрнутый блок «✻ Thought for Ns» над ответом: (HTML, простой текст).
     Таблицы возвращают None — их показываем обычным rich-путём без блока."""
     if any(_is_table_separator(line) for line in answer_md.splitlines()):
         return None, answer_md
+    line_html = thought_line_html(lang, sec)
+    if not line_html:
+        return None, answer_md
     # Обычный ответ без поиска: одна курсивная строка, как «Thought for Ns»
     # в Claude. Цитата с рамкой тут выглядела тяжело (ревью 28.10.2026).
     line = "✻ " + _lang_t(lang, "progress_thought_for", sec=max(0, int(sec)))
-    html_block = "<i>" + html.escape(line) + "</i>\n\n" + _md_to_html(answer_md)
+    html_block = line_html + "\n\n" + _md_to_html(answer_md)
     return html_block, line + "\n\n" + answer_md
 
 
@@ -97,6 +110,8 @@ class StatusMessage:
         """Смена текущей фразы с немедленной правкой, не дожидаясь тика."""
         import bot
         self._set_phrase(key, timed=timed)
+        # Немедленная правка обязана учесться в общем бюджете чата (force).
+        take_edit_slot(self._chat_id(), force=True)
         with contextlib.suppress(Exception):
             await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
 
@@ -123,6 +138,7 @@ class StatusMessage:
         import bot
         self._literal = text
         self._literal_timed = timed
+        take_edit_slot(self._chat_id(), force=True)
         with contextlib.suppress(Exception):
             await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
 
@@ -158,9 +174,13 @@ class StatusMessage:
             not self._phrase_key or self._timed
             or self._phrase_key in ("progress_thinking", "progress_retry"))
         if only_thought:
+            line_html = thought_line_html(self.lang, thought)
+            if not line_html:
+                # <1 с: строки активности нет вовсе, как в Claude (ревью 11.11.2026).
+                return "", ""
             line = "✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)
-            return "<i>" + html.escape(line) + "</i>", line
-        lines = ["✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)]
+            return line_html, line
+        lines = [] if thought < 1 else ["✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)]
         lines.extend(self._done)
         if (self._phrase_key and not self._timed
                 and self._phrase_key not in ("progress_thinking", "progress_retry")):
@@ -180,6 +200,15 @@ class StatusMessage:
         if not html_block:
             return None, answer_md
         return html_block + "\n\n" + _md_to_html(answer_md), plain_block + "\n\n" + answer_md
+
+    def paint_header_md(self) -> str:
+        """Короткая activity-строка над телом во время стрима (markdown, одна
+        строка): у Claude она есть с первой буквы и не исчезает (ревью 11.11.2026),
+        при sec < 1 её нет вовсе. Полный блок с этапами ставится только в финале."""
+        thought = self._thought_seconds if self._thought_seconds is not None else self._elapsed_seconds()
+        if thought < 1:
+            return ""
+        return "*✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought) + "*"
 
     def _set_phrase(self, key: str, *, timed: bool) -> None:
         if key == "progress_thinking" and self._thinking_started is None:
@@ -213,15 +242,21 @@ class StatusMessage:
             while not self._stopped:
                 if time.monotonic() - self._created > _STATUS_MAX_LIFETIME_SEC:
                     return
-                with contextlib.suppress(Exception):
-                    await bot._tg_call(
-                        self.message.edit_text, self._render(frame_idx),
-                        parse_mode=None, call_timeout=15.0,
-                    )
+                # Общий бюджет правок на чат: занятый слот — пропущенный кадр,
+                # не задержка анимации (ревью 11.11.2026).
+                if take_edit_slot(self._chat_id()):
+                    with contextlib.suppress(Exception):
+                        await bot._tg_call(
+                            self.message.edit_text, self._render(frame_idx),
+                            parse_mode=None, call_timeout=15.0,
+                        )
                 frame_idx += 1
                 await bot._dots_sleep(bot._DOTS_TICK_SEC)
         except asyncio.CancelledError:
             raise
+
+    def _chat_id(self):
+        return getattr(getattr(self.message, "chat", None), "id", None)
 
     async def stop(self) -> None:
         """Останавливает анимацию; само сообщение остаётся для ответа."""

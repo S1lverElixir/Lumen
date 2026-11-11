@@ -11,6 +11,7 @@ test_lumen_status.py — живой статус-плейсхолдер: стр�
 import asyncio
 
 import bot
+import lumen_status
 from lumen_status import StatusMessage
 from tests.bot_test_helpers import _FakeIncomingMessage
 
@@ -19,9 +20,33 @@ async def _passthrough(method, *args, **kwargs):
     return await method(*args, **kwargs)
 
 
+
+
+class _FakeClock:
+    """Часы теста: sleep подменён на no-op, а «Думал N с» считается по
+    monotonic — без них любая проверка на секунды зависела бы от реальной
+    длительности прогона."""
+
+    def __init__(self, start: float = 1000.0):
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, sec: float) -> None:
+        self.now += sec
+
+
+def _fixed_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(lumen_status, "time", clock)
+    return clock
+
 def test_status_message_renders_done_lines_and_timer(monkeypatch):
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999900)
+
+    clock = _fixed_clock(monkeypatch)
 
     async def scenario():
         status = await StatusMessage.start(incoming, "en", "progress_searching")
@@ -29,6 +54,7 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
         status.add_done("progress_search_done", count=5)
         status.set_sources(["example.com", "example.com", "second.example"])
         await status.set_phase("progress_thinking", timed=True)
+        clock.advance(3)
         await status.finish()
         return status
 
@@ -40,7 +66,7 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     assert "Thinking… 0s" in text
     html_block, plain_block = status.activity_prefix()
     assert html_block.startswith("<blockquote expandable>") and html_block.endswith("</blockquote>")
-    assert "Thought for 0s" in plain_block
+    assert "Thought for 3s" in plain_block
     assert "✓ Searched the web · found 5" in plain_block
     assert plain_block.count("· example.com") == 1
     assert "· second.example" in plain_block
@@ -57,15 +83,18 @@ def test_simple_thought_activity_is_italic_not_quote(monkeypatch):
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999902)
 
+    clock = _fixed_clock(monkeypatch)
+
     async def scenario():
         status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
+        clock.advance(2)
         await status.finish()
         return status
 
     status = asyncio.run(scenario())
     html_block, plain = status.activity_prefix()
     assert html_block.startswith("<i>") and "blockquote" not in html_block
-    assert "Thought for" in plain
+    assert "Thought for 2s" in plain
     bot.chat_state.pop(999902, None)
 
 
@@ -75,9 +104,12 @@ def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999903)
 
+    clock = _fixed_clock(monkeypatch)
+
     async def scenario():
         status = await StatusMessage.start(incoming, "en", "progress_viewing_image")
         await status.mark_stage_done()
+        clock.advance(2)
         await status.finish()
         return status
 
@@ -87,7 +119,7 @@ def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
     assert "Thinking… 0s" in live
     _, plain = status.activity_prefix()
     assert "✓ Looking at the image" in plain
-    assert "Thought for" in plain
+    assert "Thought for 2s" in plain
     bot.chat_state.pop(999903, None)
 
 
@@ -134,11 +166,31 @@ def test_retry_phase_is_not_a_completed_step(monkeypatch):
         await status.set_phase("progress_thinking", timed=True)
         await asyncio.sleep(0.01)
         await status.set_phase("progress_retry")
+        clock.advance(2)
         await status.finish()
         return status
 
+    clock = _fixed_clock(monkeypatch)
     status = asyncio.run(scenario())
     _, plain = status.activity_prefix()
     assert "Trying again" not in plain
     assert "Thought for" in plain
     bot.chat_state.pop(999901, None)
+
+def test_subsecond_answer_shows_no_thought_line(monkeypatch):
+    # Claude не пишет «Thought for 0 seconds». Ревью 11.11.2026: строка активности
+    # при <1 с должна исчезать целиком, а не печатать ноль.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999905)
+    _fixed_clock(monkeypatch)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
+        await status.finish()
+        return status
+
+    status = asyncio.run(scenario())
+    assert status.activity_prefix() == ("", "")
+    html_block, plain_block = status.compose_answer("ответ")
+    assert html_block is None and plain_block == "ответ"
+    bot.chat_state.pop(999905, None)
