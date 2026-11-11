@@ -51,7 +51,7 @@ A Telegram bot styled after Claude's tone and personality (direct, warm, light o
 - `/draw` and `/tts` also work as plain phrases at the start of a message ("draw a cat," "read this out loud"), no slash required.
 - **Clarifying buttons** for short taste requests without details ("посоветуй фильм" → genre buttons instead of a guess).
 - **Captionless media** (a photo, video or voice note sent without text) gets a description/summary in the chat's language; with no `/lang` set, Telegram's client language is used, and unsupported codes fall back to the model's own choice.
-- **Bot language** (`/lang`): system messages in 25 languages (English by default). AI answers always follow the user's own language.
+- **Bot language** (`/lang`): system messages in 25 languages (English by default). AI answers always follow the user's own language. The Telegram profile too — bot name, the "About" one-liner and the long description — is registered from `lumen_lang.py` at startup in ten locales, so it is edited in code, not in BotFather.
 - **Persistent state.** An optional Upstash Redis backend keeps chat history and quota counters alive across redeploys.
 - **Error tracking** through an optional Sentry integration that scrubs secrets before sending anything.
 

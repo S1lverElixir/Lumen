@@ -140,6 +140,11 @@ or a routing change). If nothing is unverified or risky, say so in one line.
   `_t(chat_id, "key")`; buttons are assembled in `lumen_commands.py`. A new key must be filled in
   all 25 language packs, or `test_lang_table_covers_all_keys_in_all_languages` in
   `tests/test_bot_commands.py` fails.
+- The bot's Telegram profile (name, the "About" one-liner, the long description) is set by code, not
+  by BotFather: `_register_bot_profile` in `bot.py` sends the `profile_*` keys of `lumen_lang.py` for
+  the default locale plus `PROFILE_LANGS` on every startup, so a hand edit in BotFather is undone by
+  the next deploy. 64/120/500 characters are Telegram's caps, checked by
+  `test_profile_strings_fit_telegram_limits`.
 
 ## Providers, in one screen
 The backbone since 05.11.2026 is Munito AI (an OpenAI-compatible endpoint serving open models), and
