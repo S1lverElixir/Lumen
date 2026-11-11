@@ -850,8 +850,15 @@ async def _run_streaming_reply(
                               bad=_detect_garbled_mix(full_text.strip()) and not _is_garbled_echo(full_text.strip(), user_text))
     await _remember_turn(state, history_text, user_text, final_answer, history_meta)
     bot._record_quota_usage(provider, model_id)
-    log.info("[stream] smoothness frames=%d max_step=%d chars=%d sec=%.1f",
-             paint_frames, paint_max_step, len(final_answer), time.monotonic() - overall_start_ts)
+    # Плавность судим по окну набора, а не по всему ответу: первый кусок мог
+    # прийти на 15-й секунде, и тогда frames=4 — не рывки, а короткий хвост после
+    # долгого ожидания (прод 11.11.2026: frames=4 max_step=848 sec=20.4 читалось
+    # двояко: _ttft и paint_span разносят эти два случая).
+    _now_end = time.monotonic()
+    _ttft = (first_piece_ts - overall_start_ts) if first_piece_ts is not None else -1.0
+    _paint_span = (_now_end - first_piece_ts) if first_piece_ts is not None else 0.0
+    log.info("[stream] smoothness frames=%d max_step=%d chars=%d sec=%.1f ttft=%.1f paint_span=%.1f",
+             paint_frames, paint_max_step, len(final_answer), _now_end - overall_start_ts, _ttft, _paint_span)
     return final_answer, None
 
 async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None, history_meta=None) -> tuple[str | None, Message | None]:
