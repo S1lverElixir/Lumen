@@ -437,6 +437,8 @@ async def _run_streaming_reply(
 
     # Первый кусок запрашиваем ДО плейсхолдера: отправка "…" — отдельный круг
     # к Telegram через прокси, и запрос к модели простаивал бы весь этот круг.
+    # Кадр маляра в пути — сюда, а не внутрь try: finally должен видеть его всегда.
+    paint_task: asyncio.Future | None = None
     first_task = asyncio.ensure_future(piece_agen.__anext__())
     read_task: asyncio.Future | None = None
     try:
@@ -478,6 +480,22 @@ async def _run_streaming_reply(
         # (она идёт до первой точки ожидания после full_text +=).
         iterator = piece_agen.__aiter__()
         next_paint_ts = 0.0
+        # Кадр маляра идёт отдельной задачей: правка — это круг к Telegram через
+        # прокси (0,5-0,7 с), и пока она в пути, цикл читал бы куски, ничего не
+        # показывая. Прод 11.11.2026 мерил ровно 1 кадр в секунду вместо тика в
+        # 0,55 с; в пути держим не больше одной правки, следующая берёт самое
+        # свежее состояние (coalescing), перед финализацией обязательно ждём.
+        def _schedule_paint(**kwargs) -> None:
+            nonlocal paint_task
+            if paint_task is not None and not paint_task.done():
+                return
+            paint_task = asyncio.ensure_future(_paint(**kwargs))
+
+        async def _await_paint() -> None:
+            nonlocal paint_task
+            if paint_task is not None and not paint_task.done():
+                await paint_task
+            paint_task = None
         while True:
             if read_task is None:
                 read_task = asyncio.ensure_future(iterator.__anext__())
@@ -490,7 +508,7 @@ async def _run_streaming_reply(
                 now_tick = time.monotonic()
                 if deadline is not None and now_tick > deadline:
                     raise bot.RouteBudgetExceededError([f"{provider}:{model_id}"])
-                await _paint()
+                _schedule_paint()
                 next_paint_ts = now_tick + paint_interval
                 continue
             try:
@@ -618,9 +636,12 @@ async def _run_streaming_reply(
                 await _paint(force=True, min_reveal=FIRST_PAINT_MIN_CHARS)
                 next_paint_ts = time.monotonic() + paint_interval
             elif time.monotonic() >= next_paint_ts:
-                await _paint()
+                _schedule_paint()
                 next_paint_ts = time.monotonic() + paint_interval
 
+        # Правка в пути не должна переживать финал: две правки одного пузырька
+        # одновременно — гонка содержимого, а не coalescing.
+        await _await_paint()
         # Метки классификатора и разметка инструмента — не ответ: чат должен
         # видеть следующую модель, а не 39 символов «User Safety: safe».
         full_text = _strip_provider_artifacts(full_text)
@@ -801,6 +822,12 @@ async def _run_streaming_reply(
             read_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await read_task
+        # Кадр, ушедший в сеть до раннего выхода, ждём или гасим здесь: иначе он
+        # правил бы пузырёк уже после того, как ответ дописан другим путём.
+        if paint_task is not None and not paint_task.done():
+            paint_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await paint_task
         if not first_task.done():
             first_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
