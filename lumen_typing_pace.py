@@ -13,6 +13,10 @@ import time
 DEFAULT_CHARS_PER_SEC = 90.0
 MIN_CHARS_PER_SEC = 40.0
 MAX_CHARS_PER_SEC = 260.0
+# Потолок именно показа, не замера: 260 симв/с — скорость прихода кусков, а
+# на экране Claude печатает заметно медленнее, и при 260 границы набора
+# догоняет буфер за один кадр (прод 11.11.2026: frames=1).
+DISPLAY_MAX_CHARS_PER_SEC = 110.0
 
 # Меньше альфа — стабильнее оценка, но медленнее подстройка под смену бэкенда под тем же слагом.
 _EMA_ALPHA = 0.3
@@ -22,9 +26,10 @@ _ARRIVAL_ALPHA = 0.5
 
 _speed_ema: dict[str, float] = {}
 
-# Мелкий остаток в один тик не дробим: правка ради 20-50 символов — тот же
-# лишний круг к Telegram без всякого эффекта «печати».
-_CATCHUP_SMOOTH_MIN_CHARS = 120
+# Мелкий остаток в один тик не дробим: правка ради 20 символов — тот же лишний
+# круг к Telegram без эффекта «печати». 120 было слишком крупно: хвост в 300+
+# символов доезжал тремя прыжками по 100+ (прод 11.11.2026: max_step=214).
+_CATCHUP_SMOOTH_MIN_CHARS = 60
 
 # ── единый бюджет правок на чат (ревью 11.11.2026) ──
 # Раньше тикер статуса, маляр стрима и финал троттлили каждый сам себя: в сумме
@@ -82,7 +87,7 @@ def catchup_reveal_steps(remaining_len: int, chars_per_sec: float, tick_interval
     Без обращения к часам: в тестах ожидание подменено no-op, цикл на monotonic завис бы."""
     if remaining_len <= 0 or max_ticks <= 0:
         return []
-    chars_per_tick = max(1, int(chars_per_sec * tick_interval_sec))
+    chars_per_tick = max(1, min(int(chars_per_sec * tick_interval_sec), _CATCHUP_SMOOTH_MIN_CHARS))
     if -(-remaining_len // chars_per_tick) <= max_ticks:
         steps: list[int] = []
         revealed = 0
@@ -92,7 +97,8 @@ def catchup_reveal_steps(remaining_len: int, chars_per_sec: float, tick_interval
         return steps
     # Хвост не влезает в бюджет по скорости: раньше последний шаг вываливал
     # сразу сотни символов одним прыжком (ревью 11.11.2026). Доводим ровными
-    # шагами: N = ceil(remaining/120) с потолком max_ticks, шаг = remaining/N.
+    # шагами: N = ceil(remaining/_CATCHUP_SMOOTH_MIN_CHARS) с потолком max_ticks,
+    # шаг = remaining/N.
     ticks = min(max(1, max_ticks), -(-remaining_len // _CATCHUP_SMOOTH_MIN_CHARS))
     step = -(-remaining_len // ticks)
     return [min(remaining_len, step * i) for i in range(1, ticks + 1)]
@@ -107,7 +113,11 @@ def blend_arrival_speed(prev_ewma: float | None, piece_len: int, dt_sec: float) 
 
 
 def display_speed_for(arrival_ewma: float | None, pace_key: str) -> float:
-    """Скорость показа: измеренный темп прихода, пока он есть; иначе глобальная EMA модели (затравка на первые куски)."""
-    if arrival_ewma is not None:
-        return max(MIN_CHARS_PER_SEC, min(MAX_CHARS_PER_SEC, arrival_ewma))
-    return get_typing_speed(pace_key)
+    """Скорость показа: измеренный темп прихода, пока он есть; иначе глобальная EMA модели (затравка на первые куски).
+    Показ зажат снизу человеческой печатью Claude: измеренный темп прихода SSE
+    кусками по 200+ символов обгоняет буфер, граница набора догоняет текст целиком
+    и кадры схлопываются в 1-3 правки (прод 11.11.2026: frames=1 max_step=2 chars=322
+    вместо плавного набора)."""
+    speed = (max(MIN_CHARS_PER_SEC, min(MAX_CHARS_PER_SEC, arrival_ewma))
+             if arrival_ewma is not None else get_typing_speed(pace_key))
+    return max(MIN_CHARS_PER_SEC, min(DISPLAY_MAX_CHARS_PER_SEC, speed))

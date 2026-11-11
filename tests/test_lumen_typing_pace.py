@@ -140,6 +140,27 @@ def test_blend_arrival_speed_moves_toward_new_sample():
 
 def test_display_speed_for_prefers_measured_arrival():
     key = lumen_typing_pace.speed_key("gemini", "__test_display_model__")
-    assert lumen_typing_pace.display_speed_for(150.0, key) == 150.0
+    # Ниже потолка показа — измеренный темп и есть скорость показа.
+    assert lumen_typing_pace.display_speed_for(80.0, key) == 80.0
     # Без замера прихода — глобальная EMA модели (затравка на первые куски).
-    assert lumen_typing_pace.display_speed_for(None, key) == lumen_typing_pace.get_typing_speed(key)
+    assert lumen_typing_pace.display_speed_for(None, key) == min(
+        lumen_typing_pace.DISPLAY_MAX_CHARS_PER_SEC, lumen_typing_pace.get_typing_speed(key))
+
+
+def test_display_speed_never_exceeds_human_pace():
+    # РЕГРЕССИЯ на прод 11.11.2026 (frames=1 max_step=2 chars=322): SSE приходит
+    # кусками по 200+ символов, измеренный темп 260 симв/с, и граница показа
+    # догоняла буфер за один кадр — пользователь видел не печать, а подмену текста.
+    key = lumen_typing_pace.speed_key("munito", "__test_display_model__")
+    assert lumen_typing_pace.display_speed_for(260.0, key) == lumen_typing_pace.DISPLAY_MAX_CHARS_PER_SEC
+    assert lumen_typing_pace.display_speed_for(10_000.0, key) == lumen_typing_pace.DISPLAY_MAX_CHARS_PER_SEC
+
+
+def test_catchup_splits_long_tail_into_small_even_steps():
+    # Тот же прод-кейс на стороне довывода: остаток 322 символа при завышенной
+    # оценке скорости обязан доехать шагами по <=60, а не тремя прыжками по 108.
+    steps = lumen_typing_pace.catchup_reveal_steps(322, 260.0, 0.35, 8)
+    assert steps[-1] == 322
+    sizes = [steps[0]] + [steps[i] - steps[i - 1] for i in range(1, len(steps))]
+    assert max(sizes) <= lumen_typing_pace._CATCHUP_SMOOTH_MIN_CHARS
+    assert len(steps) >= 5
