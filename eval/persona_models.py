@@ -512,8 +512,14 @@ def style_flags(question: dict, answer: str) -> list[str]:
     if heads > style.get("heads_max", 2):
         flags.append(f"headings-{heads}")
     marks = text.count("?") + text.count("\u061f") + text.count("\uff1f")
-    if marks > style.get("questions_max", 1) and "questions_max" in style:
+    if "questions_max" in style and marks > style["questions_max"]:
         flags.append(f"questions-{marks}")
+    if "questions_min" in style and marks < style["questions_min"]:
+        flags.append(f"questions-{marks}<asked")
+    if style.get("math") and not any(ch in text for ch in ("$", "\u03c0", "\u2248", "\u221a", "^2", "2\u2070")):
+        flags.append("no-math")
+    if "chars_max" in style and len(text) > style["chars_max"]:
+        flags.append(f"len-{len(text)}>{style['chars_max']}")
     if style.get("table") and "|---" not in text.replace(" ", ""):
         flags.append("no-table")
     for term in style.get("keep_terms") or []:

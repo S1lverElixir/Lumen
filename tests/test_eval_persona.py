@@ -97,4 +97,9 @@ def test_style_flags_catches_the_real_manner_defects():
     assert "bullets-6" in persona_models.style_flags(
         {"id": 3, "style": {"bullets_max": 2}}, "\n".join("- пункт %d" % i for i in range(6)))
     assert "no-table" in persona_models.style_flags({"id": 8, "style": {"table": True}}, "обычный текст")
+    assert persona_models.style_flags({"id": 13, "style": {"table": True}}, "| a | b |\n|---|---|") == []
+    assert "no-math" in persona_models.style_flags({"id": 15, "style": {"math": True}}, "площадь равна пи r в квадрате")
+    assert persona_models.style_flags({"id": 15, "style": {"math": True}}, "S = $\\pi r^2$, \u221a3 \u2248 1,73") == []
+    assert "questions-0<asked" in persona_models.style_flags({"id": 17, "style": {"questions_min": 1}}, "Вот скрипт.")
+    assert any(f.startswith("len-") for f in persona_models.style_flags({"id": 6, "style": {"chars_max": 5}}, "длинный ответ"))
     assert "empty" in persona_models.style_flags({"id": 2}, "   ")
