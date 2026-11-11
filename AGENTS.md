@@ -98,7 +98,7 @@ production on 10.11.2026, so change a fact and update this file in the same comm
 ## Deploy
 - A green CI run on main is a deploy: `.github/workflows/sync-to-hf.yml` waits for CI, then pushes
   exactly the tested commit to the Space with a lease. A hotfix made directly on the Space makes the
-  sync fail loudly instead of being overwritten.
+  sync fail loudly instead of being overwritten. Batch work into one merge: every merged commit re-queues a Docker build, and while the build is queued the Space answers 503 and nobody gets an answer (measured 11.11.2026: three merges inside 12 minutes left the build queued for 15+ minutes).
 - The proxy ships separately through `deploy-proxy.yml`, and it can miss a change silently: it
   deploys only when the diff of the commit CI actually tested touches `proxy/`. Merges and squashes
   are covered (the base is the merge base, or the whole squashed diff), but a rebase-style push of
