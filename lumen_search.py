@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -546,14 +547,89 @@ def _wiki_lang(text: str) -> str:
     return "ru" if _CYRILLIC_RE.search(text or "") else "en"
 
 
+def _unaccent(text: str) -> str:
+    """Заголовки Википедии идут с сочетанными ударениями («Кла́дби» для \\w — это
+    «Кла» плюс «дби»), которые рвут слово и корень пополам (замер 11.11.2026)."""
+    return "".join(c for c in unicodedata.normalize("NFKD", text or "") if not unicodedata.combining(c))
+
+
 def _tokens(text: str) -> set[str]:
-    return {w.lower() for w in re.findall(r"[\wА-ЯЁа-яё]{3,}", text or "")}
+    return {w.lower() for w in re.findall(r"[\wА-ЯЁа-яё]{3,}", _unaccent(text))}
 
 
 def _stems(text: str) -> set[str]:
     """Корень = первые 5 букв: в русском «Центральный» и «Центрального» — одно и то же,
     а точное сравнение слов теряло половину совпадений (замер 11.11.2026)."""
     return {w[:5] for w in _tokens(text)}
+
+
+def _stem_seq(text: str) -> list[str]:
+    """Те же корни, но списком по порядку — для проверки плотного упоминания имени."""
+    return [w[:5] for w in re.findall(r"[\wЁё\-]{3,}", _unaccent(text).lower())]
+
+
+# Сколько слов тела статьи может разделять корни имени организации: за окном
+# совпадения случайны («банк» в начале, «Центральный офис» в конце Газпромбанка).
+_NAME_WINDOW_TOKENS = 8
+
+
+def _content_need(query: str) -> list[str]:
+    """Содержательные слова запроса по порядку: без хвоста составного вопроса,
+    ролевых слов (_ROLE_WORDS_RE) и пустых слов — то обязано быть в заголовке."""
+    cleaned = _ROLE_WORDS_RE.sub(" ", _lead_clause(query or ""))
+    out: list[str] = []
+    for word in re.findall(r"[\wЁё\-]{3,}", (cleaned or "").lower()):
+        stem = word[:5]
+        if _STOPWORDS_RE.fullmatch(word) or stem in out:
+            continue
+        out.append(stem)
+    return out
+
+
+def _stem_hit(need_stem: str, token_stem: str) -> bool:
+    """Совпадение корней с учётом флексий коротких слов: «банк» и «банка» — одно
+    имя, а усечение до пяти букв их разъединяет (замер 11.11.2026)."""
+    if need_stem == token_stem:
+        return True
+    return (token_stem.startswith(need_stem) or need_stem.startswith(token_stem)) \
+        and min(len(need_stem), len(token_stem)) >= 4
+
+
+def _ordered_window_hit(seq: list[str], need: list[str]) -> bool:
+    """Все корни need идут по seq в том же порядке внутри окна _NAME_WINDOW_TOKENS."""
+    if not need:
+        return True
+    if len(need) == 1:
+        return any(_stem_hit(need[0], stem) for stem in seq)
+    for start, stem in enumerate(seq):
+        if not _stem_hit(need[0], stem):
+            continue
+        idx = 1
+        for pos in range(start + 1, min(start + _NAME_WINDOW_TOKENS, len(seq))):
+            if _stem_hit(need[idx], seq[pos]):
+                idx += 1
+                if idx == len(need):
+                    return True
+    return False
+
+
+def _wiki_page_on_topic(query: str, title: str, snippet: str) -> bool:
+    """Страница про то, о чём спросили: заголовок обязан содержать содержательные
+    слова запроса, а если это страница персоны или должности — имя организации
+    стоит плотным блоком в начале тела. Иначе на «кто возглавляет ЦБ» проходили
+    Газпромбанк (по «Центральный офис» в теле) и President of the ECB (замер
+    11.11.2026)."""
+    need = _content_need(query)
+    if not need:
+        return True
+    title_stems = _stem_seq(title)
+    if all(any(_stem_hit(stem, in_title) for in_title in title_stems) for stem in need):
+        return True
+    if len(need) == 1:
+        # Одно содержательное слово: упоминание где угодно в теле — это не про него
+        # («сотня самых влиятельных женщин» проходила на «канцлер Германии» по слову «Германии»).
+        return False
+    return _ordered_window_hit(title_stems + _stem_seq(snippet), need)
 
 
 def _wiki_page_score(query: str, title: str, snippet: str) -> int:
@@ -571,6 +647,8 @@ def _wiki_page_score(query: str, title: str, snippet: str) -> int:
         return 0
     rare_hit = matched & rare_stems if rare_stems else matched
     if rare_stems and not rare_hit:
+        return 0
+    if not _wiki_page_on_topic(query, title, snippet):
         return 0
     title_bonus = 1 if _stems(title) & matched else 0
     return len(matched) + 2 * len(rare_hit) + title_bonus
@@ -691,18 +769,94 @@ _ROLE_WORDS_RE = re.compile(
     r"|руководит|руководил|глава|главы|председател\w*|руководител\w*|президент\w*|канцлер\w*"
     r"|премьер[-\s]?министр\w*|мэр\w*|губернатор\w*|секретар\w*|генеральн\w*|министр\w*"
     r"|ceo|leader|head|chairman|chairperson|chairwoman|president|chancellor|mayor|governor|"
-    r"|secretary|general|of|the|is|who|currently)"
+    r"|secretary|general|of|the|is|who|current(?:ly)?)"
     r"\b[\s,.!?-]*",
     re.IGNORECASE,
 )
 # Постоянные места утверждений: «действующий» — это без P582 (конец) или с далёким будущим.
 _OPEN_END_PREFIXES = ("+2099", "+2100", "+9999", "-9999")
+# Потолок цикла кандидатов: больше восьми поисков и пяти сущностей слой не жевает —
+# бюджет сообщения общий, а промах одного кандидата не стоит задержки всего поиска.
+_WD_MAX_SEARCHES = 8
+_WD_MAX_ENTITIES = 5
 
 
 def _entity_topic(query: str) -> str:
     """Только имена собственные из вопроса — то, чем ищут в индексе сущностей."""
     stripped = _ROLE_WORDS_RE.sub(" ", keyword_form(query) or query)
     return re.sub(r"\s{2,}", " ", stripped).strip(" ,.:;-")[:120]
+
+
+# Хвост составного вопроса («... и какая ключевая ставка») — это второй факт, он
+# только портит и термин для Wikidata, и слова для порога Википедии (замер 11.11.2026).
+_TAIL_CLAUSE_RE = re.compile(r"\s+[,;]\s+|\s+(?:и|а|но|или|and)\s+", re.IGNORECASE)
+
+
+def _lead_clause(text: str) -> str:
+    """Первая клауза: без хвоста после союза «и»/запятой."""
+    return _TAIL_CLAUSE_RE.split(text or "", maxsplit=1)[0].strip(" ,.:;-")
+
+
+def _stem_term(term: str) -> str:
+    """Срез флексий для индекса Wikidata: «банка россии» и «великобритании» он не
+    знает, «банк росси» и «великоб» дают точные Q806651/Q145 (замер 11.11.2026)."""
+    out: list[str] = []
+    for word in (term or "").split():
+        if len(word) > 7:
+            word = word[:7]
+        elif len(word) >= 5 and _CYRILLIC_RE.search(word) and word.lower()[-1] in "аеяиюыёо":
+            word = word[:-1]
+        out.append(word)
+    return " ".join(out).strip(" ,.:;-")
+
+
+def _leading_entity_phrase(query: str) -> str:
+    """Имя сущности с самого начала фразы: служебные слова выбрасываются только
+    ведущие, «of»/«the» внутри имени остаются — «Central Bank of Russia» индекс
+    знает, а «Central Bank Russia» (после keyword_form) нет (замер 11.11.2026)."""
+    tokens = (query or "").split()
+    start = 0
+    while start < len(tokens) and start < 6:
+        bare = tokens[start].strip(".,:;!?-«»\"'()")
+        if bare and not (_ROLE_WORDS_RE.fullmatch(bare) or _STOPWORDS_RE.fullmatch(bare)):
+            break
+        start += 1
+    while len(tokens) - start > 1:
+        bare = tokens[-1].strip(".,:;!?-«»\"'()")
+        if not (bare and (_ROLE_WORDS_RE.fullmatch(bare) or _STOPWORDS_RE.fullmatch(bare))):
+            break
+        tokens = tokens[:-1]
+    return " ".join(tokens[start:]).strip(" ,.:;-!?")
+
+
+def _entity_candidates(query: str) -> list[str]:
+    """Термина для индекса сущностей может быть несколько: падеж, составной хвост,
+    потерянные предлоги — каждый вариант ловит свой класс промаха (замер 11.11.2026)."""
+    bases: list[str] = []
+    for raw in (query, _lead_clause(query)):
+        for base in (_entity_topic(raw), _leading_entity_phrase(raw)):
+            base = (base or "").strip(" ,.:;-")
+            if base and base.lower() not in [b.lower() for b in bases]:
+                bases.append(base)
+    out: list[str] = []
+
+    def add(term: str) -> None:
+        term = (term or "").strip(" ,.:;-")[:120]
+        if term and term.lower() not in [t.lower() for t in out] and len(out) < _WD_MAX_SEARCHES:
+            out.append(term)
+
+    for base in bases:
+        add(base)
+    for base in bases:
+        add(_stem_term(base))
+    for base in bases:
+        words = base.split()
+        if len(words) > 3:
+            add(" ".join(words[:3]))
+            add(_stem_term(" ".join(words[:3])))
+            add(" ".join(words[:2]))
+            add(words[0])
+    return out
 
 
 def _first_time(quals: object, prop: str) -> str:
@@ -731,17 +885,49 @@ def _claims_target(statement: dict) -> str:
     return target if isinstance(target, str) and target.startswith("Q") else ""
 
 
+def _wd_open_end(statement: dict) -> bool:
+    end = _first_time(statement.get("qualifiers") or {}, "P582")
+    return not end or end.startswith(_OPEN_END_PREFIXES)
+
+
+def _leader_rows(claims: dict, props: dict[str, str]) -> list[tuple[str, str, str]]:
+    """Действующие руководители сущности: (Qid, роль, дата начала)."""
+    rows: list[tuple[str, str, str]] = []
+    for prop, role in props.items():
+        for statement in claims.get(prop) or []:
+            if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
+                continue
+            target = _claims_target(statement)
+            if not target:
+                continue
+            # Назначение с датой конца — не действующий руководитель.
+            if not _wd_open_end(statement):
+                continue
+            start = _first_time(statement.get("qualifiers") or {}, "P580")
+            rows.append((target, role, start.lstrip("+")[:10]))
+    return rows
+
+
 async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, limit: int,
                                     deadline: float) -> list[dict]:
-    """Сущность из запроса -> действующий руководитель с датой начала полномочий."""
+    """Сущность из запроса -> действующий руководитель с датой начала полномочий.
+
+    Ищем несколькими кандидатами термина и берём тот Q, у которого есть открытое
+    утверждение о руководителе: падежные и составные формулировки дают мусор без
+    утверждений, а первый попавшийся hit — чужую сущность (замер 11.11.2026).
+    Цикл укладывается в остаток deadline и останавливается на первом успехе."""
     cached = _cache_get("wd|" + query)
     if cached is not None:
         return cached
     lang = _wiki_lang(query)
     props = _LEADER_PROPS.get(lang) or _LEADER_PROPS["en"]
-    budget = aiohttp.ClientTimeout(total=max(0.4, deadline - time.monotonic()))
+    tried: set[str] = set()
+    rows: list[tuple[str, str, str]] = []
     qid = ""
-    for topic in [t for t in dict.fromkeys((_entity_topic(query), keyword_form(query) or query)) if t][:2]:
+    for topic in _entity_candidates(query):
+        if time.monotonic() >= deadline or len(tried) >= _WD_MAX_ENTITIES:
+            break
+        budget = aiohttp.ClientTimeout(total=max(0.3, deadline - time.monotonic()))
         try:
             async with session.get(
                 _WD_API_URL,
@@ -756,55 +942,48 @@ async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, 
                 found = (json.loads(await resp.text()) or {}).get("search") or []
         except Exception as exc:
             log.info("[web-search] wikidata search failed: %s", type(exc).__name__)
-            found = []
-        if found:
-            candidate = (found[0].get("id") or "").strip()
-            if candidate.startswith("Q"):
-                qid = candidate
+            continue
+        for hit in found[:2]:
+            cand = (hit.get("id") or "").strip()
+            if not cand.startswith("Q") or cand in tried or time.monotonic() >= deadline:
+                continue
+            tried.add(cand)
+            ent_budget = aiohttp.ClientTimeout(total=max(0.3, deadline - time.monotonic()))
+            try:
+                async with session.get(_WD_ENTITY_URL.format(qid=cand), headers=_WIKI_HEADERS,
+                                       timeout=ent_budget) as resp:
+                    resp.raise_for_status()
+                    data = json.loads(await resp.text())
+            except Exception as exc:
+                log.info("[web-search] wikidata entity failed: %s", type(exc).__name__)
+                continue
+            claims = ((data.get("entities") or {}).get(cand) or {}).get("claims") or {}
+            cand_rows = _leader_rows(claims, props)
+            if cand_rows:
+                # Q без открытого утверждения о руководителе — промах индекса, идём дальше.
+                rows, qid = cand_rows, cand
                 break
+        if qid:
+            break
     if not qid:
         return []
-    try:
-        async with session.get(_WD_ENTITY_URL.format(qid=qid), headers=_WIKI_HEADERS,
-                               timeout=budget) as resp:
-            resp.raise_for_status()
-            data = json.loads(await resp.text())
-    except Exception as exc:
-        log.info("[web-search] wikidata entity failed: %s", type(exc).__name__)
-        return []
-    claims = ((data.get("entities") or {}).get(qid) or {}).get("claims") or {}
-    rows: list[tuple[str, str, str]] = []
-    for prop, role in props.items():
-        for statement in claims.get(prop) or []:
-            if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
-                continue
-            target = _claims_target(statement)
-            if not target:
-                continue
-            quals = statement.get("qualifiers") or {}
-            start = _first_time(quals, "P580")
-            end = _first_time(quals, "P582")
-            # Назначение с датой конца — не действующий руководитель.
-            if end and not end.startswith(_OPEN_END_PREFIXES):
-                continue
-            rows.append((target, role, start.lstrip("+")[:10]))
-    if not rows:
-        return []
     labels: dict[str, str] = {}
-    try:
-        async with session.get(
-            _WD_API_URL,
-            params={"action": "wbgetentities", "ids": "|".join(dict.fromkeys(row[0] for row in rows)),
-                    "languages": lang + "|en", "props": "labels", "format": "json"},
-            headers=_WIKI_HEADERS, timeout=budget,
-        ) as resp:
-            resp.raise_for_status()
-            ents = (json.loads(await resp.text()) or {}).get("entities") or {}
-        for key, ent_data in ents.items():
-            lab = (ent_data.get("labels") or {}).get(lang) or (ent_data.get("labels") or {}).get("en") or {}
-            labels[key] = (lab.get("value") or "").strip()
-    except Exception as exc:
-        log.info("[web-search] wikidata labels failed: %s", type(exc).__name__)
+    if time.monotonic() < deadline:
+        label_budget = aiohttp.ClientTimeout(total=max(0.3, deadline - time.monotonic()))
+        try:
+            async with session.get(
+                _WD_API_URL,
+                params={"action": "wbgetentities", "ids": "|".join(dict.fromkeys(row[0] for row in rows)),
+                        "languages": lang + "|en", "props": "labels", "format": "json"},
+                headers=_WIKI_HEADERS, timeout=label_budget,
+            ) as resp:
+                resp.raise_for_status()
+                ents = (json.loads(await resp.text()) or {}).get("entities") or {}
+            for key, ent_data in ents.items():
+                lab = (ent_data.get("labels") or {}).get(lang) or (ent_data.get("labels") or {}).get("en") or {}
+                labels[key] = (lab.get("value") or "").strip()
+        except Exception as exc:
+            log.info("[web-search] wikidata labels failed: %s", type(exc).__name__)
     word = "с" if lang == "ru" else "since"
     out: list[dict] = []
     for target, role, start in rows:
@@ -1197,7 +1376,9 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
             # Справочник опрашивается всегда: он дёшев (один параллельный запрос),
             # даёт чистый URL и дату, а порог релевантности отсекает мусор.
             jobs.append(_task("wikipedia", _wikipedia_snippets(session, queries, limit, deadline)))
-            jobs.append(_task("wikidata", _wikidata_leader_snippets(session, queries[-1], limit, deadline)))
+            # Кандидаты Wikidata строятся из разговорной формы: в ключевой уже
+            # выбросили «of»/«the» и союз «и», а по ним режут хвост и сохраняют имя (prod 11.11.2026).
+            jobs.append(_task("wikidata", _wikidata_leader_snippets(session, queries[0], limit, deadline)))
 
         if intents["news"] or wants_fresh or _ADVICE_RE.search(text):
             # Советы по покупке живут в обзорах, а не в энциклопедии: для «что купить
