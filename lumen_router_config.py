@@ -457,6 +457,97 @@ _FRESHNESS_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ── Структурные сигналы свежести (требование владельца 11.11.2026: списочный
+# перечень форм не покрывает язык — в проде «когда вышла Fable 5.2» ответили без
+# поиска; Claude решает по классу вопроса, а не по ключевому слову).
+# Ложное срабатывание здесь так же дёшево, как у _FRESHNESS_QUERY_RE: искать или нет,
+# решает модель.
+
+# Морфология релизов: корень вместо перечисления рода и числа (вышла/вышло/вышли/вышедшая).
+_RELEASE_LEX_RE = re.compile(
+    r"\b(?:выш(?:ел|ла|ло|ли|ед|увш)\w*|выйд\w*|выпуст\w*|выпуск\w*|релиз\w*|анонс\w*|презент\w*"
+    r"|появ\w*|обнов\w*|добав(?:и|л)\w*|стартов\w*|откры(?:л|т)\w*|поступ(?:ил|а|я)\w*"
+    r"|в\s+(?:прокат|продаж)\w*)",
+    re.IGNORECASE,
+)
+# Слово про релиз — сигнал только вместе с вопросом: вопросительное слово, частица «ли»
+# или знак вопроса. «как» в список не входит: «как добавить муку» — рецепт, не новость.
+_QUESTION_MARK_RE = re.compile(
+    r"\b(?:когда|уже|ли|сколько|какой|какая|какое|какие|каков|правда|существует)\b"
+    r"|есть\s+ли|что\s+нов\w*|[?？]",
+    re.IGNORECASE,
+)
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+# Имя собственное: латиница в любом регистре (прод: «claude Fable 5.2» писали строчными)
+# или кириллица с большой буквы. Вопросительные, служебные и глаголы-приказы в начале фразы
+# отфильтрованы: иначе «Сколько будет 45.5» превращало арифметику в новость.
+_NAME_TOK = (
+    r"(?!(?:is|are|was|were|the|this|that|with|from|just|about|will|would|could|should|shall"
+    r"|how|what|when|why|who|which|does|did|have|has|had|not|now|out|it|on|in|at|to|of)\b)[A-Za-z]{2,}"
+    r"|(?!(?:Что|Как|Кто|Где|Когда|Почему|Зачем|Какой|Какая|Какое|Какие|Сколько|Это|Этот|Эта|Эти"
+    r"|Он|Она|Оно|Они|Мы|Вы|Ты|Будет|Есть|Вот|Тут|Здесь|Напиши|Переведи|Исправь|Реши|Составь"
+    r"|Расскажи|Объясни|Покажи|Сделай|Найди|Посчитай|Вычисли|Помнишь)\s)[А-ЯЁ][а-яё]{2,}"
+)
+# Токены версии: x.y, имя-число, 19 Pro, римские цифры, поколение. Регистр значим:
+# под IGNORECASE [А-ЯЁ] ловил строчное «вспомним 2039» как имя (тест 11.11.2026).
+_ROMAN_TOKEN = r"\b(?:XVIII|XVII|XVI|XV|XIV|XIII|XII|XI|XXI|IX|VIII|VII|VI|V|IV|III|II)\b"
+_NAMED_VERSION_RE = re.compile(
+    # «Fable 5.2», «GTA 7», «Silent Hill 2», «iPhone-15»: имя рядом с версией — сущности
+    # нет в памяти модели, ответ только из веба, даже без слов-триггеров (замер 11.11.2026).
+    # \b вокруг имени обязателен: без него ловились латинские подслова «ко», «то» внутри русских слов.
+    rf"\b(?:{_NAME_TOK})\b\s*[-—–]?\s*\d+[.,]\d+"
+    rf"|\b(?:{_NAME_TOK})\b\s*(?:[-—–]\s*\d+|\s*\d{{1,4}}\b)"
+    rf"|\b(?:{_NAME_TOK})\b[^.?!,;]{{0,12}}{_ROMAN_TOKEN}"
+    r"|\d+\s*(?i:pro|max|ultra|mini|plus)\b"
+    r"|(?i:поколен\w*|gen)\s*№?\s*\d+"
+    r"|\d+\s*(?:[-—–]\s*(?:е|й))?\s*(?i:поколен\w*|gen\b)"
+)
+# «модель claude», «фильм „Аватар“», «сезон 3 The Bear»: класс артефакта или события рядом с именем.
+_EVENT_CLASS = (
+    r"модел\w*|верси\w*|релиз\w*|игр\w*|фильм\w*|сериал\w*|сезон\w*|эпизод\w*|альбом\w*"
+    r"|смартфон\w*|процессор\w*|видеокарт\w*|обновлени\w*|прошивк\w*|приложени\w*|фреймворк\w*"
+    r"|лиг\w*|турнир\w*|выбор\w*|назначени\w*|отставк\w*|смерт\w*|свадьб\w*|закон\w*|санкци\w*|суд\w*"
+)
+_CLASS_NEAR_NAME_RE = re.compile(rf"(?i:\b(?:{_EVENT_CLASS}))\s+(?:\d+\s+)?\b(?:{_NAME_TOK})\b")
+
+# Вопросы про собственную модель и версию бота: ответ не из веба, а поиск подталкивал бы
+# говорить о модели (требование владельца 11.11.2026). Гасит только новые структурные правила.
+_SELF_MODEL_RE = re.compile(
+    r"\b(?:ты|тебя|у\s+тебя|у\s+вас)\b[^.?!,;]{0,30}\b(?:верси|модел|движк|нейросет)\w*"
+    r"|\b(?:верси|модел|нейросет)\w*[^.?!,;]{0,30}\b(?:ты|тебя|у\s+тебя|у\s+вас|работаешь)\b"
+    r"|\b(?:what|which)\b[^.?]{0,30}\b(?:model|version)\b[^.?]{0,30}\b(?:you|your|running|using)\b",
+    re.IGNORECASE,
+)
+
+# Английский набор той же схемы (мультиязычные наборы основного regex не тронуты).
+_EN_RELEASE_RE = re.compile(
+    r"\bis\s+out\b|\bout\s+now\b|\b(?:come|came)\s+out\b|\brelease\s+date|\breleas(?:e|ed|es)\b"
+    r"|\bis\s+there\s+a\b|\bany\s+news\s+about\b|\bdid\s+(?:it|they|this|that)?\s*drop\b"
+    r"|\blatest\s+version\b|\bwhat(?:'s|\s+is)\s+new\b",
+    re.IGNORECASE,
+)
+
+def _looks_like_release_question(text: str) -> bool:
+    """Форма глагола релиза (вышла/выйдет/анонсирована…) плюс любой вопрос или версия рядом."""
+    if _SELF_MODEL_RE.search(text):
+        return False
+    if not _RELEASE_LEX_RE.search(text):
+        return False
+    return bool(_QUESTION_MARK_RE.search(text)) or bool(_HAS_DIGIT_RE.search(text))
+
+def _looks_like_named_version_query(text: str) -> bool:
+    """Неизвестная сущность с номером версии — самый важный сигнал: ловит «Fable 5.2» без слов-триггеров."""
+    if _SELF_MODEL_RE.search(text):
+        return False
+    return bool(_NAMED_VERSION_RE.search(text)) or bool(_CLASS_NEAR_NAME_RE.search(text))
+
+def _looks_like_en_freshness_query(text: str) -> bool:
+    """Английские эквиваленты релизного сигнала: is out, released, is there a, what's new."""
+    if _SELF_MODEL_RE.search(text):
+        return False
+    return bool(_EN_RELEASE_RE.search(text))
+
 # ── Явная просьба искать в вебе — отдельно от свежести.
 # Голые "найди/ищи" без упоминания поиска не ловим: "найди баг" про код, а не про веб (прод 11.10.2026).
 _SEARCH_REQUEST_RE = re.compile(
@@ -472,7 +563,10 @@ def _looks_like_search_request(text: str) -> bool:
 
 
 def _looks_like_freshness_query(text: str) -> bool:
-    return bool(text) and bool(_FRESHNESS_QUERY_RE.search(text))
+    if not text:
+        return False
+    return bool(_FRESHNESS_QUERY_RE.search(text)) or _looks_like_release_question(text) \
+        or _looks_like_named_version_query(text) or _looks_like_en_freshness_query(text)
 
 
 def _gemini_text_chain(*, needs_freshness: bool) -> list[str]:
