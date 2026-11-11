@@ -79,3 +79,22 @@ def test_sanitize_no_proxy_drops_bracketed_ipv6_only():
     assert touched == ["NO_PROXY"]
     assert os.environ["NO_PROXY"] == "localhost,127.0.0.1,.example.com"
     assert persona_models.sanitize_no_proxy() == []
+def test_style_flags_catches_the_real_manner_defects():
+    # Дешёвая детерминированная сетка на ответ: маркер протокола в тексте,
+    # гирлянда эмодзи вместо 1-2 по просьбе, список там, где просили прозу,
+    # съеденный полировкой термин. Это ловит то, что судья пропускает.
+    sys.path.insert(0, str(REPO / "eval"))
+    import persona_models
+
+    assert persona_models.style_flags({"id": 11, "style": {"keep_terms": ["for", "while"]}},
+                                      "الفرق بين for و while واضح") == []
+    assert "term-lost:while" in persona_models.style_flags(
+        {"id": 11, "style": {"keep_terms": ["for", "while"]}}, "разница в for")
+    assert "search-marker" in persona_models.style_flags({"id": 1}, "[[SEARCH]]")
+    assert "emoji-4>2" in persona_models.style_flags({"id": 5}, "С днём 🎉🎂✨🎈 рождения")
+    assert "emoji-0<asked" in persona_models.style_flags(
+        {"id": 5, "style": {"emoji_min": 1}}, "С днём рождения")
+    assert "bullets-6" in persona_models.style_flags(
+        {"id": 3, "style": {"bullets_max": 2}}, "\n".join("- пункт %d" % i for i in range(6)))
+    assert "no-table" in persona_models.style_flags({"id": 8, "style": {"table": True}}, "обычный текст")
+    assert "empty" in persona_models.style_flags({"id": 2}, "   ")

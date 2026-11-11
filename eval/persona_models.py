@@ -460,6 +460,7 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
                 "chars": len(last),
                 "tokens": tokens_seen,
                 "script_ok": answer_script_ok(question.get("lang"), last),
+                "style_flags": style_flags(question, last),
             }
             log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., {tokens_seen} токенов, первый токен {ttft_last:.1f}с, всего {elapsed:.1f}с")
         # Пауза под фактический расход токенов: окно TPM у обеих голов считается по нему,
@@ -468,7 +469,57 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
     wrong = sorted((qid for qid, item in answers.items() if item.get("script_ok") is False), key=int)
     if wrong:
         log(f"  язык ответа не совпал с языком вопроса в вопросах: {', '.join(wrong)}")
+    flagged = sorted(((qid, item.get("style_flags")) for qid, item in answers.items() if item.get("style_flags")), key=lambda t: int(t[0]))
+    if flagged:
+        detail = "; ".join(f"{q}:{','.join(fs)}" for q, fs in flagged)
+        log(f"  стиль: флаги в {len(flagged)} вопрос(ах): {detail[:400]}")
     return answers
+
+
+_EMOJI_CHARS_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF]")
+_BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+", re.M)
+_HEAD_RE = re.compile(r"^\s*#{1,6}\s+\S.*$", re.M)
+_BOLD_LINE_RE = re.compile(r"^\s*\*\*[^*\n]+\*\*\s*$", re.M)
+
+
+def style_flags(question: dict, answer: str) -> list[str]:
+    """Дешёвая детерминированная сетка на ответ: то, что не требует судьи и
+    ловит настоящие провалы манеры Claude (служебный маркер в тексте, утечка
+    идентичности, гирлянда эмодзи, список там, где просили прозу, съеденный
+    термин). Подсказки вопроса — в поле style; без них действуют общие нормы.
+    Ревью 12.11.2026: судья не поймал то, что здесь считается строкой."""
+    from lumen_security import _leak_spans
+
+    style = question.get("style") or {}
+    text = answer or ""
+    flags: list[str] = []
+    if not text.strip():
+        return ["empty"]
+    if "[[search]]" in text.lower():
+        flags.append("search-marker")
+    if _leak_spans(text):
+        flags.append("identity-leak")
+    n_emoji = len(_EMOJI_CHARS_RE.findall(text))
+    max_emoji = style.get("emoji_max", 2)
+    if n_emoji > max_emoji:
+        flags.append(f"emoji-{n_emoji}>{max_emoji}")
+    if style.get("emoji_min") and n_emoji < style["emoji_min"]:
+        flags.append(f"emoji-{n_emoji}<asked")
+    bullets = len(_BULLET_RE.findall(text))
+    if bullets > style.get("bullets_max", 4):
+        flags.append(f"bullets-{bullets}")
+    heads = len(_HEAD_RE.findall(text)) + len(_BOLD_LINE_RE.findall(text))
+    if heads > style.get("heads_max", 2):
+        flags.append(f"headings-{heads}")
+    marks = text.count("?") + text.count("\u061f") + text.count("\uff1f")
+    if marks > style.get("questions_max", 1) and "questions_max" in style:
+        flags.append(f"questions-{marks}")
+    if style.get("table") and "|---" not in text.replace(" ", ""):
+        flags.append("no-table")
+    for term in style.get("keep_terms") or []:
+        if term.lower() not in text.lower():
+            flags.append(f"term-lost:{term}")
+    return flags
 
 
 def judge_prompt(data: dict, question: dict, answers: dict[str, Any], checks: list[int]) -> str:
