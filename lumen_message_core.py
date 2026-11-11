@@ -100,6 +100,17 @@ def _media_prompt_lang(message: Any, state: dict | None) -> str | None:
     return base if base in LANG_NAMES else None
 
 
+def _wants_web_search(text: str) -> bool:
+    """Ищет ли бот так же, как искал бы Claude: нужны свежие данные либо явная
+    просьба искать. Ссылка на прошлый разговор («помнишь, мы вчера обсуждали») —
+    вопрос к памяти чата, поиск по ней запускался зря (замер 11.11.2026)."""
+    if not text:
+        return False
+    if _PAST_CHAT_RE.search(text):
+        return False
+    return _looks_like_freshness_query(text) or _looks_like_search_request(text)
+
+
 def _initial_status(needs_youtube: bool, needs_website: bool, media_mime: str | None,
                     search_will_run: bool) -> tuple[str, bool]:
     """Первая фраза статус-пузыря: показываем тот этап, который реально идёт первым."""
@@ -1085,10 +1096,7 @@ async def _handle_message_core(
     # Явная просьба искать тоже ведёт на свежий маршрут: иначе "погугли" без слов-маркеров уходило на модели без поиска (прод 11.10.2026).
     # «помнишь, мы вчера обсуждали» — вопрос к памяти чата, а не к вебу: из-за слова
     # «вчера» запускался поиск и ответ получал пометку «без интернета» (замер 11.11.2026).
-    needs_freshness = (
-        (_looks_like_freshness_query(clean_prompt) or _looks_like_search_request(clean_prompt))
-        and not _PAST_CHAT_RE.search(clean_prompt)
-    )
+    needs_freshness = _wants_web_search(clean_prompt)
     route = _build_route(
         needs_youtube=needs_youtube, needs_website=needs_website,
         media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
