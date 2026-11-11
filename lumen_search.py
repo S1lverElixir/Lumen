@@ -579,6 +579,9 @@ def _wiki_page_score(query: str, title: str, snippet: str) -> int:
 async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: int, deadline: float) -> list[dict]:
     """Википедия: чистый URL, точный заголовок и дата — то, чем Claude подкрепляет
     вопросы «кто такой X / что такое X», когда новости молчат."""
+    cached = _cache_get("wiki|" + query)
+    if cached is not None:
+        return cached
     lang = _wiki_lang(query)
     params = {
         "action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": max(3, limit),
@@ -587,7 +590,7 @@ async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: in
     }
     budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
     try:
-        async with session.get(_WIKI_API.format(lang=lang), params=params, headers=_SEARCH_HEADERS, timeout=budget) as resp:
+        async with session.get(_WIKI_API.format(lang=lang), params=params, headers=_WIKI_HEADERS, timeout=budget) as resp:
             resp.raise_for_status()
             data = json.loads(await resp.text())
     except Exception as exc:
@@ -608,7 +611,9 @@ async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: in
     out.sort(key=lambda item: -item.get("_score", 0))
     for item in out:
         item.pop("_score", None)
-    return out[:limit]
+    result = out[:limit]
+    _cache_put("wiki|" + query, result)
+    return result
 
 
 async def _wikipedia_snippets(session: aiohttp.ClientSession, queries: list[str], limit: int,
@@ -625,6 +630,193 @@ async def _wikipedia_snippets(session: aiohttp.ClientSession, queries: list[str]
             continue
         out.extend(group)
     return _dedupe(out)
+
+
+# Wikimedia требует описательный User-Agent с контактом: анонимный браузерный UA
+# с одного адреса ловит 429 уже на пятом запросе, и справочный слой молчал
+# (замер 11.11.2026).
+_WIKI_HEADERS = {
+    "User-Agent": "LumenBot/1.0 (Telegram assistant; contact: https://t.me/Lumen) aiohttp",
+    "Accept": "application/json",
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+}
+
+# Кэш справочных источников: председатель меняется раз в годы, а Wikimedia
+# считает обращения — без кэша повторный вопрос того же чата получал 429.
+_REFERENCE_CACHE_TTL_SEC = 15 * 60
+_REFERENCE_CACHE_MAX = 64
+_reference_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _cache_get(key: str) -> list[dict] | None:
+    hit = _reference_cache.get(key)
+    if not hit:
+        return None
+    stamp, items = hit
+    if time.monotonic() - stamp > _REFERENCE_CACHE_TTL_SEC:
+        _reference_cache.pop(key, None)
+        return None
+    return items
+
+
+def _cache_put(key: str, items: list[dict]) -> None:
+    if not items:
+        return
+    if len(_reference_cache) >= _REFERENCE_CACHE_MAX:
+        # FIFO: dict хранит порядок вставки, старые записи вымываются первыми.
+        _reference_cache.pop(next(iter(_reference_cache)), None)
+    _reference_cache[key] = (time.monotonic(), list(items))
+
+
+def clear_reference_cache() -> None:
+    """Для тестов: кэш переживает вызовы между кейсами."""
+    _reference_cache.clear()
+
+# ───────────────────────── руководители из Wikidata ─────────────────────────
+# Wikidata отдаёт должность датированным утверждением (P488 «председатель»,
+# P6 «глава правительства», P169 «CEO») — ровно то, чего не даёт ни скрейпинг
+# выдачи, ни память модели (промах зонда 11.11.2026: «кто возглавляет ЦБ» без
+# имени председателя).
+_WD_API_URL = "https://www.wikidata.org/w/api.php"
+_WD_ENTITY_URL = "https://www.wikidata.org/wiki/Special:EntityData/{qid}.json"
+_LEADER_PROPS = {
+    "ru": {"P488": "председатель", "P6": "глава правительства", "P169": "исполнительный директор"},
+    "en": {"P488": "chairperson", "P6": "head of government", "P169": "chief executive officer"},
+}
+# Индекс сущностей ищется по имени организации: «кто возглавляет Центральный банк»
+# для него — мусор, поэтому роль и вопросительные слова выкидываются (замер
+# 11.11.2026: с полной фразой wbsearchentities не находил ничего).
+_ROLE_WORDS_RE = re.compile(
+    r"\b(?:кто|что|какой|какая|какие|какое|сейчас|ныне|теперь|возглавляет|возглавлял|возглавля"
+    r"|руководит|руководил|глава|главы|председател\w*|руководител\w*|президент\w*|канцлер\w*"
+    r"|премьер[-\s]?министр\w*|мэр\w*|губернатор\w*|секретар\w*|генеральн\w*|министр\w*"
+    r"|ceo|leader|head|chairman|chairperson|chairwoman|president|chancellor|mayor|governor|"
+    r"|secretary|general|of|the|is|who|currently)"
+    r"\b[\s,.!?-]*",
+    re.IGNORECASE,
+)
+# Постоянные места утверждений: «действующий» — это без P582 (конец) или с далёким будущим.
+_OPEN_END_PREFIXES = ("+2099", "+2100", "+9999", "-9999")
+
+
+def _entity_topic(query: str) -> str:
+    """Только имена собственные из вопроса — то, чем ищут в индексе сущностей."""
+    stripped = _ROLE_WORDS_RE.sub(" ", keyword_form(query) or query)
+    return re.sub(r"\s{2,}", " ", stripped).strip(" ,.:;-")[:120]
+
+
+def _first_time(quals: object, prop: str) -> str:
+    """Дата квалификатора: в EntityData qualifiers — словарь property_id -> список,
+    в claims-ответе api — список со свойством внутри."""
+    if isinstance(quals, dict):
+        entries = quals.get(prop) or []
+    elif isinstance(quals, list):
+        entries = [q for q in quals if isinstance(q, dict) and (
+            (q.get("property") or {}).get("id") if isinstance(q.get("property"), dict)
+            else q.get("property")) == prop]
+    else:
+        return ""
+    for entry in entries:
+        value = ((entry or {}).get("datavalue") or {}).get("value")
+        if isinstance(value, dict):
+            value = value.get("time") or ""
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _claims_target(statement: dict) -> str:
+    value = (((statement.get("mainsnak") or {}).get("datavalue") or {}).get("value") or {})
+    target = value.get("id") if isinstance(value, dict) else ""
+    return target if isinstance(target, str) and target.startswith("Q") else ""
+
+
+async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, limit: int,
+                                    deadline: float) -> list[dict]:
+    """Сущность из запроса -> действующий руководитель с датой начала полномочий."""
+    cached = _cache_get("wd|" + query)
+    if cached is not None:
+        return cached
+    lang = _wiki_lang(query)
+    props = _LEADER_PROPS.get(lang) or _LEADER_PROPS["en"]
+    budget = aiohttp.ClientTimeout(total=max(0.4, deadline - time.monotonic()))
+    qid = ""
+    for topic in [t for t in dict.fromkeys((_entity_topic(query), keyword_form(query) or query)) if t][:2]:
+        try:
+            async with session.get(
+                _WD_API_URL,
+                params={"action": "wbsearchentities", "search": topic, "language": lang,
+                        "limit": 2, "format": "json", "uselang": lang},
+                headers=_WIKI_HEADERS, timeout=budget,
+            ) as resp:
+                if resp.status == 429:
+                    log.info("[web-search] wikidata rate limited")
+                    return []
+                resp.raise_for_status()
+                found = (json.loads(await resp.text()) or {}).get("search") or []
+        except Exception as exc:
+            log.info("[web-search] wikidata search failed: %s", type(exc).__name__)
+            found = []
+        if found:
+            candidate = (found[0].get("id") or "").strip()
+            if candidate.startswith("Q"):
+                qid = candidate
+                break
+    if not qid:
+        return []
+    try:
+        async with session.get(_WD_ENTITY_URL.format(qid=qid), headers=_WIKI_HEADERS,
+                               timeout=budget) as resp:
+            resp.raise_for_status()
+            data = json.loads(await resp.text())
+    except Exception as exc:
+        log.info("[web-search] wikidata entity failed: %s", type(exc).__name__)
+        return []
+    claims = ((data.get("entities") or {}).get(qid) or {}).get("claims") or {}
+    rows: list[tuple[str, str, str]] = []
+    for prop, role in props.items():
+        for statement in claims.get(prop) or []:
+            if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
+                continue
+            target = _claims_target(statement)
+            if not target:
+                continue
+            quals = statement.get("qualifiers") or {}
+            start = _first_time(quals, "P580")
+            end = _first_time(quals, "P582")
+            # Назначение с датой конца — не действующий руководитель.
+            if end and not end.startswith(_OPEN_END_PREFIXES):
+                continue
+            rows.append((target, role, start.lstrip("+")[:10]))
+    if not rows:
+        return []
+    labels: dict[str, str] = {}
+    try:
+        async with session.get(
+            _WD_API_URL,
+            params={"action": "wbgetentities", "ids": "|".join(dict.fromkeys(row[0] for row in rows)),
+                    "languages": lang + "|en", "props": "labels", "format": "json"},
+            headers=_WIKI_HEADERS, timeout=budget,
+        ) as resp:
+            resp.raise_for_status()
+            ents = (json.loads(await resp.text()) or {}).get("entities") or {}
+        for key, ent_data in ents.items():
+            lab = (ent_data.get("labels") or {}).get(lang) or (ent_data.get("labels") or {}).get("en") or {}
+            labels[key] = (lab.get("value") or "").strip()
+    except Exception as exc:
+        log.info("[web-search] wikidata labels failed: %s", type(exc).__name__)
+    word = "с" if lang == "ru" else "since"
+    out: list[dict] = []
+    for target, role, start in rows:
+        name = labels.get(target) or ""
+        if not name:
+            continue
+        snippet = f"{name} — {role}" + (f" ({word} {start})" if start else "")
+        out.append({"title": f"{role}: {name}", "url": f"https://www.wikidata.org/wiki/{qid}",
+                    "snippet": snippet, "publisher": "wikidata.org", "date": start, "kind": "fact"})
+    result = out[:limit]
+    _cache_put("wd|" + query, result)
+    return result
 
 
 async def _crypto_snippets(session: aiohttp.ClientSession, text: str, deadline: float) -> list[dict]:
@@ -1005,6 +1197,7 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
             # Справочник опрашивается всегда: он дёшев (один параллельный запрос),
             # даёт чистый URL и дату, а порог релевантности отсекает мусор.
             jobs.append(_task("wikipedia", _wikipedia_snippets(session, queries, limit, deadline)))
+            jobs.append(_task("wikidata", _wikidata_leader_snippets(session, queries[-1], limit, deadline)))
 
         if intents["news"] or wants_fresh or _ADVICE_RE.search(text):
             # Советы по покупке живут в обзорах, а не в энциклопедии: для «что купить
