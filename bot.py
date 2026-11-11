@@ -1487,11 +1487,23 @@ _PROFILE_FIELDS: tuple[tuple[str, str, str], ...] = (
 # шторм «Flood control exceeded on method 'SetMyName'. Retry in 79522 seconds» с
 # 17:44 до 17:47 — и у живых людей в эти минуты рвались ответы. Поэтому очередь
 # раздаётся по одному вызову с паузой, а на первом же отказе встает: долбить
-# Telegram нельзя, остаток добирает часовой цикл.
+# Telegram нельзя, остаток добирает часовой цикл.
+# Второй вывод того же замера: штраф копят повторные записи, а перезапуск
+# Space после деплоя писал все поля заново. Отсюда два правила — не слать
+# локализованное поле, если текст совпадает с дефолтным (имя «Lumen» одинаков
+# во всех паках: 19 вызовов SetMyName сворачиваются в один), и сверять с
+# Telegram перед записью: то, что уже стоит, не пишется вовсе.
 _profile_queue: list[tuple[str, dict[str, str]]] = []
 _PROFILE_CALL_GAP_SEC = 0.6
 _PROFILE_STARTUP_FIELDS = 20
 _profile_sleep = asyncio.sleep
+# К каждому set* есть пара get*: чтение почти не лимитировано, а повторная запись
+# одного и того же значения стоит того же лимита, что и первая.
+_PROFILE_READ_METHODS = {
+    "set_my_name": ("get_my_name", "name"),
+    "set_my_short_description": ("get_my_short_description", "short_description"),
+    "set_my_description": ("get_my_description", "description"),
+}
 
 
 def _profile_payloads() -> list[tuple[str, dict[str, str]]]:
@@ -1499,8 +1511,40 @@ def _profile_payloads() -> list[tuple[str, dict[str, str]]]:
     for lang in PROFILE_LANGS:
         where = {} if lang == DEFAULT_LANG else {"language_code": lang}
         for key, method_name, arg_name in _PROFILE_FIELDS:
-            payloads.append((method_name, {arg_name: _lang_t(lang, key), **where}))
+            value = _lang_t(lang, key)
+            # Языку без собственного текста Telegram показывает значение по
+            # умолчанию: отдельная запись ничего не меняет, а лимит съедает.
+            if lang != DEFAULT_LANG and value == _lang_t(DEFAULT_LANG, key):
+                continue
+            payloads.append((method_name, {arg_name: value, **where}))
     return payloads
+
+
+def _profile_field_value(kwargs: dict[str, str]) -> str:
+    return next(v for k, v in kwargs.items() if k != "language_code")
+
+
+async def _profile_pending_payloads() -> list[tuple[str, dict[str, str]]]:
+    """Поля, которых в Telegram ещё нет. Ошибка чтения записи не блокирует: лучше
+    лишняя правка, чем профиль, застрявший в тексте из BotFather."""
+    pending: list[tuple[str, dict[str, str]]] = []
+    for method_name, kwargs in _profile_payloads():
+        read = _PROFILE_READ_METHODS.get(method_name)
+        method = getattr(bot, read[0], None) if read else None
+        if method is None:
+            pending.append((method_name, kwargs))
+            continue
+        getter_name, attr = read
+        read_kwargs = {"language_code": kwargs["language_code"]} if "language_code" in kwargs else {}
+        try:
+            got = await _tg_call(method, **read_kwargs, call_timeout=10.0, retries=0)
+            current = getattr(got, attr, None)
+        except Exception as exc:
+            log.info("[webhook] %s read skipped (%s): %s", getter_name, kwargs.get("language_code", DEFAULT_LANG), type(exc).__name__)
+            current = None
+        if current != _profile_field_value(kwargs):
+            pending.append((method_name, kwargs))
+    return pending
 
 
 async def _register_bot_profile(limit: int | None = None) -> int:
@@ -1512,7 +1556,10 @@ async def _register_bot_profile(limit: int | None = None) -> int:
         log.warning("[webhook] Bot profile skipped: bot instance is not initialized")
         return 0
     if not _profile_queue:
-        _profile_queue = _profile_payloads()
+        _profile_queue = await _profile_pending_payloads()
+        if not _profile_queue:
+            log.info("[webhook] Bot profile already matches lumen_lang: nothing to write.")
+            return 0
 
     done = 0
     while _profile_queue and (limit is None or done < limit):

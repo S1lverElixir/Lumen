@@ -2651,8 +2651,15 @@ def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
     monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
     monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _spy(m) for m in _PROFILE_ARG_BY_METHOD}))
     bot._profile_queue.clear()
-    assert asyncio.run(bot._register_bot_profile()) == 3 * len(bot.PROFILE_LANGS)
-    assert Counter(name for name, _ in calls) == Counter({m: len(bot.PROFILE_LANGS) for m in _PROFILE_ARG_BY_METHOD})
+    # Имя одинаковое во всех паках, значит set_my_name уходит один раз: SetMyName
+    # лимитирован сильнее всех, а 19 повторов той же строки стоили штрафа на ~20 ч.
+    expected = {
+        "set_my_name": 1,
+        "set_my_short_description": len(bot.PROFILE_LANGS),
+        "set_my_description": len(bot.PROFILE_LANGS),
+    }
+    assert asyncio.run(bot._register_bot_profile()) == sum(expected.values())
+    assert Counter(name for name, _ in calls) == Counter(expected)
     for name, kwargs in calls:
         key, arg = _PROFILE_ARG_BY_METHOD[name]
         lang = kwargs.get("language_code") or bot.DEFAULT_LANG
@@ -4333,7 +4340,7 @@ def test_profile_pass_pauses_on_flood_control_and_resumes_later(monkeypatch):
     # людей рвались ответы. Теперь один отказ = пауза, поле остаётся в очереди,
     # часовой проход продолжает с того же места.
     bot._profile_queue.clear()
-    total = 3 * len(bot.PROFILE_LANGS)
+    total = len(bot._profile_payloads())
     seen = []
 
     def _flaky(method_name):
@@ -4365,3 +4372,86 @@ def test_profile_pass_pauses_on_flood_control_and_resumes_later(monkeypatch):
     monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _calm(m) for m in _PROFILE_ARG_BY_METHOD}))
     assert asyncio.run(bot._register_bot_profile()) == total - 4
     assert bot._profile_queue == []
+
+def _profile_value(kwargs: dict) -> str:
+    return next(v for k, v in kwargs.items() if k != "language_code")
+
+
+def test_profile_payloads_sends_the_shared_name_only_once():
+    # Локализованное поле с тем же текстом, что в языке по умолчанию, Telegram
+    # покажет из дефолта; отдельная запись только съедает лимит метода.
+    import lumen_lang
+    payloads = bot._profile_payloads()
+    names = [kw for method, kw in payloads if method == "set_my_name"]
+    assert len(names) == 1 and "language_code" not in names[0]
+    shared = lumen_lang.t(bot.DEFAULT_LANG, "profile_name")
+    assert all(lumen_lang.t(lang, "profile_name") == shared for lang in bot.PROFILE_LANGS)
+    # Описания различаются по языкам — их очередь обязана нести целиком.
+    assert sum(1 for method, _ in payloads if method == "set_my_description") == len(bot.PROFILE_LANGS)
+
+
+def test_register_bot_profile_skips_fields_telegram_already_has(monkeypatch):
+    # Каждый редиплой писал все поля заново и ловил Flood control на ~20 часов
+    # (прод 11.11.2026: SetMyName лимитирован сильнее всех). Перед записью сверяем
+    # get*: в чат и в профиль уходит только то, чего там ещё нет.
+    payloads = bot._profile_payloads()
+    current: dict[tuple[str, str], str] = {}
+    for method_name, kwargs in payloads:
+        attr = bot._PROFILE_READ_METHODS[method_name][1]
+        current[(kwargs.get("language_code", bot.DEFAULT_LANG), attr)] = _profile_value(kwargs)
+    stale_key = sorted(current)[0]
+    current[stale_key] = "устаревший текст"
+
+    writes: list[tuple[str, dict]] = []
+
+    def _setter(method_name: str):
+        async def _call(**kwargs):
+            writes.append((method_name, kwargs))
+            return True
+        return _call
+
+    def _getter(attr: str):
+        async def _call(language_code=None):
+            return SimpleNamespace(**{attr: current.get((language_code or bot.DEFAULT_LANG, attr), "")})
+        return _call
+
+    methods = {}
+    for method_name, (getter_name, attr) in bot._PROFILE_READ_METHODS.items():
+        methods[method_name] = _setter(method_name)
+        methods[getter_name] = _getter(attr)
+
+    async def passthrough_tg_call(method, *args, call_timeout=None, retries=None, **kwargs):
+        return await method(**kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", passthrough_tg_call)
+    monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**methods))
+    bot._profile_queue.clear()
+
+    assert asyncio.run(bot._register_bot_profile()) == 1
+    written = {(kw.get("language_code", bot.DEFAULT_LANG), bot._PROFILE_READ_METHODS[name][1])
+               for name, kw in writes}
+    assert written == {stale_key}, (written, stale_key)
+
+
+def test_register_bot_profile_writes_everything_when_reads_are_unavailable(monkeypatch):
+    # Старый aiogram без getMyName: отсутствие чтения не должно молча оставить
+    # профиль незаписанным.
+    calls = []
+
+    def _setter(method_name):
+        async def _call(**kwargs):
+            calls.append(method_name)
+            return True
+        return _call
+
+    async def passthrough_tg_call(method, *args, call_timeout=None, retries=None, **kwargs):
+        return await method(**kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", passthrough_tg_call)
+    monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(
+        **{m: _setter(m) for m in ("set_my_name", "set_my_short_description", "set_my_description")}))
+    bot._profile_queue.clear()
+    assert asyncio.run(bot._register_bot_profile()) == len(bot._profile_payloads())
+    assert len(calls) == len(bot._profile_payloads())

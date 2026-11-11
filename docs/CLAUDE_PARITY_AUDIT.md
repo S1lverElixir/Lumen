@@ -233,3 +233,26 @@ be, pl, it, hi, ur); `status_listening` единственная с точкой
   на «capital of australia» — «Canberra.» (рубрика хочет развенчанный миф про
   Сидней). Оба ответа укладываются в явную просьбу человека отвечать коротко.
   Развёрнутый юридический список на «меня уволили» — вопрос к промпту, не к фильтрам.
+
+## Профиль бота: штраф за повторные записи (11.11.2026, вечер)
+
+- После деплоя в логах оставалось «Bot profile was not set for any language», а
+  Telegram отвечал «Flood control exceeded on method 'SetMyName'. Retry in 73964
+  seconds» — то есть штраф не только не сгорал, его каждый перезапуск контейнера
+  брал заново: очередь профиля состояла из 72 полей и писалась целиком, хотя
+  значения не менялись.
+- Два правила в bot.py: `_profile_payloads` больше не шлёт локализованное поле,
+  если текст совпадает с дефолтным языком (имя «Lumen» одинаково во всех паках —
+  24 вызова SetMyName сворачиваются в один, а Telegram и без них показывает
+  дефолт), и `_profile_pending_payloads` сверяет каждое поле через парный get*
+  (чтение квоту записей не ест) — пишется только то, чего в профиле ещё нет.
+  Очередь холодного профиля — 49 полей, после редиплоя без изменений — ноль, и в
+  логе это видно: «Bot profile already matches lumen_lang: nothing to write».
+- Ошибку чтения профиль не считает отказом записывать: без get* (старый aiogram,
+  недоступный прокси) очередь ведёт себя как раньше, иначе профиль мог молча
+  остаться текстом из BotFather.
+- Тесты: `test_profile_payloads_sends_the_shared_name_only_once`,
+  `test_register_bot_profile_skips_fields_telegram_already_has`,
+  `test_register_bot_profile_writes_everything_when_reads_are_unavailable`;
+  часовому проходу после отказа соответствует обновлённый
+  `test_profile_pass_pauses_on_flood_control_and_resumes_later`.
