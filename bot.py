@@ -1344,7 +1344,9 @@ from lumen_commands import (
     _send_pick_question,
     handle_pick_callback,
 )
-dp.message.register(cmd_start, Command("start"))
+# /help — алиас /start: по привычке человек просит справку именно так, а без
+# алиаса его текст уезжал в модель (решение владельца 11.11.2026). В меню не дублируем.
+dp.message.register(cmd_start, Command("start", "help"))
 dp.message.register(cmd_draw, Command("draw"))
 dp.callback_query.register(handle_draw_more_callback, F.data == "draw:more")
 dp.message.register(cmd_tts, Command("tts"))

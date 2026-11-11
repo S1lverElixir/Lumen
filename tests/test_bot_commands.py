@@ -2415,6 +2415,39 @@ def test_user_facing_strings_name_no_provider_or_model():
             assert not _EMOJI_RE.search(cb["q"])
 
 
+# Отказ на служебные команды (logs_deny/stats_deny) читает человек без прав.
+# Старая форма «No access to this command.» подтверждала, что команда существует
+# и что у бота есть владелец, — то есть что бот не Claude (решение владельца
+# 11.11.2026). Стоп-слова взяты из всех 25 прежних формулировок, поэтому тест
+# падает на любом возврате к ним.
+_DENY_KEYS = ("logs_deny", "stats_deny")
+_DENY_LEAK_WORDS = [
+    # доступ / права
+    r"\bacces", r"accès", r"\bdost", r"\bдост", r"toegang", r"erişim",
+    r"akses", r"สิทธิ์", r"पहुंच", r"প্রবেশাধিকার", r"رسائی", r"دسترسی",
+    r"kirish", r"ilungelo", r"صلاحية", r"қолжетімділік", r"\bправ", r"quyền",
+    # команда
+    r"\bcommand", r"\bcomand", r"\bkomand", r"\bкоманд", r"\bкаманд",
+    r"befehl", r"komut", r"perintah", r"คำสั่ง", r"कमांड", r"কমান্ড", r"کمانڈ",
+    r"دستور", r"buyruq", r"myalo", r"الأمر", r"lệnh",
+    # владелец / админ: отказ не должен указывать, кому принадлежит команда
+    r"\bowner", r"\badmin", r"админ", r"владели", r"власник", r"ўладальнік",
+]
+
+
+def test_service_command_deny_reveals_no_internals():
+    import lumen_lang
+    for key in _DENY_KEYS:
+        en = _string_value(lumen_lang, key, "en")
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            hits = [w for w in _DENY_LEAK_WORDS if re.search(w, v, re.IGNORECASE)]
+            assert not hits, (key, lang, hits, v)
+            # Калька с английского — не перевод: форма обязана быть своей.
+            if lang != "en":
+                assert v != en, (key, lang, v)
+
+
 def test_status_and_progress_punctuation_is_consistent():
     # Регрессия: «Слушаю.» с точкой и фазы без многоточия ломают вид статусного
     # блока Claude. Живые media/поиск-фазы вне правила: lumen_status ставит им
@@ -3196,6 +3229,38 @@ def test_banned_user_commands_send_nothing(monkeypatch):
             assert calls == [], func.__name__
     finally:
         bot._unban_user(banned_id)
+
+
+def test_help_command_opens_the_start_screen(rate_guard_setup):
+    # Регресс: без алиаса /help уходил в catch-all и уезжал в модель как текст,
+    # а человек, печатающий /help по привычке, получал выдуманный ответ.
+    import datetime
+    from aiogram import Bot
+    from aiogram.types import Chat as TgChat
+    from aiogram.types import Message as TgMessage
+    real_bot = Bot(token="123456:" + "x" * 35)
+
+    def resolved(text):
+        # Матчит сам реестр dp и aiogram, а не копия правил Command.
+        message = TgMessage(
+            message_id=1, date=datetime.datetime.now(),
+            chat=TgChat(id=999812, type="private"), text=text,
+        )
+        for handler in bot.dp.message.handlers:
+            if asyncio.run(handler.check(message, bot=real_bot))[0]:
+                return handler.callback
+        return None
+
+    assert resolved("/help") is resolved("/start") is bot.cmd_start
+    sent = []
+    for text in ("/start", "/help"):
+        incoming = rate_guard_setup()
+        incoming.text = text
+        asyncio.run(bot.cmd_start(incoming))
+        # фикстура ставит свой AsyncMock на каждый вызов — смотрим его аргументы
+        sent.append(bot._tg_call.await_args.args[1])
+    assert sent[0] == sent[1] == bot._t(123, "start_text")
+
 
 
 def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(monkeypatch):

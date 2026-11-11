@@ -116,7 +116,7 @@ All endpoints below require `Authorization: Bearer <ADMIN_PANEL_KEY>` (`/admin_k
 
 | Command | Access | Purpose |
 |---|---|---|
-| `/start` | anyone | Shows a short intro and the command list. |
+| `/start` (`/help` is the same command, kept out of the menu) | anyone | Shows a short intro and the command list. |
 | `/reset` | anyone in DMs; group admins/owner in groups | Clears the chat's conversation history. |
 | `/draw [description]` | anyone | Generates an image (see [Features](#features)). |
 | `/tts [text]` | anyone | Reads text out loud. |
