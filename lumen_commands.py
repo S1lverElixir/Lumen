@@ -1356,7 +1356,7 @@ async def cmd_reset(message: Message) -> None:
         bot._t(message.chat.id, "reset_done")
     )
 
-# ── Язык системных сообщений (/lang) — ответы ИИ не трогает (см. RESPONSE LANGUAGE в system_prompt.py). Права как у /reset; кнопки без флагов/эмодзи, текущий — с ✓, меню по алфавиту кода.
+# ── Язык системных сообщений (/lang) — ответы ИИ не трогает (см. RESPONSE LANGUAGE в system_prompt.py). Права как у /reset; кнопки без флагов/эмодзи/галочек, текущий язык — в заголовке, меню по алфавиту кода.
 async def cmd_lang(message: Message) -> None:
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
@@ -1371,15 +1371,14 @@ async def cmd_lang(message: Message) -> None:
     for i in range(0, len(codes), 2):
         row = []
         for code in codes[i:i + 2]:
-            mark = " ✓" if code == lang else ""
             row.append(InlineKeyboardButton(
-                text=f"{LANG_NAMES[code]}{mark}",
+                text=LANG_NAMES[code],
                 callback_data=f"lang:{code}",
             ))
         rows.append(row)
     await bot._tg_call(
         message.reply,
-        bot._t(message.chat.id, "lang_title"),
+        bot._t(message.chat.id, "lang_title", current=LANG_NAMES[lang]),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 

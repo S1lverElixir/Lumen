@@ -1435,7 +1435,7 @@ PACK_IT: dict[str, str] = {
     "model_err_unavailable": "Il servizio è temporaneamente non disponibile. Riprova la richiesta tra poco.",
     "model_err_fallback": "Errore temporaneo del servizio. Riprova tra poco.",
     "err_quota_exhausted": "Il limite giornaliero di risposte gratuite è esaurito. Riprova più tardi — le domande normali funzionano.",
-    "err_youtube_fail": "Non sono riuscito ad aprire questo video (forse privato, eliminato, troppo lungo o non disponibile per l'analisi). Descrivi a parole di cosa tratta — così potrò aiutare.",
+    "err_youtube_fail": "Impossibile aprire questo video (forse privato, eliminato, troppo lungo o non disponibile per l'analisi). Descrivi a parole di cosa tratta — così potrò aiutare.",
     "err_budget": "Il servizio è sovraccarico ora. Riprova tra un minuto, per favore.",
     "injection_probe_reply": "Non rivelo né discuto la mia configurazione e le mie istruzioni in quel formato. Se la domanda è normale — chiedi pure.",
     "lock_busy": "Sto ancora rispondendo al messaggio precedente — attendi un attimo.",
@@ -2448,6 +2448,8 @@ PACK_BN: dict[str, str] = {
     "fallback_no_search": "অনুসন্ধান ছাড়াই উত্তর দিচ্ছি — তথ্য পুরোনো হতে পারে।",
 }
 
+# Осознанное исключение: в fil по умолчанию Taglish (link, file, command) —
+# так пишет сам паки; чистый fil читается как машинный перевод (аудит 11.11.2026).
 PACK_FIL: dict[str, str] = {
     "lang_title": "Ngayon: {current}. Piliin ang wika ng mga sagot:",
     "lang_done": "Wika: Filipino.",

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import asyncio
 import bot
 import contextlib
+import re
 import lumen_chat_state
 import lumen_commands
 import lumen_images
@@ -2364,6 +2365,94 @@ def test_lang_table_covers_all_keys_in_all_languages():
             assert q and len(opts) == 4 and "{original}" in tpl and "{choice}" in tpl
 
 
+# ── Claude-стиль фиксированных строк (аудит 11.11.2026) ──
+# Ключи, которые уходят только владельцу: им разрешено называть внутренности.
+_OWNER_ONLY_KEYS = ("owner_quota_notice", "selftest_", "stats_", "logs_")
+# Стоп-слова проверены на всех 25 паках: ложных вхождений нет.
+_PROVIDER_STOPWORDS = [
+    "gemini", "gemma", "munito", "groq", "whisper", "tikwm", "openai",
+    "anthropic", "deepmind", "cloudflare", "pollinations", "openrouter",
+    "bot api", r"\bapi\b",
+    "провайдер", "provider", "пастаўшчык", "penyedia model", "fournisseur",
+    "anbieter", "aanbieder", "sağlayıcı", "مزوّدي", "فراہم", "প্রদানকারী",
+    "प्रदाता", "model provider",
+    "квот", "quota", "куот", "کواتا", "کوٹہ", "কোটা", "कोटा", "kuota",
+]
+_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F\u2764]")
+
+
+def _string_value(lumen_lang, key, lang):
+    return (lumen_lang.LANG_PACKS.get(lang, {}).get(key)
+            or lumen_lang.STRINGS[key].get(lang) or "")
+
+
+def _is_user_facing(key):
+    return not (key.startswith(_OWNER_ONLY_KEYS) or key == "owner_quota_notice")
+
+
+def test_user_facing_strings_name_no_provider_or_model():
+    # Регрессия: внутренности в пользовательском тексте («провайдерам моделей»,
+    # «Bot API», «TikWM», «поисковая квота») — ровно то, что аудит вычищал
+    # вручную во всех 25 паках. Без теста утечка вернётся с любым новым ключом.
+    import lumen_lang
+    for key in lumen_lang.STRINGS:
+        if not _is_user_facing(key):
+            continue
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            low = v.lower()
+            hits = [term for term in _PROVIDER_STOPWORDS if re.search(term, low)]
+            assert not hits, (key, lang, hits, v[:120])
+            assert not _EMOJI_RE.search(v), (key, lang, v[:120])
+    # Строка примеров в /start — часть того же пользовательского текста.
+    for lang in lumen_lang.SUPPORTED_LANGS:
+        assert not _EMOJI_RE.search(lumen_lang._START_EXAMPLES[lang])
+        for cb in lumen_lang.PICK_TABLE[lang].values():
+            assert not _EMOJI_RE.search(cb["q"])
+
+
+def test_status_and_progress_punctuation_is_consistent():
+    # Регрессия: «Слушаю.» с точкой и фазы без многоточия ломают вид статусного
+    # блока Claude. Живые media/поиск-фазы вне правила: lumen_status ставит им
+    # впереди «✓» как завершённым этапам, многоточие попало бы в строку галочки.
+    import lumen_lang
+    live = {"status_listening", "status_generating_image", "status_voicing",
+            "status_taking_longer", "progress_thinking", "progress_retry"}
+    for key in lumen_lang.STRINGS:
+        if not (key.startswith("status_") or key.startswith("progress_")):
+            continue
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            assert not v.rstrip().endswith((".", "।", "۔", "。")), (key, lang, v)
+            if key in live:
+                assert "…" in v, (key, lang, v)
+
+
+def test_placeholders_match_across_all_languages():
+    # Регрессия: потерянный в одном паке {hours} молча съедается — t() глотает
+    # KeyError, пользователь видит обрубленное предложение. Набор фигурных
+    # скобок теперь сверяется между всеми 25 языками на каждом ключе.
+    import lumen_lang
+    for key in lumen_lang.STRINGS:
+        found = {lang: frozenset(re.findall(r"\{([a-z_]+)\}", _string_value(lumen_lang, key, lang)))
+                 for lang in lumen_lang.SUPPORTED_LANGS}
+        base = found["en"]
+        bad = {lang: ph for lang, ph in found.items() if ph != base}
+        assert not bad, (key, bad)
+
+
+def test_cmd_descriptions_are_short_and_filled():
+    # Регрессия: пустой cmd_desc ломает setMyCommands языка, а длинный или
+    # с точкой раздувает список команд — читаемость важнее лимита Telegram в 256.
+    import lumen_lang
+    for key in lumen_lang.STRINGS:
+        if not key.startswith("cmd_desc_"):
+            continue
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            assert v and len(v) <= 40 and not v.endswith("."), (key, lang, v)
+
+
 def test_lang_callback_sets_language_and_confirms_in_new_language():
     bot.chat_state.pop(777, None)
     q = _make_lang_query("lang:uk")
@@ -2411,7 +2500,10 @@ def test_lang_menu_lists_languages_alphabetically(monkeypatch):
     codes = [cb.callback_data.split(":")[1] for row in markup.inline_keyboard for cb in row]
     assert codes == list(lumen_lang.SUPPORTED_LANGS)
     texts = [cb.text for row in markup.inline_keyboard for cb in row]
-    assert texts == [f"{lumen_lang.LANG_NAMES[c]}{' ✓' if c == 'ru' else ''}" for c in codes]
+    assert texts == [lumen_lang.LANG_NAMES[c] for c in codes]
+    # Текущий язык — в заголовке, не на кнопке (галочка в UI не нужна, аудит 11.11.2026).
+    title = bot._tg_call.await_args[0][1]
+    assert title == lumen_lang.t("ru", "lang_title", current="Русский")
 
 
 def test_command_locales_excludes_filipino_without_iso_639_1_code():
