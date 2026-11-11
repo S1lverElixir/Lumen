@@ -407,15 +407,25 @@ TIKTOK_GROUP_REQUIRE_MENTION = os.getenv("TIKTOK_GROUP_REQUIRE_MENTION", "0") ==
 # Лимит ожидания следующего куска для любого провайдера: зависший стрим иначе держит лок чата бесконечно.
 STREAM_CHUNK_TIMEOUT_SEC = _env_number("STREAM_CHUNK_TIMEOUT_SEC", 30, min_value=1)
 # ── Паттерн "живой печати" при стриминге (см. lumen_typing_pace.py) ──
-# Показ подкрашивается под оценённую скорость модели, чтобы куски не мигали
-# скачками. Три константы ниже — периоды правок и предел довывода остатка.
-STREAM_EDIT_MIN_INTERVAL_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_SEC", 1.2, min_value=0)
+# Правки рисуются по таймеру (маляр), а не по приходу куска; интервал правок
+# один на чат и для тикера статуса, и для стрима (ревью 11.11.2026).
+# STREAM_EDIT_MIN_INTERVAL_SEC — общий бюджет в личке: тикер (0.3) в него
+# укладывается, суммарно не больше ~3 правок/с в один чат.
+STREAM_EDIT_MIN_INTERVAL_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_SEC", 0.3, min_value=0)
+# В группе та же анимация жрёт квоту чата на несколько человек: бюджет 1.5-2 с.
+STREAM_EDIT_MIN_INTERVAL_GROUP_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_GROUP_SEC", 1.8, min_value=0)
+# Кадр маляра: Claude дописывает пословно каждые ~50-100 мс, Telegram позволяет
+# чаще раза в секунду; 0.55 с — компромисс плавности и 429 (личка).
+STREAM_PAINT_TICK_SEC = _env_number("STREAM_PAINT_TICK_SEC", 0.55, min_value=0)
+STREAM_PAINT_TICK_GROUP_SEC = _env_number("STREAM_PAINT_TICK_GROUP_SEC", 1.8, min_value=0)
 STREAM_TYPING_TICK_SEC = _env_number("STREAM_TYPING_TICK_SEC", 0.5, min_value=0)
-STREAM_TYPING_MAX_CATCHUP_TICKS = _env_number("STREAM_TYPING_MAX_CATCHUP_TICKS", 6, cast=int, min_value=0)
+STREAM_TYPING_MAX_CATCHUP_TICKS = _env_number("STREAM_TYPING_MAX_CATCHUP_TICKS", 8, cast=int, min_value=0)
 # FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска (см.
 # lumen_model_speed.first_chunk_limit_sec): быструю зависшую модель бросаем рано.
 # Предел только укорачивает ожидание: первым сработает минимум из двух таймаутов.
-FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 12, min_value=1)
+# 12 с держали «Думаю…» при зависшей голове; для текста хватает 5 с — медленные
+# модели уже покрыты адаптивным floor из EMA×2.5, которое здесь только floor.
+FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
 # Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
 # дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).
 _DOTS_START_AFTER_SEC = 0.5

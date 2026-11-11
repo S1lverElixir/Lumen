@@ -799,7 +799,9 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
 
 def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
     # Обычный текст после раннего сбоя стрима не должен терять «Thought for Ns»:
-    # статуса в этом пути нет, блок строим по времени маршрута.
+    # статуса в этом пути нет, блок строим по времени маршрута. Ревью 11.11.2026
+    # п.11: при нулевом времени маршрута строки нет, поэтому резервная модель
+    # честно «думает» чуть дольше секунды.
     chat_id = 999322
     placeholder = _FakeSentMessage()
     incoming = _FakeIncomingMessage(chat_id)
@@ -808,6 +810,7 @@ def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
         return None, placeholder
 
     async def fake_text(cid, prompt, model_chain, deadline=None, **kwargs):
+        await asyncio.sleep(1.05)
         return "Ответ от резервной модели"
 
     monkeypatch.setattr(bot, "_try_munito_streaming", fake_stream_fail)
