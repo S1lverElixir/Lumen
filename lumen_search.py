@@ -130,6 +130,16 @@ _SEARCH_MARKER_LEADING_RE = re.compile(
 )
 
 
+# Сам маркерный токен в любом обрамлении: служебная строка протокола, которой
+# не должен видеть никто (ревью 11.11.2026: «[[SEARCH]][[SEARCH]]» оставляло
+# осколок в чате, а «Не могу знать без [[SEARCH]]» показывал токен целиком).
+_MARKER_TOKEN_RE = re.compile(r"[\s`*_~\"'“”«»([{<]*\[\s*search\s*\][\s`*_~\"'“”«»)}\],.;:!?]*", re.IGNORECASE)
+# Короткая затравка перед маркером («Хм, », «Подожди, ») ничего не отвечает и
+# теряется без потери смысла; точка, восклицательный или перенос строки
+# означают, что текст до маркера — настоящая часть ответа.
+_MARKER_PREAMBLE_RE = re.compile(r"^[^\n.!?…\u3002\uff01\uff1f\.]{0,24}$", re.DOTALL)
+
+
 class _SearchRequested(Exception):
     """Ответ модели — ровно маркер [[SEARCH]]. Это не сбой: под него не должны
     попадать остывка, карантин и model_failures. placeholder — пузырёк, который
@@ -160,6 +170,22 @@ def has_leading_search_marker(text: str) -> bool:
     return bool(_SEARCH_MARKER_LEADING_RE.match(text or ""))
 
 
+def search_marker_requested(text: str) -> bool:
+    """Ответ — только маркер, ищём ещё раз. Допускается короткая затравка без
+    знаков конца предложения («Хм, [[SEARCH]]») и несколько маркеров подряд:
+    с одним ведущим правилом токен оставался виден человеку и оседал в
+    истории (ревью 11.11.2026)."""
+    if not text:
+        return False
+    m = _MARKER_TOKEN_RE.search(text)
+    if not m:
+        return False
+    before, after = text[:m.start()], text[m.end():]
+    if before.strip() and not _MARKER_PREAMBLE_RE.match(before):
+        return False
+    return not _MARKER_TOKEN_RE.sub("", after).strip(_MARKER_TAIL_PUNCT)
+
+
 def search_marker_state(text: str) -> str:
     """'' — обычный ответ; 'pending' — накопленное ещё может достроиться в
     маркер, показывать его нельзя; 'requested' — ответ это только маркер.
@@ -174,10 +200,21 @@ def search_marker_state(text: str) -> str:
 
 
 def strip_search_marker(text: str) -> str:
-    """Служебный маркер с начала строки: в чате его не должен видеть никто."""
-    if not has_leading_search_marker(text):
+    """Служебный маркер removed: в чате его не должен видеть никто. Убираем все
+    вхождения (двойной маркер оставлял осколок) и затравку перед ним, когда
+    больше отвечать нечем; текст с настоящим содержанием не трогается иначе
+    как вычёркиванием самого токена."""
+    if not text or not _MARKER_TOKEN_RE.search(text):
         return text
-    return _SEARCH_MARKER_LEADING_RE.sub("", text or "", count=1).lstrip(_MARKER_WRAP_BEFORE).lstrip()
+    if search_marker_requested(text):
+        rest = _MARKER_TOKEN_RE.sub("", text)
+        # Осталась только затравка («Хм, ») — это не ответ, снимем и её.
+        return "" if _MARKER_PREAMBLE_RE.match(rest) else rest.strip().lstrip(_MARKER_WRAP_BEFORE).strip()
+    # Токен заменяется пробелом, а двойные пробелы схлопываются: «Вот [[SEARCH]]
+    # что» -> «Вот что», а не «Вотчто». Ветка reachable только когда в ответе
+    # буквально лежит токен протокола, поэтому отступы кода не страдают.
+    cleaned = re.sub(r" {2,}", " ", _MARKER_TOKEN_RE.sub(" ", text))
+    return re.sub(r" +([,.;:!?])", r"\1", cleaned).strip()
 
 
 # ───────────────────────── подготовка запроса ─────────────────────────

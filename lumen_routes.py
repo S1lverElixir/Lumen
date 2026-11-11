@@ -34,7 +34,7 @@ from lumen_router_config import (
     GEMINI_DEFAULT_CHAIN,
     _looks_like_heavy_query,
 )
-from lumen_search import _SearchRequested, search_marker_state, strip_search_marker
+from lumen_search import _SearchRequested, search_marker_requested, strip_search_marker
 from lumen_security import _polish_answer, _detect_garbled_mix, _is_garbled_echo
 from lumen_status import thought_block
 
@@ -174,7 +174,7 @@ def _raise_if_search_requested(answer: str, provider: str, model_id: str) -> str
     Останавливает маршрут ДО записи в память чата (маркер в истории подсказывал
     бы себе в следующих ходах); квоту вызова пишем — он реально состоялся
     (замер 11.11.2026)."""
-    if search_marker_state(answer) != "requested":
+    if not search_marker_requested(answer):
         return strip_search_marker(answer)
     import bot
     log.info('[router] %s/%s asked for a web search instead of answering', provider, model_id)

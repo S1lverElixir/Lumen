@@ -800,3 +800,18 @@ def test_detect_intents_sends_astronomy_to_the_weather_layer():
     assert lumen_search.detect_intents("во сколько завтра рассвет в москве")["weather"] is True
     assert lumen_search.detect_intents("какая фаза луны сегодня в минске")["weather"] is True
     assert lumen_search.detect_intents("почему небо голубое")["weather"] is False
+def test_search_marker_survives_preamble_and_repeats():
+    # Ревью 11.11.2026: ведущего правила не хватало на «Хм, [[SEARCH]]» —
+    # токен оставался виден человеку и ложился в историю, а «[[SEARCH]]
+    # [[SEARCH]]» оставлял осколок. Настоящий ответ с токеном внутри обязан
+    # потерять только токен.
+    import lumen_search
+    assert lumen_search.search_marker_requested("Хм, [[SEARCH]]") is True
+    assert lumen_search.search_marker_requested("[[SEARCH]] [[SEARCH]]") is True
+    assert lumen_search.search_marker_requested("[[search]]\n") is True
+    assert lumen_search.search_marker_requested("Не знаю. [[SEARCH]]") is False
+    assert lumen_search.search_marker_requested("[[См. также]] это ссылка") is False
+    assert lumen_search.strip_search_marker("[[SEARCH]][[SEARCH]]") == ""
+    assert lumen_search.strip_search_marker("Хм, [[SEARCH]]") == ""
+    assert lumen_search.strip_search_marker("Вот [[SEARCH]] что ты просил написать") == "Вот что ты просил написать"
+    assert lumen_search.strip_search_marker("[[См. также]] вот ссылка") == "[[См. также]] вот ссылка"
