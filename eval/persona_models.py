@@ -37,6 +37,7 @@ sys.path.insert(0, str(REPO))
 
 from lumen_errors import get_system_prompt  # noqa: E402
 from lumen_router_config import _looks_like_heavy_query  # noqa: E402
+from lumen_security import _polish_answer  # noqa: E402
 
 # Munito: тот же дефолт, что в bot.MUNITO_BASE_URL (значение берём из окружения/.env).
 MUNITO_BASE_URL = "https://api.munito.ai/inference/v1"
@@ -364,6 +365,9 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
             time.sleep(gap)
             try:
                 last, ttft_last, tokens_seen = call_with_retry(target, history, turn)
+                # Судья видит ровно то, что человек: боевой маршрут прогоняет
+                # ответ через выходной фильтр, и в память ложится он же.
+                last = _polish_answer(last, source="persona-eval")
             except RuntimeError as exc:
                 failure = str(exc)[:200]
                 break

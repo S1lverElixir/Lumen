@@ -101,7 +101,6 @@ def summarize(label, events):
     lines = [f"=== {label}: событий {len(events)}, сообщений {len(by_msg)} ==="]
     for mid, seq in sorted(by_msg.items()):
         seq.sort(key=lambda x: x["at"])
-        t0 = seq[0]["at"]
         lines.append(f"#{mid} кадров {len(seq)} (edit={sum(1 for s in seq if s['kind']=='edited_message')}) "
                      f"долгий_хвост={round(seq[-1]['at']-seq[0]['at'],1)}s фото={any(s['photo'] for s in seq)}")
         if len(seq) > 1:
