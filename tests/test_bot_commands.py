@@ -2445,6 +2445,19 @@ def test_placeholders_match_across_all_languages():
         assert not bad, (key, bad)
 
 
+def test_timed_one_forms_keep_placeholders_and_supported_langs():
+    # Формы единственного числа (smoke 11.11.2026) живут вне STRINGS, общий
+    # тест плейсхолдеров их не видит: потерянный {sec} или чужой код языка
+    # молча отдали бы обрезанную строку при sec == 1.
+    import lumen_lang
+    for key, forms in lumen_lang._TIMED_ONE_FORMS.items():
+        assert key in lumen_lang.STRINGS, key
+        for lang, one in forms.items():
+            assert lang in lumen_lang.SUPPORTED_LANGS, (key, lang)
+            base = _string_value(lumen_lang, key, lang)
+            assert re.findall(r"\{([a-z_]+)\}", one) == re.findall(r"\{([a-z_]+)\}", base), (key, lang, one)
+
+
 def test_cmd_descriptions_are_short_and_filled():
     # Регрессия: пустой cmd_desc ломает setMyCommands языка, а длинный или
     # с точкой раздувает список команд — читаемость важнее лимита Telegram в 256.

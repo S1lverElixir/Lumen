@@ -3103,6 +3103,26 @@ _START_EXAMPLES: dict[str, str] = {
 }
 
 
+# Единственное число в живых строках-таймерах: en и zu меняют форму слова
+# «секунда» при sec == 1 (smoke 11.11.2026: «Thought for 1 seconds»).
+# Остальные паки либо не склоняют единицу (hi, fa, th, ur, bn, vi, ...),
+# либо дают сокращение («s», «с», «sn», «soniya») — форма им не нужна.
+_TIMED_ONE_FORMS: dict[str, dict[str, str]] = {
+    "progress_thought_for": {
+        "en": "Thought for {sec} second",
+        "zu": "Ngicabange umzuzwana ongu-{sec}",
+    },
+    "progress_thinking": {
+        "en": "Thinking… {sec} second",
+        "zu": "Ngicabanga… umzuzwana ongu-{sec}",
+    },
+    "progress_seconds": {
+        "en": "{sec} second",
+        "zu": "umzuzwana ongu-{sec}",
+    },
+}
+
+
 def t(lang: str | None, key: str, **kwargs: object) -> str:
     """Строка key на языке lang (фолбэк — английский). Плейсхолдеры вида
     {error}/{choice}/{name} подставляются из kwargs. Новые языки лежат в
@@ -3110,6 +3130,15 @@ def t(lang: str | None, key: str, **kwargs: object) -> str:
     lang = normalize_lang(lang)
     table = STRINGS.get(key, {})
     text = LANG_PACKS.get(lang, {}).get(key) or table.get(lang) or table.get(DEFAULT_LANG) or key
+    if kwargs.get("sec") == 1:
+        text = _TIMED_ONE_FORMS.get(key, {}).get(lang, text)
+    elif key == "progress_thinking" and kwargs.get("sec") == 0:
+        # Claude при нуле печатает только фразу (smoke 11.11.2026: «Thinking…
+        # 0 seconds»). Отсечка по «…»: оно есть во всех 25 паках ключа —
+        # test_status_and_progress_punctuation_is_consistent его бережёт.
+        cut = text.find("…")
+        if cut != -1:
+            return text[:cut + 1]
     if key == "start_text":
         examples = _START_EXAMPLES.get(lang)
         if examples:
