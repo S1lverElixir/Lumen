@@ -419,7 +419,10 @@ STREAM_EDIT_MIN_INTERVAL_GROUP_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_GROUP
 STREAM_PAINT_TICK_SEC = _env_number("STREAM_PAINT_TICK_SEC", 0.55, min_value=0)
 STREAM_PAINT_TICK_GROUP_SEC = _env_number("STREAM_PAINT_TICK_GROUP_SEC", 1.8, min_value=0)
 STREAM_TYPING_TICK_SEC = _env_number("STREAM_TYPING_TICK_SEC", 0.5, min_value=0)
-STREAM_TYPING_MAX_CATCHUP_TICKS = _env_number("STREAM_TYPING_MAX_CATCHUP_TICKS", 8, cast=int, min_value=0)
+# Потолок довывода — в секундах, а не в тиках: с 8 тиками хвост длинного
+# ответа вываливался прыжками по 300-500 символов (прод 11.11.2026: 6201
+# символов, max_step=326), а Claude печатает длинный ответ ровно, пока печатает.
+STREAM_TYPING_MAX_CATCHUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_SEC", 20, min_value=1)
 # FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска (см.
 # lumen_model_speed.first_chunk_limit_sec): быструю зависшую модель бросаем рано.
 # Предел только укорачивает ожидание: первым сработает минимум из двух таймаутов.

@@ -715,7 +715,14 @@ async def _run_streaming_reply(
         remaining_len = len(target_full) - already_shown_len
         if remaining_len > 0 and not edits_dead:
             typing_speed = _typing_display_speed(arrival_ewma, pace_key)
-            for step_len in _typing_catchup_steps(remaining_len, typing_speed, bot.STREAM_TYPING_TICK_SEC, bot.STREAM_TYPING_MAX_CATCHUP_TICKS):
+            # Бюджет довывода в тиках считаем из секунд, а не из жёстической
+            # восьмёрки: иначе длинный хвост показывается несколькими прыжками.
+            # Заодно не выходим за остаток бюджета сообщения.
+            catchup_sec = bot.STREAM_TYPING_MAX_CATCHUP_SEC
+            if deadline is not None:
+                catchup_sec = min(catchup_sec, max(0.0, deadline - time.monotonic()))
+            max_ticks = max(1, int(catchup_sec / bot.STREAM_TYPING_TICK_SEC))
+            for step_len in _typing_catchup_steps(remaining_len, typing_speed, bot.STREAM_TYPING_TICK_SEC, max_ticks):
                 await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
                 # Довывод идёт тем же маляром: тот же coalescing, partial-safe
                 # разметка и общий бюджет правок на чат (пункты 1 и 12).

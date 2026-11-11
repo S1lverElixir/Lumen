@@ -1091,7 +1091,7 @@ def test_run_streaming_reply_records_observed_speed_on_success():
 def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_burst():
     # РЕГРЕССИЯ на ключевое требование: сколько бы ни оценивалась скорость модели
     # заниженно и сколько бы символов ни осталось "довыводить" одним куском, число
-    # искусственных пауз ограничено STREAM_TYPING_MAX_CATCHUP_TICKS — реальная
+    # искусственных пауз ограничено STREAM_TYPING_MAX_CATCHUP_SEC — реальная
     # скорость ответа не должна страдать ради красивости набора текста.
     import lumen_typing_pace
     chat_id = 999112
@@ -1119,7 +1119,10 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
     try:
         answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == long_text.strip()
-        assert len(sleep_calls) <= bot.STREAM_TYPING_MAX_CATCHUP_TICKS
+        tick_ceiling = max(1, int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / bot.STREAM_TYPING_TICK_SEC))
+        assert len(sleep_calls) <= tick_ceiling
+        # Длинный хвост идёт ровно, а не восьмью прыжками: тиков заметно больше.
+        assert len(sleep_calls) > 8, sleep_calls
     finally:
         bot._typing_sleep = original_sleep
         bot.client = original_client
