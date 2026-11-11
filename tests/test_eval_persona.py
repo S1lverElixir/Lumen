@@ -11,6 +11,7 @@
 с самой Gemma из маршрута: боевой функции, с которой сверялась копия, больше нет.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -63,3 +64,18 @@ def test_answer_script_check_follows_the_question_language():
     assert persona_models.answer_script_ok("kk", "Австралияның астанасы — Канберра.") is True
     assert persona_models.answer_script_ok("en", "The capital of Australia is Canberra.") is True
     assert persona_models.answer_script_ok("ru", "") is False
+def test_sanitize_no_proxy_drops_bracketed_ipv6_only():
+    # Глобальный NO_PROXY владельца с «[::1]» ломает любой httpx-вызов замера
+    # (судья Gemini падал с InvalidURL: Invalid port, 12.11.2026). Чистка
+    # обязана снять только скобочные записи и оставить обычные правила.
+    sys.path.insert(0, str(REPO / "eval"))
+    import persona_models
+
+    # На Windows имена переменных регистронезависимы: сначала чистим обе,
+    # иначе pop("no_proxy") снял бы только что заданный NO_PROXY.
+    os.environ.pop("no_proxy", None)
+    os.environ["NO_PROXY"] = "localhost,127.0.0.1,[::1],.example.com"
+    touched = persona_models.sanitize_no_proxy()
+    assert touched == ["NO_PROXY"]
+    assert os.environ["NO_PROXY"] == "localhost,127.0.0.1,.example.com"
+    assert persona_models.sanitize_no_proxy() == []

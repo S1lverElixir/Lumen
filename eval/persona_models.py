@@ -135,6 +135,24 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def sanitize_no_proxy() -> list[str]:
+    """Глобальный NO_PROXY владельца содержит «[::1]», и любой httpx-клиент
+    (а через него — судебный вызов Gemini) падает на InvalidURL: Invalid port
+    (замер 12.11.2026: судья умер на первом же вопросе, ответы были собраны).
+    Записные адреса из скобок здесь useless, а прокси-правила остаются.
+    Возвращает список переменных, которые пришлось почистить."""
+    touched: list[str] = []
+    for name in ("NO_PROXY", "no_proxy"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        kept = [part for part in raw.split(",") if part.strip() and not part.strip().startswith("[")]
+        if kept != [part for part in raw.split(",")]:
+            os.environ[name] = ",".join(kept)
+            touched.append(name)
+    return touched
+
+
 def load_env() -> None:
     """Читает .env репозитория в окружение. Значения не печатаются и не логируются."""
     env_file = REPO / ".env"
@@ -669,6 +687,7 @@ def main() -> int:
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
 
+    sanitize_no_proxy()
     args = parser.parse_args()
     return args.func(args)
 
