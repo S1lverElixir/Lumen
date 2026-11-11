@@ -821,3 +821,40 @@ def test_rich_heading_keeps_scrubbed_latex():
     out = lumen_formatting._md_to_rich_html("## Коэффициент \\alpha и \\int_0^1")
     assert "\\alpha" not in out and "\\int" not in out
     assert "α" in out and "∫" in out
+
+
+def test_split_does_not_leave_a_heading_at_the_end_of_a_chunk():
+    # Живой ответ 11.11.2026: пузырь закончился строкой «III. Итоги», а текст
+    # раздела уехал в следующий — у Claude заголовок не остаётся висеть один.
+    import lumen_formatting as F
+    chunks = [
+        "Первый раздел кончается здесь.\n\nIII. Итоги",
+        "Потери: около десяти миллионов погибших.",
+    ]
+    out = F._pull_dangling_headings(chunks, 4096)
+    assert out[0].endswith("здесь.")
+    assert out[1].startswith("III. Итоги")
+    assert "Потери" in out[1]
+
+
+def test_split_moves_bold_heading_and_keeps_limit():
+    import lumen_formatting as F
+    out = F._pull_dangling_headings(["Абзац. \n\n**Итоги**", "Текст итогов."], 4096)
+    assert out[0] == "Абзац."
+    assert out[1].startswith("**Итоги**")
+    # Под лимит заголовок уезжает вместе с первым абзацем: если следующий кусок
+    # уже полный, он перерезается, но пузырь из одного заголовка не появляется.
+    tight = F._pull_dangling_headings(["Абзац.\n\n**Итоги**", "x" * 60], 64)
+    assert tight[0] == "Абзац."
+    assert any(part.startswith("**Итоги**") for part in tight[1:])
+    assert all(len(part) <= 64 for part in tight), [len(p) for p in tight]
+
+
+def test_split_text_chunks_never_ends_a_chunk_on_a_heading():
+    import lumen_formatting as F
+    body = ("Это длинный абзац про причины и ход событий, он занимает место. " * 6)
+    text = body + "\n\n## Итоги\n\n" + body
+    chunks = F._split_text_chunks(text, 260)
+    assert len(chunks) > 1
+    for chunk in chunks[:-1]:
+        assert not chunk.rstrip().endswith("## Итоги"), chunk[-60:]

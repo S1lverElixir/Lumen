@@ -832,7 +832,55 @@ def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
     out: list[str] = []
     for chunk in md_chunks:
         out.extend(_split_to_fit_html(chunk, max_len))
-    return _merge_short_chunks(out, max_len) or [text]
+    return _pull_dangling_headings(_merge_short_chunks(out, max_len) or [text], max_len)
+
+
+# Строка, которая не должна оставаться последней в пузыре: markdown-заголовок,
+# жирная строка целиком, нумерованный раздел («III. Итоги»), разделитель или
+# короткая строка, заканчивающаяся двоеточием.
+_DANGLING_HEAD_RE = re.compile(
+    r"^\s*(?:#{1,6}\s"
+    r"|\*\*[^*\n]{1,60}\*\*[:：]?\s*"
+    r"|(?:[IVXLC]{1,4}|\d{1,2})[.)]\s+\S[^.!?]{0,55}$"
+    r"|(?:---+|———+|___+)\s*$"
+    r"|\S[^.!?]{0,55}[:：]\s*$)"
+)
+
+
+def _pull_dangling_headings(chunks: list[str], max_len: int) -> list[str]:
+    """Кусок не должен кончаться заголовком или разделителем без тела: в живом
+    ответе 11.11.2026 пузырь закончился строкой «III. Итоги», а сами потери
+    уехали в следующий. У Claude заголовок стоит над своим текстом. Переносим
+    только одиночную короткую строку, отделённую пустой строкой, — обычный
+    абзац без последней точки не сдвигаем."""
+    if len(chunks) < 2:
+        return chunks
+    out = list(chunks)
+    for i in range(len(out) - 1):
+        head_part, sep, tail_part = out[i].rpartition("\n\n")
+        if not sep:
+            continue
+        candidate = tail_part.strip()
+        if not candidate or "\n" in candidate or len(candidate) > 60:
+            continue
+        if not _DANGLING_HEAD_RE.match(candidate):
+            continue
+        if not head_part.strip():
+            continue
+        joined = candidate + "\n\n" + out[i + 1].lstrip("\n")
+        if _tg_len(joined) <= max_len:
+            out[i] = head_part.rstrip()
+            out[i + 1] = joined
+        else:
+            # Не влезает целиком: заголовок всё равно уезжает вперёд, а следующий
+            # кусок перерезается так, чтобы заголовок остался НАД первым абзацем
+            # (иначе получался пузырь из одних «## Итоги»).
+            room = max(16, max_len - _tg_len(candidate) - 2)
+            subs = _split_to_fit_html(out[i + 1].strip(), room) or [out[i + 1].strip()]
+            subs[0] = candidate + "\n\n" + subs[0]
+            out[i] = head_part.rstrip()
+            out[i + 1:i + 2] = subs
+    return out
 
 
 def _truncate_html_to_fit(md_text: str, limit: int) -> str:
