@@ -34,6 +34,7 @@ from lumen_router_config import (
     GEMINI_DEFAULT_CHAIN,
     _looks_like_heavy_query,
 )
+from lumen_search import _SearchRequested, search_marker_state
 from lumen_security import _scrub_identity_leak, _detect_garbled_mix, _is_garbled_echo
 from lumen_status import thought_block
 
@@ -167,6 +168,20 @@ def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> boo
     except Exception:
         return False
 
+
+def _raise_if_search_requested(answer: str, provider: str, model_id: str) -> None:
+    """Ответ — ровно маркер [[SEARCH]]: данных не хватило, модель просит поиск.
+    Останавливает маршрут ДО записи в память чата (маркер в истории подсказывал
+    бы себе в следующих ходах); квоту вызова пишем — он реально состоялся
+    (замер 11.11.2026)."""
+    if search_marker_state(answer) != "requested":
+        return
+    import bot
+    log.info('[router] %s/%s asked for a web search instead of answering', provider, model_id)
+    bot._record_quota_usage(provider, model_id)
+    raise _SearchRequested()
+
+
 async def _chat_completion_chain(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
     request_fn, provider: str, deadline: float | None = None,
@@ -279,6 +294,7 @@ async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], 
         out=_out, extra_payload=_munito_payload_extras(),
     )
     _note_provenance(provenance, "munito", _out)
+    _raise_if_search_requested(answer, "munito", model_trial)
 
     hist_text = _history_user_text(history_text if history_text is not None else user_text)
     lumen_memory.append_user_from_meta(state, hist_text, history_meta)
@@ -329,6 +345,7 @@ async def ask_munito_multimodal(
         out=_out, extra_payload=_munito_payload_extras(),
     )
     _note_provenance(provenance, "munito", _out)
+    _raise_if_search_requested(answer, "munito", model_trial)
 
     hist_text = _history_user_text(history_text if history_text is not None else user_text)
     lumen_memory.append_user_from_meta(state, hist_text, history_meta)
@@ -731,6 +748,7 @@ async def ask_gemini(
     ans = _scrub_identity_leak(ans, source=f"ask_gemini:{curr_model_id}")
     bot._record_model_outcome("gemini", curr_model_id,
                               bad=_detect_garbled_mix(ans) and not _is_garbled_echo(ans, user_text))
+    _raise_if_search_requested(ans, "gemini", curr_model_id)
 
     hist_text = _history_user_text(history_text if history_text is not None else user_text)
     lumen_memory.append_user_from_meta(state, hist_text, history_meta)
@@ -1025,6 +1043,12 @@ async def _run_route(
                     return ans, True
             _count_user_answer(provider)
             return ans, False
+        except _SearchRequested as req:
+            # Не неудача провайдера: следующая модель ничего не изменит, а пузырь
+            # (если он уже в чате) отдаётся вызывающему коду живым.
+            if req.placeholder is None:
+                req.placeholder = reusable_placeholder
+            raise
         except asyncio.CancelledError:
             # Отмена посреди ответа: плейсхолдер чистим, отмену пробрасываем —
             # иначе в чате навсегда висело "…".

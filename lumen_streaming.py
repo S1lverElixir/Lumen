@@ -25,6 +25,12 @@ from lumen_model_speed import (
     first_chunk_limit_sec as _model_first_chunk_limit,
 )
 from lumen_router_config import GEMINI_MODELS
+from lumen_search import (
+    SEARCH_REQUEST_MARKER,
+    _SearchRequested,
+    search_marker_state,
+    strip_search_marker,
+)
 from lumen_security import (
     _leak_scan_window,
     _IDENTITY_LEAK_FALLBACK,
@@ -517,6 +523,18 @@ async def _run_streaming_reply(
             last_piece_ts = now_piece
             full_text += piece
 
+            marker_state = search_marker_state(full_text)
+            if marker_state == "pending":
+                continue
+            if marker_state == "requested":
+                # Модель просит поиск: уходим ДО первой правки — в чате ни кадра
+                # с маркером, пузырёк остаётся живым для прохода со сниппетами.
+                log.info('[stream] %s/%s asked for a web search instead of answering', provider, model_id)
+                raise _SearchRequested(sent_messages[-1] if sent_messages else None)
+            if full_text.lstrip().startswith(SEARCH_REQUEST_MARKER):
+                # Маркер плюс текст: служебную строку не показываем, ответ остаётся.
+                full_text = strip_search_marker(full_text)
+
             leak_kind = None
             _scan_text = _leak_scan_window(full_text, piece)
             if _detect_identity_leak(_scan_text):
@@ -718,6 +736,9 @@ async def _run_streaming_reply(
                     body = header_md + "\n\n" + final_text
                 await bot._edit_message_quietly(sent_messages[-1], body, call_timeout=15.0)
 
+    except _SearchRequested:
+        # Не сбой модели: остывка, карантин и model_failures тут ни при чём.
+        raise
     except Exception as exc:
         if _is_empty_like(full_text):
             # 429 до первого куска — в /stats и ненадолго из роута. Суточный лимит
