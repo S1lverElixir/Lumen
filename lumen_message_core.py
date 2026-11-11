@@ -16,7 +16,6 @@ from zoneinfo import ZoneInfo
 
 from aiogram.enums import ChatType, ParseMode
 from aiogram.types import Message, Update
-from urllib.parse import urlparse
 
 from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
@@ -58,6 +57,7 @@ from lumen_router_config import (
 )
 from lumen_search import (
     answered_with_live_search,
+    clean_publisher,
     fetch_web_snippets,
     format_snippets_for_prompt,
     route_has_live_search,
@@ -1216,7 +1216,7 @@ async def _handle_message_core(
         if status is not None:
             if snippets:
                 status.add_done("progress_search_done", count=len(snippets))
-                status.set_sources([item.get("publisher") or urlparse(item.get("url") or "").netloc for item in snippets])
+                status.set_sources([clean_publisher(item) for item in snippets if clean_publisher(item)])
             else:
                 status.add_done("progress_search_empty")
             await status.set_phase("progress_thinking", timed=True)

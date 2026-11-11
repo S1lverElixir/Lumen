@@ -661,3 +661,15 @@ def test_wikidata_layer_gets_its_own_slice_of_the_search_budget(monkeypatch):
     asyncio.run(lumen_search.fetch_web_snippets(
         "кто сейчас возглавляет Центральный банк России и какая ключевая ставка", timeout_sec=6.0))
     assert seen["left"] <= lumen_search._LEADER_BUDGET_SEC + 0.5
+
+
+def test_clean_publisher_normalizes_urls_and_drops_aggregators():
+    # Живой ответ 11.11.2026 в списке источников показал «https://www.championat.ru/»
+    # и «bing.com»: Bing отдаёт издателем голые URL и сам агрегатор.
+    assert lumen_search.clean_publisher({"publisher": "https://www.championat.ru/"}) == "championat.ru"
+    assert lumen_search.clean_publisher({"publisher": "bing.com", "url": "https://example.com/a"}) == "example.com"
+    assert lumen_search.clean_publisher({"publisher": "in.bing.com"}) == ""
+    assert lumen_search.clean_publisher({"publisher": "", "url": "https://m.vk.com/x"}) == "m.vk.com"
+    assert lumen_search.clean_publisher({"publisher": "Газета.Ру"}) == "Газета.Ру"
+    label = lumen_search._source_label({"publisher": "https://www.championat.ru/", "url": "", "date": "2026-11-11"})
+    assert label == "championat.ru, 2026-11-11"

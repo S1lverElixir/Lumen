@@ -1506,8 +1506,26 @@ async def _ddg_source(session: aiohttp.ClientSession, query: str, deadline: floa
 
 
 # ───────────────────────── блок в промпт ─────────────────────────
+_AGGREGATOR_HOSTS = ("bing.com", "duckduckgo.com", "google.com", "news.google.com",
+                     "www.bing.com", "in.bing.com", "routify-file-proxy")
+
+
+def clean_publisher(item: dict) -> str:
+    """Имя источника для показанных списков: в выдаче Bing издателем приезжает и
+    голый URL («https://www.championat.ru/»), и сам агрегатор («bing.com») —
+    в живом ответе 11.11.2026 это читалось как мусор вместо источников."""
+    value = (item.get("publisher") or "").strip()
+    if value.startswith(("http://", "https://", "www.")) or "/" in value:
+        value = urllib.parse.urlparse(value if "//" in value else "https://" + value).netloc
+    value = (value or "").removeprefix("www.").rstrip("/").strip()
+    if not value or any(value == host or value.endswith("." + host) for host in _AGGREGATOR_HOSTS):
+        # Агрегатор вместо издателя — берём хост самой ссылки.
+        value = urllib.parse.urlparse(item.get("url") or "").netloc.removeprefix("www.").strip()
+    return value
+
+
 def _source_label(item: dict) -> str:
-    publisher = (item.get("publisher") or "").strip()
+    publisher = clean_publisher(item)
     if publisher:
         return f"{publisher}, {item['date']}" if item.get("date") else publisher
     host = urllib.parse.urlparse(item.get("url") or "").netloc.removeprefix("www.")
