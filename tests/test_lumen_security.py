@@ -373,7 +373,7 @@ def test_polish_answer_keeps_english_terms_code_and_quotes():
     assert lumen_security._polish_answer(text, source="test") == text
 
 
-def test_polish_answer_caps_decorative_emoji_at_two():
+def test_polish_answer_removes_decorative_emoji_over_the_norm():
     text = (
         "С днём рождения! 🎉✨\n\n"
         "Пусть этот год будет щедрым на поводы для улыбки 😊, лёгким на подъём 🚀 "
@@ -382,11 +382,20 @@ def test_polish_answer_caps_decorative_emoji_at_two():
         "Обнимаю — и поднимаю бокал за тебя 🥂🎂"
     )
     out = lumen_security._polish_answer(text, source="test")
-    assert "🎉" in out and "✨" in out
-    for glyph in ("😊", "🚀", "🤗", "🌟", "💪", "💸", "😴", "🥂", "🎂"):
+    # Ревью 11.11.2026: раньше снимались только «лишние», и ответ оставался в
+    # двух стилях сразу — у двух фраз значок, у восьми нет. Теперь выше нормы
+    # украшательства не остаётся вообще: это и есть манера Claude.
+    for glyph in ("🎉", "✨", "😊", "🚀", "🤗", "🌟", "💪", "💸", "😴", "🥂", "🎂"):
         assert glyph not in out
     assert "улыбки, лёгким" in out and "крепкого, денег" in out
     assert out.rstrip().endswith("за тебя")
+
+
+def test_polish_answer_keeps_emoji_within_the_norm():
+    # В пределах нормы («1-2 на ответ») правка не трогает ничего: иначе
+    # поздравление с двумя значками выглядело бы выхоженным.
+    text = "С днём рождения! 🎉 Пусть этот год будет лёгким и щедрым 🚀 — обнимаю тебя крепко."
+    assert lumen_security._polish_answer(text, source="test") == text
 
 
 def test_polish_answer_keeps_emoji_legend_and_service_glyphs():
@@ -464,3 +473,48 @@ def test_polish_answer_leaves_latin_script_answers_alone():
     de = ("Die Hauptstadt von Australien ist Canberra and not Sydney, was ein häufiger "
           "Irrtum bleibt, obwohl Sydney die grösseste Stadt des Landes ist und lebt.")
     assert lumen_security._polish_answer(de, source="test") == de
+def test_answer_polish_keeps_content_shapes():
+    # Ревью 11.11.2026: украшество снималось вместе с тем, что не украшество —
+    # галками в ячейках таблицы, списком значков как ответом и ZWJ-семьёй.
+    table = "| Модель | Цена | Память |\n|---|---|---|\n| A | 40к | ✅ |\n| B | 55к | ❌ |"
+    assert lumen_security._polish_answer(table, source="review") == table
+    family = "Моя семья 👨\u200d👩\u200d👧\u200d👦 ездила в Геленджик летом и осталась довольна морем и горами."
+    assert lumen_security._polish_answer(family, source="review") == family
+    # Ответ из одних эмодзи остаётся ответом: пустой текст ушёл бы в edit_text.
+    assert lumen_security._polish_answer("🎉🎊🥳🎈🍾🎁🍰", source="review") == "🎉🎊🥳🎈🍾🎁🍰"
+    # Частичная правка выглядела бы как два стиля в одном списке: снимаются все.
+    checklist = "\n".join("✔ Пункт %d" % i for i in range(1, 8))
+    polished = lumen_security._polish_answer(checklist, source="review")
+    assert "✔" not in polished and polished.splitlines()[0] == "Пункт 1"
+
+
+def test_answer_polish_keeps_latin_terms_and_still_drops_intruders():
+    # Ревью 11.11.2026: «цикл for», «game over», «the beatles» и «you're» —
+    # термины и имена, а не вставное английское слово. Прод-промах 11.11
+    # («в нём everywhere плавают частички») обязан оставаться вычищенным.
+    for text in (
+        "Здесь цикл for перебирает список по элементам и ничего не меняет на месте, а индексы считает отдельно.",
+        "На этом экране game over появляется после третьей жизни и счёт не сохраняется вовсе.",
+        "Эта группа the beatles записала первый альбом в 1963 году довольно быстро и легко.",
+        "Ты уверен что you're прав в этом споре про смысл жизни, язык и всё остальное вокруг?",
+    ):
+        assert lumen_security._polish_answer(text, source="review") == text, text
+    leak = ("В нём everywhere плавают частички пыли, и это видно даже невооружённым "
+            "глазом, если посмотреть на окно против солнца утром.")
+    assert "everywhere" not in lumen_security._polish_answer(leak, source="review")
+
+
+def test_polished_prefix_len_maps_painted_boundary_exactly():
+    # Стриминг режет хвост по уже показанной границе; полировка укорачивает текст,
+    # и срез по старой границе терял ровно столько символов, сколько снято
+    # (ревью 11.11.2026: 11 символов пропали из второго пузыря).
+    raw = "🎉✨🔥 " + ("Абзац про кота на луне, " * 200) + "Конец."
+    polished = lumen_security._polish_answer(raw, source="review")
+    cut = 400
+    shown = lumen_security._polished_prefix_len(raw, cut, source="review")
+    assert shown < cut, "граница должна сдвинуться на снятые символы"
+    assert polished[:shown] == lumen_security._polish_answer(raw[:cut], source="review")
+    assert polished[shown:].endswith("Конец.")
+    # Прежний срез по covered_len терял начало хвоста: по разнице границ видно,
+    # что без отображения смещений текст не совпадает.
+    assert polished[cut:] != polished[shown:]

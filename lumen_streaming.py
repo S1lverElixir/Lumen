@@ -40,6 +40,7 @@ from lumen_security import (
     _is_garbled_echo,
     _detect_identity_leak,
     _polish_answer,
+    _polished_prefix_len,
 )
 from lumen_typing_pace import (
     speed_key as _typing_speed_key,
@@ -665,11 +666,19 @@ async def _run_streaming_reply(
 
         # Финальный скраб ДО последней правки: иначе пользователь видел ответ,
         # который в историю уже попал очищенным (аудит 28.10.2026).
-        full_text = _polish_answer(full_text.strip(), source=f"{provider}_stream_final:{model_id}")
+        raw_full = full_text.strip()
+        _polish_src = f"{provider}_stream_final:{model_id}"
+        full_text = _polish_answer(raw_full, source=_polish_src)
         # "Довывод" остатка: бэкенды одним куском в конце показывали бы "…" до самого финала. Ограничено catchup-лимитом сверху.
         # Разбиение — только хвост от замороженной границы: пересчёт всего текста
         # сдвигал бы уже показанные границы (пункт 5; _resync_finalized удалён).
-        final_tail = _split_text_chunks(full_text[covered_len:], bot.TG_MAX_LEN)
+        # Граница считается в смещениях ДО полировки: правка укорачивает текст,
+        # и срез по covered_len терял ровно столько символов, сколько снято
+        # (ревью 11.11.2026: 11 символов пропали из второго пузыря).
+        shown_len = covered_len
+        if len(full_text) != len(raw_full):
+            shown_len = _polished_prefix_len(raw_full, min(covered_len, len(raw_full)), source=_polish_src)
+        final_tail = _split_text_chunks(full_text[shown_len:], bot.TG_MAX_LEN)
         final_chunks = frozen + final_tail
         # Маляр и довывод должны видеть ФИНАЛЬный хвост (со скрабом), а не
         # предфинальный: иначе catch-up кадры рисуют устаревший буфер.

@@ -248,36 +248,45 @@ _PROTECTED_SPANS_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`|https?://\S+", 
 # под снятие не попадают.
 # Потолок 2 — норма промпта для украшательства; легенда (значок в начале строки
 # с разделителем: «🔍 — лупа») — это контент, промпт допускает до пяти таких.
+# Свыше потолка украшательства снимаются ВСЕ, а не лишние: частичная правка
+# оставляла ответ в двух стилях сразу (ревью 11.11.2026).
 _EMOJI_MAX_PER_ANSWER = 2
 _EMOJI_MAX_LEGEND = 5
+# Значок в ячейке таблицы — это значение столбца, а не декор.
+_TABLE_CELL_CH = "|"
+
 _EMOJI_KEEP = "✻✓∴∵⋯⋰⋱"
 _EMOJI_BASE = "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF]"
 _EMOJI_RUN_RE = re.compile(_EMOJI_BASE + "(?:[\\uFE0F\\u200D]?" + _EMOJI_BASE + "|[\\uFE0F\\u200D])*")
 _LEGEND_AFTER_RE = re.compile(r"\s*(?:[—–-]|:|•|\d{1,2}[.)])")
+# ZWJ-склейка, вариативный знак и тона кожи: «👨‍👩‍👧» — один знак,
+# а не три (ревью 11.11.2026: семья из четырёх кодпоинтов считалась гирляндой).
+_EMOJI_JOIN_CH = "\u200d\ufe0f\U0001f3fb\U0001f3fc\U0001f3fd\U0001f3fe\U0001f3ff"
 
-# Только закрытые классы: предлоги, союзы, местоимения, служебные глаголы,
-# квантификаторы, наречия места/времени/меры. Существительные и полные глаголы —
-# открытые: в техническом русском это обычные термины (dict, asyncio, get). Из
-# закрытых убраны not, all, any, each, both: они сохнут в коде как ключевые слова
-# и человек пишет их без обратных кавычек, а вычистить их — испортить ответ.
+
+# Только закрытые классы: артикли, предлоги, союзы, указатели, наречия.
+# Существительные и полные глаголы — открытые: в техническом русском это
+# термины (dict, asyncio, get). Из закрытых убраны все, что в коде работают
+# ключевым словом или оператором: not, all, any, each, both (проверка
+# 11.11.2026), затем for, in, with, within, without, is, are, was, were, been,
+# being, have, has, had, will, would, could, should, shall, must, might, they,
+# them, their, there, then, than, over, under, above, below, between, during,
+# while, about, against, you, your. Ревью 11.11.2026 посчитало жертвы вида
+# «цикл for перебирает» и «экран game over»: снимать такое слово — значить
+# испортить правильный ответ, а вставное «the» или «everywhere» остаётся видно.
 _FOREIGN_FUNC_WORDS = frozenset({
-    "the", "and", "but", "for", "you", "your", "yours", "with", "within",
-    "without", "from", "have", "has", "had", "was", "were", "are", "been",
-    "being", "will", "would", "could", "should", "shall", "must", "might",
-    "this", "that", "these", "those", "them", "they", "their", "theirs", "there",
-    "then", "than", "very", "quite", "rather", "almost", "enough", "much",
-    "many", "more", "most", "other", "another", "such", "some", "every",
-    "few", "less", "least", "anything", "something",
-    "everything", "nothing", "none", "because", "although", "though", "however",
-    "therefore", "otherwise", "where", "wherever", "when", "whenever", "which",
-    "what", "whatever", "who", "whom", "whose", "why", "how", "into", "onto",
-    "over", "under", "above", "below", "between", "during", "since", "until",
-    "while", "about", "against", "again", "already", "yet", "still", "just",
-    "also", "even", "only", "too", "maybe", "perhaps", "really", "actually",
-    "basically", "literally", "clearly", "obviously", "finally", "eventually",
-    "always", "never", "often", "sometimes", "soon", "now", "here", "everywhere",
-    "somewhere", "anywhere", "nowhere", "today", "tonight", "yesterday",
-    "tomorrow",
+    "the", "and", "but", "or", "from", "this", "that", "these", "those",
+    "very", "quite", "rather", "almost", "enough", "much", "many", "more",
+    "most", "other", "another", "such", "some", "every", "few", "less",
+    "least", "anything", "something", "everything", "nothing", "because",
+    "although", "though", "however", "therefore", "otherwise", "where",
+    "wherever", "when", "whenever", "which", "what", "whatever", "who", "whom",
+    "whose", "why", "how", "into", "onto", "since", "until", "again",
+    "already", "yet", "still", "just", "also", "even", "only", "too", "maybe",
+    "perhaps", "really", "actually", "basically", "literally", "clearly",
+    "obviously", "finally", "eventually", "always", "never", "often",
+    "sometimes", "soon", "now", "here", "everywhere", "somewhere", "anywhere",
+    "nowhere", "today", "tonight", "yesterday", "tomorrow",
 })
 
 # Сразу за словом стоит один из этих знаков — значит это идентификатор или
@@ -290,7 +299,13 @@ _CODEISH_AFTER = "([:=/#_.,;+-"
 # и because — норма, а не артефакт.
 _LATIN_LETTERS_RE = re.compile(r"[A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F\u1E00-\u1EFF]")
 _LETTER_TOKEN_RE = re.compile(r"[^\W\d_]+")
-_LATIN_WORD_RE = re.compile(r"\b[a-z]+\b")
+# Целое латинское вхождение вместе с апострофами: «you're» — одно слово,
+# а не «you» с хвостом «'re» (ревью 11.11.2026: после снятия оставалось «'re прав»).
+_LATIN_RUN_RE = re.compile(r"[A-Za-z][A-Za-z']*", re.ASCII)
+_LATIN_RUN_CH = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'"
+# Признак того, что в предложении код: английские слова в нём могут быть
+# идентификаторами, и вычистивать их нельзя.
+_CODE_SIGNAL_RE = re.compile(r"[={}#_]|->|[A-Za-z0-9]+\.[A-Za-z_]+|[A-Z][a-z]+[A-Z]", re.ASCII)
 _LANG_MIX_MIN_NONLATIN_WORDS = 5
 _LANG_MIX_MIN_NONLATIN_SHARE = 0.6
 # Знаки, перед которыми пробел не ставится: вычищая слово, соседний пробел
@@ -336,21 +351,41 @@ def _drop_spans(text: str, spans: list[tuple[int, int]]) -> str:
             continue
         lead = s > 0 and text[s - 1] == " "
         nxt = text[e] if e < len(text) else ""
+        head = s == 0 or text[s - 1] in "\n\r"
         if lead and (nxt in _TIGHT_PUNCT or nxt in "\n\r" or not nxt):
             s -= 1
-        elif lead and nxt == " ":
+        elif (lead or head) and nxt == " ":
             e += 1
+
         parts.append(text[prev:s])
         prev = e
     parts.append(text[prev:])
     return "".join(parts)
 
 
+def _emoji_clusters(run: str) -> int:
+    """Сколько самостоятельных знаков в последовательности: ZWJ склеивает
+    соседей в один (семья — это один знак), вариативный знак и тон кожи нового
+    кластера не создают. Гирлянда «🎉✨🔥» без ZWJ остаётся тремя."""
+    total = 0
+    joined = False
+    for ch in run:
+        if ch == "\u200d":
+            joined = True
+            continue
+        if ch in _EMOJI_JOIN_CH:
+            continue
+        if not joined:
+            total += 1
+        joined = False
+    return total
+
+
 def _trim_decoration_emoji(text: str, *, source: str) -> str:
     """Гирлянда decorative-эмодзи урезается до нормы промпта («1-2 на ответ»).
     Эмодзи в начале строки, сразу за которым стоит разделитель («🔍 — лупа»), —
-    это легенда, то есть контент: промпт разрешает до пяти таких. В коде и
-    ссылках эмодзи не считаем и не снимаем."""
+    это легенда, то есть контент: промпт разрешает до пяти таких. В коде,
+    ссылках и ячейках таблицы эмодзи — контент, его не считаем и не снимаем."""
     if not text:
         return text
     visible = _masked_copy(text[:_MUSH_MAX_TEXT_LEN])
@@ -359,21 +394,26 @@ def _trim_decoration_emoji(text: str, *, source: str) -> str:
     for m in _EMOJI_RUN_RE.finditer(visible):
         if m.group(0)[0] in _EMOJI_KEEP:
             continue
-        size = sum(1 for ch in m.group(0) if ch not in "\ufe0f\u200d")
         line_start = visible.rfind("\n", 0, m.start()) + 1
+        line_end = visible.find("\n", m.start())
+        line_end = len(visible) if line_end < 0 else line_end
+        if _TABLE_CELL_CH in visible[line_start:line_end]:
+            continue
         at_line_head = not visible[line_start:m.start()].strip()
+        size = _emoji_clusters(m.group(0))
         if at_line_head and _LEGEND_AFTER_RE.match(visible, m.end()):
             legend.append((m.span(), size))
         else:
             flourish.append((m.span(), size))
     cut: list[tuple[int, int]] = []
-    for bucket, cap in ((legend, _EMOJI_MAX_LEGEND), (flourish, _EMOJI_MAX_PER_ANSWER)):
-        kept = 0
-        for span, size in bucket:
-            if kept + size <= cap:
-                kept += size
-            else:
-                cut.append(span)
+    if sum(size for _, size in flourish) > _EMOJI_MAX_PER_ANSWER:
+        cut.extend(span for span, _ in flourish)
+    kept = 0
+    for span, size in legend:
+        if kept + size > _EMOJI_MAX_LEGEND:
+            cut.append(span)
+        else:
+            kept += size
     if not cut:
         return text
     cut.sort()
@@ -404,10 +444,17 @@ def _foreign_insert_spans(text: str) -> list[tuple[int, int]]:
         words, share = _nonlatin_shape(seg)
         if words < _LANG_MIX_MIN_NONLATIN_WORDS or share < _LANG_MIX_MIN_NONLATIN_SHARE:
             continue
-        for m in _LATIN_WORD_RE.finditer(seg):
-            if m.group(0) not in _FOREIGN_FUNC_WORDS:
+        if _CODE_SIGNAL_RE.search(seg):
+            continue
+        for m in _LATIN_RUN_RE.finditer(seg):
+            if m.group(0).lower() not in _FOREIGN_FUNC_WORDS:
                 continue
+            # Остров: слева и справа не латиница. «the beatles» — не вставное
+            # «the», а имя: вычищаем только одиночное служебное слово.
+            before = seg[m.start() - 1] if m.start() else ""
             after = seg[m.end()] if m.end() < len(seg) else ""
+            if before in _LATIN_RUN_CH or after in _LATIN_RUN_CH:
+                continue
             if after in _CODEISH_AFTER:
                 continue
             spans.append((lo + m.start(), lo + m.end()))
@@ -425,9 +472,30 @@ def _strip_foreign_inserts(text: str, *, source: str) -> str:
 def _polish_answer(text: str, *, source: str) -> str:
     """Единый выходной полировщик ответа: утечки, эмодзи-декор, вставные слова.
     Вызывать там, где стоял _scrub_identity_leak — до показа и до записи в
-    историю, иначе артефакт осел бы в контексте следующих ответов."""
+    историю, иначе артефакт осел бы в контексте следующих ответов.
+    Ответ из одних эмодзи — это ответ: если правка съела всё видимое,
+    возвращаем оригинал (ревью 11.11.2026: пустой текст уходил в edit_text)."""
     text = _scrub_identity_leak(text, source=source)
-    return _strip_foreign_inserts(_trim_decoration_emoji(text, source=source), source=source)
+    polished = _strip_foreign_inserts(_trim_decoration_emoji(text, source=source), source=source)
+    if text.strip() and not polished.strip():
+        return text
+    return polished
+
+
+def _polished_prefix_len(text: str, index: int, *, source: str) -> int:
+    """Сколько знаков уже показано, если текст укорочен полировкой: длина общего
+    префикса оригинала и полированного. Завысить не может, поэтому хвост не
+    теряет показанное; при разнобое на самой границе он повторит пару символов,
+    что для ответа лучше пропажи (ревью 11.11.2026)."""
+    if index <= 0:
+        return 0
+    polished = _polish_answer(text, source=source)
+    shown = _polish_answer(text[:index], source=source)
+    limit = min(len(shown), len(polished))
+    n = 0
+    while n < limit and shown[n] == polished[n]:
+        n += 1
+    return n
 
 
 def _leak_spans(text: str) -> list[tuple[int, int]]:
