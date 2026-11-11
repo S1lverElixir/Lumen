@@ -423,6 +423,9 @@ STREAM_TYPING_TICK_SEC = _env_number("STREAM_TYPING_TICK_SEC", 0.5, min_value=0)
 # ответа вываливался прыжками по 300-500 символов (прод 11.11.2026: 6201
 # символов, max_step=326), а Claude печатает длинный ответ ровно, пока печатает.
 STREAM_TYPING_MAX_CATCHUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_SEC", 20, min_value=1)
+# В группе лок чата общий: 20 секунд довывода одного длинного ответа
+# задерживали бы всех, поэтому там потолок короче.
+STREAM_TYPING_MAX_CATCHUP_GROUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_GROUP_SEC", 8, min_value=1)
 # FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска (см.
 # lumen_model_speed.first_chunk_limit_sec): быструю зависшую модель бросаем рано.
 # Предел только укорачивает ожидание: первым сработает минимум из двух таймаутов.

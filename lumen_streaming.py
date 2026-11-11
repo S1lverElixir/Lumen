@@ -718,7 +718,8 @@ async def _run_streaming_reply(
             # Бюджет довывода в тиках считаем из секунд, а не из жёстической
             # восьмёрки: иначе длинный хвост показывается несколькими прыжками.
             # Заодно не выходим за остаток бюджета сообщения.
-            catchup_sec = bot.STREAM_TYPING_MAX_CATCHUP_SEC
+            catchup_sec = (bot.STREAM_TYPING_MAX_CATCHUP_GROUP_SEC if is_group
+                             else bot.STREAM_TYPING_MAX_CATCHUP_SEC)
             if deadline is not None:
                 catchup_sec = min(catchup_sec, max(0.0, deadline - time.monotonic()))
             max_ticks = max(1, int(catchup_sec / bot.STREAM_TYPING_TICK_SEC))

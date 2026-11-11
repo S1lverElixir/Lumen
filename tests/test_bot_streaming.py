@@ -1449,4 +1449,36 @@ def test_live_stream_is_not_cut_by_the_route_budget(monkeypatch):
         assert not any("interrupted" in (t or "").lower() for t, _ in incoming.sent[0].edits)
     finally:
         bot.chat_state.pop(chat_id, None)
-
+def test_group_catchup_uses_the_shorter_ceiling():
+    # В группе лок чата общий: длинный хвост не должен держать его 20 секунд.
+    import lumen_typing_pace
+
+    chat_id = 999113
+    pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
+    original_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.chat.type = "group"
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream(["Буква " * 500])
+    sleep_calls: list[float] = []
+
+    async def counting_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    original_sleep, original_client = bot._typing_sleep, bot.client
+    bot._typing_sleep = counting_sleep
+    bot.client = fake_client
+    try:
+        asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
+    finally:
+        bot._typing_sleep, bot.client = original_sleep, original_client
+        bot.chat_state.pop(chat_id, None)
+        if original_ema is not None:
+            lumen_typing_pace._speed_ema[pace_key] = original_ema
+        else:
+            lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+    group_ceiling = max(1, int(bot.STREAM_TYPING_MAX_CATCHUP_GROUP_SEC / bot.STREAM_TYPING_TICK_SEC))
+    private_ceiling = max(1, int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / bot.STREAM_TYPING_TICK_SEC))
+    assert len(sleep_calls) <= group_ceiling < private_ceiling
