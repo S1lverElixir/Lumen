@@ -208,6 +208,10 @@ Gemini is the unconditional reserve on every route where Munito answers.
   character. Edit single lines, and never reflow a whole file to LF as a side effect. Source
   files are UTF-8 with Cyrillic, and `col_offset` in an AST is a byte offset: a script that
   patches by offset must work on bytes.
+  A patcher that splits on CRLF and rejoins on CRLF corrupts a file that an earlier
+  patch left with LF lines: the whole file then shows as changed. When that
+  happens, rebuild the file from `git show HEAD:<path>` and re-apply the one
+  intended insert; never fix it by converting endings.
 
 ## Code style
 - Targeted edits on existing files. Never rewrite a file from scratch unless a split was approved.
