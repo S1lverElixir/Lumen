@@ -426,6 +426,12 @@ STREAM_TYPING_MAX_CATCHUP_TICKS = _env_number("STREAM_TYPING_MAX_CATCHUP_TICKS",
 # 12 с держали «Думаю…» при зависшей голове; для текста хватает 5 с — медленные
 # модели уже покрыты адаптивным floor из EMA×2.5, которое здесь только floor.
 FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
+# Пока куски прибывают, бюджет стрима продлевается: прод 11.11.2026 резал
+# 5700-символьный ответ на 35-й секунде («Route time budget exhausted»), и
+# человек видел «Соединение прервалось». Потолок держим ниже 60 с — дольше релей
+# (proxy/proxy.ts) обрывает upstream сам.
+STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10)
+STREAM_ROUTE_STALL_GRACE_SEC = _env_number("STREAM_ROUTE_STALL_GRACE_SEC", 20, min_value=2)
 # Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
 # дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).
 _DOTS_START_AFTER_SEC = 0.5
@@ -1476,40 +1482,62 @@ _PROFILE_FIELDS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-async def _register_bot_profile() -> int:
-    """Имя и «О себе» в профиле бота задаются из кода, а не только BotFather:
-    иначе тексты расходятся с lumen_lang и не закрыты тестами. Ничего не кидает:
-    профиль не влияет на приём сообщений, ронять из-за него старт нельзя."""
-    if bot is None:
-        log.warning("[webhook] Bot profile skipped: bot instance is not initialized")
-        return 0
+# Очередь полей профиля: PROFILE_LANGS × 3 поля = 72 вызова. Семьдесят два вызова
+# параллельно (как было) ловят flood control: прод 11.11.2026 после деплоя получил
+# шторм «Flood control exceeded on method 'SetMyName'. Retry in 79522 seconds» с
+# 17:44 до 17:47 — и у живых людей в эти минуты рвались ответы. Поэтому очередь
+# раздаётся по одному вызову с паузой, а на первом же отказе встает: долбить
+# Telegram нельзя, остаток добирает часовой цикл.
+_profile_queue: list[tuple[str, dict[str, str]]] = []
+_PROFILE_CALL_GAP_SEC = 0.6
+_PROFILE_STARTUP_FIELDS = 20
+_profile_sleep = asyncio.sleep
 
+
+def _profile_payloads() -> list[tuple[str, dict[str, str]]]:
     payloads: list[tuple[str, dict[str, str]]] = []
     for lang in PROFILE_LANGS:
         where = {} if lang == DEFAULT_LANG else {"language_code": lang}
         for key, method_name, arg_name in _PROFILE_FIELDS:
             payloads.append((method_name, {arg_name: _lang_t(lang, key), **where}))
+    return payloads
 
-    # Те же 4 параллельно, что у setMyCommands: быстрее и без flood-контроля.
-    _profile_sem = asyncio.Semaphore(4)
 
-    async def _one(method_name: str, kwargs: dict[str, str]) -> bool:
-        async with _profile_sem:
-            try:
-                return await _tg_call(getattr(bot, method_name), **kwargs, call_timeout=15.0) is not None
-            except Exception as exc:
-                log.warning(
-                    "[webhook] %s failed (%s): %s",
-                    method_name, kwargs.get("language_code", DEFAULT_LANG), exc,
-                )
-                return False
+async def _register_bot_profile(limit: int | None = None) -> int:
+    """Имя и «О себе» в профиле бота задаются из кода, а не только BotFather:
+    иначе тексты расходятся с lumen_lang и не закрыты тестами. Ничего не кидает:
+    профиль не влияет на приём сообщений, ронять из-за него старт нельзя."""
+    global _profile_queue
+    if bot is None:
+        log.warning("[webhook] Bot profile skipped: bot instance is not initialized")
+        return 0
+    if not _profile_queue:
+        _profile_queue = _profile_payloads()
 
-    ok = sum(1 for done in await asyncio.gather(*(_one(m, kw) for m, kw in payloads)) if done)
-    if ok:
-        log.info("[webhook] Bot profile set for %d/%d field(s).", ok, len(payloads))
-    else:
-        log.warning("[webhook] Bot profile was not set for any language.")
-    return ok
+    done = 0
+    while _profile_queue and (limit is None or done < limit):
+        method_name, kwargs = _profile_queue[0]
+        try:
+            # retries=0: на flood control повтор только ухудшает штраф.
+            ok = await _tg_call(getattr(bot, method_name), **kwargs, call_timeout=15.0, retries=0) is not None
+        except Exception as exc:
+            log.warning(
+                "[webhook] %s failed (%s): %s",
+                method_name, kwargs.get("language_code", DEFAULT_LANG), exc,
+            )
+            ok = False
+        if not ok:
+            if not done:
+                log.warning("[webhook] Bot profile was not set for any language.")
+            log.info("[webhook] Bot profile paused: %d field(s) left for the hourly pass.", len(_profile_queue))
+            return done
+        _profile_queue.pop(0)
+        done += 1
+        if _profile_queue:
+            await _profile_sleep(_PROFILE_CALL_GAP_SEC)
+    if done:
+        log.info("[webhook] Bot profile set for %d field(s); %d left.", done, len(_profile_queue))
+    return done
 
 
 async def _webhook_startup() -> None:
@@ -1667,8 +1695,10 @@ async def _webhook_startup() -> None:
             log.warning("[webhook] Bot commands were not set for any language.")
         # Профиль не влияет на приём сообщений, поэтому его провал не должен
         # уходить в main(): любая ошибка старта там = выход контейнера с кодом 1.
+        # На старте — только первые поля: остальные добирает часовой цикл, иначе
+        # 72 вызова подряд ловят flood control (прод 11.11.2026).
         with contextlib.suppress(Exception):
-            await _register_bot_profile()
+            await _register_bot_profile(limit=_PROFILE_STARTUP_FIELDS)
         return webhook_ok
 
     setup_ok = await try_setup()
@@ -1684,6 +1714,9 @@ async def _webhook_startup() -> None:
         try:
             _cleanup_rate_limit_dict()
             _evict_orphan_chat_locks()
+            # Поля профиля, недобраниые на старте или вставшие на flood control:
+            # часовой цикл добирает очередь медленно, вне пути живого ответа.
+            await _register_bot_profile()
             # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
             # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
             _reset_quota_if_new_day()

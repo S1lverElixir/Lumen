@@ -2626,6 +2626,11 @@ def test_profile_locales_match_command_locales():
     assert set(bot.PROFILE_LANGS) == set(bot.COMMAND_LOCALES) | {bot.DEFAULT_LANG}
 
 
+async def _no_sleep(_sec: float) -> None:
+    # Пауза между вызовами профиля — шов уровня модуля; в тесте она не нужна.
+    return None
+
+
 def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
     # Без этих вызовов «О себе» живёт только в BotFather и расходится с
     # lumen_lang (10.11.2026).
@@ -2639,11 +2644,13 @@ def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
             return True
         return _method
 
-    async def fake_tg_call(method, *args, call_timeout=None, **kwargs):
+    async def fake_tg_call(method, *args, call_timeout=None, retries=None, **kwargs):
         return await method(*args, **kwargs)
 
     monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
     monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _spy(m) for m in _PROFILE_ARG_BY_METHOD}))
+    bot._profile_queue.clear()
     assert asyncio.run(bot._register_bot_profile()) == 3 * len(bot.PROFILE_LANGS)
     assert Counter(name for name, _ in calls) == Counter({m: len(bot.PROFILE_LANGS) for m in _PROFILE_ARG_BY_METHOD})
     for name, kwargs in calls:
@@ -2662,6 +2669,7 @@ def test_register_bot_profile_survives_dead_telegram(monkeypatch, caplog):
     import logging
     monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=None))
     monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: AsyncMock() for m in _PROFILE_ARG_BY_METHOD}))
+    bot._profile_queue.clear()
     with caplog.at_level(logging.INFO, logger="bot"):
         assert asyncio.run(bot._register_bot_profile()) == 0
     assert "Bot profile was not set" in caplog.text
@@ -2672,6 +2680,7 @@ def test_register_bot_profile_survives_missing_method(monkeypatch):
     # Старый aiogram без set_my_name давал бы AttributeError внутри стартапа.
     monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "bot", SimpleNamespace())
+    bot._profile_queue.clear()
     assert asyncio.run(bot._register_bot_profile()) == 0
 
 
@@ -4316,3 +4325,43 @@ def test_reserve_translation_memo_skips_failed_translation(monkeypatch):
     asyncio.run(lumen_commands._translate_for_reserve("рыжий кот на луне", deadline))
     asyncio.run(lumen_commands._translate_for_reserve("рыжий кот на луне", deadline))
     assert translate.await_count == 2
+
+
+def test_profile_pass_pauses_on_flood_control_and_resumes_later(monkeypatch):
+    # РЕГРЕССИЯ на прод 11.11.2026 17:44-17:47: 72 вызова профиля подряд поймали
+    # «Flood control exceeded ... Retry in 79522 seconds», и в эти минуты у живых
+    # людей рвались ответы. Теперь один отказ = пауза, поле остаётся в очереди,
+    # часовой проход продолжает с того же места.
+    bot._profile_queue.clear()
+    total = 3 * len(bot.PROFILE_LANGS)
+    seen = []
+
+    def _flaky(method_name):
+        async def _method(**kwargs):
+            seen.append((method_name, kwargs))
+            if len(seen) == 5:
+                raise RuntimeError("Telegram server says - Flood control exceeded. Retry in 18 seconds")
+            return True
+        return _method
+
+    async def fake_tg_call(method, *args, call_timeout=None, retries=None, **kwargs):
+        assert retries == 0, "профиль не должен ретраить flood control"
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _flaky(m) for m in _PROFILE_ARG_BY_METHOD}))
+
+    assert asyncio.run(bot._register_bot_profile(limit=20)) == 4
+    assert len(bot._profile_queue) == total - 4
+    fifth = bot._profile_queue[0]
+    assert fifth in seen, "неудавшееся поле обязано остаться первым в очереди"
+
+    # Второй проход (часовой цикл) продолжает с того же поля и добирает остаток.
+    def _calm(method_name):
+        async def _method(**kwargs):
+            return True
+        return _method
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _calm(m) for m in _PROFILE_ARG_BY_METHOD}))
+    assert asyncio.run(bot._register_bot_profile()) == total - 4
+    assert bot._profile_queue == []

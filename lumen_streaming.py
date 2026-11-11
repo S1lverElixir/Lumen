@@ -518,11 +518,17 @@ async def _run_streaming_reply(
             read_task = None
             if not piece:
                 continue
-            # Общий бюджет маршрута — и на стрим тоже: капающий по куску раз в 29с стрим
-            # иначе держал бы lock чата далеко за ROUTE_TOTAL_BUDGET_SEC (найдено внешним аудитом).
-            if deadline is not None and time.monotonic() > deadline:
-                raise bot.RouteBudgetExceededError([f"{provider}:{model_id}"])
             now_piece = time.monotonic()
+            # Общий бюджет маршрута — и на стрим, но живой стрим не режем по
+            # 40-секундному капит: прод 11.11.2026 оборвал им 5700-символьный ответ
+            # на 35-й секунде, и человек видел «Соединение прервалось». Пока куски
+            # прибывают, бюджет продлевается на grace-окно с потолком ниже 60 с,
+            # которые срезает релей; lock чата по-прежнему держится MESSAGE_TOTAL_BUDGET_SEC.
+            if deadline is not None:
+                deadline = min(overall_start_ts + bot.STREAM_ROUTE_MAX_SEC,
+                               now_piece + bot.STREAM_ROUTE_STALL_GRACE_SEC)
+                if now_piece > deadline:
+                    raise bot.RouteBudgetExceededError([f"{provider}:{model_id}"])
             first_piece = first_piece_ts is None
             if first_piece:
                 first_piece_ts = now_piece

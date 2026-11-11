@@ -524,7 +524,10 @@ def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
-def test_streaming_respects_route_deadline():
+def test_streaming_respects_route_deadline(monkeypatch):
+    # Grace-окно живого стрима в проде 20 с; в тесте окно уменьшаем, иначе
+    # он спит 20 секунд, а проверяется именно застой куска.
+    monkeypatch.setattr(bot, "STREAM_ROUTE_STALL_GRACE_SEC", 0.3)
     # Внешний аудит: капающий по куску стрим жил мимо ROUTE_TOTAL_BUDGET_SEC и держал lock.
     chat_id = 999309
 
@@ -1417,3 +1420,30 @@ def test_stream_search_marker_never_reaches_the_screen_and_keeps_the_bubble():
     finally:
         bot.client = original_client
         bot.chat_state.pop(chat_id, None)
+
+
+def test_live_stream_is_not_cut_by_the_route_budget(monkeypatch):
+    # РЕГРЕССИЯ на прод 11.11.2026: 5700-символьный ответ оборвался на 35-й
+    # секунде с пометкой «Соединение прервалось», потому что стрим проверялся
+    # общим 40-секундным бюджетом маршрута. Пока куски прибывают, ответ должен
+    # дойти до конца.
+    chat_id = 999311
+    monkeypatch.setattr(bot, "STREAM_ROUTE_MAX_SEC", 30)
+
+    async def steady_drip_pieces():
+        for n in range(30):
+            yield "кусочек%02d " % n
+            await asyncio.sleep(0.05)
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-y",
+            piece_agen=steady_drip_pieces(), deadline=time.monotonic() - 1.0,
+        ))
+        assert answer is not None and placeholder is None
+        assert "кусочек29" in answer, answer
+        assert not any("interrupted" in (t or "").lower() for t, _ in incoming.sent[0].edits)
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
