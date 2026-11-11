@@ -10,6 +10,7 @@ test_bot_search.py — сквозные тесты внешнего поиска
     pytest tests/test_bot_search.py -v
 """
 import asyncio
+import pytest
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -520,3 +521,14 @@ def test_answer_without_marker_streams_and_never_searches(rate_guard_setup, monk
     texts = _outgoing_texts()
     assert any("функция, которая зовёт себя сама" in t for t in texts)
     bot.chat_state.pop(123, None)
+
+
+def test_search_marker_never_reaches_the_chat_inside_an_answer():
+    # Модель поставила маркер и всё равно написала ответ: служебный знак обязан
+    # срезаться, а не уезжать в чат (замер 11.11.2026 — маркер видела только
+    # ветка «только маркер», примесь в тексте показывалась как есть).
+    import lumen_routes
+    assert lumen_routes._raise_if_search_requested("[[SEARCH]] Обычный ответ", "munito", "m-x") == "Обычный ответ"
+    assert lumen_routes._raise_if_search_requested("Обычный ответ", "munito", "m-x") == "Обычный ответ"
+    with pytest.raises(lumen_routes._SearchRequested):
+        lumen_routes._raise_if_search_requested("[[SEARCH]]", "munito", "m-x")

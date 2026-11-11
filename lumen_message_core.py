@@ -92,7 +92,9 @@ def _fresh_date_context() -> str:
 _SEARCH_UNAVAILABLE_NOTE = (
     "\n\n[No web search is available for this turn. Answer from what you already know, "
     "in the user's language, and say in one plain line what you could not verify. "
-    "Do not ask for a search and do not refuse to answer.]"
+    "Do not ask for a search and do not refuse to answer. "
+    "This bracket is an instruction to you, not text to show: never quote, translate or "
+    "reproduce it, and never mix its language into the reply.]"
 )
 
 
