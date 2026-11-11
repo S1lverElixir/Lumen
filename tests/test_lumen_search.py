@@ -134,7 +134,7 @@ def test_web_search_kill_switch_and_limits(monkeypatch):
     monkeypatch.setenv("WEB_SEARCH_ENABLED", "1")
     assert lumen_search.web_search_is_enabled() is True
     monkeypatch.setenv("WEB_SEARCH_TIMEOUT_SEC", "мусор")
-    assert lumen_search.web_search_timeout_sec() == 8.0
+    assert lumen_search.web_search_timeout_sec() == 6.0
     monkeypatch.setenv("WEB_SEARCH_MAX_RESULTS", "3")
     assert lumen_search.web_search_max_results() == 3
 
@@ -460,18 +460,36 @@ def test_fetch_web_snippets_asks_crypto_api_only_for_crypto(monkeypatch):
     assert "73557" in out[0]["snippet"] or "bitcoin" in out[0]["snippet"]
     session = seen[0]
     assert lumen_search._COINGECKO_URL in session.requested
-    # Википедия по вопросам о цене не спрашивается: там нет живого числа.
-    assert lumen_search._WIKI_API.format(lang="ru") not in session.requested
+    # Погоду по вопросу о цене не зовём: каждый лишний источник — это лишняя задержка
+    # в общем бюджете, а не бесплатная страховка.
+    assert lumen_search._WEATHER_URL not in session.requested
 
 
-def test_fetch_web_snippets_skips_wikipedia_without_entity_intent(monkeypatch):
-    session = _RoutedSession({lumen_search._BING_NEWS_URL: _BING_NEWS_FIXTURE})
+def test_wikipedia_is_queried_with_both_search_forms(monkeypatch):
+    # Одна форма промахивается («secretary general UN» против «United Nations»),
+    # поэтому справочник опрашивается двумя формами сразу (замер 11.11.2026).
+    sessions = []
+
+    def spy_session(*args, **kwargs):
+        session = _RoutedSession({
+            lumen_search._WIKI_API.format(lang="en"):
+                '{"query":{"pages":{"1":{"title":"Secretary-General of the United Nations",'
+                '"extract":"The secretary-general of the United Nations is the chief administrative '
+                'officer of the UN Secretariat, appointed by the General Assembly."}}}}',
+        })
+        sessions.append(session)
+        return session
+
     monkeypatch.setattr(
         lumen_search, "aiohttp",
-        SimpleNamespace(ClientSession=lambda *a, **k: session, ClientTimeout=aiohttp.ClientTimeout),
+        SimpleNamespace(ClientSession=spy_session, ClientTimeout=aiohttp.ClientTimeout),
     )
-    asyncio.run(lumen_search.fetch_web_snippets("последние новости техники сегодня"))
-    assert lumen_search._WIKI_API.format(lang="ru") not in session.requested
+    out = asyncio.run(lumen_search.fetch_web_snippets(
+        "who is the current secretary general of the UN?"
+    ))
+    wiki_calls = [url for url in sessions[0].requested if "wikipedia" in url]
+    assert len(wiki_calls) == 2
+    assert any(item["kind"] == "fact" for item in out)
 
 
 def test_fetch_web_snippets_uses_entity_source_for_who_questions(monkeypatch):

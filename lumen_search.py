@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 import aiohttp
 
-from lumen_router_config import GEMINI_MODELS
+from lumen_router_config import GEMINI_MODELS, _looks_like_freshness_query
 
 log = logging.getLogger("bot")
 
@@ -67,9 +67,9 @@ def web_search_timeout_sec() -> float:
     """Общий бюджет на все источники параллельно (WEB_SEARCH_TIMEOUT_SEC, дефолт 8)."""
     try:
         raw = (os.getenv("WEB_SEARCH_TIMEOUT_SEC", "") or "").strip()
-        value = float(raw) if raw else 8.0
+        value = float(raw) if raw else 6.0
     except (TypeError, ValueError):
-        return 8.0
+        return 6.0
     return max(1.0, value)
 
 
@@ -538,7 +538,7 @@ def _wiki_page_score(query: str, title: str, snippet: str) -> int:
     return len(matched) + 2 * len(rare_hit) + title_bonus
 
 
-async def _wikipedia_snippets(session: aiohttp.ClientSession, query: str, limit: int, deadline: float) -> list[dict]:
+async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: int, deadline: float) -> list[dict]:
     """Википедия: чистый URL, точный заголовок и дата — то, чем Claude подкрепляет
     вопросы «кто такой X / что такое X», когда новости молчат."""
     lang = _wiki_lang(query)
@@ -571,6 +571,22 @@ async def _wikipedia_snippets(session: aiohttp.ClientSession, query: str, limit:
     for item in out:
         item.pop("_score", None)
     return out[:limit]
+
+
+async def _wikipedia_snippets(session: aiohttp.ClientSession, queries: list[str], limit: int,
+                              deadline: float) -> list[dict]:
+    """Обе формы запроса сразу: разговорная форма и ключевая ищут разные страницы,
+    а одна из них регулярно промахивается (замер 11.11.2026)."""
+    groups = await asyncio.gather(
+        *(_wikipedia_pages(session, q, limit, deadline) for q in dict.fromkeys(queries) if q),
+        return_exceptions=True,
+    )
+    out: list[dict] = []
+    for group in groups:
+        if isinstance(group, BaseException):
+            continue
+        out.extend(group)
+    return _dedupe(out)
 
 
 async def _crypto_snippets(session: aiohttp.ClientSession, text: str, deadline: float) -> list[dict]:
@@ -921,8 +937,10 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
     limit = max_results if max_results else web_search_max_results()
     deadline = time.monotonic() + max(1.0, timeout)
     intents = detect_intents(text)
-    wants_fresh = bool(intents["news"] or _TODAY_QUERY_RE.search(text)
-                       or re.search(r"сейчас|теперь|последн\w*|актуальн\w*|now|current|latest|recent", text, re.I))
+    # Тот же детектор, что решает, запускать ли поиск: выбор источника и запуск
+    # поиска не должны разъезжаться («ключевая ставка ЦБ» — свежий вопрос, но
+    # новостных лент это не касалось, и слой молчал: замер 11.11.2026).
+    wants_fresh = bool(intents["news"] or _looks_like_freshness_query(text))
     diagnostics: dict[str, int] = {}
 
     async def _task(name: str, coro) -> tuple[str, list[dict]]:
@@ -946,8 +964,9 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
                 jobs.append(_task("fx", _fx_snippets(session, text, deadline)))
             if intents["weather"]:
                 jobs.append(_task("weather", _weather_snippets(session, text, deadline)))
-            if intents["entity"]:
-                jobs.append(_task("wikipedia", _wikipedia_snippets(session, alt_query, limit, deadline)))
+            # Справочник опрашивается всегда: он дёшев (один параллельный запрос),
+            # даёт чистый URL и дату, а порог релевантности отсекает мусор.
+            jobs.append(_task("wikipedia", _wikipedia_snippets(session, queries, limit, deadline)))
 
         if intents["news"] or wants_fresh or _ADVICE_RE.search(text):
             # Советы по покупке живут в обзорах, а не в энциклопедии: для «что купить
@@ -1020,28 +1039,31 @@ def parse_ddg_html(page: str, max_results: int = _DEFAULT_MAX_RESULTS) -> list[d
     return out
 
 
+async def _ddg_html_page(session: aiohttp.ClientSession, query: str, deadline: float) -> str:
+    budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
+    async with session.get(_DDG_HTML_URL, params={"q": query}, headers=_SEARCH_HEADERS, timeout=budget) as resp:
+        if resp.status != 200:
+            return ""
+        return await resp.text()
+
+
 async def _ddg_source(session: aiohttp.ClientSession, query: str, deadline: float, limit: int) -> list[dict]:
-    """DDG: сначала lite, если он отдаёт аномалию — полный HTML-эндпоинт. Оба внутри
-    одного дедлайна: висло на 8 секундах на пустом ответе раньше (аудит 01.11.2026)."""
-    ddg_deadline = time.monotonic() + max(0.5, min(4.0, deadline - time.monotonic()))
-    page = ""
-    try:
-        page = await _fetch_ddg_page(session, query, ddg_deadline)
-    except Exception as exc:
-        log.info("[web-search] DuckDuckGo lite failed: %s", type(exc).__name__)
-    items = parse_ddg_lite_html(page, limit)
-    if items:
-        return items
-    html_deadline = time.monotonic() + max(0.4, min(3.0, deadline - time.monotonic()))
-    try:
-        budget = aiohttp.ClientTimeout(total=max(0.2, html_deadline - time.monotonic()))
-        async with session.get(_DDG_HTML_URL, params={"q": query}, headers=_SEARCH_HEADERS, timeout=budget) as resp:
-            if resp.status != 200:
-                return []
-            return parse_ddg_html(await resp.text(), limit)
-    except Exception as exc:
-        log.info("[web-search] DuckDuckGo html failed: %s", type(exc).__name__)
-        return []
+    """DDG: lite и полный HTML опрашиваются ПАРАЛЛЕЛЬНО — второй формат спасает, когда
+    первый отдаёт аномалию (замер 11.11.2026), а последовательная попытка удваивала
+    задержку: 4с + 3с против 4с."""
+    ddg_deadline = time.monotonic() + max(1.0, min(4.0, deadline - time.monotonic()))
+    lite_page, html_page = await asyncio.gather(
+        _fetch_ddg_page(session, query, ddg_deadline),
+        _ddg_html_page(session, query, ddg_deadline),
+        return_exceptions=True,
+    )
+    if isinstance(lite_page, BaseException):
+        log.info("[web-search] DuckDuckGo lite failed: %s", type(lite_page).__name__)
+        lite_page = ""
+    if isinstance(html_page, BaseException):
+        log.info("[web-search] DuckDuckGo html failed: %s", type(html_page).__name__)
+        html_page = ""
+    return parse_ddg_lite_html(lite_page, limit) or parse_ddg_html(html_page, limit)
 
 
 # ───────────────────────── блок в промпт ─────────────────────────
