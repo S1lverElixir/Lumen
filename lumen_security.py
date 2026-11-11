@@ -283,13 +283,16 @@ _FOREIGN_FUNC_WORDS = frozenset({
 # Сразу за словом стоит один из этих знаков — значит это идентификатор или
 # термин (value=, take(2), only-child), а не вставное английское слово.
 _CODEISH_AFTER = "([:=/#_.,;+-"
-_CYRILLIC_LETTER_RE = re.compile("[\u0400-\u04FF]")
-_CYRILLIC_WORD_RE = re.compile("[\u0400-\u04FF]{2,}")
-_LATIN_LETTER_RE = re.compile("[A-Za-z]")
-# Только целиком строчный латинский токен: «The», «Apple», «Windows» мимо.
+# Предложение-носитель артефакта: не меньше 5 слов не-латинской графики и
+# 60% букв в ней. Правило не привязано к кириллице — тот же сбой головы
+# одинаково выглядит в тайском, арабском или корейском ответе (проверка
+# 25 языков 11.11.2026), а латинское предложение трогать нельзя: там these
+# и because — норма, а не артефакт.
+_LATIN_LETTERS_RE = re.compile(r"[A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F\u1E00-\u1EFF]")
+_LETTER_TOKEN_RE = re.compile(r"[^\W\d_]+")
 _LATIN_WORD_RE = re.compile(r"\b[a-z]+\b")
-_LANG_MIX_MIN_CYR_WORDS = 5
-_LANG_MIX_MIN_SHARE = 0.6
+_LANG_MIX_MIN_NONLATIN_WORDS = 5
+_LANG_MIX_MIN_NONLATIN_SHARE = 0.6
 # Знаки, перед которыми пробел не ставится: вычищая слово, соседний пробел
 # убираем вместе с ним, иначе в строке остаётся дыра «улыбки ,».
 _TIGHT_PUNCT = ",.;:!?)]»”"
@@ -378,19 +381,28 @@ def _trim_decoration_emoji(text: str, *, source: str) -> str:
     return _drop_spans(text, cut)
 
 
+def _nonlatin_shape(seg: str) -> tuple[int, float]:
+    """(слов не-латинской графики, доля не-латинских букв) в отрезке текста."""
+    tokens = _LETTER_TOKEN_RE.findall(seg)
+    all_letters = sum(len(t) for t in tokens)
+    if not all_letters:
+        return 0, 0.0
+    latin_letters = sum(len(_LATIN_LETTERS_RE.findall(t)) for t in tokens)
+    foreign_words = sum(1 for t in tokens if not _LATIN_LETTERS_RE.search(t))
+    return foreign_words, (all_letters - latin_letters) / all_letters
+
+
 def _foreign_insert_spans(text: str) -> list[tuple[int, int]]:
-    """Вставные английские служебные слова внутри кириллического предложения."""
+    """Вставные английские служебные слова в предложении, написанном другим
+    алфавитом (кириллица, арабица, тайский — любой не-латинский)."""
     if not text or len(text) < _MUSH_MIN_TEXT_LEN:
         return []
     visible = _masked_copy(text[:_MUSH_MAX_TEXT_LEN])
     spans: list[tuple[int, int]] = []
     for lo, hi in _sentence_bounds(visible):
         seg = visible[lo:hi]
-        if len(_CYRILLIC_WORD_RE.findall(seg)) < _LANG_MIX_MIN_CYR_WORDS:
-            continue
-        cyr = len(_CYRILLIC_LETTER_RE.findall(seg))
-        lat = len(_LATIN_LETTER_RE.findall(seg))
-        if cyr < _LANG_MIX_MIN_SHARE * (cyr + lat):
+        words, share = _nonlatin_shape(seg)
+        if words < _LANG_MIX_MIN_NONLATIN_WORDS or share < _LANG_MIX_MIN_NONLATIN_SHARE:
             continue
         for m in _LATIN_WORD_RE.finditer(seg):
             if m.group(0) not in _FOREIGN_FUNC_WORDS:
@@ -406,7 +418,7 @@ def _strip_foreign_inserts(text: str, *, source: str) -> str:
     spans = _foreign_insert_spans(text)
     if not spans:
         return text
-    log.warning("[lang-mix] Removed %d inserted Latin word(s) from a Cyrillic answer (source=%s, len=%d)", len(spans), source, len(text))
+    log.warning("[lang-mix] Removed %d inserted Latin word(s) from a non-Latin answer (source=%s, len=%d)", len(spans), source, len(text))
     return _drop_spans(text, spans)
 
 

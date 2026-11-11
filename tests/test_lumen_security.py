@@ -440,3 +440,27 @@ def test_polish_answer_leaves_programming_keywords_alone():
     for word in ("not", "all", "any", "each", "both"):
         assert word in out, word
     assert "because" not in out
+
+def test_polish_answer_catches_the_same_intrusion_in_other_scripts():
+    # Тот же сбой головы одинаков в арабском и тайском: фильтр смотрит не на
+    # кириллицу, а на преобладание не-латинской графики (проверка 25 языков).
+    ar = ("الذكاء الاصطناعي the يساعد الناس على كتابة النصوص وتحليل الصور بسرعة كبيرة، "
+          "لكنه يحتاج إلى بيانات كثيرة جداً لكي يتعلم الأنماط اللغوية ويحسن جودته يوماً بعد يوم.")
+    out = lumen_security._polish_answer(ar, source="test")
+    assert " the " not in out
+    assert "الذكاء الاصطناعي يساعد" in out
+
+    th = ("ปัญญาประดิษฐ์ the ช่วยเขียนข้อความและวิเคราะห์รูปภาพได้อย่างรวดเร็ว "
+          "แต่ก็ยังต้องการข้อมูลจำนวนมากเพื่อเรียนรู้รูปแบบของภาษาให้ดีและแม่นยำยิ่งขึ้นทุกวัน")
+    assert " the " not in lumen_security._polish_answer(th, source="test")
+
+
+def test_polish_answer_leaves_latin_script_answers_alone():
+    # В английском и немецком these/because — норма речи, а не артефакт: пока
+    # предложение не написало другим алфавитом, фильтр молчит.
+    en = ("The capital of Australia is Canberra, because Sydney is the largest city "
+          "but not the capital of the country at all, and that surprises many travellers.")
+    assert lumen_security._polish_answer(en, source="test") == en
+    de = ("Die Hauptstadt von Australien ist Canberra and not Sydney, was ein häufiger "
+          "Irrtum bleibt, obwohl Sydney die grösseste Stadt des Landes ist und lebt.")
+    assert lumen_security._polish_answer(de, source="test") == de
