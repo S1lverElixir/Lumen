@@ -523,6 +523,47 @@ def test_fetch_web_snippets_rejects_irrelevant_wikipedia_pages(monkeypatch):
     assert all("Газпромбанк" != item["title"] for item in out)
 
 
+def test_wiki_page_score_requires_content_words_in_title():
+    # Прод 11.11.2026: «Газпромбанк» проходил на «кто возглавляет ЦБ» из-за
+    # «Центрального офиса» в теле, а President of the ECB — на английский who-вопрос.
+    ru = "кто сейчас возглавляет Центральный банк России и какая ключевая ставка"
+    assert lumen_search._wiki_page_score(ru, "Центральный банк Российской Федерации",
+                                         "главный эмиссионный банк государства") > 0
+    assert lumen_search._wiki_page_score(ru, "Газпромбанк",
+                                         "российский коммерческий банк, входит в активы ПАО «Газпром». "
+                                         "Занимает третье место в списке банков Центральной и Восточной "
+                                         "Европы. Центральный офис в Москве.") == 0
+    en = "who is the head of the Central Bank of Russia"
+    assert lumen_search._wiki_page_score(en, "Central Bank of Russia",
+                                         "The Central Bank of the Russian Federation, commonly known "
+                                         "as the Bank of Russia, is the central bank and national "
+                                         "banking regulator of Russia.") > 0
+    assert lumen_search._wiki_page_score(en, "President of the European Central Bank",
+                                         "The president of the European Central Bank is the head of "
+                                         "the European Central Bank, the main institution responsible "
+                                         "for the management of the eurozone monetary policy.") == 0
+    # Одно содержательное слово не тащит страницу по случайному упоминанию в теле
+    # («сотня влиятельных женщин» проходила на «канцлер Германии»).
+    assert lumen_search._wiki_page_score("кто сейчас канцлер Германии",
+                                         "Список 100 самых влиятельных женщин мира",
+                                         "Рейтинг журнала Forbes, в него входил канцлер Германии.") == 0
+
+
+def test_wiki_page_score_survives_person_page_and_accents():
+    # Страница персоны слов запроса в заголовке не несёт — её держит плотное
+    # упоминание организации в начале тела (тот же тест fetch сверху).
+    assert lumen_search._wiki_page_score("кто сейчас возглавляет Центральный банк России",
+                                         "Набиуллина, Эльвира Сахипзадовна",
+                                         "Председатель Центрального банка Российской Федерации "
+                                         "с 24 июня 2013 года.") > 0
+    # Сочетанные ударения Википедии («Кла́дби» → «Кла»+«дби») рвут начало слова —
+    # нормализация держит корень целым (замер 11.11.2026).
+    assert lumen_search._wiki_page_score("кто сейчас возглавляет Центральный банк России",
+                                         "Банк России",
+                                         "Центра́льный банк Росси́йской Федера́ции — "
+                                         "главный банк страны.") > 0
+
+
 def test_search_api_provider_autodetects_key(monkeypatch):
     for var in ("TAVILY_API_KEY", "BRAVE_API_KEY", "EXA_API_KEY", "SEARCH_API_PROVIDER"):
         monkeypatch.delenv(var, raising=False)
