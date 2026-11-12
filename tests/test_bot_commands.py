@@ -2903,6 +2903,19 @@ def test_cmd_selftest_group_only_for_owner(monkeypatch):
         assert mid not in fake_tg_call.text
 
 
+def test_cmd_selftest_reports_the_search_layer(monkeypatch):
+    # Строка состояния слоя поиска: после рестарта Space по ней видно, включён ли
+    # цикл и сколько обращений к источникам уже израсходовано. Без неё владелец
+    # проверял бы переключатели вслепую.
+    monkeypatch.setattr(bot, "OWNER_ID", 444002)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999713, 444002)))
+    text = fake_tg_call.text
+    assert "Поиск:" in text and "цикл:" in text
+    assert "обращений сегодня" in text
+    bot._selftest_last_run = 0.0
+
+
 def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
     # Без паузы владелец случайно выжигал бы квоту повторными тапами.
     monkeypatch.setattr(bot, "OWNER_ID", 444001)
