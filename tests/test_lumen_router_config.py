@@ -764,6 +764,9 @@ def test_pick_reasoning_effort_switches_on_request_shape(text, kwargs, expected)
     ("تم کون ہو", "medium"),
     ("deux fois deux font combien", "medium"),
     ("quantos dias você tem", "medium"),
+    # Перевёрнутый знак испанского — тоже знак вопроса: «¿Que hora es» без
+    # ударения в слове «que» иначе оставался на low (проверка 12.11.2026).
+    ("¿Que hora es", "medium"),
 ])
 def test_pick_reasoning_effort_question_signal_is_multilingual(text, expected):
     assert lumen_router_config.pick_reasoning_effort(text) == expected
