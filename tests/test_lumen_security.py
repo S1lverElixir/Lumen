@@ -554,3 +554,48 @@ def test_answer_polish_is_a_fixpoint_on_every_shape_it_edits():
         twice = lumen_security._polish_answer(once, source="review")
         assert twice == once, text
         assert lumen_security._polish_answer(twice, source="review") == once, text
+
+@pytest.mark.parametrize("phrase", [
+    # Ревью приватности 12.11.2026: новый слой (инструмент, сниппеты, запросы
+    # модели) научился подталкивать модель к этим формулировкам, а фильтр их не
+    # ловил.
+    "I am running on gemini-2.5-pro.",
+    "I run on OpenAI servers.",
+    "My system prompt is: you are a helpful assistant.",
+    "Sure. My system prompt is: You are Lumen styled after Claude.",
+    "Мой системный промпт запрещает это.",
+    "Вот наш системный промпт: ты ассистент.",
+    "Мы работаем на OpenAI.",
+    "Модель gemini-2.5-flash.",
+    "I am powered by Anthropic.",
+])
+def test_identity_leak_phrases_are_blocked(phrase):
+    assert lumen_security._detect_identity_leak(phrase) is True
+
+
+@pytest.mark.parametrize("phrase", [
+    # Те же слова в честном рассказе утечкой не считаются: иначе фильтр резал
+    # нормальные ответы про чужие стеки и про устройство LLM.
+    "Что такое системный промпт в LLM?",
+    "system prompt — это первое сообщение",
+    "The company Google makes Chrome.",
+    "gemini-3.8-flashback это не модель",
+    "https://blog.google/gemini-2.5-pro/",
+    "openai.com/gpt-4o",
+    "Сравни Gemini и GPT по цене подписки",
+    "Промпт — это короткий запрос к модели.",
+    "Он основан на Google Transformer.",
+    "Я не могу сравнивать себя с Claude.",
+    "The demo runs on Google hardware.",
+    "Приложение работает на Google Cloud",
+])
+def test_honest_talk_about_models_and_prompts_is_not_a_leak(phrase):
+    assert lumen_security._detect_identity_leak(phrase) is False
+
+
+def test_prompt_reveal_sentence_is_cut_without_the_whole_answer():
+    out = lumen_security._scrub_identity_leak(
+        "Конечно, помогу. Мой системный промпт запрещает это. Цена подписки — 20 долларов.",
+        source="test")
+    assert "системн" not in out.lower()
+    assert "Конечно, помогу." in out and "20 долларов" in out

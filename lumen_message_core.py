@@ -62,6 +62,7 @@ from lumen_router_config import (
 )
 from lumen_search import (
     _SearchRequested,
+    search_daily_budget_left,
     answered_with_live_search,
     clean_publisher,
     fetch_web_snippets,
@@ -196,6 +197,12 @@ async def _gather_web_evidence(
     # Потолок поисков считается от усилия; EFFORT_AUTO=0 даёт effort=None, и тогда
     # цикл молчит целиком — ровно прежний один поиск по словам человека.
     max_searches = agent_max_searches(effort)
+    if search_daily_budget_left() <= 0:
+        # Дневной потолок обращений исчерпан: цикл всё равно ничего не найдёт,
+        # но успеет потратить планирующие вызовы модели (до трёх за сообщение).
+        # Молча отдаём старую ветку — она честно вернёт пустоту и пометку
+        # «без live-поиска» (ревью приватности 12.11.2026).
+        max_searches = 0
     head = _munito_head(route) if max_searches > 0 else None
     if head is not None and lumen_agent.agent_turn_enabled():
         turn = None
@@ -1320,6 +1327,9 @@ async def _handle_message_core(
         ai_prompt += "\n\n" + _fresh_date_context()
     web_search_failed = False
     snippets_injected = False
+    # Закрытый этап поиска: одна галочка на сообщение, даже если поиск был
+    # попыткой №2 после [[SEARCH]] (ревью 12.11.2026).
+    search_step_reported = False
     agent_used = False
     agent_steps = 0
     agent_planning_ms = 0
@@ -1352,22 +1362,29 @@ async def _handle_message_core(
         log.info("[web-search] chat=%s sources=%d agent=%s effort=%s",
                  message.chat.id, len(snippets), agent_used, effort or "auto-off")
         if status is not None:
-            if snippets:
-                # Один закрытый этап на ответ — нашёл ли источники цикл или прежний
-                # fetch: два «поискал · нашёл» в трейсе читались как ложь.
-                status.add_done("progress_search_done", count=len(snippets))
-                status.set_sources([clean_publisher(item) for item in snippets if clean_publisher(item)])
-            else:
-                status.add_done("progress_search_empty")
-            await status.set_phase("progress_thinking", timed=True)
+            # Один закрытый этап на ВЁС ответ: два «поискал · нашёл N» в трейсе
+            # читались как ложь, а «нашёл 1» рядом с «ничего не нашёл» — хуже
+            # молчания (ревью 12.11.2026). Пузырь не имеет права уронить ответ:
+            # все его правки под suppress, как в самом цикле.
+            with contextlib.suppress(Exception):
+                if snippets and not search_step_reported:
+                    status.add_done("progress_search_done", count=len(snippets))
+                    status.set_sources([clean_publisher(item) for item in snippets if clean_publisher(item)])
+                    search_step_reported = True
+                elif not snippets and not search_step_reported:
+                    status.add_done("progress_search_empty")
+                    search_step_reported = True
+                await status.set_phase("progress_thinking", timed=True)
     elif need_external_search:
         web_search_failed = True
     if status is None and status_task is not None:
         status = await status_task
     if status is not None and not search_will_run and (media_tuple or extra_media):
         # Файл уже скачан: этап просмотра закрываем галочкой и показываем
-        # живой таймер размышления, как в Claude (ревью 28.10.2026).
-        await status.mark_stage_done()
+        # живой таймер размышления, как в Claude (ревью 28.10.2026). Правка
+        # пузыря не имеет права стоить ответа (ревью 12.11.2026).
+        with contextlib.suppress(Exception):
+            await status.mark_stage_done()
     # Пометка «без поиска» — только если поиск реально не дал результатов: при
     # исчерпанном лимите Gemini сниппеты едут дешёвым моделям, а не отключаются.
     no_search_note = user_gemini_limited and needs_freshness and not snippets_injected
@@ -1467,15 +1484,24 @@ async def _handle_message_core(
             # Единственный дополнительный проход на сообщение: тот же этап статуса,
             # что у обычного поиска, один fetch в остаток бюджета и повтор тем же
             # ai_prompt. Гостю стрим нельзя (ответ уходит через answerGuestQuery).
-            if status is None and stream_bubble is not None:
-                status = StatusMessage.from_message(stream_bubble, bot._chat_lang(message.chat.id), "progress_searching")
-            elif status is None and not is_guest:
-                status = await StatusMessage.start(message, bot._chat_lang(message.chat.id), "progress_searching")
-            elif status is not None and not snippets_injected:
-                await status.set_phase("progress_searching")
+            # Создание и перекраска пузыря в этом проходе — косметика: ошибка
+            # Telegram API здесь означала бы, что человек не получил вообще
+            # ничего, хотя второй проход ещё впереди (ревью 12.11.2026).
+            with contextlib.suppress(Exception):
+                if status is None and stream_bubble is not None:
+                    status = StatusMessage.from_message(stream_bubble, bot._chat_lang(message.chat.id), "progress_searching")
+                elif status is None and not is_guest:
+                    status = await StatusMessage.start(message, bot._chat_lang(message.chat.id), "progress_searching")
+                elif status is not None and not snippets_injected:
+                    await status.set_phase("progress_searching")
             mark_snippets: list = []
             mark_queries: list[str] = []
             mark_agent = False
+            # Переменная присваивается только внутри `if not snippets_injected`
+            # ниже, а читается всегда: при [[SEARCH]] после уже собранных
+            # источников был UnboundLocalError, и сообщение падало в служебную
+            # ошибку вместо ответа (ревью 12.11.2026).
+            mark_stats: dict = {}
             if not snippets_injected:
                 # Вопрос по определению свежий: дата нужна и этому проходу.
                 ai_prompt += "\n\n" + _fresh_date_context()
@@ -1500,12 +1526,18 @@ async def _handle_message_core(
                 ai_prompt += _SEARCH_UNAVAILABLE_NOTE
                 web_search_failed = True
             if status is not None:
-                if mark_snippets:
-                    status.add_done("progress_search_done", count=len(mark_snippets))
-                    status.set_sources([clean_publisher(item) for item in mark_snippets if clean_publisher(item)])
-                else:
-                    status.add_done("progress_search_empty")
-                await status.set_phase("progress_thinking", timed=True)
+                with contextlib.suppress(Exception):
+                    if mark_snippets and not search_step_reported:
+                        status.add_done("progress_search_done", count=len(mark_snippets))
+                        status.set_sources([clean_publisher(item) for item in mark_snippets
+                                            if clean_publisher(item)])
+                        search_step_reported = True
+                    elif not mark_snippets and not search_step_reported:
+                        # Первый проход уже поставил галочку: вторая строка
+                        # противоречила бы первой.
+                        status.add_done("progress_search_empty")
+                        search_step_reported = True
+                    await status.set_phase("progress_thinking", timed=True)
             log.info("[web-search] The model asked for a search, retrying once (snippets=%d, agent=%s, steps=%s).",
                      len(mark_snippets), mark_agent, mark_stats.get("steps"))
             try:
@@ -1673,11 +1705,19 @@ async def _handle_message_core(
             await bot._maybe_alert_gemini_exhausted()
         if status is not None:
             # Статус-пузырь не должен остаться висеть с «Думаю…» после ошибки.
-            await status.delete()
+            # Удаление пузыря — косметика: сообщение удалено, сеть упала, права
+            # нет — всё это не имеет права стоить человеку служебного ответа,
+            # который пишется сразу после (ревью 12.11.2026).
+            with contextlib.suppress(Exception):
+                await status.delete()
         await bot._safe_reply(message, bot._route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze, lang=bot._chat_lang(message.chat.id)))
     finally:
         if status is not None:
-            await status.stop()
+            # Индикатор «печатает» снимается в finally: исключение отсюда
+            # вылетело бы из обработчика уже после того, как ответ отправлен
+            # (ревью 12.11.2026).
+            with contextlib.suppress(Exception):
+                await status.stop()
 
 
 async def _process_raw_update(raw_update: dict) -> None:

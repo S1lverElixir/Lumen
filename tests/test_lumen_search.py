@@ -815,3 +815,32 @@ def test_search_marker_survives_preamble_and_repeats():
     assert lumen_search.strip_search_marker("Хм, [[SEARCH]]") == ""
     assert lumen_search.strip_search_marker("Вот [[SEARCH]] что ты просил написать") == "Вот что ты просил написать"
     assert lumen_search.strip_search_marker("[[См. также]] вот ссылка") == "[[См. также]] вот ссылка"
+
+def test_public_host_filter_blocks_metadata_and_internal_targets():
+    # Редирект DuckDuckGo и поле publisher приезжают из чужой выдачи: в живой
+    # выдаче встречались адрес метаданных и служебный хост с портом
+    # (ревью приватности 12.11.2026).
+    assert lumen_search.url_host_is_public("https://www.championat.ru/news/1")
+    assert not lumen_search.url_host_is_public("http://169.254.169.254/latest/meta-data")
+    assert not lumen_search.url_host_is_public("https://internal:8080/admin")
+    assert not lumen_search.url_host_is_public("http://localhost/x")
+    assert not lumen_search.url_host_is_public("http://127.0.0.1:9200/y")
+    assert lumen_search._unwrap_ddg_url(
+        "https://duckduckgo.com/l/?uddg=http%3A%2F%2F169.254.169.254%2Fm") == ""
+    assert lumen_search._unwrap_ddg_url(
+        "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fcbr.ru%2Fx") == "https://cbr.ru/x"
+
+
+def test_publisher_human_name_survives_the_host_filter():
+    # Проверка адресов не имеет права съедать человеческое имя издания:
+    # «Центральный Банк России» — не хост, а нормальный источник.
+    human = {"title": "T", "url": "https://news.google.com/rss/articles/xx",
+             "publisher": "Центральный Банк России"}
+    assert lumen_search.clean_publisher(human) == "Центральный Банк России"
+    bait = {"title": "T", "url": "http://169.254.169.254/latest/meta-data",
+            "publisher": "169.254.169.254"}
+    assert lumen_search.clean_publisher(bait) == ""
+    # Агрегатор без человеческого издателя остаётся агрегатором: фильтрация
+    # адресов не имеет права выдумывать источник, которого в выдаче нет.
+    aggregator = {"title": "T", "url": "https://bing.com/news?id=1", "publisher": "bing.com"}
+    assert lumen_search.clean_publisher(aggregator) == "bing.com"
