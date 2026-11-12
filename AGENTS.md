@@ -130,6 +130,9 @@ run); what was not verified; what the owner must check by hand (a smoke test aft
 or a routing change). If nothing is unverified or risky, say so in one line.
 
 ## Where things live
+- `lumen_agent.py` is the model-driven search loop and a producer of evidence only: the answering call
+  receives the gathered block as prompt text, never a tool transcript (measured 12.11.2026: both
+  Munito heads ignore `tool_calls`/`role:"tool"` messages sent without `tools`).
 - `bot.py` is the entry point and composition root (env, logging, Dispatcher, main) and imports
   hundreds of names from the `lumen_*.py` modules: a grep for a symbol hits `bot.py` first, the
   definition is in the module. `lumen_admin.py` holds the FastAPI app and the admin endpoints; the
@@ -156,11 +159,19 @@ Gemini is the unconditional reserve on every route where Munito answers.
   does both generation and edits, Pollinations (`sana`) is the reserve and only generates; the
   chain falls back by provider, not by model. A moderation refusal is terminal for the chain and
   still costs the person their personal slot.
-- Freshness: no Munito model has web search, so every provider also gets an external snippet block
+- Freshness: no Munito model has a built-in search engine, so `lumen_agent.py` hands the Munito head a
+  client-side `web_search` tool and executes it: the model writes the queries, sees the results and may
+  refine them, and the gathered block then goes to every provider as prompt text. Evidence never
+  travels to the answering call as a tool transcript — measured 12.11.2026 the heads ignore a transcript
+  sent without `tools` and answer from memory. The block itself is built by `lumen_search.py` from
+  three layers
   built by `lumen_search.py` from three layers — exact fact APIs (Wikipedia, crypto, FX, weather), dated news feeds and the general web (DuckDuckGo lite then its HTML endpoint, Bing RSS) — after the user's wording is cleaned into search forms; an optional keyed provider (Tavily/Brave/Exa) replaces the scraping layer. Without a key there is no reliable general engine: measured 11.11.2026, DuckDuckGo lite returned an anomaly page 8/8 and Brave/Ecosia/Qwant/Yandex/Startpage/SearxNG are all blocked. The order and merge rules are in
   `docs/ARCHITECTURE.md`. A model unsure about a post-cutoff fact may instead answer with the bare
-  marker `[[SEARCH]]`: it is intercepted before anything is shown and buys one searched retry, so
-  that exception must never reach the model-failure marks (mechanics in `docs/ARCHITECTURE.md`).
+  marker `[[SEARCH]]`: it is intercepted before anything is shown and buys one searched retry, which
+  goes through the same loop so the model writes those queries too, and that exception must never
+  reach the model-failure marks (mechanics in `docs/ARCHITECTURE.md`). Effort is derived per message
+  (`EFFORT_AUTO`, on by default) and also caps searches; non-empty `MUNITO_REASONING_EFFORT` pins it,
+  empty drops the field.
 - Limits are derived, not picked: a daily cap sits under the provider's real free-tier budget with
   headroom, and per-user caps follow the existing family (one for messages, one per heavy feature).
   The global cap is what protects a shared provider, so a reflexively small number is not safety.

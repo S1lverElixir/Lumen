@@ -96,6 +96,8 @@ class AgentTurnResult:
     """Что вынесено из агентного хода: источники, запросы, преамбулы, число поисков."""
 
     def __init__(self) -> None:
+        self.steps = 0
+        self.planning_ms = 0
         self.queries: list[str] = []
         self.snippets: list[dict] = []
         # Один и тот же источник две разные формулировки приносят дважды: считаем
@@ -279,11 +281,14 @@ async def run_search_turn(
         return result
 
     by_query: dict[str, list[dict]] = {}
-    steps = 0
     searches_left = max_searches
-    while steps < _MAX_STEPS and searches_left > 0:
+    while result.steps < _MAX_STEPS and searches_left > 0:
+        _plan_started = time.monotonic()
         message = await _plan_call(messages, model_id=model_id, effort=effort,
                                    deadline=deadline, chat_id=chat_id)
+        # Время планирования меряется отдельно: по нему видно, что фаза дорожает
+        # из-за модели, а не из-за источников (решение владельца 12.11.2026).
+        result.planning_ms += int((time.monotonic() - _plan_started) * 1000)
         if message is None:
             result.failed = True
             break
@@ -358,7 +363,7 @@ async def run_search_turn(
             "content": _tool_result_text(by_query.get(_norm_query(query), [])),
         } for call, query in planned)
 
-        steps += 1
+        result.steps += 1
         searches_left -= len(planned)
         result.searches += len(planned)
         result.snippets = list(result.by_url.values())
@@ -370,8 +375,9 @@ async def run_search_turn(
     # они удваивались бы с резервной веткой (ревью 12.11.2026).
 
     log.info(
-        "[agent] chat=%s model=%s steps=%d searches=%d queries=%d snippets=%d failed=%s",
-        chat_id, model_id, steps, result.searches, len(result.queries), len(result.snippets), result.failed,
+        "[agent] chat=%s model=%s steps=%d searches=%d queries=%d snippets=%d planning_ms=%d failed=%s",
+        chat_id, model_id, result.steps, result.searches, len(result.queries),
+        len(result.snippets), result.planning_ms, result.failed,
     )
     return result
 
