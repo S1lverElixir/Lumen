@@ -213,8 +213,8 @@ Gemini is the unconditional reserve on every route where Munito answers.
   new writer must honor that flag (audit A5-2, 28.10.2026).
 - `unittest.mock.patch` only replaces the name in the namespace that reads it: patch
   `lumen_router_config.X`, not `bot.X`.
-- With `core.autocrlf=true` and no `.gitattributes`, almost the whole working tree is CRLF
-  (two tracked files are not), so multi-line edits often fail to match because of the CR
+- With `core.autocrlf=true` and no `.gitattributes`, the working tree is CRLF throughout
+  (scanned 12.11.2026: no tracked file is LF-only), so multi-line edits often fail to match because of the CR
   character. Edit single lines, and never reflow a whole file to LF as a side effect. Source
   files are UTF-8 with Cyrillic, and `col_offset` in an AST is a byte offset: a script that
   patches by offset must work on bytes.

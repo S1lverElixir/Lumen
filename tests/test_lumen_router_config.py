@@ -820,6 +820,20 @@ def test_leading_and_horizon_signals_do_not_fire_on_ordinary_words():
     assert lumen_router_config.pick_reasoning_effort("huh????") != "xhigh"
 
 
+def test_quarantine_window_env_falls_back_instead_of_crashing(monkeypatch):
+    # Мусор в QUARANTINE_WINDOW_SEC не имеет права валить импорт модуля — а с ним
+    # и весь бот. С «int()» напрямую так и было: ValueError на старте
+    # (проверено 12.11.2026 отдельным процессом с QUARANTINE_WINDOW_SEC=abc).
+    monkeypatch.setenv("QUARANTINE_WINDOW_SEC", "abc")
+    assert lumen_router_config._quarantine_window_sec() == 900
+    monkeypatch.setenv("QUARANTINE_WINDOW_SEC", "5")
+    assert lumen_router_config._quarantine_window_sec() == 60, "пол окна обязан остаться"
+    monkeypatch.setenv("QUARANTINE_WINDOW_SEC", "120")
+    assert lumen_router_config._quarantine_window_sec() == 120
+    monkeypatch.delenv("QUARANTINE_WINDOW_SEC", raising=False)
+    assert lumen_router_config._quarantine_window_sec() == 900
+
+
 def test_pick_reasoning_effort_never_returns_unknown_level():
     # Неизвестный уровень = 400 от провайдера или молчаливое отсутствие поля.
     for text in ("", "?", "докажи", "а он точно не в клубе?", "x" * 5000):
