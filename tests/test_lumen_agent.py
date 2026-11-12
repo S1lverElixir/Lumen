@@ -6,26 +6,7 @@ import time
 
 import lumen_agent
 import lumen_router_config
-
-
-class _FakeStatus:
-    def __init__(self):
-        self.phases: list[tuple[str, dict]] = []
-        self.done: list[tuple[str, dict]] = []
-        self.actions: list[str] = []
-        self.sources: list[list[str]] = []
-
-    async def set_phase(self, key, *, timed=False, **kwargs):
-        self.phases.append((key, kwargs))
-
-    async def set_action(self, text, *, timed=True):
-        self.actions.append(text)
-
-    def add_done(self, key, **kwargs):
-        self.done.append((key, kwargs))
-
-    def set_sources(self, hosts):
-        self.sources.append(list(hosts))
+from tests.bot_test_helpers import _FakeStatus
 
 
 def _tool_calls_message(*queries, content=""):
@@ -97,7 +78,7 @@ def test_search_turn_uses_model_queries_not_user_words(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="а он точно не в клубе?", model_id="m-1",
+            chat_id=1, user_prompt="а он точно не в клубе?", clean_prompt="а он точно не в клубе?", model_id="m-1",
             effort="high", max_searches=2, status=status,
         )
 
@@ -108,9 +89,13 @@ def test_search_turn_uses_model_queries_not_user_words(monkeypatch):
     assert result.searches == 2
     assert len(result.snippets) == 2
     assert status.actions == ["Ищу актуальные данные."]
-    assert ("progress_search_query", {"query": "главный тренер сборной Беларуси"}) in status.phases
-    assert status.done == [("progress_search_done", {"count": 2})]
-    assert status.sources == [["example.org"]]
+    assert {"query": "главный тренер сборной Беларуси"} in status.phase_kwargs
+    # Закрытый этап печатает вызывающий код один раз на ответ: на каждом шаге
+    # получалось «нашёл 2» плюс «нашёл 4» в одном трейсе (ревью 12.11.2026).
+    assert status.done == []
+    # Источники и закрытый этап рисует вызывающий код: цикл их не дублирует.
+    assert status.sources == []
+    assert status.done == []
     payload = calls[0]["json"]
     assert payload["tools"][0]["function"]["name"] == "web_search"
     assert payload["tool_choice"] == "auto"
@@ -122,7 +107,7 @@ def test_search_turn_stops_when_model_declines_to_search(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="сколько будет 2+2", model_id="m-1", effort="low", max_searches=2,
+            chat_id=1, user_prompt="сколько будет 2+2", clean_prompt="сколько будет 2+2", model_id="m-1", effort="low", max_searches=2,
         )
 
     result = asyncio.run(scenario())
@@ -140,7 +125,7 @@ def test_search_turn_caps_steps_and_never_loops_forever(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="новости", model_id="m-1", effort="high", max_searches=9,
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1", effort="high", max_searches=9,
         )
 
     result = asyncio.run(scenario())
@@ -154,7 +139,7 @@ def test_search_turn_failure_is_not_fatal(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
         )
 
     result = asyncio.run(scenario())
@@ -168,7 +153,7 @@ def test_search_turn_without_budget_does_not_call_anyone(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
             deadline=time.monotonic() - 1.0,
         )
 
@@ -187,7 +172,7 @@ def test_search_turn_repeats_same_query_without_second_fetch(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="курс рубля", model_id="m-1", effort="high", max_searches=3,
+            chat_id=1, user_prompt="курс рубля", clean_prompt="курс рубля", model_id="m-1", effort="high", max_searches=3,
         )
 
     result = asyncio.run(scenario())
@@ -203,7 +188,7 @@ def test_planning_call_omits_unsupported_model(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="курс", model_id="google/gemma-4-12b", effort="medium", max_searches=1,
+            chat_id=1, user_prompt="курс", clean_prompt="курс", model_id="google/gemma-4-12b", effort="medium", max_searches=1,
         )
 
     result = asyncio.run(scenario())
@@ -219,7 +204,7 @@ def test_planning_call_sends_effort_and_headroom_timeout(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="ок", model_id="m-1", effort="xhigh", max_searches=1,
+            chat_id=1, user_prompt="ок", clean_prompt="ок", model_id="m-1", effort="xhigh", max_searches=1,
             deadline=time.monotonic() + 30.0,
         )
 
@@ -241,7 +226,7 @@ def test_preamble_is_scrubbed_and_truncated(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
             status=status,
         )
 
@@ -272,7 +257,7 @@ def test_tool_result_carries_the_untrusted_data_caveat(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
         )
 
     asyncio.run(scenario())
@@ -294,7 +279,7 @@ def test_empty_search_result_says_so_plainly(monkeypatch):
 
     async def scenario():
         return await lumen_agent.run_search_turn(
-            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
         )
 
     result = asyncio.run(scenario())

@@ -71,6 +71,7 @@ class StatusMessage:
         self._done: list[str] = []
         self._sources: list[str] = []
         self._phrase_key = ""
+        self._phrase_kwargs: dict[str, object] = {}
         self._literal = ""
         self._literal_timed = False
         self._timed = False
@@ -82,11 +83,12 @@ class StatusMessage:
         self._stopped = False
 
     @classmethod
-    async def start(cls, reply_to: Message, lang: str, key: str, *, timed: bool = False) -> "StatusMessage | None":
+    async def start(cls, reply_to: Message, lang: str, key: str, *, timed: bool = False,
+                    **kwargs: object) -> "StatusMessage | None":
         """Отправляет первую строку статуса; None — Telegram не принял сообщение."""
         import bot
         status = cls(message=reply_to, lang=lang)
-        status._set_phrase(key, timed=timed)
+        status._set_phrase(key, timed=timed, **kwargs)
         sent = await bot._tg_call(
             bot._answer_sender(reply_to), status._render(0), parse_mode=None,
             call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
@@ -115,10 +117,12 @@ class StatusMessage:
                 break
         self._sources = unique
 
-    async def set_phase(self, key: str, *, timed: bool = False) -> None:
-        """Смена текущей фразы с немедленной правкой, не дожидаясь тика."""
+    async def set_phase(self, key: str, *, timed: bool = False, **kwargs: object) -> None:
+        """Смена текущей фразы с немедленной правкой, не дожидаясь тика. kwargs —
+        подстановка в строку этапа: у Claude живой шаг называет то, что модель
+        делает сейчас, а не только род работы («Ищу в интернете: курс рубля»)."""
         import bot
-        self._set_phrase(key, timed=timed)
+        self._set_phrase(key, timed=timed, **kwargs)
         # Немедленная правка обязана учесться в общем бюджете чата (force).
         take_edit_slot(self._chat_id(), force=True)
         with contextlib.suppress(Exception):
@@ -155,11 +159,11 @@ class StatusMessage:
         await self.set_action(_lang_t(self.lang, key), timed=self._literal_timed)
 
     @classmethod
-    def from_message(cls, message: Message, lang: str, key: str) -> "StatusMessage":
+    def from_message(cls, message: Message, lang: str, key: str, **kwargs: object) -> "StatusMessage":
         """Статус поверх пузыря, который УЖЕ в чате (плейсхолдер стрима): новой
         отправки нет, иначе рядом встанут два «Думаю…» (замер 11.11.2026)."""
         status = cls(message=message, lang=lang)
-        status._set_phrase(key, timed=False)
+        status._set_phrase(key, timed=False, **kwargs)
         status._task = asyncio.create_task(status._tick())
         return status
 
@@ -202,7 +206,7 @@ class StatusMessage:
         lines.extend(self._done)
         if (self._phrase_key and not self._timed
                 and self._phrase_key not in ("progress_thinking", "progress_retry")):
-            lines.append("✓ " + _lang_t(self.lang, self._phrase_key))
+            lines.append("✓ " + _lang_t(self.lang, self._phrase_key, **self._phrase_kwargs))
         if self._sources:
             lines.extend("· " + host for host in self._sources)
         plain = "\n".join(lines)
@@ -228,10 +232,11 @@ class StatusMessage:
             return ""
         return "*✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought) + "*"
 
-    def _set_phrase(self, key: str, *, timed: bool) -> None:
+    def _set_phrase(self, key: str, *, timed: bool, **kwargs: object) -> None:
         if key == "progress_thinking" and self._thinking_started is None:
             self._thinking_started = time.monotonic()
         self._phrase_key = key
+        self._phrase_kwargs = kwargs
         self._literal = ""
         self._timed = timed
         self._phase_started = time.monotonic()
@@ -249,9 +254,10 @@ class StatusMessage:
             lines.append(line)
         elif self._timed:
             elapsed = max(0, int(time.monotonic() - self._phase_started))
-            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key, sec=elapsed))
+            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key, sec=elapsed,
+                                               **self._phrase_kwargs))
         else:
-            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key))
+            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key, **self._phrase_kwargs))
         return "\n".join(lines)
 
     async def _tick(self) -> None:

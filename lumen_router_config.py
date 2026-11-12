@@ -463,9 +463,13 @@ def _bump_effort(level: str, delta: int) -> str:
 
 
 def agent_max_searches(effort: str | None) -> int:
-    """Сколько поисков за ход разрешено при этом усилии (AGENT_MAX_SEARCH_STEPS
-    перекрывает, 0 выключает цикл целиком)."""
-    raw = (os.getenv("AGENT_MAX_SEARCH_STEPS", "") or "").strip()
+    """Сколько поисков за ход разрешено при этом усилии. None = автовыбор выключен
+    (EFFORT_AUTO=0), и цикл тогда выключается тоже: без усилия нет и обоснованного
+    потолка поиска, а гибрид «авто выключено, цикл работает» не замерян.
+    AGENT_MAX_SEARCHES перекрывает, 0 глушит цикл совсем."""
+    if not effort:
+        return 0
+    raw = (os.getenv("AGENT_MAX_SEARCHES", "") or "").strip()
     if raw:
         try:
             return max(0, int(raw))

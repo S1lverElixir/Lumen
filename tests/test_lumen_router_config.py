@@ -806,20 +806,20 @@ def test_munito_payload_extras_drops_field_for_unsupported_model(monkeypatch):
 
 
 @pytest.mark.parametrize(("effort", "expected"), [
-    ("low", 0), ("medium", 1), ("high", 2), ("xhigh", 2), (None, 1),
+    ("low", 0), ("medium", 1), ("high", 2), ("xhigh", 2), (None, 0),
 ])
 def test_agent_max_searches_follows_effort(monkeypatch, effort, expected):
-    monkeypatch.delenv("AGENT_MAX_SEARCH_STEPS", raising=False)
+    monkeypatch.delenv("AGENT_MAX_SEARCHES", raising=False)
     assert lumen_router_config.agent_max_searches(effort) == expected
 
 
 def test_agent_max_searches_env_override(monkeypatch):
     # Владелец обязан уметь глушить цикл поиска цифрой, без правки кода.
-    monkeypatch.setenv("AGENT_MAX_SEARCH_STEPS", "0")
+    monkeypatch.setenv("AGENT_MAX_SEARCHES", "0")
     assert lumen_router_config.agent_max_searches("xhigh") == 0
-    monkeypatch.setenv("AGENT_MAX_SEARCH_STEPS", "3")
+    monkeypatch.setenv("AGENT_MAX_SEARCHES", "3")
     assert lumen_router_config.agent_max_searches("medium") == 3
-    monkeypatch.setenv("AGENT_MAX_SEARCH_STEPS", "не число")
+    monkeypatch.setenv("AGENT_MAX_SEARCHES", "не число")
     assert lumen_router_config.agent_max_searches("medium") == 1
 
 

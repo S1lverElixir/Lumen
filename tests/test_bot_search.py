@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import bot
-from tests.bot_test_helpers import _run_core_capturing_prompt
+from tests.bot_test_helpers import _FakeStatus, _run_core_capturing_prompt
 
 _DEAD_SEARCH_QUOTA = {("gemini", "gemini-2.5-flash"), ("gemini", "gemini-2.5-flash-lite")}
 
@@ -154,31 +154,6 @@ def test_fresh_query_with_live_gemini_still_gets_external_snippets(rate_guard_se
     asyncio.run(bot._handle_message_core(message))
     assert "https://example.com/grounded" in captured["prompt"]
     bot.chat_state.pop(123, None)
-
-
-class _FakeStatus:
-    def __init__(self):
-        self.message = object()
-        self.done = []
-        self.phases = []
-        self.sources = []
-        self.stopped = False
-        self.deleted = False
-
-    def add_done(self, key, **kwargs):
-        self.done.append((key, kwargs))
-
-    def set_sources(self, hosts):
-        self.sources = list(hosts)
-
-    async def set_phase(self, key, *, timed=False):
-        self.phases.append((key, timed))
-
-    async def stop(self):
-        self.stopped = True
-
-    async def delete(self):
-        self.deleted = True
 
 
 def test_fresh_query_status_shows_search_then_thinking(rate_guard_setup, monkeypatch):

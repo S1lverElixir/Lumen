@@ -68,6 +68,48 @@ class _FakeExc(Exception):
         self.status_code = status_code
 
 
+class _FakeStatus:
+    """Запись того, что обработчик показал в живом пузыре: закрытые этапы, фазы с
+    подстановками, строки действия и источники. Один на все модульные тесты статуса,
+    чтобы правка StatusMessage не требовала правки трёх копий фейка."""
+
+    def __init__(self):
+        self.message = object()
+        self.started: tuple[str, bool] | None = None
+        self.done: list[tuple[str, dict]] = []
+        self.phases: list[tuple[str, bool]] = []
+        self.phase_kwargs: list[dict] = []
+        self.actions: list[str] = []
+        self.sources: list[str] = []
+        self.stopped = False
+        self.deleted = False
+
+    def add_done(self, key, **kwargs):
+        self.done.append((key, kwargs))
+
+    def set_sources(self, hosts):
+        self.sources = list(hosts)
+
+    async def set_phase(self, key, *, timed=False, **kwargs):
+        self.phases.append((key, timed))
+        self.phase_kwargs.append(kwargs)
+
+    async def set_action(self, text, *, timed=True):
+        self.actions.append(text)
+
+    async def mark_stage_done(self):
+        pass
+
+    async def finish(self):
+        self.stopped = True
+
+    async def stop(self):
+        self.stopped = True
+
+    async def delete(self):
+        self.deleted = True
+
+
 class _FakeStatusExc(Exception):
     def __init__(self, msg, status_code=None):
         super().__init__(msg)

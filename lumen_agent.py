@@ -11,7 +11,6 @@ import time
 from typing import Any
 
 from lumen_search import (
-    clean_publisher,
     fetch_web_snippets,
     format_snippets_for_prompt,
     web_search_max_results,
@@ -57,8 +56,15 @@ _MIN_STEP_BUDGET_SEC = 5.0
 # Преамбула («Ищу актуальные данные.») — строка статуса, а не ответ: один абзац
 # рассуждений занял бы пузырь целиком.
 _PREAMBLE_MAX_CHARS = 160
-# Потолок шагов поверх усилия: защита от модели, которая зацикливается на запросах.
+# Потолок шагов: страховка от модели, которая зацикливается на уточнениях. Лимит
+# поиска считается отдельно и в поисках, а не в шагах: один шаг с параллельными
+# tool_calls = 2-3 сети.
 _MAX_STEPS = 3
+
+# Потолок всей фазы сбора источников: планирующий вызов плюс один внешний поиск.
+# Фаза идёт ДО бюджета маршрута и раньше не была ограничена ничем, кроме собственной
+# пары таймаутов: замер 12.11.2026 — три шага съедали ~42 с до начала ответа.
+_STEP_PHASE_SEC = _STEP_CALL_TIMEOUT_SEC + 6.0  # 6 = дефолт WEB_SEARCH_TIMEOUT_SEC
 
 _IDENTITY_NAMES: tuple[str, ...] = ()
 
@@ -105,6 +111,14 @@ class AgentTurnResult:
         return bool(self.snippets)
 
 
+def evidence_phase_budget_sec(max_searches: int) -> float:
+    """Сколько секунд может занять вся фаза: на каждый запланированный поиск пара
+    «планирование + сеть», но не больше потолка шагов. Отдельная граница нужна
+    потому, что планирующие вызовы идут вне бюджета маршрута."""
+    per_step = _STEP_PHASE_SEC + _STEP_CALL_TIMEOUT_SEC
+    return float(max(_STEP_PHASE_SEC, min(max_searches, _MAX_STEPS) * per_step))
+
+
 def agent_turn_enabled() -> bool:
     """AGENT_TURN_ENABLED=0/false/off возвращает прежний один внешний поиск по словам
     человека. Выключатель, а не включатель: по умолчанию цикл работает."""
@@ -137,15 +151,20 @@ def _clean_preamble(text: str) -> str:
     модели) сюда не попадает намеренно: Claude показывает человеку короткий пересказ
     хода, а не рассуждение, и сырое рассуждение ломает персону и выдаёт английский
     в русском чате (замер 12.11.2026: reasoning у головы — 400+ символов на вопрос)."""
-    import bot
+    import lumen_security
     from lumen_formatting import _strip_provider_artifacts
 
     line = " ".join((text or "").split())
     if not line:
         return ""
-    with contextlib.suppress(Exception):
-        line = _strip_provider_artifacts(line)
-        line = bot._scrub_identity_leak(line, source="agent_preamble")
+    # Без contextlib.suppress: он прятал AttributeError на неверном имени фильтра, и
+    # преамбула «Я — Gemini 2.5 Pro…» уходила в пузырь как есть (ревью 12.11.2026).
+    line = _strip_provider_artifacts(line)
+    if lumen_security._detect_identity_leak(line):
+        line = lumen_security._scrub_identity_leak(line, source="agent_preamble")
+        if line == lumen_security._IDENTITY_LEAK_FALLBACK:
+            # Целая заглушка в строку этапа не просится: пустая строка честнее.
+            return ""
     line = _strip_identity_names(line)
     if line != " ".join((text or "").split()):
         # После вырезанного имени остаётся хвостовая пунктуация («:» следом за
@@ -213,25 +232,32 @@ async def _one_search(query: str, *, budget_sec: float, context: str) -> list[di
 
 
 async def run_search_turn(
-    *, chat_id: int, clean_prompt: str, model_id: str, effort: str | None, max_searches: int,
-    status: Any = None, deadline: float | None = None, history_meta: dict | None = None,
+    *, chat_id: int, user_prompt: str, clean_prompt: str, model_id: str, effort: str | None,
+    max_searches: int, status: Any = None, deadline: float | None = None,
+    history_meta: dict | None = None,
 ) -> AgentTurnResult:
     """Цикл «модель просит поиск — бот ищет — модель уточняет формулировку».
 
     Запросы пишет сама модель (так же у Claude: web_search вызывает она, а не
     классификатор по словам человека), поэтому «а кто сейчас тренер» превращается
     в два разных запроса вместо одного по сырой фразе. Финальный ответ модель
-    маршрута получает собранные сниппеты в промпте, а не transcript с tool_calls:
-    tools в ответном вызове не участвуют, поэтому сбой на планировании не может
-    оставить чат без ответа и не ломает резервную цепочку Gemini.
+    маршрута получает собранные сниппеты в промпте, а не transcript: замер
+    12.11.2026 показал, что transcript без поля tools обе головы игнорируют и
+    отвечают по памяти, поэтому пересылка transcript в ответный вызов запрещена.
+    max_searches ограничивает ЧИСЛО ПОИСКОВ: параллельные tool_calls одного шага
+    считаются каждым запросом, иначе «один шаг» превращался в три сети.
     """
     import bot
     result = AgentTurnResult()
     if max_searches <= 0:
         return result
+    plan_meta = dict(history_meta or {})
+    # Прошлые фото планировщику не нужны: он пишет запросы по тексту, а качаются
+    # они через прокси на каждый свежий вопрос (ревью 12.11.2026).
+    plan_meta["attach_past"] = False
     try:
         messages: list[dict] = await bot._build_openai_turn_messages(
-            chat_id, clean_prompt, model_id, history_meta=history_meta,
+            chat_id, user_prompt, model_id, history_meta=plan_meta,
         )
     except Exception as exc:
         log.warning("[agent] transcript build failed: %s", exc.__class__.__name__)
@@ -240,7 +266,8 @@ async def run_search_turn(
 
     by_query: dict[str, list[dict]] = {}
     steps = 0
-    while steps < min(max_searches, _MAX_STEPS):
+    searches_left = max_searches
+    while steps < _MAX_STEPS and searches_left > 0:
         message = await _plan_call(messages, model_id=model_id, effort=effort, deadline=deadline)
         if message is None:
             result.failed = True
@@ -249,7 +276,9 @@ async def run_search_turn(
         preamble = _clean_preamble(message.get("content") or "")
         if preamble and preamble not in result.preambles:
             result.preambles.append(preamble)
-            if status is not None:
+            # Одна правка под преамбулу на весь ход: вторая на том же шаге отнимает
+            # слот, который боевой стрим отдаёт живому набору текста.
+            if status is not None and len(result.preambles) == 1:
                 with contextlib.suppress(Exception):
                     await status.set_action(preamble, timed=False)
         if not calls:
@@ -261,7 +290,7 @@ async def run_search_turn(
             if call.get("id")
             for query in [_parse_query((call.get("function") or {}).get("arguments"))]
             if query
-        ]
+        ][:searches_left]
         if not planned:
             # Ни одного разобранного запроса: повторять бессмысленно, закрываем цикл.
             result.failed = True
@@ -315,19 +344,15 @@ async def run_search_turn(
         } for call, query in planned)
 
         steps += 1
+        searches_left -= len(planned)
         result.searches += len(planned)
         result.snippets = list(result.by_url.values())
-        if status is not None:
-            status.add_done("progress_search_done", count=len(result.snippets))
+        # Закрытый этап печатает один раз вызывающий код: накопительные строки на
+        # каждом шаге давали «нашёл 0» рядом с «нашёл 4» (ревью 12.11.2026).
 
     result.snippets = list(result.by_url.values())
-    if status is not None and result.snippets:
-        publishers: list[str] = []
-        for item in result.snippets:
-            name = clean_publisher(item)
-            if name and name not in publishers:
-                publishers.append(name)
-        status.set_sources(publishers)
+    # Источники и закрытый этап рисует вызывающий код один раз на ответ: здесь
+    # они удваивались бы с резервной веткой (ревью 12.11.2026).
 
     log.info(
         "[agent] chat=%s model=%s steps=%d searches=%d queries=%d snippets=%d failed=%s",

@@ -49,11 +49,16 @@ from lumen_media import (
     _msg_media_source,
     _youtube_summary_prompt,
 )
+from lumen_agent import evidence_trace
 from lumen_router_config import (
     _build_route,
+    _effort_auto_on,
     _looks_like_freshness_query,
     _looks_like_heavy_query,
     _looks_like_search_request,
+    agent_max_searches,
+    pick_reasoning_effort,
+    recent_corrections,
 )
 from lumen_search import (
     _SearchRequested,
@@ -140,6 +145,92 @@ def _wants_web_search(text: str, *, previous: str = "") -> bool:
     if _looks_like_freshness_query(text) or _looks_like_search_request(text):
         return True
     return bool(previous) and is_anaphoric_followup(text)
+
+
+def _munito_head(route: list[tuple[str, str]]) -> str | None:
+    """Первая Munito-модель маршрута, годная к инструментам: планирующий вызов
+    нужен только у неё (у Gemini свои серверные grounding-инструменты)."""
+    from lumen_router_config import _munito_model_supports
+
+    for provider, model_id in route:
+        if provider != "munito":
+            continue
+        return model_id if _munito_model_supports(model_id, "tools") else None
+    return None
+
+
+def _snippet_fetch_budget_sec(deadline: float | None) -> float:
+    """Бюджет одного внешнего поиска: свой таймаут, но не больше остатка бюджета
+    маршрута, а без него — остатка бюджета сообщения (прежний расчёт)."""
+    import bot
+
+    budget = web_search_timeout_sec()
+    if deadline is not None:
+        return min(budget, max(0.0, deadline - time.monotonic()))
+    remaining = bot._msg_remaining_sec()
+    if remaining is not None:
+        budget = min(budget, remaining)
+    return budget
+
+
+async def _gather_web_evidence(
+    *, chat_id: int, user_prompt: str, clean_prompt: str, previous: str,
+    route: list[tuple[str, str]], effort: str | None, status, deadline: float | None,
+    history_meta: dict | None,
+) -> tuple[list[dict], list[str], bool]:
+    """Свежие источники для одного сообщения: агентный цикл, под ним — прежний
+    один внешний поиск по словам человека.
+
+    Цикл даёт то, чего классификатор не даёт: запросы пишет сама модель, она
+    видит результаты и уточняет формулировку (замер 12.11.2026: на «а он точно не
+    в клубе?» голова выдаёт два отдельных запроса вместо сырой фразы). Пустой или
+    сорванный цикл не имеет права лишить ответа поиска — работает старая ветка.
+    Возвращает (сниппеты, запросы модели, работал ли цикл)."""
+    import bot
+    import lumen_agent
+    from lumen_router_config import agent_max_searches
+
+    if not web_search_is_enabled():
+        return [], [], False
+    queries: list[str] = []
+    # Потолок поисков считается от усилия; EFFORT_AUTO=0 даёт effort=None, и тогда
+    # цикл молчит целиком — ровно прежний один поиск по словам человека.
+    max_searches = agent_max_searches(effort)
+    head = _munito_head(route) if max_searches > 0 else None
+    if head is not None and lumen_agent.agent_turn_enabled():
+        turn = None
+        # deadline маршрута здесь ещё не выставлен (его считают перед маршрутом),
+        # поэтому фаза берёт собственный бюджет внутри бюджета сообщения: иначе
+        # планирующие вызовы шли вовсе без границы.
+        phase_deadline = deadline if deadline is not None else bot._deadline_within_message(
+            lumen_agent.evidence_phase_budget_sec(max_searches)
+        )
+        try:
+            turn = await lumen_agent.run_search_turn(
+                chat_id=chat_id, user_prompt=user_prompt, clean_prompt=clean_prompt,
+                model_id=head, effort=effort, max_searches=max_searches, status=status,
+                deadline=phase_deadline, history_meta=history_meta,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("[agent] search turn crashed, falling back to a plain fetch: %s", exc.__class__.__name__)
+        if turn is not None:
+            queries = list(turn.queries)
+            if turn.has_evidence:
+                return turn.snippets, queries, True
+
+    budget = _snippet_fetch_budget_sec(deadline)
+    snippets: list[dict] = []
+    if budget > 0:
+        try:
+            snippets = await fetch_web_snippets(
+                clean_prompt, timeout_sec=budget, max_results=web_search_max_results(),
+                context=previous,
+            )
+        except Exception as exc:
+            log.warning("[web-search] Snippet fetch failed, answering with a no-search note: %s", exc.__class__.__name__)
+    return snippets, queries, False
 
 
 def _initial_status(needs_youtube: bool, needs_website: bool, media_mime: str | None,
@@ -1142,6 +1233,16 @@ async def _handle_message_core(
     # «помнишь, мы вчера обсуждали» — вопрос к памяти чата, а не к вебу: из-за слова
     # «вчера» запускался поиск и ответ получал пометку «без интернета» (замер 11.11.2026).
     needs_freshness = _wants_web_search(clean_prompt, previous=_previous_user_text(state))
+    # Автовыбор усилия (Claude-style effort): EFFORT_AUTO=0 оставляет прежний
+    # плоский MUNITO_REASONING_EFFORT и прежнюю эвристику не-heavy у Gemini.
+    _history_log = state.get("history") or []
+    effort: str | None = None
+    if _effort_auto_on():
+        effort = pick_reasoning_effort(
+            clean_prompt, is_heavy=is_heavy, needs_freshness=needs_freshness,
+            corrections=recent_corrections(_history_log), history_len=len(_history_log),
+        )
+    max_searches = agent_max_searches(effort)
     route = _build_route(
         needs_youtube=needs_youtube, needs_website=needs_website,
         media_mime=media_mime, is_heavy=is_heavy, needs_freshness=needs_freshness,
@@ -1154,8 +1255,9 @@ async def _handle_message_core(
         else:
             route_shape.append([provider, 1])
     log.info(
-        '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s route=%s (%d)',
+        '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s effort=%s searches<=%d route=%s (%d)',
         message.chat.id, is_heavy, needs_freshness, needs_youtube, needs_website, media_mime,
+        effort or "auto-off", max_searches,
         " -> ".join(f"{p}:{n}" for p, n in route_shape), len(route),
     )
 
@@ -1214,33 +1316,31 @@ async def _handle_message_core(
     web_search_failed = False
     snippets_injected = False
     if search_will_run:
-        # Сниппеты DuckDuckGo едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
-        # Поиск идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный вопрос получит "занято").
-        # Статус-пузырь отправляется параллельно поиску, чтобы не добавлять круг к задержке.
-        search_budget = web_search_timeout_sec()
-        if route_deadline is not None:
-            search_budget = min(search_budget, max(0.0, route_deadline - time.monotonic()))
-        else:
-            remaining = bot._msg_remaining_sec()
-            if remaining is not None:
-                search_budget = min(search_budget, remaining)
-        snippets: list = []
-        if search_budget > 0:
-            try:
-                snippets = await fetch_web_snippets(
-                    clean_prompt, timeout_sec=search_budget, max_results=web_search_max_results(),
-                    context=_previous_user_text(state),
-                )
-            except Exception as exc:
-                log.warning("[web-search] Snippet fetch failed, answering with a no-search note: %s", exc.__class__.__name__)
+        # Сниппеты едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
+        # Сбор идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный
+        # вопрос получит "занято"). Статус-пузырь создаётся до первого этапа,
+        # чтобы строки цикла правили уже живой пузырь, а не висели в очереди.
+        status = await status_task if status_task is not None else None
+        snippets, model_queries, agent_used = await _gather_web_evidence(
+            chat_id=message.chat.id, user_prompt=ai_prompt, clean_prompt=clean_prompt,
+            previous=_previous_user_text(state), route=route, effort=effort, status=status,
+            # history_meta здесь ещё не собран (его строят ниже, с медиа-ссылками):
+            # прошлые фото цикл не тянет — attach_past выключен внутри.
+            deadline=route_deadline, history_meta=None,
+        )
         if snippets:
-            ai_prompt += format_snippets_for_prompt(snippets)
+            ai_prompt += format_snippets_for_prompt(snippets) + evidence_trace(model_queries)
             snippets_injected = True
         else:
             web_search_failed = True
-        status = await status_task if status_task is not None else None
+        # Чем принесены источники — циклом или прежним fetch: по этой строке в проде
+        # видно, работает ли надстройка и не ест ли она бюджет молча.
+        log.info("[web-search] chat=%s sources=%d agent=%s effort=%s",
+                 message.chat.id, len(snippets), agent_used, effort or "auto-off")
         if status is not None:
             if snippets:
+                # Один закрытый этап на ответ — нашёл ли источники цикл или прежний
+                # fetch: два «поискал · нашёл» в трейсе читались как ложь.
                 status.add_done("progress_search_done", count=len(snippets))
                 status.set_sources([clean_publisher(item) for item in snippets if clean_publisher(item)])
             else:
@@ -1343,7 +1443,7 @@ async def _handle_message_core(
                 media=gemini_media_list, media_filename=med_name,
                 youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
                 deadline=route_deadline, provenance=provenance, status=status,
-                history_text=history_text, history_meta=history_meta,
+                history_text=history_text, history_meta=history_meta, effort=effort,
             )
             answered_grounded = answered_with_live_search(provenance)
         except _SearchRequested as req:
@@ -1360,22 +1460,24 @@ async def _handle_message_core(
             elif status is not None and not snippets_injected:
                 await status.set_phase("progress_searching")
             mark_snippets: list = []
+            mark_queries: list[str] = []
+            mark_agent = False
             if not snippets_injected:
                 # Вопрос по определению свежий: дата нужна и этому проходу.
                 ai_prompt += "\n\n" + _fresh_date_context()
-                mark_budget = web_search_timeout_sec()
-                if route_deadline is not None:
-                    mark_budget = min(mark_budget, max(0.0, route_deadline - time.monotonic()))
-                if mark_budget > 0 and web_search_is_enabled():
-                    try:
-                        mark_snippets = await fetch_web_snippets(
-                            clean_prompt, timeout_sec=mark_budget, max_results=web_search_max_results(),
-                            context=_previous_user_text(state),
-                        )
-                    except Exception as exc:
-                        log.warning("[web-search] Search requested by the model failed: %s", exc.__class__.__name__)
+                # Модель сама попросила поиск: запросы пишет она же, а не берётся
+                # сырая фраза — иначе «[[SEARCH]]» искало бы по тем же словам, по
+                # которым модель уже сказала, что ответа не хватает.
+                try:
+                    mark_snippets, mark_queries, mark_agent = await _gather_web_evidence(
+                        chat_id=message.chat.id, user_prompt=ai_prompt, clean_prompt=clean_prompt,
+                        previous=_previous_user_text(state), route=route, effort=effort,
+                        status=status, deadline=route_deadline, history_meta=history_meta,
+                    )
+                except Exception as exc:
+                    log.warning("[web-search] Search requested by the model failed: %s", exc.__class__.__name__)
             if mark_snippets:
-                ai_prompt += format_snippets_for_prompt(mark_snippets)
+                ai_prompt += format_snippets_for_prompt(mark_snippets) + evidence_trace(mark_queries)
                 snippets_injected = True
                 # Сниппеты есть: пометка «без поиска» была бы ложью.
                 web_search_failed = False
@@ -1390,7 +1492,8 @@ async def _handle_message_core(
                 else:
                     status.add_done("progress_search_empty")
                 await status.set_phase("progress_thinking", timed=True)
-            log.info("[web-search] The model asked for a search, retrying once (snippets=%d).", len(mark_snippets))
+            log.info("[web-search] The model asked for a search, retrying once (snippets=%d, agent=%s).",
+                     len(mark_snippets), mark_agent)
             try:
                 # Стрим на втором проходе нужен: человек ждёт живого набора, а не
                 # мёртвого пузырька (allow_stream первого прохода тут ни при чём).
@@ -1399,7 +1502,7 @@ async def _handle_message_core(
                     media=gemini_media_list, media_filename=med_name,
                     youtube_url=youtube_url_to_analyze, allow_stream=not is_guest,
                     deadline=route_deadline, provenance=provenance, status=status,
-                    history_text=history_text, history_meta=history_meta,
+                    history_text=history_text, history_meta=history_meta, effort=effort,
                 )
                 answered_grounded = answered_with_live_search(provenance)
             except _SearchRequested:
@@ -1437,7 +1540,7 @@ async def _handle_message_core(
                         media=gemini_media_list, media_filename=med_name,
                         youtube_url=youtube_url_to_analyze, allow_stream=False,
                         deadline=route_deadline, provenance=provenance,
-                        history_text=history_text, history_meta=history_meta,
+                        history_text=history_text, history_meta=history_meta, effort=effort,
                     )
                     # Ретрай уже с найденными сниппетами: пометка «без поиска»
                     # была бы ложью (аудит 28.10.2026).
@@ -1471,7 +1574,7 @@ async def _handle_message_core(
                         message.chat.id, continued_prompt, route, message,
                         allow_stream=True, deadline=route_deadline,
                         provenance=provenance, history_text=continued_prompt,
-                        history_meta=history_meta,
+                        history_meta=history_meta, effort=effort,
                     )
                     web_search_failed = False
                 except Exception as exc:
