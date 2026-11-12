@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
+import ipaddress
 import json
 import logging
 import math
@@ -580,6 +581,30 @@ def _clean_text(raw: str, cap: int) -> str:
     return _WS_RE.sub(" ", text).strip()[:cap]
 
 
+def url_host_is_public(url: str) -> bool:
+    """Можно ли показать и отдать модели этот адрес как источник. Ревью
+    приватности 12.11.2026: цель редиректа DuckDuckGo и поле publisher приезжают
+    из чужой выдачи целиком, и в живом прогоне в пузырь и в промпт уходили
+    «http://169.254.169.254/latest/meta-data» и «https://internal:8080/admin» —
+    бот не ходит по этим адресам, но охотно показывает их человеку и советует
+    модели на них ссылаться. Служебные адреса, литералы IP, порты и креды — не
+    источники, а наживка."""
+    try:
+        parts = urllib.parse.urlparse((url or "").strip())
+    except ValueError:
+        return False
+    host = (parts.hostname or "").strip(".").lower()
+    if not host or parts.username or parts.password or parts.port:
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        pass
+    # Домен: обязана быть точка (отсекает «internal», «localhost», «169» без
+    # точек) и не быть служебного суффикса.
+    return "." in host and not host.endswith((".local", ".internal", ".lan", ".home.arpa"))
+
+
 def _unwrap_ddg_url(href: str) -> str:
     """Ссылки lite-выдачи идут через редирект //duckduckgo.com/l/?uddg=<url>: достаём целевой, мусор отсекаем."""
     href = (href or "").strip()
@@ -594,6 +619,10 @@ def _unwrap_ddg_url(href: str) -> str:
     except ValueError:
         return ""
     if parts.scheme not in ("http", "https") or not parts.netloc:
+        return ""
+    if not url_host_is_public(href):
+        # Разыменованный редирект безопаснее голой служебной ссылки: её хотя бы
+        # нельзя выдать за источник.
         return ""
     return href
 
@@ -1772,10 +1801,25 @@ _AGGREGATOR_HOSTS = ("bing.com", "duckduckgo.com", "google.com", "news.google.co
                      "www.bing.com", "in.bing.com", "routify-file-proxy")
 
 
+def _looks_like_host(value: str) -> bool:
+    """Значение похоже на адрес, а не на человеческое имя издания: без пробелов
+    и с точкой («cbr.ru», «169.254.169.254»). «Центральный Банк России» адресом
+    не считается и проверять его нечем."""
+    return bool(value) and " " not in value and "." in value
+
+
+def _public_host_or_empty(value: str) -> str:
+    """Хост обязан быть публичным адресом: служебные IP (169.254.169.254),
+    «internal», localhost, порты и креды — это не источник, а наживка для
+    человека и для модели (ревью приватности 12.11.2026)."""
+    return value if url_host_is_public("https://" + value) else ""
+
+
 def clean_publisher(item: dict) -> str:
     """Имя источника для показанных списков: в выдаче Bing издателем приезжает и
     голый URL («https://www.championat.ru/»), и сам агрегатор («bing.com») —
-    в живом ответе 11.11.2026 это читалось как мусор вместо источников."""
+    в живом ответе 11.11.2026 это читалось как мусор вместо источников.
+    Человеческое имя издания остаётся как есть, адрес обязан быть публичным."""
     value = (item.get("publisher") or "").strip()
     if value.startswith(("http://", "https://", "www.")) or "/" in value:
         value = urllib.parse.urlparse(value if "//" in value else "https://" + value).netloc
@@ -1783,7 +1827,7 @@ def clean_publisher(item: dict) -> str:
     if not value or any(value == host or value.endswith("." + host) for host in _AGGREGATOR_HOSTS):
         # Агрегатор вместо издателя — берём хост самой ссылки.
         value = urllib.parse.urlparse(item.get("url") or "").netloc.removeprefix("www.").strip()
-    return value
+    return _public_host_or_empty(value) if _looks_like_host(value) else value
 
 
 def _source_label(item: dict) -> str:

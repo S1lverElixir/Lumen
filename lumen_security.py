@@ -104,18 +104,49 @@ _IDENTITY_BASED_ON_RE = re.compile(
     rf"\bоснован\w*\s+на\s+{_LEAK_BRAND_TOKENS}\b"
     rf"|\bbuilt\s+on\s+{_LEAK_BRAND_TOKENS}\b"
     rf"|\bpowered\s+by\s+{_LEAK_BRAND_TOKENS}\b"
-    rf"|\bbased\s+on\s+{_LEAK_BRAND_TOKENS}\b",
+    rf"|\bbased\s+on\s+{_LEAK_BRAND_TOKENS}\b"
+    # «I am running on gemini-2.5-flash», «we run on OpenAI»: по-русски «работаю
+    # на» уже ловилось, по-английски — нет (ревью приватности 12.11.2026).
+    # Требование первого лица в том же предложении остаётся: «The demo runs on
+    # Google hardware» — честный рассказ о чужом стеке, а не самоопределение.
+    rf"|\b(?:running|run|runs)\s+on\s+(?:the\s+)?(?:model\s+)?{_LEAK_BRAND_TOKENS}\b"
+    # То же по-русски в любой форме: «мы работаем на OpenAI», «я работал на
+    # Gemini» (ревью приватности 12.11.2026). Узкий «работаю на» выше оставлен
+    # как есть, а сюда форма попала под защитой первого лица: «приложение
+    # работает на Google Cloud» — честный рассказ о чужом стеке.
+    rf"|\bработ\w*\s+на\s+(?:базе\s+)?{_LEAK_BRAND_TOKENS}\b",
     re.IGNORECASE,
 )
-_FIRST_PERSON_RE = re.compile(r"\b(я|меня|мне|мной|мною|i|me|my)\b", re.IGNORECASE)
+_FIRST_PERSON_RE = re.compile(
+    # Множественное число обязательно: «мы работаем на OpenAI» — то же
+    # самоопределение, что и «I run on OpenAI» (ревью приватности 12.11.2026).
+    r"\b(я|мы|меня|мне|мной|мною|нас|нам|нами|i|we|me|my|our)\b",
+    re.IGNORECASE,
+)
+# «My system prompt is: …» и «мой системный промпт запрещает …» — выдача
+# собственной инструкции, а не объяснение жанра: притяжательное слово
+# обязательно. Дыра стала видна на агентском слое: модель, которой показывают
+# инструмент и чужие сниппеты, в живом прогоне пересказывала промпт (12.11.2026).
+_PROMPT_REVEAL_RE = re.compile(
+    r"\b(?:my|our)\s+(?:hidden\s+)?system\s+prompt\b"
+    r"|\bмо[яийугв]\s+системн\w*\s+промпт"
+    r"|\bнаш\s+системн\w*\s+промпт",
+    re.IGNORECASE,
+)
 _SENTENCE_SPLIT_RE = re.compile(r"[.!?…\n]+")
 
 # Точные ID моделей ловим как отдельные токены, а не подстрокой: слаг внутри
-# более длинного слова ("gemini-3.8-flashback") утечкой не считаем.
+# более длинного слова ("gemini-3.8-flashback") утечкой не считаем. Прежний класс
+#([\w/:.\-]) после id отбрасывал и обычную пунктуацию конца фразы, поэтому
+# «I work on gemini-2.5-flash.» и «Модель gemini-2.5-flash.» фильтром не ловились
+# вовсе (ревью приватности 12.11.2026). Отказываем только в продолжении id
+# (буква, цифра, дефис), в пути или адресе («/gemini-2.5-flash/model»,
+# «openai.com/gpt-4o») и в расширении файла («gemini-2.5-flash.ru»): там это не
+# самоопределение, а часть ссылки.
 _LEAK_LITERAL_RE = re.compile(
     r"(?<![\w/:.\-])(?:" + "|".join(
         re.escape(lit) for lit in sorted(_LEAK_LITERAL_STRINGS, key=len, reverse=True) if lit
-    ) + r")(?![\w/:.\-])",
+    ) + r")(?![\w\-]|\.\w|[/:])",
     re.IGNORECASE,
 ) if _LEAK_LITERAL_STRINGS else None
 
@@ -163,6 +194,12 @@ def _detect_identity_leak(text: str) -> bool:
         return True
     for sentence in _SENTENCE_SPLIT_RE.split(text):
         if _IDENTITY_BASED_ON_RE.search(sentence) and _FIRST_PERSON_RE.search(sentence):
+            return True
+        # Пересказ собственного промпта: притяжательное («my/mой», «our/наш»)
+        # уже входит в шаблон, поэтому отдельного первого лица не требует. Без
+        # этого «Мой системный промпт запрещает…» и «Вот наш системный промпт:»
+        # фильтром не ловились (ревью приватности 12.11.2026).
+        if _PROMPT_REVEAL_RE.search(sentence):
             return True
     return False
 
@@ -518,7 +555,8 @@ def _polished_prefix_len(text: str, index: int, *, source: str) -> int:
 def _leak_spans(text: str) -> list[tuple[int, int]]:
     """Диапазоны символов, где нашлась утечка или эхо инструкции."""
     spans: list[tuple[int, int]] = []
-    for pattern in (_LEAK_LITERAL_RE, _IDENTITY_LEAK_RE, _INJECTED_PAYLOAD_ECHO_RE, _IDENTITY_BASED_ON_RE):
+    for pattern in (_LEAK_LITERAL_RE, _IDENTITY_LEAK_RE, _INJECTED_PAYLOAD_ECHO_RE,
+                    _IDENTITY_BASED_ON_RE, _PROMPT_REVEAL_RE):
         if pattern is None:
             continue
         for m in pattern.finditer(text):

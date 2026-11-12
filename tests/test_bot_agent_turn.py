@@ -463,3 +463,129 @@ def test_loop_metrics_reach_the_devtrace(rate_guard_setup, monkeypatch, tmp_path
     assert flags["agent_planning_ms"] == 700
     assert flags["effort"] in ("medium", "high")
     bot.chat_state.pop(123, None)
+
+def test_search_marker_after_evidence_retries_and_reports_one_step(rate_guard_setup, monkeypatch):
+    # Регрессия 12.11.2026: первый проход уже принёс источники, модель всё равно
+    # ответила [[SEARCH]]. mark_stats связывалась только внутри ветки «источников
+    # ещё нет», поэтому второй проход падал в служебную ошибку, а пузырь получал
+    # две противоречивые строки («нашёл 1» и «ничего не нашёл»).
+    import lumen_search
+    from types import SimpleNamespace
+
+    message = rate_guard_setup()
+    message.text = "когда вышла Fable 5.2?"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    fake_status = _FakeStatus()
+    prompts: list[str] = []
+    passes = {"n": 0}
+
+    async def fake_start(reply_to, lang, key, *, timed=False, **kwargs):
+        fake_status.started = (key, timed)
+        return fake_status
+
+    async def fake_turn(**kw):
+        return _turn(queries=["Fable 5.2 релиз дата"], snippets=[
+            {"title": "Релиз", "url": "https://example.org/r", "snippet": "3 ноября 2026",
+             "publisher": "example.org"}])
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        prompts.append(ai_prompt)
+        passes["n"] += 1
+        if passes["n"] == 1:
+            raise lumen_search._SearchRequested(None)
+        return "Fable 5.2 вышла 3 ноября 2026", False
+
+    monkeypatch.setattr("lumen_message_core.StatusMessage", SimpleNamespace(start=fake_start))
+    monkeypatch.setattr(lumen_agent, "run_search_turn", fake_turn)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+
+    assert passes["n"] == 2, "ретрай после маркера обязан состояться"
+    assert fake_status.done.count(("progress_search_done", {"count": 1})) == 1, fake_status.done
+    assert ("progress_search_empty", {}) not in fake_status.done, fake_status.done
+    assert "[[SEARCH]]" not in prompts[1]
+    bot.chat_state.pop(123, None)
+
+
+def test_exploding_status_object_does_not_cost_the_answer(rate_guard_setup, monkeypatch):
+    # Пузырь — украшение ответа: правка статуса не имеет права оставить человека
+    # без текста (ревью 12.11.2026: вызовы статуса в message_core шли без suppress).
+    from types import SimpleNamespace
+
+    class _Boom:
+        message = object()
+
+        def add_done(self, key, **kwargs):
+            raise RuntimeError("status exploded")
+
+        def set_sources(self, names):
+            raise RuntimeError("status exploded")
+
+        async def set_phase(self, key, **kwargs):
+            raise RuntimeError("status exploded")
+
+        async def set_action(self, text, **kwargs):
+            raise RuntimeError("status exploded")
+
+        async def mark_stage_done(self):
+            raise RuntimeError("status exploded")
+
+        async def delete(self):
+            raise RuntimeError("status exploded")
+
+        async def stop(self):
+            raise RuntimeError("status exploded")
+
+    message = rate_guard_setup()
+    message.text = "кто сейчас главный тренер сборной Беларуси?"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    passes = {"n": 0}
+
+    async def fake_start(reply_to, lang, key, *, timed=False, **kwargs):
+        return _Boom()
+
+    async def fake_turn(**kw):
+        return _turn(queries=["тренер сборной Беларуси"], snippets=[
+            {"title": "Тренер", "url": "https://example.org/a", "snippet": "назначен",
+             "publisher": "example.org"}])
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        passes["n"] += 1
+        assert "Тренер" in ai_prompt or "example.org" in ai_prompt, "источники обязаны доехать в промпте"
+        return "постановили Штейнер", False
+
+    monkeypatch.setattr("lumen_message_core.StatusMessage", SimpleNamespace(start=fake_start))
+    monkeypatch.setattr(lumen_agent, "run_search_turn", fake_turn)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+
+    assert passes["n"] == 1, "обработчик обязан дойти до ответа, а не упасть на статусе"
+    bot.chat_state.pop(123, None)
+
+
+def test_spent_daily_search_budget_does_not_spend_planning_calls(rate_guard_setup, monkeypatch):
+    # Потолок обращений исчерпан: цикл всё равно ничего не найдёт, но успевает
+    # извести до трёх планирующих вызовов модели. Ревью приватности 12.11.2026.
+    message = rate_guard_setup()
+    message.text = "какая ключевая ставка ЦБ России сегодня?"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    monkeypatch.setattr("lumen_message_core.search_daily_budget_left", lambda: 0)
+    seen = {"loop": 0, "fetch": 0}
+
+    async def fake_turn(**kw):
+        seen["loop"] += 1
+        return _turn(queries=["ключевая ставка ЦБ"])
+
+    async def fake_fetch(query, **kw):
+        seen["fetch"] += 1
+        return []
+
+    monkeypatch.setattr(lumen_agent, "run_search_turn", fake_turn)
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    _run_core(message, monkeypatch)
+
+    assert seen["loop"] == 0, "при нулевом бюджете планировать не за чем"
+    # Один fetch обязателен (прежняя ветка), второй возможен на пост-хок ретрае
+    # свежести: цикл тут ни при чём, важны ноль планирующих вызовов.
+    assert seen["fetch"] >= 1, "прежний один поиск остаётся и честно вернёт пустоту"
+    bot.chat_state.pop(123, None)
