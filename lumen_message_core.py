@@ -1295,12 +1295,14 @@ async def _handle_message_core(
     )
     search_will_run = need_external_search and web_search_is_enabled()
     # Живой статус (как в Claude): этапы в одном сообщении, которое потом становится
-    # ответом. Только личка и только запросы с реальным ранним этапом (поиск/медиа/
-    # ссылка): для обычного текста пузырь создаст сам стрим, не тормозя старт модели.
+    # ответом. Личка и группы — решение владельца 12.11.2026: претензии по слабому
+    # поиску пришли скриншотами из группы, и без пузыря там не видно ровно того, ради
+    # чего цикл и делался. Гостям тишина: их ответ уходит через answerGuestQuery, где
+    # правок не делают. Ранний этап обязателен: обычный текст пузырём не тормозим.
     status: StatusMessage | None = None
     status_task: asyncio.Task | None = None
     early_status = search_will_run or bool(media_mime) or needs_website or needs_youtube
-    if is_private and not is_guest and early_status:
+    if not is_guest and early_status:
         status_key, status_timed = _initial_status(needs_youtube, needs_website, media_mime, search_will_run)
         status_task = asyncio.create_task(
             StatusMessage.start(message, bot._chat_lang(message.chat.id), status_key, timed=status_timed)
@@ -1532,7 +1534,11 @@ async def _handle_message_core(
                 log.warning("[web-search] Post-hoc snippet fetch failed: %s", exc.__class__.__name__)
             if retry_snippets:
                 log.info("[web-search] Retrying route once with fresh snippets (first answer had no live search).")
-                ai_prompt += format_snippets_for_prompt(retry_snippets)
+                # Здесь повторяется прежним поиском по сырой фразе: запросы модели
+                # уже не дали ничего, а формулировка человека — другая форма того же
+                # вопроса, и иногда именно она находит источник. О ней модель тоже
+                # должна знать, иначе «я искал» сошлётся не на то, что искалось.
+                ai_prompt += format_snippets_for_prompt(retry_snippets) + evidence_trace([clean_prompt])
                 snippets_injected = True
                 try:
                     ans, reply_already_sent = await bot._run_route(

@@ -182,6 +182,7 @@ def _tool_result_text(snippets: list[dict]) -> str:
 
 async def _plan_call(
     messages: list[dict], *, model_id: str, effort: str | None, deadline: float | None,
+    chat_id: Any = None,
 ) -> dict | None:
     """Один планирующий вызов с инструментом. None — на любом сбое: цикл надстройка,
     его падение не имеет права стоить человеку ответ."""
@@ -202,6 +203,7 @@ async def _plan_call(
         **_munito_payload_extras(effort, model_id),
     }
     timeout = min(_STEP_CALL_TIMEOUT_SEC, remaining) if remaining is not None else _STEP_CALL_TIMEOUT_SEC
+    bot._record_stats_event("model_attempts")
     try:
         resp = await bot._munito_request(
             "chat/completions", "POST", json_body=payload,
@@ -210,11 +212,23 @@ async def _plan_call(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        # Планирование не наказываем карантином (модель ничего не ответила плохого),
+        # но попытка и исход видны в /stats: иначе «Попыток к моделям» меньше, чем
+        # реально ушло запросов (решение владельца 12.11.2026).
         log.warning("[agent] planning call failed (%s): %s", model_id, exc.__class__.__name__)
+        bot._record_stats_event("model_failures")
         return None
     choices = resp.get("choices") or []
     if not choices:
+        bot._record_stats_event("model_failures")
         return None
+    from lumen_routes import _log_llm_usage, _usage_from_openai_response
+
+    _pt, _ct, _tt = _usage_from_openai_response(resp)
+    # В квоту ответа планировщик не пишется (он не ответ), но его токены
+    # логируются: иначе суточный расход провайдера не сходится с [usage].
+    _log_llm_usage(chat_id=chat_id, provider="munito", model_id=model_id,
+                   prompt=_pt, completion=_ct, total=_tt)
     return (choices[0] or {}).get("message") or None
 
 
@@ -268,7 +282,8 @@ async def run_search_turn(
     steps = 0
     searches_left = max_searches
     while steps < _MAX_STEPS and searches_left > 0:
-        message = await _plan_call(messages, model_id=model_id, effort=effort, deadline=deadline)
+        message = await _plan_call(messages, model_id=model_id, effort=effort,
+                                   deadline=deadline, chat_id=chat_id)
         if message is None:
             result.failed = True
             break

@@ -813,6 +813,21 @@ def test_agent_max_searches_follows_effort(monkeypatch, effort, expected):
     assert lumen_router_config.agent_max_searches(effort) == expected
 
 
+def test_agent_searches_table_names_searches_not_steps():
+    # Револьвер ревью: лимит обязан считаться поисками. Если в таблице снова
+    # окажутся шаги, одна строка с тремя tool_calls израсходует «один поиск».
+    assert lumen_router_config._AGENT_SEARCHES_BY_EFFORT["medium"] == 1
+    assert "AGENT_MAX_SEARCHES" in lumen_router_config.agent_max_searches.__doc__
+
+
+def test_unknown_effort_pin_is_warned_but_sent(monkeypatch, caplog):
+    # Провайдер не отклоняет мусорное значение, поэтому хотя бы видно в логе.
+    monkeypatch.setenv("MUNITO_REASONING_EFFORT", "none")
+    with caplog.at_level("WARNING", logger="bot"):
+        assert lumen_router_config._munito_payload_extras("high") == {"reasoning_effort": "none"}
+    assert "not in the provider scale" in caplog.text
+
+
 def test_agent_max_searches_env_override(monkeypatch):
     # Владелец обязан уметь глушить цикл поиска цифрой, без правки кода.
     monkeypatch.setenv("AGENT_MAX_SEARCHES", "0")

@@ -316,20 +316,28 @@ def _munito_route() -> list[tuple[str, str]]:
 # qwen3.8-27b при xhigh ответил неверно — выше high без замера не поднимаемся.
 EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
 
-# Возможности моделей по параметрам запроса — только по живому замеру 12.11.2026
-# (gemma-4-12b и pplx-decider-v1.2 на reasoning_effort отвечают 400
-# "'reasoning_effort' is not supported", четыре текстовые головы принимают
-# minimal..xhigh и отдают tool_calls и в стриме, и без него). Модель без записи
-# считается неподдерживающей: лучше потерять усилие, чем получить 400 на каждый
-# запрос. Тест на полноте записи держит список в порядке.
+# Возможности моделей по параметрам запроса — по живому замеру 12.11.2026, по
+# одному вызову на пару (модель, параметр): gemma-4-12b принимает tools (отдала
+# корректный tool_calls) и отвечает 400 на reasoning_effort; pplx-decider-v1.2
+# отвечает 400 и на tools, и на reasoning_effort; четыре текстовые головы
+# принимают minimal..xhigh и отдают tool_calls и в стриме, и без него. Модель вне
+# каталога считается поддерживающей прежний набор: молча потерять усилие или tools
+# для новой головы хуже, чем один 400, который виден в логе и в резервной ветке.
 _MUNITO_CAPS: dict[str, dict[str, bool]] = {
     "deepseek-ai/deepseek-v4.1-flash-1017": {"reasoning_effort": True, "tools": True},
     "deepseek-ai/deepseek-v4-flash": {"reasoning_effort": True, "tools": True},
     "zai-org/glm-5.3-flash": {"reasoning_effort": True, "tools": True},
     "qwen/qwen3.8-27b": {"reasoning_effort": True, "tools": True},
-    "google/gemma-4-12b": {"reasoning_effort": False},
-    "perplexity-ai/pplx-decider-v1.2": {"reasoning_effort": False},
+    "google/gemma-4-12b": {"reasoning_effort": False, "tools": True},
+    "perplexity-ai/pplx-decider-v1.2": {"reasoning_effort": False, "tools": False},
 }
+
+
+def _known_effort(value: str) -> bool:
+    """Значение усилия из шкалы провайдера. Munito отвечает 200 и на «none», и на
+    опечатку (замер 12.11.2026), то есть кривое значение молча ничего не меняет —
+    его видно только в логе."""
+    return value in EFFORT_LEVELS
 
 
 def _munito_model_supports(model_id: str | None, param: str) -> bool:
@@ -376,10 +384,11 @@ _EFFORT_LONGHORIZON_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Сколько поисков разрешаем за один ход на каждом уровне (Claude: effort решает,
-# сколько работы модель делает, а web_search ограничен max_uses). Шаг поиска —
-# это отдельный вызов модели плюс внешний запрос, поэтому потолок жёсткий.
-_AGENT_SEARCH_STEPS_BY_EFFORT: dict[str, int] = {
+# Сколько ПОИСКОВ разрешаем за один ход на каждом уровне (Claude: effort решает,
+# сколько работы модель делает, а web_search ограничен max_uses). Каждый поиск —
+# это отдельный планирующий вызов плюс внешняя сеть, поэтому потолок жёсткий, а
+# шаги цикла считаются отдельно (lumen_agent._MAX_STEPS).
+_AGENT_SEARCHES_BY_EFFORT: dict[str, int] = {
     "minimal": 0, "low": 0, "medium": 1, "high": 2, "xhigh": 2,
 }
 
@@ -475,7 +484,7 @@ def agent_max_searches(effort: str | None) -> int:
             return max(0, int(raw))
         except ValueError:
             pass
-    return _AGENT_SEARCH_STEPS_BY_EFFORT.get(effort or "medium", 0)
+    return _AGENT_SEARCHES_BY_EFFORT.get(effort, 0)
 
 
 def gemini_thinking_for(model_id: str, effort: str | None) -> tuple[str, Any]:
@@ -515,6 +524,11 @@ def _munito_payload_extras(effort: str | None = None, model_id: str | None = Non
     chosen = raw.strip() if raw is not None else (effort or "low").strip()
     if not chosen:
         return {}
+    if not _known_effort(chosen):
+        # Munito принимает любое значение с HTTP 200 (замер 12.11.2026: «none» и
+        # опечатка проходят), то есть кривой пин выглядел бы как работающая галочка.
+        log.warning("[effort] Unknown reasoning_effort %r is not in the provider scale,"
+                    " the field is sent as is — check MUNITO_REASONING_EFFORT", chosen)
     if not _munito_model_supports(model_id, "reasoning_effort"):
         return {}
     return {"reasoning_effort": chosen}

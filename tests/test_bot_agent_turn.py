@@ -11,6 +11,8 @@ test_bot_agent_turn.py — сквозные тесты агентного ход
     pytest tests/test_bot_agent_turn.py -v
 """
 import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 import bot
@@ -133,6 +135,9 @@ def test_empty_search_loop_still_runs_the_plain_fetch(rate_guard_setup, monkeypa
 def test_kill_switch_returns_to_single_fetch(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "погоде сегодня в Минске верить?"
+    # Без головы Munito цикл не запустился бы и без выключателя: ключ обязателен,
+    # иначе assert «цикл не звали» тривиален.
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     seen = {"loop": 0, "fetch": 0}
 
     async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
@@ -159,6 +164,7 @@ def test_search_disabled_switch_skips_the_loop_too(rate_guard_setup, monkeypatch
     # планирующие вызовы, когда внешний поиск запрещён владельцем.
     message = rate_guard_setup()
     message.text = "кто сейчас главный тренер сборной"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     seen = {"loop": 0}
 
     async def fake_turn(**kwargs):
@@ -188,15 +194,28 @@ def test_effort_of_the_message_reaches_the_route(rate_guard_setup, monkeypatch, 
     bot.chat_state.pop(123, None)
 
 
-def test_effort_auto_off_passes_none(rate_guard_setup, monkeypatch):
+def test_effort_auto_off_passes_none_and_disables_the_loop(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "спроектируй архитектуру бота"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setenv("EFFORT_AUTO", "0")
+    seen = {"loop": 0}
+
+    async def fake_turn(**kwargs):
+        seen["loop"] += 1
+        return _turn(snippets=[{"url": "https://example.org/x"}])
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
+        raise AssertionError("без автовыбора поиск запускается прежним путём, а не циклом")
+
     captured = {}
+    monkeypatch.setattr(lumen_agent, "run_search_turn", fake_turn)
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
     _run_core(message, monkeypatch, captured=captured)
+    # Это не свежий вопрос, поэтому поиска нет вовсе; главное — effort=None и
+    # цикл не звался: EFFORT_AUTO=0 обязан возвращать прежнюю плоскую схему.
     assert captured["kwargs"]["effort"] is None
-    # И цикл тогда не запускается: потолок поисков считается от плоского дефолта.
-    assert captured["kwargs"]["effort"] is None
+    assert seen["loop"] == 0
     bot.chat_state.pop(123, None)
 
 
@@ -204,6 +223,7 @@ def test_gemini_only_route_does_not_run_munito_loop(rate_guard_setup, monkeypatc
     # Ссылку и YouTube читает только Gemini: планирующий вызов Munito там нечем
     # заменить, и цикл не имеет права его подставлять.
     message = rate_guard_setup()
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     message.text = "расскажи про https://example.org/page что там нового"
     seen = {"loop": 0}
 
@@ -330,3 +350,86 @@ def test_search_loop_failure_closes_the_step_once(rate_guard_setup, monkeypatch)
     assert seen["fetch"] == [message.text]
     assert "https://example.org/1" in captured["prompt"]
     bot.chat_state.pop(123, None)
+
+
+def test_group_chat_gets_the_agent_status_bubble(rate_guard_setup, monkeypatch):
+    # Решение владельца 12.11.2026: претензии по слабому поиску пришли скриншотами
+    # из группы, поэтому живой этап обязан быть и там, где чат не личный.
+    message = rate_guard_setup()
+    message.chat = SimpleNamespace(id=123, type=bot.ChatType.GROUP)
+    message.text = "кто сейчас главный тренер сборной Беларуси?"
+    # Фоновое сообщение группы бот не отвечает вовсе: адресованность нужна,
+    # иначе тест мерял бы ранний выход, а не пузырь.
+    monkeypatch.setattr(bot, "message_mentions_bot", lambda msg: True)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    fake_status = _FakeStatus()
+
+    async def fake_start(reply_to, lang, key, *, timed=False, **kwargs):
+        fake_status.started = (key, timed)
+        return fake_status
+
+    async def fake_turn(**kwargs):
+        await fake_status.set_phase("progress_search_query", query="тренер сборной")
+        return _turn(queries=["тренер сборной"],
+                     snippets=[{"url": "https://a.by/1", "publisher": "a.by"}])
+
+    monkeypatch.setattr("lumen_message_core.StatusMessage", SimpleNamespace(start=fake_start))
+    monkeypatch.setattr(lumen_agent, "run_search_turn", fake_turn)
+    captured = {}
+    _run_core(message, monkeypatch, captured=captured)
+
+    assert fake_status.started == ("progress_searching", False)
+    assert {"query": "тренер сборной"} in fake_status.phase_kwargs
+    assert captured["kwargs"]["status"] is fake_status
+    bot.chat_state.pop(123, None)
+
+
+def test_guest_does_not_get_the_bubble(rate_guard_setup, monkeypatch):
+    # Гостям тишина: их ответ уходит через answerGuestQuery, где правок не делают.
+    message = rate_guard_setup()
+    message.text = "кто сейчас главный тренер сборной Беларуси?"
+    monkeypatch.setattr(bot, "is_guest_message", lambda msg: True)
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    started: list[str] = []
+
+    async def fake_start(reply_to, lang, key, *, timed=False, **kwargs):
+        started.append(key)
+        return _FakeStatus()
+
+    async def fake_turn(**kwargs):
+        return _turn(snippets=[{"url": "https://a.by/1", "publisher": "a.by"}])
+
+    monkeypatch.setattr("lumen_message_core.StatusMessage", SimpleNamespace(start=fake_start))
+    monkeypatch.setattr(lumen_agent, "run_search_turn", fake_turn)
+    _run_core(message, monkeypatch)
+    assert started == []
+    bot.chat_state.pop(123, None)
+
+
+def test_outbound_search_daily_budget_stops_everything():
+    # После дневного потолка бот перестаёт ходить в источники и отвечает с честной
+    # пометкой; и цикл, и прежняя ветка идут через ту же границу.
+    import lumen_search
+
+    async def scenario():
+        lumen_search.reset_search_counters_for_tests()
+        for _ in range(lumen_search.WEB_SEARCH_DAILY_LIMIT):
+            lumen_search.note_search_call()
+        assert lumen_search.search_daily_budget_left() is False
+        exhausted = await lumen_search.fetch_web_snippets("кто тренер сборной")
+        lumen_search.reset_search_counters_for_tests()
+        assert lumen_search.search_daily_budget_left() is True
+        return exhausted
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_search_query_placeholder_exists_in_every_language():
+    # Новый ключ статуса подставляет {query}: пакет без плейсхолдера показал бы
+    # «Ищу в интернете» без запроса, и тест полноты таблиц этого не поймает.
+    from lumen_lang import SUPPORTED_LANGS, t
+
+    for lang in SUPPORTED_LANGS:
+        rendered = t(lang, "progress_search_query", query="курс рубля")
+        assert "курс рубля" in rendered, lang
+        assert "{query}" not in rendered, lang

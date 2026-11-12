@@ -93,8 +93,10 @@ def test_search_turn_uses_model_queries_not_user_words(monkeypatch):
     # Закрытый этап печатает вызывающий код один раз на ответ: на каждом шаге
     # получалось «нашёл 2» плюс «нашёл 4» в одном трейсе (ревью 12.11.2026).
     assert status.done == []
-    # Источники и закрытый этап рисует вызывающий код: цикл их не дублирует.
-    assert status.sources == []
+    # Источники и закрытый этап рисует вызывающий код: цикл их не дублирует.
+
+    assert status.sources == []
+
     assert status.done == []
     payload = calls[0]["json"]
     assert payload["tools"][0]["function"]["name"] == "web_search"
@@ -145,7 +147,7 @@ def test_search_turn_failure_is_not_fatal(monkeypatch):
     result = asyncio.run(scenario())
     assert result.failed is True
     assert result.snippets == []
-    assert len(calls) == 0 or len(calls) == 1
+    assert len(calls) == 1, "одна попытка планирования на сбойный вызов"
 
 
 def test_search_turn_without_budget_does_not_call_anyone(monkeypatch):
@@ -311,3 +313,101 @@ def test_parse_query_accepts_string_and_dict_forms():
     assert lumen_agent._parse_query("не json") == ""
     assert lumen_agent._parse_query(None) == ""
     assert lumen_agent._parse_query('{"query": 123}') == ""
+
+
+def test_max_searches_counts_searches_not_steps(monkeypatch):
+    # Ревью 12.11.2026: один шаг с тремя параллельными tool_calls израсходовал
+    # «лимит в один поиск» целиком. Теперь лимит считается запросами: лишние
+    # вызовы модели не исполняются, а шаг всё равно засчитан.
+    calls, queries = _install(
+        monkeypatch,
+        [_tool_calls_message("запрос один", "запрос два", "запрос три"), _text_message("")],
+    )
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1",
+            effort="medium", max_searches=1,
+        )
+
+    result = asyncio.run(scenario())
+    assert queries == ["запрос один"]
+    assert result.searches == 1
+    # Обрезка по лимиту происходит ДО исполнения: второй планирующий вызов
+    # не нужен, когда модель позвала три поиска, а разрешён один.
+    assert len(calls) == 1
+
+
+def test_planning_calls_are_counted_in_stats_and_usage(monkeypatch):
+    # Планировщик не тратит квоту ответа, но обязан быть виден: без этого
+    # «Попыток к моделям» в /stats меньше, чем реально ушло запросов.
+    events: list[str] = []
+    usage: list[dict] = []
+    _calls, _queries = _install(monkeypatch, [
+        {"choices": [{"message": {"content": "ок"}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 6409, "completion_tokens": 12, "total_tokens": 6421}},
+    ])
+
+    import bot
+    import lumen_routes
+
+    monkeypatch.setattr(bot, "_record_stats_event", lambda name: events.append(name))
+    monkeypatch.setattr(lumen_routes, "_log_llm_usage", lambda **kw: usage.append(kw))
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=777, user_prompt="ок", clean_prompt="ок", model_id="m-1",
+            effort="medium", max_searches=1,
+        )
+
+    asyncio.run(scenario())
+    assert "model_attempts" in events
+    assert usage and usage[0]["chat_id"] == 777 and usage[0]["provider"] == "munito"
+    assert usage[0]["prompt"] == 6409
+
+
+def test_planning_failure_counts_as_model_failure(monkeypatch):
+    # Сбой планирования не наказывает модель карантином, но виден в счётчике:
+    # иначе 503 провайдера выглядит как «модель сама не захотела искать».
+    events: list[str] = []
+    _calls, _queries = _install(monkeypatch, [RuntimeError("MunitoAPIError: 503")])
+
+    import bot
+
+    monkeypatch.setattr(bot, "_record_stats_event", lambda name: events.append(name))
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1",
+            effort="medium", max_searches=1,
+        )
+
+    result = asyncio.run(scenario())
+    assert result.failed is True
+    assert events == ["model_attempts", "model_failures"]
+
+
+def test_search_turn_phase_deadline_is_honoured(monkeypatch):
+    # Фаза без границы съедала бюджет сообщения: планировщик обязан получить
+    # дедлайн и не начинать шаг, когда остатка не хватает.
+    calls, _queries = _install(monkeypatch, [_tool_calls_message("курс рубля")])
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, user_prompt="курс", clean_prompt="курс", model_id="m-1",
+            effort="medium", max_searches=2,
+            deadline=time.monotonic() + lumen_agent._MIN_STEP_BUDGET_SEC - 0.5,
+        )
+
+    result = asyncio.run(scenario())
+    assert calls == []
+    assert result.failed is True
+
+
+def test_evidence_phase_budget_is_bounded_by_steps():
+    # Потолок фазы растёт до потолка шагов, а не до бесконечности: при
+    # AGENT_MAX_SEARCHES=9 фаза всё равно не имеет права съесть бюджет сообщения.
+    one = lumen_agent.evidence_phase_budget_sec(1)
+    many = lumen_agent.evidence_phase_budget_sec(9)
+    assert one < many
+    assert many == lumen_agent.evidence_phase_budget_sec(lumen_agent._MAX_STEPS)

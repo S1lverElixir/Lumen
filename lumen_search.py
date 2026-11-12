@@ -75,6 +75,48 @@ def web_search_timeout_sec() -> float:
     return max(1.0, value)
 
 
+# Дневной потолок ОБРАЩЕНИЙ к внешнему поиску на процесс. Выведен из нагрузки:
+# 250 ответов в сутки, свежих 15-20 % (замер корпуса 12.11.2026), на свежий ответ
+# теперь до 4 обращений (поиск циклом, резервный, пост-хок ретрай) = 50-60 в
+# типичный день. 300 — пятикратный запас над типичным и предел, за которым
+# DuckDuckGo/Bing начинают считать нас абьюзерами: их молчаливые пустые ответы
+# уже ловили (замер 11.11.2026). После потолка поиск отвечает пусто, а человек
+# видит честную пометку «без live-поиска» — тишину вместо вранья.
+WEB_SEARCH_DAILY_LIMIT = 300
+_search_day = ""
+_search_calls = 0
+
+
+def _roll_search_day() -> None:
+    """Прокрутка дня счётчика: тот же quota-day, что у моделей и карантина."""
+    import bot
+    global _search_day, _search_calls
+    today = bot._current_quota_day()
+    if today != _search_day:
+        _search_day, _search_calls = today, 0
+
+
+def search_daily_budget_left() -> bool:
+    """Остался ли дневной бюджет обращений: in-memory, как карантин моделей."""
+    _roll_search_day()
+    return _search_calls < WEB_SEARCH_DAILY_LIMIT
+
+
+def note_search_call() -> None:
+    # Прокрутка и здесь: иначе первое обращение после полуночи приплюсовалось
+    # бы к вчерашнему счётчику и потолок дня сработал бы на день раньше.
+    _roll_search_day()
+    global _search_calls
+    _search_calls += 1
+
+
+def reset_search_counters_for_tests() -> None:
+    """Счётчик глобальный и дневной: тесту нужен явный сброс, иначе порядок файлов
+    решает, кто упрётся в потолок."""
+    global _search_day, _search_calls
+    _search_day, _search_calls = "", 0
+
+
 def web_search_max_results() -> int:
     """Сколько сниппетов клеим в промпт (WEB_SEARCH_MAX_RESULTS, дефолт 5)."""
     try:
@@ -1569,6 +1611,13 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
     text = (text or "").strip()[:500]
     if not text:
         return []
+    if not search_daily_budget_left():
+        # Долбить источники после потолка = получить бан на IP контейнера и тишину
+        # для всех остальных. Пусто здесь честно превращается в пометку вызывающим.
+        log.warning("[web-search] Daily search budget (%d) exhausted, answering without live search",
+                    WEB_SEARCH_DAILY_LIMIT)
+        return []
+    note_search_call()
     queries = plan_search_queries(text, context=context) or [text]
     timeout = timeout_sec if timeout_sec else web_search_timeout_sec()
     limit = max_results if max_results else web_search_max_results()
