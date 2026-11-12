@@ -52,6 +52,10 @@ def _install(monkeypatch, replies, snippets_by_query=None):
 
     async def fake_fetch(text, *, timeout_sec=None, max_results=None, context=""):
         queries.append(text)
+        # Единственная точка, где параллельные fetch'ы цикла реально переплетаются:
+        # без неё gather сработал бы строго последовательно и тест не поймал бы
+        # сериализацию запросов (в отличие от декоративных sleep(0) в моках маршрута,
+        # которые были сняты 12.11.2026 как шум).
         await asyncio.sleep(0)
         return table.get(text, [{"title": text + " news", "url": "https://example.org/" + text[:16],
                                  "snippet": "facts", "publisher": "example.org"}])
@@ -239,6 +243,30 @@ def test_preamble_is_scrubbed_and_truncated(monkeypatch):
     assert "deepseek" not in line.lower()
     assert "\n" not in line
     assert "очень длинная строка" in line
+
+
+def test_preamble_with_identity_leak_is_dropped_wholly(monkeypatch):
+    # Регрессия 12.11.2026: прежняя частичная зачистка оставляла в пузыре осколки
+    # имени — «Я — Gemini 2.5 Pro, ищу данные» превращалось в «5 Pro, ищу данные».
+    # Строка этапа не стоит того, чтобы показывать в ней обрывки личности модели.
+    assert lumen_agent._clean_preamble("Я — Gemini 2.5 Pro, ищу данные") == ""
+    assert lumen_agent._clean_preamble("I am Claude, let me search") == ""
+
+    _calls, _queries = _install(
+        monkeypatch,
+        [_tool_calls_message("новости", content="Я — Gemini 2.5 Pro, ищу данные")],
+    )
+    status = _FakeStatus()
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, user_prompt="новости", clean_prompt="новости", model_id="m-1",
+            effort="medium", max_searches=1, status=status,
+        )
+
+    asyncio.run(scenario())
+    shown = " ".join(status.actions).lower()
+    assert "pro" not in shown and "gemini" not in shown, status.actions
 
 
 def test_tool_result_carries_the_untrusted_data_caveat(monkeypatch):

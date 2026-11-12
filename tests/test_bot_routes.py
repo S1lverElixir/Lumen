@@ -542,6 +542,45 @@ def test_chain_safety_label_only_response_moves_to_next_model(monkeypatch):
     assert (answer, used) == ("живой ответ", "probe/good")
 
 
+def test_chain_recomputes_reasoning_effort_after_model_fallback(monkeypatch):
+    # Замер 12.11.2026: google/gemma-4-12b отвечает 400 на reasoning_effort, а
+    # четыре текстовые головы его принимают. Поле, посчитанное один раз на весь
+    # маршрут, уезжал бы и туда, и туда: на gemma — гарантированный 400, на
+    # голову — ответ вовсе без усилия. Поэтому extras пересчитываются на модель
+    # попытки (extra_payload_fn), и этот тест фиксирует именно пересчёт.
+    import lumen_routes
+    from lumen_router_config import _munito_payload_extras
+
+    monkeypatch.delenv("MUNITO_REASONING_EFFORT", raising=False)
+    gemma = "google/gemma-4-12b"
+    head = "deepseek-ai/deepseek-v4.1-flash-1017"
+    seen: dict[str, dict] = {}
+
+    async def fake_request(payload, deadline):
+        seen[payload["model"]] = payload
+        if payload["model"] == gemma:
+            raise bot.MunitoAPIError("HTTP 400 'reasoning_effort' is not supported", status_code=400)
+        return {"choices": [{"message": {"content": "живой ответ"}}]}
+
+    try:
+        answer, used = asyncio.run(lumen_routes._chat_completion_chain(
+            [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+            [gemma, head], gemma, request_fn=fake_request, provider="munito",
+            extra_payload_fn=lambda model: _munito_payload_extras("medium", model),
+        ))
+    finally:
+        # Реальные id моделей в общем состоянии тестовой сессии не остаются.
+        lumen_router_config._QUARANTINE.pop(("munito", gemma), None)
+        lumen_router_config._QUARANTINE.pop(("munito", head), None)
+        bot.GLOBAL_QUOTA.setdefault("munito", {}).pop(gemma, None)
+        bot.GLOBAL_QUOTA.setdefault("munito", {}).pop(head, None)
+
+    assert (answer, used) == ("живой ответ", head)
+    assert set(seen) == {gemma, head}, "обе модели обязаны получить свой payload"
+    assert "reasoning_effort" not in seen[gemma], "gemma получила бы 400 на это поле"
+    assert seen[head]["reasoning_effort"] == "medium", "после откатa поле обязано пересчитаться"
+
+
 def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
     # Три пустых подряд в одну голову — карантин (реальная регрессия: мёртвая голова
     # жевала бы каждую попытку до конца суток вместо объезда после третьей).

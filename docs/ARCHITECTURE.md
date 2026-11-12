@@ -74,7 +74,13 @@ failure. Outbound searches share one process-wide daily ceiling (`WEB_SEARCH_DAI
 `/stats`), because one `fetch_web_snippets` already fans out to 4-8 endpoints and DuckDuckGo lite has
 been observed returning nothing (12.11.2026: `duckduckgo=0` on most queries). Measured live phase
 cost (`eval/agent_loop_probe.py`, 12.11.2026): 11 of 12 questions searched, 3.12 s mean, 0 errors,
-≈5.9K tokens per planning call.
+≈5.9K tokens per planning call. Re-measured on the evening of 12.11.2026 after the effort-signal
+change, same probe and the same 12 questions: 11 of 12 searched, mean 4.36 s, median 4.66 s, p95
+4.94 s, worst 5.13 s — the phase still sits inside `ROUTE_TOTAL_BUDGET_SEC` with an eightfold
+margin, and the slower mean came from DuckDuckGo lite and Wikidata timing out (the block was built
+from Bing News and Google News instead), not from the code. Deliberately not in this branch, by the
+owner's decision of 12.11.2026: a `read_page` tool (it needs the Deno relay allowlist and an SSRF
+review first), a Gemini-native function-calling loop, and Gemini thought summaries.
 
 ### Image generation
 
