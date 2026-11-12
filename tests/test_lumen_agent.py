@@ -1,0 +1,328 @@
+"""Тесты агентного хода: модель сама пишет поисковые запросы, бот исполняет web_search."""
+from __future__ import annotations
+
+import asyncio
+import time
+
+import lumen_agent
+import lumen_router_config
+
+
+class _FakeStatus:
+    def __init__(self):
+        self.phases: list[tuple[str, dict]] = []
+        self.done: list[tuple[str, dict]] = []
+        self.actions: list[str] = []
+        self.sources: list[list[str]] = []
+
+    async def set_phase(self, key, *, timed=False, **kwargs):
+        self.phases.append((key, kwargs))
+
+    async def set_action(self, text, *, timed=True):
+        self.actions.append(text)
+
+    def add_done(self, key, **kwargs):
+        self.done.append((key, kwargs))
+
+    def set_sources(self, hosts):
+        self.sources.append(list(hosts))
+
+
+def _tool_calls_message(*queries, content=""):
+    return {
+        "choices": [{
+            "message": {
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": f"call_{idx}",
+                        "type": "function",
+                        "function": {"name": "web_search", "arguments": '{"query": "' + q + '"}'},
+                    }
+                    for idx, q in enumerate(queries)
+                ],
+            }
+        }]
+    }
+
+
+def _text_message(text):
+    return {"choices": [{"message": {"content": text}}]}
+
+
+def _install(monkeypatch, replies, snippets_by_query=None):
+    """Подменяет планирующие вызовы и внешний поиск; возвращает журнал обращений."""
+    calls: list[dict] = []
+    queries: list[str] = []
+    responses = list(replies)
+    table = snippets_by_query or {}
+
+    async def fake_request(path, method="GET", *, json_body=None, deadline=None):
+        calls.append({"json": json_body, "deadline": deadline})
+        if not responses:
+            raise AssertionError("планирующий вызов без заготовки ответа")
+        reply = responses.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    async def fake_build(chat_id, user_text, model_id, *, history_meta=None, current_parts=None):
+        return [{"role": "system", "content": "sys"}, {"role": "user", "content": user_text}]
+
+    async def fake_fetch(text, *, timeout_sec=None, max_results=None, context=""):
+        queries.append(text)
+        await asyncio.sleep(0)
+        return table.get(text, [{"title": text + " news", "url": "https://example.org/" + text[:16],
+                                 "snippet": "facts", "publisher": "example.org"}])
+
+    import bot
+
+    monkeypatch.setattr(bot, "_munito_request", fake_request)
+    monkeypatch.setattr(bot, "_build_openai_turn_messages", fake_build)
+    monkeypatch.setattr(lumen_agent, "fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(lumen_router_config, "_munito_model_supports", lambda model_id, param: True)
+    return calls, queries
+
+
+def test_search_turn_uses_model_queries_not_user_words(monkeypatch):
+    # Защита главной регрессии: раньше по свежему вопросу искалось сырой фразой
+    # человека («а он точно не в клубе?»), теперь — запросами самой модели.
+    calls, queries = _install(
+        monkeypatch,
+        [_tool_calls_message("главный тренер сборной Беларуси", "контракт тренера до какого года",
+                             content="Ищу актуальные данные."),
+         _text_message("")],
+    )
+    status = _FakeStatus()
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="а он точно не в клубе?", model_id="m-1",
+            effort="high", max_searches=2, status=status,
+        )
+
+    result = asyncio.run(scenario())
+    assert queries == ["главный тренер сборной Беларуси", "контракт тренера до какого года"]
+    assert result.queries == queries
+    assert result.searched is True
+    assert result.searches == 2
+    assert len(result.snippets) == 2
+    assert status.actions == ["Ищу актуальные данные."]
+    assert ("progress_search_query", {"query": "главный тренер сборной Беларуси"}) in status.phases
+    assert status.done == [("progress_search_done", {"count": 2})]
+    assert status.sources == [["example.org"]]
+    payload = calls[0]["json"]
+    assert payload["tools"][0]["function"]["name"] == "web_search"
+    assert payload["tool_choice"] == "auto"
+    assert payload["stream"] is False
+
+
+def test_search_turn_stops_when_model_declines_to_search(monkeypatch):
+    calls, queries = _install(monkeypatch, [_text_message("Полагаю, нет: он главный тренер.")])
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="сколько будет 2+2", model_id="m-1", effort="low", max_searches=2,
+        )
+
+    result = asyncio.run(scenario())
+    assert queries == []
+    assert calls and len(calls) == 1
+    assert result.searched is False and result.failed is False
+    assert result.snippets == []
+
+
+def test_search_turn_caps_steps_and_never_loops_forever(monkeypatch):
+    # Модель зацикливается на уточнениях: цикл обязан встать по потолку шагов,
+    # иначе бюджет сообщения уходит на планирование вместо ответа.
+    replies = [_tool_calls_message(f"запрос {n}") for n in range(6)]
+    calls, queries = _install(monkeypatch, replies)
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="новости", model_id="m-1", effort="high", max_searches=9,
+        )
+
+    result = asyncio.run(scenario())
+    assert len(calls) == lumen_agent._MAX_STEPS
+    assert len(queries) == lumen_agent._MAX_STEPS
+    assert result.searches == lumen_agent._MAX_STEPS
+
+
+def test_search_turn_failure_is_not_fatal(monkeypatch):
+    calls, _queries = _install(monkeypatch, [RuntimeError("MunitoAPIError: 503")])
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+        )
+
+    result = asyncio.run(scenario())
+    assert result.failed is True
+    assert result.snippets == []
+    assert len(calls) == 0 or len(calls) == 1
+
+
+def test_search_turn_without_budget_does_not_call_anyone(monkeypatch):
+    calls, _queries = _install(monkeypatch, [_tool_calls_message("x")])
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+            deadline=time.monotonic() - 1.0,
+        )
+
+    result = asyncio.run(scenario())
+    assert calls == []
+    assert result.failed is True
+
+
+def test_search_turn_repeats_same_query_without_second_fetch(monkeypatch):
+    # Повтор той же формулировки = модель топчется: запрос берётся из кэша, сеть
+    # не дёргается, а шаг всё равно засчитан и цикл движется.
+    calls, queries = _install(
+        monkeypatch,
+        [_tool_calls_message("курс рубля"), _tool_calls_message("курс рубля"), _text_message("")],
+    )
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="курс рубля", model_id="m-1", effort="high", max_searches=3,
+        )
+
+    result = asyncio.run(scenario())
+    assert queries == ["курс рубля"]
+    assert result.queries == ["курс рубля"]
+    assert result.searches == 2
+    assert len(result.snippets) == 1
+
+
+def test_planning_call_omits_unsupported_model(monkeypatch):
+    calls, _queries = _install(monkeypatch, [_tool_calls_message("курс")])
+    monkeypatch.setattr(lumen_router_config, "_munito_model_supports", lambda model_id, param: False)
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="курс", model_id="google/gemma-4-12b", effort="medium", max_searches=1,
+        )
+
+    result = asyncio.run(scenario())
+    assert calls == []
+    assert result.failed is True
+
+
+def test_planning_call_sends_effort_and_headroom_timeout(monkeypatch):
+    # В проде переменная не задана вовсе (тогда работает автовыбор); conftest её
+    # чистит в "", что значит «поле не отправляем», поэтому поднимаем её явно.
+    monkeypatch.delenv("MUNITO_REASONING_EFFORT", raising=False)
+    calls, _queries = _install(monkeypatch, [_text_message("ок")])
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="ок", model_id="m-1", effort="xhigh", max_searches=1,
+            deadline=time.monotonic() + 30.0,
+        )
+
+    asyncio.run(scenario())
+    assert calls[0]["json"]["reasoning_effort"] == "xhigh"
+    # Шаг планирования не получает весь бюджет маршрута: потолок — _STEP_CALL_TIMEOUT_SEC.
+    assert calls[0]["deadline"] <= time.monotonic() + lumen_agent._STEP_CALL_TIMEOUT_SEC + 1
+
+
+def test_preamble_is_scrubbed_and_truncated(monkeypatch):
+    # Размышление модели (поле reasoning) в чат не попадает: показывается только
+    # её собственный короткий текст, и он обязан пройти те же фильтры, что и ответ.
+    long_preamble = ("deepseek-v4.1-flash-1017 отвечает мне: " + "очень длинная строка " * 40)
+    _calls, _queries = _install(
+        monkeypatch,
+        [_tool_calls_message("новости", content=long_preamble)],
+    )
+    status = _FakeStatus()
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+            status=status,
+        )
+
+    asyncio.run(scenario())
+    assert status.actions, "преамбула должна попасть в статус"
+    line = status.actions[0]
+    assert len(line) <= lumen_agent._PREAMBLE_MAX_CHARS
+    assert "deepseek" not in line.lower()
+    assert "\n" not in line
+    assert "очень длинная строка" in line
+
+
+def test_tool_result_carries_the_untrusted_data_caveat(monkeypatch):
+    # Результат инструмента — чужие данные: оговорка из format_snippets_for_prompt
+    # обязана доезжать до модели в самом transcript, иначе промпт-инъекция из
+    # сниппета читается как инструкция.
+    _calls, _queries = _install(monkeypatch, [_tool_calls_message("новости"), _text_message("")])
+    built: list[list[dict]] = []
+
+    async def capture_build(chat_id, user_text, model_id, *, history_meta=None, current_parts=None):
+        messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": user_text}]
+        built.append(messages)
+        return messages
+
+    import bot
+
+    monkeypatch.setattr(bot, "_build_openai_turn_messages", capture_build)
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+        )
+
+    asyncio.run(scenario())
+    messages = built[0]
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assistant_msgs = [m for m in messages if m.get("tool_calls")]
+    assert tool_msgs and assistant_msgs
+    assert "untrusted third-party data" in tool_msgs[0]["content"]
+    assert tool_msgs[0]["tool_call_id"] == "call_0"
+    assert assistant_msgs[0]["tool_calls"][0]["function"]["name"] == "web_search"
+
+
+def test_empty_search_result_says_so_plainly(monkeypatch):
+    _calls, _queries = _install(monkeypatch, [_tool_calls_message("пустой запрос"), _text_message("")])
+    monkeypatch.setattr(lumen_agent, "fetch_web_snippets", lambda *a, **k: _empty_fetch())
+
+    async def _empty_fetch():
+        return []
+
+    async def scenario():
+        return await lumen_agent.run_search_turn(
+            chat_id=1, clean_prompt="новости", model_id="m-1", effort="medium", max_searches=1,
+        )
+
+    result = asyncio.run(scenario())
+    assert result.searched is False
+    assert result.snippets == []
+
+
+def test_evidence_trace_lists_queries_only_once():
+    assert lumen_agent.evidence_trace([]) == ""
+    trace = lumen_agent.evidence_trace(["курс рубля", "", "тренер сборной"])
+    assert "курс рубля" in trace and "тренер сборной" in trace
+    assert trace.count("курс рубля") == 1
+
+
+def test_agent_turn_enabled_kill_switch(monkeypatch):
+    monkeypatch.delenv("AGENT_TURN_ENABLED", raising=False)
+    assert lumen_agent.agent_turn_enabled() is True
+    monkeypatch.setenv("AGENT_TURN_ENABLED", "0")
+    assert lumen_agent.agent_turn_enabled() is False
+    monkeypatch.setenv("AGENT_TURN_ENABLED", "off")
+    assert lumen_agent.agent_turn_enabled() is False
+    monkeypatch.setenv("AGENT_TURN_ENABLED", "1")
+    assert lumen_agent.agent_turn_enabled() is True
+
+
+def test_parse_query_accepts_string_and_dict_forms():
+    assert lumen_agent._parse_query('{"query": "  курс   рубля  "}') == "курс рубля"
+    assert lumen_agent._parse_query({"q": "новости матча"}) == "новости матча"
+    assert lumen_agent._parse_query("не json") == ""
+    assert lumen_agent._parse_query(None) == ""
+    assert lumen_agent._parse_query('{"query": 123}') == ""
