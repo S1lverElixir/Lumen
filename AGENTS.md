@@ -7,7 +7,7 @@ Hugging Face egress. The Claude look is deliberate: when you change how the bot 
 reference's layout, its live status bubble and its plain tone.
 This file holds only what an agent cannot get from the code: the owner's rules, the commands, the
 traps; how any feature works is in `docs/`. Every fact below was checked against the repo and
-production on 10.11.2026, so change a fact and update this file in the same commit.
+production on 12.11.2026, so change a fact and update this file in the same commit.
 
 ## Owner and replies
 - The owner does not write code; the bot was built with AI help. Reply in Russian, in plain words,
@@ -163,9 +163,8 @@ Gemini is the unconditional reserve on every route where Munito answers.
   client-side `web_search` tool and executes it: the model writes the queries, sees the results and may
   refine them, and the gathered block then goes to every provider as prompt text. Evidence never
   travels to the answering call as a tool transcript — measured 12.11.2026 the heads ignore a transcript
-  sent without `tools` and answer from memory. The block itself is built by `lumen_search.py` from
-  three layers
-  built by `lumen_search.py` from three layers — exact fact APIs (Wikipedia, crypto, FX, weather), dated news feeds and the general web (DuckDuckGo lite then its HTML endpoint, Bing RSS) — after the user's wording is cleaned into search forms; an optional keyed provider (Tavily/Brave/Exa) replaces the scraping layer. Without a key there is no reliable general engine: measured 11.11.2026, DuckDuckGo lite returned an anomaly page 8/8 and Brave/Ecosia/Qwant/Yandex/Startpage/SearxNG are all blocked. The order and merge rules are in
+  sent without `tools` and answer from memory. The block itself is built by
+  `lumen_search.py` from three layers — exact fact APIs (Wikipedia, crypto, FX, weather), dated news feeds and the general web (DuckDuckGo lite then its HTML endpoint, Bing RSS) — after the user's wording is cleaned into search forms; an optional keyed provider (Tavily/Brave/Exa) replaces the scraping layer. Without a key there is no reliable general engine: measured 11.11.2026, DuckDuckGo lite returned an anomaly page 8/8 and Brave/Ecosia/Qwant/Yandex/Startpage/SearxNG are all blocked. The order and merge rules are in
   `docs/ARCHITECTURE.md`. A model unsure about a post-cutoff fact may instead answer with the bare
   marker `[[SEARCH]]`: it is intercepted before anything is shown and buys one searched retry, which
   goes through the same loop so the model writes those queries too, and that exception must never
