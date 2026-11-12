@@ -68,6 +68,37 @@ _STEP_PHASE_SEC = _STEP_CALL_TIMEOUT_SEC + 6.0  # 6 = дефолт WEB_SEARCH_TI
 
 _IDENTITY_NAMES: tuple[str, ...] = ()
 
+# Компании и лаборатории. Прежний список снимал только id моделей и короткие
+# алиасы, и в строке этапа оставалось «отзывы про модель Gemini от Google»:
+# имя провайдера видели бы все участники группы (ревью приватности 12.11.2026).
+_IDENTITY_COMPANIES = (
+    "google", "anthropic", "openai", "deepmind", "mistral", "meta ai", "ai meta",
+    "xai", "groq", "alibaba", "baidu", "moonshot", "zhipu", "xiaomi", "nvidia",
+    "hugging face", "huggingface", "perplexity", "deepseek ai",
+)
+# Алиасы семейств без точного id: «gpt», «llama», «claude». Сняв семейство,
+# версия всё равно не должна остаться одна.
+_IDENTITY_FAMILIES = (
+    "gpt", "llama", "claude", "grok", "nemotron", "hermes", "dolphin", "phi", "gemma",
+    "qwen", "doubao", "kimi", "minimax", "hunyuan", "glm",
+)
+
+# Версия, прилипшая к снятому имени: «Gemini 2.5 Pro», «LLaMA 3.1 70B»,
+# «Claude 3.5 Sonnet». Без неё за «Gemini» в пузыре оставалось «2.5 Pro» —
+# обрывок, который человек читает как название модели.
+_NAME_VERSION_TAIL = (
+    r"(?:\s+\d+(?:[.,]\d+)*)*"
+    r"\s*(?:pro|max|ultra|mini|micro|nano|small|lite|plus|turbo|flash|preview|thinking|"
+    r"instruct|sonnet|opus|haiku|chat|code|vision|reasoner|api|oss|serverless|deep\-?r1)[\w.\-]*"
+)
+# Что остаётся после вырезания имени: пустые скобки, притяжательное 's, висячий
+# предлог («новости от», «данные by»).
+_DANGLING_RE = re.compile(
+    r"\b(?:от|для|на|у|про|о|by|of|from|on|via|model|модель)\b\s*(?=[,.;:!?)\]]|$)",
+    re.IGNORECASE,
+)
+_DEBRIS_RE = re.compile(r"[\[(]\s*[\])]|[‘'`]\s*s\b")
+
 
 def _identity_names() -> tuple[str, ...]:
     """Имена моделей и провайдеров, которые не имеют права появиться в строке
@@ -80,16 +111,36 @@ def _identity_names() -> tuple[str, ...]:
         from lumen_router_config import GEMINI_MODELS, _MUNITO_ORDER
 
         names = set(_MUNITO_ORDER) | set(GEMINI_MODELS)
-        names |= {"munito", "gemini", "deepseek", "qwen", "zai", "glm", "gemma", "openrouter"}
+        names |= {"munito", "gemini", "deepseek", "qwen", "zai", "gemma", "openrouter"}
+        names |= set(_IDENTITY_COMPANIES) | set(_IDENTITY_FAMILIES)
         _IDENTITY_NAMES = tuple(sorted(names, key=len, reverse=True))
     return _IDENTITY_NAMES
 
 
 def _strip_identity_names(text: str) -> str:
     line = text
+    # «?», относящийся к одному последнему классу, сделал бы хвост обязательным и
+    # тогда бы «Gemini» без версии не снимался вовсе (проверено 12.11.2026):
+    # поэтому весь хвост обёрнут в группу.
     for name in _identity_names():
-        line = re.sub(r"[\w./:+-]*" + re.escape(name) + r"[\w.:/+-]*", "", line, flags=re.IGNORECASE)
-    return " ".join(line.split())
+        line = re.sub(
+            r"[\w./:+-]*" + re.escape(name) + r"[\w.:/+-]*(?:" + _NAME_VERSION_TAIL + r")?",
+            "", line, flags=re.IGNORECASE,
+        )
+    # Порядок важен: висячий предлог открывает пустые скобки («( модель gpt-4o )»
+    # → «( )»), поэтому обе чистки крутим до устойчивости, а не двумя проходами.
+    previous = None
+    while previous != line:
+        previous = line
+        line = _DEBRIS_RE.sub(" ", line)
+        line = _DANGLING_RE.sub("", line)
+    line = " ".join(line.split())
+    if line != " ".join((text or "").split()):
+        # Что-то вырезано: после имени остаются хвостовые знаки и провисания,
+        # их снимаем. Не тронутую строку не трогаем вовсе — прежняя точка в конце
+        # преамбулы была частью текста (тест 12.11.2026).
+        line = re.sub(r"^[\s,.:;!?)\]]+|[\s,.:;!?]+$", "", line)
+    return line.strip()
 
 
 class AgentTurnResult:

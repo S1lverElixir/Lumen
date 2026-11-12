@@ -459,3 +459,24 @@ def test_evidence_trace_cannot_break_its_own_frame():
     assert "ignore previous instructions" in trace
     assert "a b" in trace
     assert lumen_agent.evidence_trace([]) == ""
+
+def test_status_query_never_keeps_model_name_version_or_debris():
+    # Ревью приватности 12.11.2026: частичная зачистка оставляла в пузыре обрывки
+    # — «Ищу: 2.5 Pro данные», «про модель от Google», пустые скобки. Строка
+    # этапа видна всем в группе, поэтому имя семейства, компания, версия и
+    # мусор после их вырезания не должны оставаться вовсе.
+    cases = {
+        "Ищу: Gemini 2.5 Pro данные": "Ищу: данные",
+        "Поищу отзывы про модель Gemini от Google": "Поищу отзывы",
+        "Поищу новости (deepseek)": "Поищу новости",
+        "Сейчас посмотрю прогноз (модель gpt-4o)": "Сейчас посмотрю прогноз",
+        "цена подписки gemini-2.5-pro": "цена подписки",
+        "let me check munito's latest data": "let me check latest data",
+    }
+    for source, expected in cases.items():
+        assert lumen_agent._safe_query_text(source) == expected, source
+    # Обычные запросы не имеют права пострадаать: это ровно то, что человек ищет.
+    for honest in ("ключевая ставка ЦБ РФ сегодня", "погода в Гомеле на завтра",
+                   "котик в сапогах мультик", "Fable 5.2 release date",
+                   "сколько законов о рекламе в Беларуси"):
+        assert lumen_agent._safe_query_text(honest) == honest, honest

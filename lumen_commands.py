@@ -1558,8 +1558,14 @@ async def cmd_stats(message: Message) -> None:
     )
     _quarantined_now = bot._quarantine_status()
     if _quarantined_now:
+        import lumen_router_config
+
+        # Не «подряд до конца суток»: окно считается от первого плохого ответа,
+        # и это другое обещание человеку (ревью документов 12.11.2026).
         quarantine_text = "\n".join(
-            f"  • {provider}/{mid}: {bad} плохих подряд (до конца суток)" for provider, mid, bad in _quarantined_now
+            f"  • {provider}/{mid}: {bad} плохих ответа за окно "
+            f"{lumen_router_config.QUARANTINE_WINDOW_SEC} с"
+            for provider, mid, bad in _quarantined_now
         )
     else:
         quarantine_text = "  нет"
