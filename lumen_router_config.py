@@ -327,16 +327,18 @@ _MUNITO_CAPS: dict[str, dict[str, bool]] = {
     "deepseek-ai/deepseek-v4-flash": {"reasoning_effort": True, "tools": True},
     "zai-org/glm-5.3-flash": {"reasoning_effort": True, "tools": True},
     "qwen/qwen3.8-27b": {"reasoning_effort": True, "tools": True},
-    "google/gemma-4-12b": {"reasoning_effort": False, "tools": False},
-    "perplexity-ai/pplx-decider-v1.2": {"reasoning_effort": False, "tools": False},
+    "google/gemma-4-12b": {"reasoning_effort": False},
+    "perplexity-ai/pplx-decider-v1.2": {"reasoning_effort": False},
 }
 
 
 def _munito_model_supports(model_id: str | None, param: str) -> bool:
-    """Есть ли у модели параметр. None (цепочка не выбрана) = не проверяем."""
+    """Есть ли у модели параметр. None (цепочка не выбрана) и модель вне каталога =
+    не проверяем: тихо выключить усилие для новой модели хуже, чем один 400 на
+    неизвестный параметр, а тест на полноте записи не даёт поставить её молча."""
     if not model_id:
         return True
-    return bool(_MUNITO_CAPS.get(model_id, {}).get(param))
+    return bool(_MUNITO_CAPS.get(model_id, {}).get(param, True))
 
 
 def _effort_auto_on() -> bool:

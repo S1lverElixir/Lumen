@@ -187,13 +187,16 @@ async def _chat_completion_chain(
     request_fn, provider: str, deadline: float | None = None,
     log_label: str | None = None, chat_id: Any = None, user_text: str | None = None,
     out: dict | None = None, extra_payload: dict | None = None,
-    record_latency: bool = True,
+    extra_payload_fn=None, record_latency: bool = True,
 ) -> tuple[str, str]:
     """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (сейчас — Munito).
 
     extra_payload — провайдерские поля поверх стандартного тела (у Munito это
     reasoning_effort): копия payload в одной ветке не должна расходиться с
-    остальными (аудит 26.09.2026).
+    остальными (аудит 26.09.2026). extra_payload_fn нужен там, где поля зависят от
+    модели попытки: reasoning_effort принимают не все модели каталога (замер
+    12.11.2026: gemma-4-12b отвечает 400), и после откатa на другую модель поле
+    обязано пересчитаться.
 
     Ровно одна попытка на модель — ретраи одной модели при массовой нестабильности
     замедляли весь маршрут. Раньше этот цикл жил в трёх копиях, и копии молча
@@ -215,7 +218,8 @@ async def _chat_completion_chain(
         messages[0]["content"] = bot.get_system_prompt(model_trial)
         attempt_start = time.monotonic()
         try:
-            payload = {"model": model_trial, "messages": messages, "stream": False, **(extra_payload or {})}
+            extras = extra_payload_fn(model_trial) if extra_payload_fn else (extra_payload or {})
+            payload = {"model": model_trial, "messages": messages, "stream": False, **extras}
             resp = await request_fn(payload, deadline)
             choices = resp.get("choices") or []
             answer = ""
@@ -272,7 +276,7 @@ async def _chat_completion_chain(
     raise RuntimeError("No candidate model returned an answer.")
 
 
-async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None, provenance: dict | None = None, history_meta: dict[str, Any] | None = None) -> str:
+async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None, provenance: dict | None = None, history_meta: dict[str, Any] | None = None, effort: str | None = None) -> str:
     """Текст через Munito AI: одна попытка на модель, скраб утечек, расход в квоту "munito".
     Память — единый лог до 200 сообщений; прошлые фото прикладываются отдельной репликой."""
     import bot
@@ -291,7 +295,7 @@ async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], 
     answer, model_trial = await _chat_completion_chain(
         messages, trial_models, primary_model_id,
         request_fn=_request, provider="munito", deadline=deadline, chat_id=chat_id, user_text=user_text,
-        out=_out, extra_payload=_munito_payload_extras(),
+        out=_out, extra_payload_fn=lambda model: _munito_payload_extras(effort, model),
     )
     _note_provenance(provenance, "munito", _out)
     answer = _raise_if_search_requested(answer, "munito", model_trial)
@@ -307,6 +311,7 @@ async def ask_munito_multimodal(
     chat_id: int, user_text: str, media_tuple: tuple[bytes, str] | list[tuple[bytes, str]], media_filename: str,
     model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None,
     provenance: dict | None = None, history_meta: dict[str, Any] | None = None,
+    effort: str | None = None,
 ) -> str:
     """Картинки через Munito AI (vision проверен 05.11.2026 живым вызовом): все картинки
     одним сообщением блоками image_url — по одному на фото, иначе 2-9 фото альбома
@@ -342,7 +347,7 @@ async def ask_munito_multimodal(
     answer, model_trial = await _chat_completion_chain(
         messages, trial_models, primary_model_id,
         request_fn=_request, provider="munito", deadline=deadline, chat_id=chat_id, user_text=user_text,
-        out=_out, extra_payload=_munito_payload_extras(),
+        out=_out, extra_payload_fn=lambda model: _munito_payload_extras(effort, model),
     )
     _note_provenance(provenance, "munito", _out)
     answer = _raise_if_search_requested(answer, "munito", model_trial)
@@ -490,6 +495,7 @@ async def _gemini_history_contents(history: list[dict]) -> list[types.Content]:
 
 def _build_gemini_call_config(
     model_id: str, contents: list[types.Content], *, memory_summary: str = "",
+    effort: str | None = None,
 ) -> tuple[list[types.Content], "types.GenerateContentConfig | None"]:
     """Строит (call_contents, gconfig) для ОДНОГО вызова Gemini: system_instruction и
     grounding по дашборду. Одна функция на ask_gemini и стриминг — чтобы не расходились."""
@@ -518,13 +524,22 @@ def _build_gemini_call_config(
             pass  # в этом SDK нет url_context
     if tools_list:
         kwargs["tools"] = tools_list
-    # Эффорт мышления — низкий только для не-heavy: калибровка 18.08.2026 поймала 3.7-flash на 17 таймаутах из 18. Heavy не трогаем (дефолт модели балансирует лучше). 3.x — thinking_level, 2.5 — thinking_budget.
-    last_text = next((p.text for p in reversed(contents[-1].parts) if getattr(p, "text", None)), "") if contents else ""
-    if not _looks_like_heavy_query(last_text):
-        if model_id.startswith("gemini-3"):
-            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="low")
-        elif model_id.startswith("gemini-2.5"):
-            kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    # Эффорт мышления: с 12.11.2026 уровень считается для всего запроса (Claude-style
+    # effort) и только при EFFORT_AUTO=0 остаётся прежняя эвристика не-heavy (калибровка
+    # 18.08.2026 поймала 3.7-flash на 17 таймаутах из 18). 3.x — thinking_level, 2.5 — thinking_budget.
+    if effort is not None:
+        from lumen_router_config import gemini_thinking_for
+
+        _param, _value = gemini_thinking_for(model_id, effort)
+        if _param:
+            kwargs["thinking_config"] = types.ThinkingConfig(**{_param: _value})
+    else:
+        last_text = next((p.text for p in reversed(contents[-1].parts) if getattr(p, "text", None)), "") if contents else ""
+        if not _looks_like_heavy_query(last_text):
+            if model_id.startswith("gemini-3"):
+                kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="low")
+            elif model_id.startswith("gemini-2.5"):
+                kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
     gconfig = types.GenerateContentConfig(**kwargs) if kwargs else None
 
     return contents, gconfig
@@ -620,6 +635,7 @@ async def ask_gemini(
     youtube_url: str | None = None, model_chain: list[str] | None = None,
     deadline: float | None = None, provenance: dict | None = None,
     history_text: str | None = None, history_meta: dict[str, Any] | None = None,
+    effort: str | None = None,
 ) -> str:
     import bot
     state = bot.get_state(chat_id)
@@ -664,6 +680,7 @@ async def ask_gemini(
         bot._record_stats_event("model_attempts")
         call_contents, gconfig = bot._build_gemini_call_config(
             curr_model_id, contents, memory_summary=state.get("memory_summary") or "",
+            effort=effort,
         )
 
         attempt_start = time.monotonic()
@@ -893,7 +910,7 @@ async def _run_route(
     youtube_url: str | None = None, allow_stream: bool = False,
     deadline: float | None = None, provenance: dict | None = None,
     status: Any | None = None, history_text: str | None = None,
-    history_meta: dict[str, Any] | None = None,
+    history_meta: dict[str, Any] | None = None, effort: str | None = None,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
@@ -956,6 +973,7 @@ async def _run_route(
             deadline=deadline, status=status, history_text=history_text,
             history_meta=history_meta,
             reuse_placeholder=reusable_placeholder, wait_started=stream_wait_started,
+            effort=effort,
         )
         if provider_name == "gemini":
             return await bot._try_gemini_streaming(chat_id, ai_prompt, message, model_id, **kwargs)
@@ -992,11 +1010,11 @@ async def _run_route(
                     return streamed, True
         try:
             if provider == "gemini":
-                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text, history_meta=history_meta)
+                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text, history_meta=history_meta, effort=effort)
             elif provider == "munito" and media:
-                ans = await bot.ask_munito_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta)
+                ans = await bot.ask_munito_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta, effort=effort)
             elif provider == "munito":
-                ans = await bot.ask_munito_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta)
+                ans = await bot.ask_munito_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta, effort=effort)
             else:
                 # Явный провайдер вместо «всё остальное = Munito»: опечатка в имени
                 # молча ушла бы в чужой API с нашим ключом (ревью 05.11.2026).

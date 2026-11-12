@@ -309,7 +309,7 @@ async def _remember_turn(
     await bot._trim_history(state["history"], state)
 
 
-async def _munito_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None):
+async def _munito_stream_pieces(model_id: str, messages: list[dict], *, deadline: float | None = None, effort: str | None = None):
     """Куски от Munito AI: тот же OpenAI-SSE через общий _sse_pieces (замер 05.11.2026: первый токен 0.24с у головы цепочки)."""
     import bot
     if not bot.MUNITO_API_KEY:
@@ -322,7 +322,7 @@ async def _munito_stream_pieces(model_id: str, messages: list[dict], *, deadline
     from lumen_router_config import _munito_payload_extras
     async for piece in _sse_pieces(
         session, f"{bot.MUNITO_BASE_URL}/chat/completions", headers,
-        {"model": model_id, "messages": messages, "stream": True, **_munito_payload_extras()},
+        {"model": model_id, "messages": messages, "stream": True, **_munito_payload_extras(effort, model_id)},
         err_cls=bot.MunitoAPIError, provider_label="Munito", deadline=deadline,
     ):
         yield piece
@@ -886,7 +886,7 @@ async def _run_streaming_reply(
              paint_frames, paint_max_step, len(final_answer), _now_end - overall_start_ts, _ttft, _paint_span)
     return final_answer, None
 
-async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None, history_meta=None) -> tuple[str | None, Message | None]:
+async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None, history_meta=None, effort=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Gemini (строит contents/config)."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
@@ -895,17 +895,17 @@ async def _try_gemini_streaming(chat_id: int, user_text: str, message: Message, 
     state = bot.get_state(chat_id)
     contents = await bot._build_gemini_turn_contents(chat_id, user_text, history_meta=history_meta)
     call_contents, gconfig = bot._build_gemini_call_config(
-        model_id, contents, memory_summary=state.get("memory_summary") or "",
+        model_id, contents, memory_summary=state.get("memory_summary") or "", effort=effort,
     )
     piece_agen = _gemini_stream_pieces(model_id, call_contents, gconfig, deadline=deadline)
     return await _run_streaming_reply(chat_id, user_text, message, provider="gemini", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started, history_meta=history_meta)
 
-async def _try_munito_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None, history_meta=None) -> tuple[str | None, Message | None]:
+async def _try_munito_streaming(chat_id: int, user_text: str, message: Message, model_id: str, *, deadline: float | None = None, status=None, history_text=None, reuse_placeholder=None, wait_started=None, history_meta=None, effort=None) -> tuple[str | None, Message | None]:
     """Обёртка _run_streaming_reply для Munito (SSE через chat/completions), память без резки — см. ask_munito_text."""
     import bot
     messages = await bot._build_openai_turn_messages(
         chat_id, user_text, model_id, history_meta=history_meta,
     )
     # Генератор — через bot.: тесты подменяют bot._munito_stream_pieces фейком.
-    piece_agen = bot._munito_stream_pieces(model_id, messages, deadline=deadline)
+    piece_agen = bot._munito_stream_pieces(model_id, messages, deadline=deadline, effort=effort)
     return await _run_streaming_reply(chat_id, user_text, message, provider="munito", model_id=model_id, piece_agen=piece_agen, deadline=deadline, status=status, history_text=history_text, reuse_placeholder=reuse_placeholder, wait_started=wait_started, history_meta=history_meta)

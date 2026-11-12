@@ -478,7 +478,7 @@ def test_sse_pieces_hanging_post_entry_times_out(deadline_mode, monkeypatch):
 def test_try_munito_streaming_happy_path_accumulates_and_finalizes(monkeypatch):
     chat_id = 999105
 
-    async def fake_stream_pieces(model_id, messages, *, deadline=None):
+    async def fake_stream_pieces(model_id, messages, *, deadline=None, effort=None):
         for piece in ["Привет", ", как ", "дела?"]:
             yield piece
 
@@ -974,7 +974,7 @@ def test_streaming_reveal_follows_arrival_pace_not_full_dump():
 def test_try_munito_streaming_returns_none_on_early_failure(monkeypatch):
     chat_id = 999106
 
-    async def fake_stream_pieces_raises(model_id, messages, *, deadline=None):
+    async def fake_stream_pieces_raises(model_id, messages, *, deadline=None, effort=None):
         raise RuntimeError("boom before any content")
         yield ""  # делает функцию async-генератором (недостижимо)
 

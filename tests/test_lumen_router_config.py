@@ -763,11 +763,16 @@ def test_bump_effort_clamps_at_both_ends():
     ("deepseek-ai/deepseek-v4.1-flash-1017", "reasoning_effort", True),
     ("zai-org/glm-5.3-flash", "tools", True),
     ("google/gemma-4-12b", "reasoning_effort", False),
-    ("perplexity-ai/pplx-decider-v1.2", "tools", False),
-    ("неизвестная/модель", "reasoning_effort", False),
+    ("perplexity-ai/pplx-decider-v1.2", "reasoning_effort", False),
+    # tools у этих двух не замеряли, поэтому он у них не снят: снято только то,
+    # по чему есть подтверждённый 400.
+    ("google/gemma-4-12b", "tools", True),
+    ("неизвестная/модель", "reasoning_effort", True),
     (None, "reasoning_effort", True),
 ])
 def test_munito_model_supports_only_measured_capabilities(model_id, param, expected):
+    # Неизвестной модели поле остаётся (прежнее поведение): иначе новая голова
+    # цепочки молча теряет усилие. Снято только то, что замерено как 400.
     assert lumen_router_config._munito_model_supports(model_id, param) is expected
 
 
