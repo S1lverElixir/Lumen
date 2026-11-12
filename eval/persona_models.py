@@ -153,20 +153,31 @@ def sanitize_no_proxy() -> list[str]:
     return touched
 
 
+def env_files() -> list[Path]:
+    """Где искать .env с ключами. В worktree-ах файла нет (он в .gitignore и живёт
+    в основном дереве), поэтому порядок тот же, что в eval/agent_loop_probe.py:
+    своё репозиторий-корень, затем LUMEN_ENV_DIR с дефолтом на основное дерево.
+    Значения отсюда нигде не печатаются."""
+    here = REPO / ".env"
+    outside = Path(os.getenv("LUMEN_ENV_DIR", "").strip()
+                   or r"C:/Users/egork/Documents/Default Project/Lumen") / ".env"
+    return [here] if here == outside else [here, outside]
+
+
 def load_env() -> None:
     """Читает .env репозитория в окружение. Значения не печатаются и не логируются."""
-    env_file = REPO / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    for env_file in env_files():
+        if not env_file.exists():
             continue
-        name, _, value = line.partition("=")
-        name = name.strip()
-        value = value.strip().strip('"').strip("'")
-        if name and value and not os.environ.get(name):
-            os.environ[name] = value
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip().lstrip("﻿")
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            name = name.strip()
+            value = value.strip().strip('"').strip("'")
+            if name and value and not os.environ.get(name):
+                os.environ[name] = value
 
 
 def load_questions(path: Path | None = None) -> dict:

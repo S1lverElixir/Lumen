@@ -1325,8 +1325,10 @@ async def _handle_message_core(
     agent_planning_ms = 0
     if search_will_run:
         # Сниппеты едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
-        # Сбор идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный
-        # вопрос получит "занято"). Статус-пузырь создаётся до первого этапа,
+        # Сбор идёт до старта бюджета маршрута и берёт собственный бюджет: 22 с на один
+        # поиск при medium и 44 с при high/xhigh (evidence_phase_budget_sec), урезанные
+        # остатком MESSAGE_TOTAL_BUDGET_SEC (параллельный вопрос получит "занято").
+        # Статус-пузырь создаётся до первого этапа,
         # чтобы строки цикла правили уже живой пузырь, а не висели в очереди.
         status = await status_task if status_task is not None else None
         snippets, model_queries, agent_used, agent_stats = await _gather_web_evidence(
