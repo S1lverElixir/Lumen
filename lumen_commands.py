@@ -1666,6 +1666,16 @@ async def cmd_selftest(message: Message) -> None:
         ok, detail, elapsed = await bot.selftest_llm_head("gemini", chat_id=message.chat.id)
         rows.append(_selftest_row("Gemini", ok, detail, elapsed))
         summary.append(f"gemini={'ok' if ok else 'FAIL'}/{elapsed:.1f}s")
+    # У слоя поиска своя пробы нет: важнее переключатели и остаток дневного
+    # бюджета обращений — по этой строке видно, активен ли цикл после рестарта.
+    import lumen_agent
+    import lumen_search
+    rows.append(
+        f"Поиск: {'включён' if lumen_search.web_search_is_enabled() else 'выключен'}"
+        f" · цикл: {'включён' if lumen_agent.agent_turn_enabled() else 'выключен'}"
+        f" · обращений сегодня {lumen_search.search_calls_today()}"
+        f"/{lumen_search.WEB_SEARCH_DAILY_LIMIT}"
+    )
     try:
         session = await bot._get_http_session()
         token = bot.BOT_TOKEN or ""
