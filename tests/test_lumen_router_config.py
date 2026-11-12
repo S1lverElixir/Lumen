@@ -3,7 +3,9 @@ test_lumen_router_config.py — юнит-тесты на lumen_router_config.py:
 (GEMINI_MODELS, GEMINI_TTS_MODELS), эвристики "это тяжёлый запрос?"/"нужна свежая
 информация?"/"просят поиск в вебе" (_looks_like_heavy_query/_looks_like_freshness_query/
 _looks_like_search_request), построение маршрута для одного сообщения (_build_route:
-провайдеры munito и gemini, выключатель _munito_active, extras запроса _munito_payload_extras),
+провайдеры munito и gemini, выключатель _munito_active, extras запроса _munito_payload_extras,
+автовыбор усилия pick_reasoning_effort/agent_max_searches/gemini_thinking_for и карта
+возможностей моделей _MUNITO_CAPS),
 фильтры исчерпанной квоты и карантина моделей (_skip_exhausted/_is_quota_exhausted) и
 реестр ID для детекта утечки личности (_KNOWN_MODEL_IDS_FOR_LEAK_DETECTION).
 
@@ -717,3 +719,123 @@ def test_quarantine_window_expires_and_stats_agree_with_routing(monkeypatch):
         assert bot._quarantine_status() == []
     finally:
         lumen_router_config._QUARANTINE.clear()
+
+
+# ─────────────────────────── автовыбор усилия и возможностей моделей ───────────────────────────
+
+@pytest.mark.parametrize(("text", "kwargs", "expected"), [
+    # Регрессия 12.11.2026: плоский MUNITO_REASONING_EFFORT=low давал glm-5.3-flash
+    # неверную арифметику (64 вместо 60), а на «подумай как следует» усилие не
+    # менялось вовсе. Здесь проверяется именно переключение по смыслу запроса.
+    ("привет", {}, "low"),
+    ("спасибо!", {}, "low"),
+    ("сколько будет 27*43", {}, "medium"),
+    ("кто такие викинги", {}, "medium"),
+    ("напиши функцию парсера", {"is_heavy": True}, "high"),
+    ("спроектируй архитектуру и докажи выбор", {}, "xhigh"),
+    ("сравни все три варианта по шагам", {}, "xhigh"),
+    ("какая сейчас цена билета", {"needs_freshness": True}, "medium"),
+    # Просьба коротко не имеет права опускаться до minimal: на нём glm ошибался.
+    ("коротко: сколько будет 27*43", {}, "low"),
+    ("реши задачу ещё раз, ты не прав", {}, "medium"),
+    ("реши задачу", {"corrections": 2}, "medium"),
+    ("объясни", {"history_len": 60}, "medium"),
+])
+def test_pick_reasoning_effort_switches_on_request_shape(text, kwargs, expected):
+    assert lumen_router_config.pick_reasoning_effort(text, **kwargs) == expected
+
+
+def test_pick_reasoning_effort_never_returns_unknown_level():
+    # Неизвестный уровень = 400 от провайдера или молчаливое отсутствие поля.
+    for text in ("", "?", "докажи", "а он точно не в клубе?", "x" * 5000):
+        assert lumen_router_config.pick_reasoning_effort(text) in lumen_router_config.EFFORT_LEVELS
+
+
+def test_bump_effort_clamps_at_both_ends():
+    assert lumen_router_config._bump_effort("xhigh", 3) == "xhigh"
+    assert lumen_router_config._bump_effort("low", -3) == "minimal"
+    assert lumen_router_config._bump_effort("мусор", 1) == "low"
+
+
+@pytest.mark.parametrize(("model_id", "param", "expected"), [
+    # 400 на reasoning_effort у gemma-4-12b и pplx-decider-v1.2 — замер 12.11.2026;
+    # тест падает, если кто-то поставит такую модель в цепочку без замера.
+    ("deepseek-ai/deepseek-v4.1-flash-1017", "reasoning_effort", True),
+    ("zai-org/glm-5.3-flash", "tools", True),
+    ("google/gemma-4-12b", "reasoning_effort", False),
+    ("perplexity-ai/pplx-decider-v1.2", "tools", False),
+    ("неизвестная/модель", "reasoning_effort", False),
+    (None, "reasoning_effort", True),
+])
+def test_munito_model_supports_only_measured_capabilities(model_id, param, expected):
+    assert lumen_router_config._munito_model_supports(model_id, param) is expected
+
+
+def test_every_munito_chain_model_has_capability_record():
+    # Модель без записи = усилие и tools для неё молча выключаются: либо замерь и
+    # добавь, либо не ставь в цепочку (правило датированных подтверждений).
+    for model_id in lumen_router_config._MUNITO_ORDER:
+        assert model_id in lumen_router_config._MUNITO_CAPS, model_id
+        assert lumen_router_config._MUNITO_CAPS[model_id]["reasoning_effort"] is True
+        assert lumen_router_config._MUNITO_CAPS[model_id]["tools"] is True
+
+
+@pytest.mark.parametrize(("value", "effort", "expected"), [
+    (None, None, {"reasoning_effort": "low"}),      # прежний дефолт без аргументов
+    (None, "high", {"reasoning_effort": "high"}),   # автовыбор, переменная не задана
+    ("", "high", {}),                               # пустая = выключатель поля
+    ("minimal", "high", {"reasoning_effort": "minimal"}),  # пин важнее автовыбора
+])
+def test_munito_payload_extras_precedence(monkeypatch, value, effort, expected):
+    if value is None:
+        monkeypatch.delenv("MUNITO_REASONING_EFFORT", raising=False)
+    else:
+        monkeypatch.setenv("MUNITO_REASONING_EFFORT", value)
+    assert lumen_router_config._munito_payload_extras(effort) == expected
+
+
+def test_munito_payload_extras_drops_field_for_unsupported_model(monkeypatch):
+    monkeypatch.delenv("MUNITO_REASONING_EFFORT", raising=False)
+    assert lumen_router_config._munito_payload_extras("high", "google/gemma-4-12b") == {}
+    assert lumen_router_config._munito_payload_extras("high", "zai-org/glm-5.3-flash") == {"reasoning_effort": "high"}
+
+
+@pytest.mark.parametrize(("effort", "expected"), [
+    ("low", 0), ("medium", 1), ("high", 2), ("xhigh", 2), (None, 1),
+])
+def test_agent_max_searches_follows_effort(monkeypatch, effort, expected):
+    monkeypatch.delenv("AGENT_MAX_SEARCH_STEPS", raising=False)
+    assert lumen_router_config.agent_max_searches(effort) == expected
+
+
+def test_agent_max_searches_env_override(monkeypatch):
+    # Владелец обязан уметь глушить цикл поиска цифрой, без правки кода.
+    monkeypatch.setenv("AGENT_MAX_SEARCH_STEPS", "0")
+    assert lumen_router_config.agent_max_searches("xhigh") == 0
+    monkeypatch.setenv("AGENT_MAX_SEARCH_STEPS", "3")
+    assert lumen_router_config.agent_max_searches("medium") == 3
+    monkeypatch.setenv("AGENT_MAX_SEARCH_STEPS", "не число")
+    assert lumen_router_config.agent_max_searches("medium") == 1
+
+
+@pytest.mark.parametrize(("model_id", "effort", "expected"), [
+    ("gemini-3.8-flash", "low", ("thinking_level", "low")),
+    ("gemini-3.8-flash", "xhigh", ("thinking_level", "high")),
+    ("gemini-2.5-flash", "low", ("thinking_budget", 0)),
+    ("gemini-2.5-flash", "high", ("", None)),   # дефолт модели: калибровка 18.08.2026
+    ("gemini-3.8-flash", None, ("", None)),     # EFFORT_AUTO=0 — прежняя эвристика снаружи
+    ("gemini-unknown", "high", ("", None)),
+])
+def test_gemini_thinking_for_maps_effort(model_id, effort, expected):
+    assert lumen_router_config.gemini_thinking_for(model_id, effort) == expected
+
+
+def test_recent_corrections_counts_only_short_user_turns():
+    history = [
+        {"role": "user", "content": "объясни про шляпы"},
+        {"role": "assistant", "content": "…"},
+        {"role": "user", "content": "ты не прав, перепроверь"},
+        {"role": "user", "content": "в статье приводится фраза «ты не прав был по отношению к…» " * 6},
+    ]
+    assert lumen_router_config.recent_corrections(history) == 1
+    assert lumen_router_config.recent_corrections([]) == 0

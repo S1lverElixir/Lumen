@@ -300,17 +300,218 @@ def _munito_route() -> list[tuple[str, str]]:
     return [("munito", m) for m in _skip_exhausted("munito", _MUNITO_ORDER)]
 
 
-def _munito_payload_extras() -> dict[str, Any]:
-    """reasoning_effort для запросов Munito (MUNITO_REASONING_EFFORT, по умолчанию low).
-    Замер 05.11.2026: у glm-5.3-flash reasoning падает с ~60 токенов до 0-20 (первый
-    токен 0.13-0.26s вместо 0.5-1.0s), у deepseek-1017 почти не меняется, а
-    qwen3.8-27b без поля съедал весь лимит вывода размышлением и отдавал пустой
-    content. Цена: на двухшаговой задаче про дистанцию GLM ответил неверно (180 при
-    low, 240 при minimal, верно 210) и исправился на повторе — риск есть, но
-    плавающий, головой остаётся DeepSeek. Пустое значение = поле не отправляем:
-    провайдер отвечает 400 на незнакомые параметры."""
-    effort = (os.getenv("MUNITO_REASONING_EFFORT", "low") or "").strip()
-    return {"reasoning_effort": effort} if effort else {}
+# ── Усилие модели: автовыбор на каждый запрос (Claude-like effort, 12.11.2026) ──
+# Claude не получает бюджет размышления руками: adaptive thinking решает сам, а
+# effort (low..max) — поведенческий сигнал о том, сколько работы вложить в ответ,
+# включая число и длину вызовов инструментов (офиц. docs "Thinking" и "Effort").
+# У наших открытых моделей тот же рычаг — reasoning_effort (Munito) и
+# thinking_level/thinking_budget (Gemini), поэтому уровень считается по тексту
+# запроса детерминированно, без второго вызова LLM.
+# Замер 12.11.2026 живым вызовом (3 задачи x effort low/high/xhigh): у
+# glm-5.3-flash «средняя скорость пути» дала 64 при low и верные 60 при high/xhigh,
+# то есть уровень переключает правильность, а не только длину; deepseek-1017 верен
+# на всех уровнях, у него меняются только reasoning-токены (89 против 242).
+# Потолок: на логике про шляпы обе головы при medium+ съели весь бюджет вывода
+# размышлением и вернули пустой content (finish_reason=length, ~1200 токенов),
+# qwen3.8-27b при xhigh ответил неверно — выше high без замера не поднимаемся.
+EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
+
+# Возможности моделей по параметрам запроса — только по живому замеру 12.11.2026
+# (gemma-4-12b и pplx-decider-v1.2 на reasoning_effort отвечают 400
+# "'reasoning_effort' is not supported", четыре текстовые головы принимают
+# minimal..xhigh и отдают tool_calls и в стриме, и без него). Модель без записи
+# считается неподдерживающей: лучше потерять усилие, чем получить 400 на каждый
+# запрос. Тест на полноте записи держит список в порядке.
+_MUNITO_CAPS: dict[str, dict[str, bool]] = {
+    "deepseek-ai/deepseek-v4.1-flash-1017": {"reasoning_effort": True, "tools": True},
+    "deepseek-ai/deepseek-v4-flash": {"reasoning_effort": True, "tools": True},
+    "zai-org/glm-5.3-flash": {"reasoning_effort": True, "tools": True},
+    "qwen/qwen3.8-27b": {"reasoning_effort": True, "tools": True},
+    "google/gemma-4-12b": {"reasoning_effort": False, "tools": False},
+    "perplexity-ai/pplx-decider-v1.2": {"reasoning_effort": False, "tools": False},
+}
+
+
+def _munito_model_supports(model_id: str | None, param: str) -> bool:
+    """Есть ли у модели параметр. None (цепочка не выбрана) = не проверяем."""
+    if not model_id:
+        return True
+    return bool(_MUNITO_CAPS.get(model_id, {}).get(param))
+
+
+def _effort_auto_on() -> bool:
+    """EFFORT_AUTO=0/off возвращает прежний плоский режим: уровень берётся только
+    из MUNITO_REASONING_EFFORT, как было до 12.11.2026."""
+    return (os.getenv("EFFORT_AUTO", "") or "").strip().lower() not in ("0", "false", "off")
+
+
+# Явная просьба подумать как следует или разбор предыдущей ошибки: Claude в этом
+# случае поднимает усилие, а не отвечает быстрее.
+_EFFORT_DEEPER_RE = re.compile(
+    r"подумай|посчитай\s+(внимательн|заново|ещё)|не торопи|как следует|перепровер|проверь\s+расчёт"
+    r"|внимательн\w*|разбер(и|ём)\s+(детальн|по\s+косточкам)|подробн\w*\s+и\s+объясн"
+    r"|think\s+(carefully|hard|twice)|take\s+your\s+time|double[\s-]check|reconsider"
+    # Человек ловит модель на ошибке: прошлый ответ был слабым, повторять его нельзя.
+    r"|ты\s+(не\s+прав|ошиб|снова|опять)|снова\s+ошиб|неверн\w*,?\s+(это|тут)|я\s+(же\s+)?говорил",
+    re.IGNORECASE,
+)
+# Просьба коротко — снижаем, но не ниже low: на minimal glm-5.3-flash ошибается в
+# арифметике (замер 12.11.2026), а «коротко» не значит «неверно».
+_EFFORT_SHORTER_RE = re.compile(
+    r"коротко|кратко|в\s+один\s+(строку|слова?)|одним\s+словом|без\s+(пояснений|воды|деталей)"
+    r"|быстро|парой\s+слов|максимально\s+коротк|в одном предложении"
+    r"|\bbriefly\b|\bshort\s+answer\b|one\s+word|\bconcise\b|no\s+explanation|tl;?dr",
+    re.IGNORECASE,
+)
+# Дальний горизонт: чертёж, доказательство, многошаговый разбор — то, где Claude
+# думает дольше всего. Снят с _HEAVY_QUERY_RE, но уже: heavy — это «код/статья»,
+# xhigh — «архитектура/доказательство/план на несколько шагов».
+_EFFORT_LONGHORIZON_RE = re.compile(
+    r"архитектур|алгоритм|докажи|доказательств|оптимизаци\w*|рефактор|спроектир\w*"
+    r"|(план|разбор|инструкц\w*|сравнен\w*)\s+(на|по|из)\s+\S{2,}\s+(недел|месяц|этап|шаг|вариант)"
+    r"|пошагов\w*|многошагов\w*|сравни\s+(все|нескольк|эти)|продумай\s+все"
+    r"|architecture|proof\b|\bprove\b|step[\s-]by[\s-]step|trade-?offs?|end[\s-]to[\s-]end",
+    re.IGNORECASE,
+)
+
+# Сколько поисков разрешаем за один ход на каждом уровне (Claude: effort решает,
+# сколько работы модель делает, а web_search ограничен max_uses). Шаг поиска —
+# это отдельный вызов модели плюс внешний запрос, поэтому потолок жёсткий.
+_AGENT_SEARCH_STEPS_BY_EFFORT: dict[str, int] = {
+    "minimal": 0, "low": 0, "medium": 1, "high": 2, "xhigh": 2,
+}
+
+
+# Вопрос по форме, а не по маркеру свежести: «что за город Брест» — стабильный
+# факт, но на нём цена догадки выше цены лишних reasoning-токенов (замер
+# 12.11.2026: low на glm давал неверную арифметику, medium+ — верную).
+_ASK_ANY_RE = re.compile(
+    r"\?|\b(кто|что|где|когда|почему|зачем|какой|какие|сколько|почему)\b"
+    r"|\b(how|what|who|where|when|why|which|much|many)\b",
+    re.IGNORECASE,
+)
+
+
+def pick_reasoning_effort(
+    text: str, *, is_heavy: bool = False, needs_freshness: bool = False,
+    corrections: int = 0, history_len: int = 0,
+) -> str:
+    """Уровень усилия для одного запроса. Дешевле ошибиться вверх, чем вниз:
+    лишние reasoning-токены стоят секунды, неверный ответ — доверие.
+    minimal не используем намеренно: на нём glm-5.3-flash давал неверную
+    арифметику (замер 12.11.2026), а выигрыш — доли секунды."""
+    body = text or ""
+    if _EFFORT_LONGHORIZON_RE.search(body) or len(body) > 1200 or body.count("?") >= 4:
+        level = "xhigh"
+    elif is_heavy:
+        level = "high"
+    elif needs_freshness:
+        # Свежий факт требует аккуратности с источниками, а не глубокого reasoning.
+        level = "medium"
+    else:
+        stripped = body.strip()
+        if len(stripped) <= 40 and not _ASK_ANY_RE.search(stripped):
+            level = "low"   # болтовня и короткие реплики: печать важнее глубины
+        else:
+            level = "medium"
+    if _EFFORT_DEEPER_RE.search(body):
+        level = _bump_effort(level, 1)
+    if corrections > 0:
+        # Человек уже ловил модель на ошибке в этом разговоре.
+        level = _bump_effort(level, 1)
+    if _EFFORT_SHORTER_RE.search(body):
+        level = _bump_effort(level, -2 if level == "xhigh" else -1)
+        if level == "minimal":
+            level = "low"
+    if history_len > 40 and level == "low":
+        # Длинный разговор: цена неверного «быстрого» ответа выше, чем пауза.
+        level = "medium"
+    return level
+
+
+def recent_corrections(history: list[Any], limit: int = 3) -> int:
+    """Сколько из последних реплик человека ловили модель на ошибке («ты не прав»,
+    «неверно»): по ним усилие поднимается на ступень, как у Claude, где человек
+    прямо выбирает уровень глубже после промаха. Считаем по роли user и только по
+    коротким репликам — в развёрнутом тексте та же фраза может быть цитатой."""
+    found = 0
+    for entry in reversed(history or []):
+        if not isinstance(entry, dict) or entry.get("role") != "user":
+            continue
+        text = entry.get("content")
+        if not isinstance(text, str):
+            continue
+        if len(text) <= 200 and _EFFORT_DEEPER_RE.search(text):
+            found += 1
+        if len(text) <= 200:
+            limit -= 1
+            if limit <= 0:
+                break
+    return found
+
+
+def _bump_effort(level: str, delta: int) -> str:
+    """Сдвиг по шкале EFFORT_LEVELS с упором в края. xhigh — потолок: выше него
+    открытые модели на замере 12.11.2026 возвращали пустой content."""
+    try:
+        idx = EFFORT_LEVELS.index(level)
+    except ValueError:
+        return "low"
+    return EFFORT_LEVELS[max(0, min(len(EFFORT_LEVELS) - 1, idx + delta))]
+
+
+def agent_max_searches(effort: str | None) -> int:
+    """Сколько поисков за ход разрешено при этом усилии (AGENT_MAX_SEARCH_STEPS
+    перекрывает, 0 выключает цикл целиком)."""
+    raw = (os.getenv("AGENT_MAX_SEARCH_STEPS", "") or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return _AGENT_SEARCH_STEPS_BY_EFFORT.get(effort or "medium", 0)
+
+
+def gemini_thinking_for(model_id: str, effort: str | None) -> tuple[str, Any]:
+    """Пары (параметр, значение) для thinking_config резерва: у линейки 3.x это
+    thinking_level (офиц. docs Gemini: minimal/low/medium/high по модели), у 2.5 —
+    thinking_budget в токенах. ('', None) = поле не трогаем, дефолт модели.
+    effort=None — автовыбор выключен (EFFORT_AUTO=0), прежняя эвристика остаётся
+    на вызывающей стороне, здесь ничего не назначаем."""
+    if not effort:
+        return "", None
+    if model_id.startswith("gemini-3"):
+        if effort in ("minimal", "low", "medium", "high"):
+            return "thinking_level", effort
+        return "thinking_level", "high"
+    if model_id.startswith("gemini-2.5"):
+        # Замера по budget у нас нет; калибровка 18.08.2026 оставила только две
+        # подтверждённые точки: выключенное размышление на лёгких и дефолт на
+        # остальных, поэтому high/xhigh здесь не поднимаем руками.
+        if effort in ("minimal", "low"):
+            return "thinking_budget", 0
+        return "", None
+    return "", None
+
+
+def _munito_payload_extras(effort: str | None = None, model_id: str | None = None) -> dict[str, Any]:
+    """reasoning_effort для запроса Munito.
+    Порядок: пустая MUNITO_REASONING_EFFORT = поле не отправляем вовсе (замер
+    05.11.2026: у glm-5.3-flash reasoning падает с ~60 токенов до 0-20, первый
+    токен 0.13-0.26s вместо 0.5-1.0s; qwen3.8-27b без поля съедал весь лимит
+    вывода размышлением и отдавал пустой content); непустая = пин, он важнее
+    автовыбора, так владелец глушит эксперимент без правки кода; без переменной —
+    автовыбор по запросу, а без него прежний дефолт low. Без аргумента effort
+    служебные вызовы (selftest, описания /draw, сводки) остаются на дефолте."""
+    raw = os.getenv("MUNITO_REASONING_EFFORT")
+    if raw is not None and not raw.strip():
+        return {}
+    chosen = raw.strip() if raw is not None else (effort or "low").strip()
+    if not chosen:
+        return {}
+    if not _munito_model_supports(model_id, "reasoning_effort"):
+        return {}
+    return {"reasoning_effort": chosen}
 
 
 # ── Цепочки Gemini: где нужен именно Gemini (ссылки, YouTube, видео/аудио) и где
