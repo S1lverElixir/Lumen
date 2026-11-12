@@ -772,21 +772,52 @@ def test_pick_reasoning_effort_question_signal_is_multilingual(text, expected):
     assert lumen_router_config.pick_reasoning_effort(text) == expected
 
 
-def test_ask_words_split_by_trailing_char_class():
-    # Гласные и носовые знаки деванагари и бенгали не считаются частью слова,
-    # поэтому граница "\b" после них не работает: такие формы ловятся только
-    # подстрокой и обязаны сидеть в tighter-списке, а не в границах слова.
-    for word in ("কে", "कहाँ", "क्यों", "কোথায়"):
-        assert lumen_router_config._boundary_safe(word) is False
-        assert word in lumen_router_config._ASK_WORDS_TIGHT
-        assert word not in lumen_router_config._ASK_WORDS_BOUND
-    for word in ("কখন", "कौन", "что", "wat"):
-        assert lumen_router_config._boundary_safe(word) is True
-        assert word in lumen_router_config._ASK_WORDS_BOUND
-    assert lumen_router_config._ASK_TIGHT_RE.search("শুধু বলো কে")
+def test_ask_words_split_by_script_not_by_trailing_char():
+    # В деванагари и бенгали гласные и носовые знаки не считаются буквами, поэтому
+    # "\b" рвётся ВНУТРИ слова. Прошлое деление по последнему знаку давало ложные
+    # вопросы: граница для «किस» ловила «किसी» («чей-то»), а подстрока для «কে»
+    # ловила «থেকে» («из, от»), и бытовая фраза на хинди или бенгали теряла low
+    # (блоклер адверсариального ревью 12.11.2026). Теперь граница проверяется по
+    # диапазону самой письменности с обеих сторон слова.
+    for word in lumen_router_config._ASK_WORDS_INDIC:
+        assert lumen_router_config._is_indic(word) is True
+        assert word not in lumen_router_config._ASK_WORDS_SPACED
+    for word in ("что", "wat", "kim", "کجا", "أين", "siapa", "kailan"):
+        assert lumen_router_config._is_indic(word) is False
+        assert word in lumen_router_config._ASK_WORDS_SPACED
+    # Именно эти фразы раньше становились «вопросом», хотя человеком были сказаны
+    # без всякого вопроса:
+    assert lumen_router_config._ASK_INDIC_RE.search("वो किसी के पास है") is None
+    assert lumen_router_config._ASK_INDIC_RE.search("कबूतर उड गया") is None
+    assert lumen_router_config._ASK_INDIC_RE.search("াজার থেকে আসছি") is None
+    assert lumen_router_config._ASK_INDIC_RE.search("কারণ আমি ক্লান্ত") is None
+    # А настоящий вопрос того же ряда обязана ловиться:
+    assert lumen_router_config._ASK_INDIC_RE.search("কোথায় আছো") is not None
+    assert lumen_router_config._ASK_INDIC_RE.search("तुम कहाँ रहते हो") is not None
     assert lumen_router_config._ASK_WORDS_RE.search("wat is de hoofdstad")
     # Отрицание «не» (кириллица) не должно подменять казахское «не» (латиница).
     assert lumen_router_config.pick_reasoning_effort("это не я") == "low"
+
+
+def test_leading_and_horizon_signals_do_not_fire_on_ordinary_words():
+    # Три блоклера ревью 12.11.2026: дальний горизонт без границ слова, просьба
+    # «коротко» из слов, которые в других языках значат другое, и союзы-омонимы
+    # в начале фразы.
+    assert lumen_router_config.pick_reasoning_effort("Планирую отпуск на месяц") == "low"
+    assert lumen_router_config.pick_reasoning_effort(
+        "Планета Венера, месяц за месяцем") == "medium"
+    assert lumen_router_config.pick_reasoning_effort(
+        "составь план тренировок на четыре недели") == "xhigh"
+    assert lumen_router_config.pick_reasoning_effort(
+        "how does a rapid transit system work") == "medium"
+    assert lumen_router_config.pick_reasoning_effort("was ist ein JWT kurz") == "low"
+    for small_talk in ("que bom!", "ne bouge pas", "co-founder thing", "https://var.io",
+                       "var i = arr", "när du kommer"):
+        assert lumen_router_config.pick_reasoning_effort(small_talk) == "low", small_talk
+    # MULTILINE: «ok\n¿qué es esto?» — одна реплика человека, а не две строки.
+    assert lumen_router_config.pick_reasoning_effort("ok\n¿qué es esto?") == "medium"
+    # «huh????» — один вопрос с четырьмя знаками, а не четыре вопроса в столбик.
+    assert lumen_router_config.pick_reasoning_effort("huh????") != "xhigh"
 
 
 def test_pick_reasoning_effort_never_returns_unknown_level():

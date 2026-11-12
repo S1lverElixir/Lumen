@@ -202,9 +202,10 @@ def _quarantine_window_over(entry: dict[str, Any]) -> bool:
 def _record_model_outcome(provider: str, model_id: str, *, bad: bool) -> None:
     """Плохой ответ +1 к счётчику в текущем окне (на пороге — карантин с записью
     в лог), успешный — сбрасывает счётчик. За пределами окна счётчик начинает
-    с нуля, а один чат вносит не больше половины порога: раньше три пустых ответа
-    из одного чата выключали модель всем остальным (аудит run-2). Вклад лимитим
-    только когда чат известен — служебные вызовы вне контекста сообщения не считаем."""
+    с нуля, а один чат вносит не больше threshold-1 из порога: раньше три пустых
+    ответа из одного чата выключали модель всем остальным (аудит run-2). Вклад
+    лимитим только когда чат известен — служебные вызовы вне контекста сообщения
+    не считаем."""
     if not bad:
         if _QUARANTINE.pop((provider, model_id), None) is not None:
             log.debug("[quarantine] %s/%s answered well, counter reset.", provider, model_id)
@@ -376,9 +377,13 @@ _EFFORT_SHORTER_RE = re.compile(
     # 12.11.2026 оставляла на medium «was ist ein JWT kurz» и «kiut a költő?
     # röviden», хотя человек просил две строки.
     r"|\bkurz\b|\bkurze\b|\bkurzen\b|r[öo]viden|lyhysti|lyhemmin"
-    r"|\bvite\b|promptement|\bpresto\b|\bpronto\b|r[áa]pid[oa]?\b"
-    r"|brevement[ée]|\bkort\b|kr[óo]tko|k[ıi]sa\b|qisqa\b"
-    r"|ng[ảa]n\b|ng[ảa]n ?g[ọo]n|singkat|ringkas|pendek|maikli|cort[oa]\b"
+    # Только те формы, которые в своём языке значат «коротко», а не «быстро,
+    # скоро, маленький». «rapid», «vite», «presto», «pronto» и «corto» без
+    # ударения в живых фразах — обычные слова, и они снижали настоящие вопросы:
+    # «how does a rapid transit system work» уходило на low (ревью 12.11.2026).
+    r"|promptement|r[áa]pid[oa]\b|m[áa]s\s+(?:corto|r[áa]pido)|brevemente"
+    r"|\bkort\b|kr[óo]tko|k[ıi]sa\b|qisqa\b"
+    r"|ng[ảa]n\b|ng[ảa]n ?g[ọo]n|singkat|ringkas|pendek|maikli"
     "|สั้น|สั้นๆ|\u0628\u062e\u0627\u0635\u0631|\u062e\u0644\u0627\u0635\u0647"
     "|\u0645\u062e\u062a\u0635\u0631|\u0938\u0902\u0915\u094d\u0937\u0947\u092a",
     re.IGNORECASE,
@@ -391,8 +396,15 @@ _EFFORT_SHORTER_RE = re.compile(
 _EFFORT_LONGHORIZON_RE = re.compile(
     r"архитектур|докажи|доказательств|спроектир\w*|аппроксим\w*|сходимость"
     # «план на четыре недели», «график на месяц», «план тренировок на 12 недель».
-    r"|(план|график|программ\w*|список\s+задач|инструкц\w*|разбор|сравнен\w*)"
-    r"[^\n]{0,40}?(недел\w*|меся\w*|\d+\s+(?:этап|шаг|ден|день)|этапн\w*|по\s+неделям)"
+    # «план на четыре недели», «график на месяц», «программа на 12 недель».
+    # Границы слова обязательны: без них «Планирую отпуск на месяц» и «Планета
+    # Венера, месяц за месяцем» уезжали на xhigh (блоклер ревью 12.11.2026).
+    # Окно — 25 знаков внутри одной фразы: склеивать несвязные предложения
+    # «план …» и «…неделя» права нет.
+    r"|\b(?:план|плана|плану|плане|график|программ\w*|список\s+задач"
+    r"|инструкц\w*|разбор|разбора|сравнен\w*)\b"
+    r"[^\n.!?]{0,25}?\b(?:недел\w*|мес[ея]ц\w*|этап\w*|\d+\s+(?:этап|шаг|ден\w*))\b"
+
     r"|по\s*шагам|пошагов\w*|многошагов\w*|шаг\s+за\s+шагом|сравни\s+(все|нескольк|эти)"
     r"|продумай\s+все|trade-?offs?|end[\s-]to[\s-]end|architecture|proof\b|\bprove\b"
     r"|step[\s-]by[\s-]step|\btwo[\s-]week\b|\broadmap\b",
@@ -425,17 +437,25 @@ _QUESTION_ANY_RE = re.compile(
     # Персидский знак «؛» (U+061B) не добавлен: в арабском это точка с запятой.
     r"[?\u00bf\u061f\uff1f\u037e]"
 )
+_ANY_DIGIT_RE = re.compile(r"\d")
 
-# Вопросительные слова по всем 25 языкам бота (lumen_lang.SUPPORTED_LANGS).
-# Что здесь сверено с корпусом, а что нет: тайские формы взяты из переводов
-# бота («คุณเป็นใคร», «ในรูปมีอะไร»), а «ทำไม» в строках бота нет и проверить её
-# нечем — поэтому её в списке нет. Остальные языки (арабский, хинди, вьетнамский,
-# казахский и прочее) — обычные вопросительные слова своих языков, сверить их
-# здесь нечем. Ошибиться можно только в лишнюю ступень: короткая реплика уедет
-# с low на medium, то есть платим секундой, а не неверным фактом.
-# «Как»/«how»/«wie»/«när»/«hur»/«comment»/«come»/«nasıl» исключены сознательно:
-# в короткой реплике это приветствие («как дела», «how are you», «wie geht’s»),
-# а вопрос с таким словом длиннее четырёх слов и берёт medium по длине.
+# «huh????» — один вопрос с четырьмя знаками, а не четыре вопроса в столбик:
+# на дальний горизонт ведёт только достаточное число слов (проверено 12.11.2026).
+_MULTI_QUESTION_MARKS = 4
+_MULTI_QUESTION_WORDS = 5
+
+# Список шире SUPPORTED_LANGS: люди пишут боту и на языках, которых у него в
+# переводах нет (польский, чешский, шведский), а промах вверх стоит одну ступень
+# усилия, промах вниз — неверный факт. Часть орфографии сверена со строк самого
+# бота (lumen_lang._START_EXAMPLES и его переводы): так сняты тайские ใคร иอะไร;
+# «ทำไม» в строках бота не встречается, и её в списке нет.
+# СОЗНАТЕЛЬНО ИСКЛЮЧЕНЫ слова, которые в короткой реплике чаще значат не вопрос:
+# «как»/«how»/«wie»/«hur»/«comment»/«come»/«nasıl» — это приветствие («как дела»,
+# «how are you»), и настоящее вопросительное слово в длинной фразе и так
+# попадает на medium по длине; шведские «var» (это ещё и прошедшее время «был»)
+# и «när» с норвежским «når» (союз «когда») — они давали ложный вопрос на
+# «var i = arr» и на коротких фразах без вопроса.
+# Многословные «how much», «how many», «por que» оставлены: они однозначны.
 _ASK_WORDS = (
     # русский, украинский, белорусский
     "кто", "кем", "кём", "чем", "что", "где", "куда", "откуда", "когда",
@@ -444,32 +464,35 @@ _ASK_WORDS = (
     "хто", "що", "де", "куди", "звідки", "коли", "чому", "навіщо", "який",
     "яка", "яке", "які", "скільки", "ким", "чим", "чи",
     # казахский, узбекский: кириллическое «не» — отрицание, поэтому его здесь нет
-    "кім", "қайда", "қашан", "неге", "қанша", "қандай",
-    "nima", "qayerda", "qayerga", "qachon", "nega", "necha", "qaysi",
+    "кім", "қайда", "қашан", "неге", "қанша", "қандай", "неше",
+    "nima", "qayerda", "qayerga", "qachon", "nega", "necha", "nechta", "qaysi", "qanday",
     # английский, немецкий, нидерландский
     "who", "whom", "whose", "what", "where", "when", "why", "which",
-    "wer", "was", "wo", "woher", "wohin", "wann", "warum", "weshalb",
+    "how much", "how many", "how old", "how long", "how far", "how come",
+    "wer", "was", "wo", "woher", "wohin", "wann", "warum", "weshalb", "wieso",
     "welche", "welcher", "welches", "wieviel", "wie viel",
-    "wat", "waar", "wanneer", "waarom", "welke", "hoeveel",
+    "wat", "waar", "wanneer", "waarom", "welke", "hoeveel", "hoe veel",
     # французский, испанский, итальянский, португальский
     "qui", "quoi", "quand", "pourquoi", "combien", "quel", "quelle", "quels",
     "quelles", "où",
-    "quién", "quiénes", "qué", "dónde", "cuándo", "cuánto", "cuál", "cuáles",
+    "quién", "quiénes", "qué", "dónde", "cuándo", "cuánto", "cuánta", "cuántos",
+    "cuántas", "cuál", "cuáles",
     "por qué",
-    "chi", "dove", "quando", "perché", "perche", "quanto", "quale", "quali",
-    "quem", "onde", "quanto", "quantos", "quantas", "qual", "quais",
+    "chi", "dove", "quando", "perché", "perche", "quanto", "quanti", "quante",
+    "quale", "quali",
+    "quem", "onde", "quanto", "quantos", "quantas", "qual", "quais", "por que",
     # польский, турецкий, шведский, датский, норвежский
-    "kto", "gdzie", "kiedy", "dlaczego", "jaki", "jaka", "jakie", "ile",
+    "kto", "czy", "gdzie", "kiedy", "dlaczego", "jaki", "jaka", "jakie", "ile",
     "kim", "czym",
     "kim", "nerede", "nereye", "ne zaman", "neden", "niçin", "kaç", "hangi",
-    "vem", "vad", "var", "när", "varför", "vilken", "vilket", "vilka",
-    "hvem", "hvad", "hva", "hvor", "når", "hvorfor", "hvilken", "hvilket",
+    "vem", "vad", "varför", "vilken", "vilket", "vilka",
+    "hvem", "hvad", "hva", "hvor", "hvorfor", "hvilken", "hvilket",
     # индонезийский, малайский, филиппинский
-    "siapa", "apa", "di mana", "kapan", "kenapa", "mengapa", "berapa",
+    "siapa", "apa", "di mana", "kapan", "bila", "kenapa", "mengapa", "berapa",
     "sino", "ano", "saan", "kailan", "bakit", "gaano", "alin", "ilang",
     # вьетнамский, зулусский
     "ai", "gì", "đâu", "khi nào", "bao giờ", "tại sao", "vì sao", "bao nhiêu",
-    "mấy", "nào",
+    "mấy", "nào", "không",
     "ubani", "yini", "phi", "nini", "kungani", "angaki", "mingaki", "kuphi",
     # хинди, бенгали
     "कौन", "क्या", "कहाँ", "कहां", "कब", "क्यों", "कितना", "कितने", "किस",
@@ -482,15 +505,28 @@ _ASK_WORDS = (
     # тайский пишет слова подряд, границы там не работают — см. _ASK_TIGHT_RE
 )
 
-# Граница слова работает только там, где слово заканчивается буквой или цифрой.
-# В деванагари и бенгали гласные и носовые знаки (U+0938, U+0957, U+09C7) —
-# combining-марки, они не считаются частью слова, и "\bके\b" или "\bकहँ\b"
-# не срабатывали бы никогда (проверено 12.11.2026 на «তুমি কে»). Поэтому
-# список делится сам: окончание-буква идёт с границами, остальное — подстрокой.
-# Тайский пишется без пробелов, его слова добавлены во вторую часть вручную
-# (_ASK_WORDS_NO_SPACE): граница в потоке символов там бесполезна в принципе.
-def _boundary_safe(word: str) -> bool:
-    return word[-1].isalnum()
+# Слово в деванагари или бенгали обязан граничить не с «не-буквой», а с чем-то
+# ВНЕ самой письменности: гласные и носовые знаки (U+093E-U+094F, U+0982-U+09FC)
+# буквами не считаются, поэтому "\b" рвётся внутри слова — "\bकिस\b" ловило
+# «किसी» («чей-то»), а подстрока «কে» ловила «থেকে» («из, от») (блоклер ревью
+# 12.11.2026: 13 из 24 коротких бытовых фраз на хинди и бенгали теряли low).
+# Те же look-around заодно принимают формы на гласовом знаке (कहाँ, কে), которым
+# граница слова противопоказана. Тайский пишется без пробелов вообще: там только
+# подстрока (_ASK_WORDS_THAI).
+_INDIC_SCRIPT = "\u0900-\u097F\u0980-\u09FF"
+
+
+def _is_indic(word: str) -> bool:
+    """Первый символ — буква деванагари или бенгали: значит, слово из той же
+    письменности и границу надо проверять по диапазону, а не по \b."""
+    return bool(word) and re.match("[" + _INDIC_SCRIPT + "]", word) is not None
+
+
+def _alternation(words) -> str:
+    """Альтернатива регулярки из слов: каждое экранировано (иначе точка или
+    вопросительный знак в слом молча испортят весь класс), длинные вперёд —
+    короткая форма иначе затенит длинную («сколько» против «сколь»)."""
+    return "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
 
 
 # Тайский вопросительный ряд: кто, что, какой/где.
@@ -498,31 +534,37 @@ _ASK_WORDS_NO_SPACE = (
     "ใคร", "อะไร", "ไหน"
 )
 
-_ASK_WORDS_BOUND = tuple(w for w in _ASK_WORDS if _boundary_safe(w))
-# Подстрока ловит слово и внутри другого: কে в থেকে («из, от») тоже поднимет
-# усилие. Ошибка вверх здесь дешевле: платим максимум ступенью reasoning-токенов
-# на короткой реплике, ошибиться вниз — неверным фактом.
-_ASK_WORDS_TIGHT = tuple(sorted(
-    _ASK_WORDS_NO_SPACE + tuple(w for w in _ASK_WORDS if not _boundary_safe(w)),
-    key=len, reverse=True,
-))
+_ASK_WORDS_SPACED = tuple(w for w in _ASK_WORDS if not _is_indic(w))
+_ASK_WORDS_INDIC = tuple(w for w in _ASK_WORDS if _is_indic(w))
 
+# Границы слова работают везде, где слова разделяются пробелом, а буквы
+# считаются словами: без них «что» ловилось бы внутри «почтово».
 _ASK_WORDS_RE = re.compile(
-    r"\b(?:%s)\b" % "|".join(sorted(_ASK_WORDS_BOUND, key=len, reverse=True)),
+    r"\b(?:%s)\b" % _alternation(_ASK_WORDS_SPACED),
     re.IGNORECASE,
 )
 
-_ASK_TIGHT_RE = re.compile("|".join(_ASK_WORDS_TIGHT))
-
-# Союзы-омонимы и двусмысленные «кто/что»: исп./порт. «que», итал. «che»,
-# пол. «co», тур. «ne», фр. «ou», рус. просторечное «чё», араб. «من» и «ما»,
-# урду «کیا», перс. «چه». В середине фразы это служебное слово, а не вопрос,
-# поэтому ловим их только в начале реплики: вопрос почти всегда начинается с
-# вопросительного слова, а «que bom!» и «من البيت» — нет.
-_ASK_LEADING_RE = re.compile(
-    r"^(?:qu[ée]|che|co|ne|ou|чё|чо|\u0645\u0646|\u0645\u0627"
-    r"|\u06a9\u06cc\u0627|\u0686\u0647)\b",
+_ASK_INDIC_RE = re.compile(
+    f"(?<![{_INDIC_SCRIPT}])(?:{_alternation(_ASK_WORDS_INDIC)})(?![{_INDIC_SCRIPT}])",
     re.IGNORECASE,
+)
+
+# Тайский вопросительный ряд: кто, что, какой/где. Подстрока — единственное,
+# что там работает, и она обязана оставаться короткой и однозначной.
+_ASK_TIGHT_RE = re.compile(_alternation(_ASK_WORDS_NO_SPACE), re.IGNORECASE)
+
+# Двусмысленные «кто/что» там, где то же слово — союз, предлог или междометие:
+# рус. просторечное «чё», араб. «من» и «ما», урду «کیا», перс. «چه» и ударные
+# испанские «qué/quién» (только с ударением: «que» без него — союз). Ловим их только в начале реплики и
+# только в начале строки (MULTILINE: «ok\nque pasa» — одно сообщение).
+# Голые «que», «che», «co», «ne», «ou» из правила убраны целиком: они и в начале
+# фразы чаще служебные слова, чем вопрос («que bom!», «ne bouge pas»,
+# «co-founder thing»), а вопрос без ударения и без знака в испанском редкость
+# дороже, чем лишний шаг усилия (ревью 12.11.2026).
+_ASK_LEADING_RE = re.compile(
+    r"^(?:qué|qui[ée]n(?:es)?|чё|чо|\u0645\u0646|\u0645\u0627"
+    r"|\u06a9\u06cc\u0627|\u0686\u0647)\b",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # Болтовня короче этих границ и без вопросительных сигналов — единственный
@@ -540,7 +582,10 @@ def pick_reasoning_effort(
     minimal не используем намеренно: провайдер его принимает, но на нём ничего
     не меряло, а выигрыш — доли секунды; неверная арифметика показана на low."""
     body = text or ""
-    if _EFFORT_LONGHORIZON_RE.search(body) or len(body) > 1200 or len(_QUESTION_ANY_RE.findall(body)) >= 4:
+    marks = len(_QUESTION_ANY_RE.findall(body))
+    if (_EFFORT_LONGHORIZON_RE.search(body) or len(body) > 1200
+            or (marks >= _MULTI_QUESTION_MARKS
+                and len(body.split()) >= _MULTI_QUESTION_WORDS)):
         level = "xhigh"
     elif is_heavy:
         level = "high"
@@ -554,10 +599,11 @@ def pick_reasoning_effort(
             len(words) <= _CHAT_MAX_WORDS
             and len(stripped) <= _CHAT_MAX_CHARS
             and not _QUESTION_ANY_RE.search(stripped)
-            and not _ASK_TIGHT_RE.search(stripped)
             and not _ASK_WORDS_RE.search(stripped)
+            and not _ASK_INDIC_RE.search(stripped)
+            and not _ASK_TIGHT_RE.search(stripped)
             and not _ASK_LEADING_RE.search(stripped)
-            and not re.search(r"\d", stripped)
+            and not _ANY_DIGIT_RE.search(stripped)
         )
         if is_small_talk:
             # Болтовня и короткие реплики: здесь печать важнее глубины.

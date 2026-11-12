@@ -76,6 +76,21 @@ CASES: list[tuple[str, str, bool, bool]] = [
     ("объясни как ребёнку, что такое рефакторинг кода", "high", True, False),
     ("план на неделю по шагам для запуска сайта", "xhigh", False, False),
     ("оптимизируй этот алгоритм и доказательство приведи", "xhigh", False, False),
+    # Блоклеры адверсариального ревью 12.11.2026: обычный текст не имеет права
+    # уезжать на самый дорогой уровень, а короткий вопрос — на самый дешёвый.
+    ("Планирую отпуск на месяц", "low", False, False),
+    ("Планета Венера, месяц за месяцем", "medium", False, False),
+    ("how does a rapid transit system work", "medium", False, False),
+    ("que bom!", "low", False, False),
+    ("ne bouge pas", "low", False, False),
+    ("co-founder thing", "low", False, False),
+    ("huh????", "medium", False, False),
+    ("czy to prawda", "medium", False, False),
+    ("how much is this", "medium", False, False),
+    ("কোথায় আছো", "medium", False, False),
+    ("বাজার থেকে আসছি", "low", False, False),
+    ("वो किसी के पास है", "medium", False, False),
+    ("من أنت", "medium", False, False),
 ]
 
 
