@@ -163,10 +163,12 @@ def _clean_preamble(text: str) -> str:
     # преамбула «Я — Gemini 2.5 Pro…» уходила в пузырь как есть (ревью 12.11.2026).
     line = _strip_provider_artifacts(line)
     if lumen_security._detect_identity_leak(line):
-        line = lumen_security._scrub_identity_leak(line, source="agent_preamble")
-        if line == lumen_security._IDENTITY_LEAK_FALLBACK:
-            # Целая заглушка в строку этапа не просится: пустая строка честнее.
-            return ""
+        # Частичная зачистка строку этапа не лечит: от «Я — Gemini 2.5 Pro, ищу
+        # данные» фильтр оставляет «5 Pro, ищу данные», и обрывок имени человек
+        # видит всё равно (проверено 12.11.2026). Преамбула — украшение пузыря,
+        # generic-фраза этапа уже есть, поэтому пустая строка честнее обрывка.
+        # В ответе (не здесь) та же фраза проходит полную зачистку lumen_security.
+        return ""
     line = _strip_identity_names(line)
     if line != " ".join((text or "").split()):
         # После вырезанного имени остаётся хвостовая пунктуация («:» следом за

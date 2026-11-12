@@ -28,8 +28,6 @@ def _run_core(message, monkeypatch, *, captured=None):
             captured["prompt"] = ai_prompt
             captured["route"] = route
             captured["kwargs"] = kwargs
-            # Даём шанс фоновым задачам (typing-индикатор) добежать до конца.
-            await asyncio.sleep(0)
         return "ok", False
 
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
@@ -267,7 +265,6 @@ def test_search_marker_asks_the_loop_not_the_user_words(rate_guard_setup, monkey
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         prompts.append(ai_prompt)
         passes["n"] += 1
-        await asyncio.sleep(0)
         if passes["n"] == 1:
             raise _SearchRequested(None)
         return "Fable 5.2 вышла 3 ноября 2026", False
