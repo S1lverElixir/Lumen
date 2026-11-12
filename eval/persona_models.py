@@ -333,8 +333,13 @@ def call_munito(target: Target, history: list[dict], user_text: str, *, system_t
         # Те же поля, что шлёт бот (reasoning_effort из lumen_router_config), чтобы
         # замер мерил боевой маршрут. Судья вызывается со своей системкой и остаётся
         # с размышлением включённым: low-effort судья сама снижает качество оценки.
-        from lumen_router_config import _munito_payload_extras
-        payload.update(_munito_payload_extras())
+        from lumen_router_config import _munito_payload_extras, pick_reasoning_effort
+        # Уровень усилия берём по тому же правилу, что и в боевом маршруте: без
+        # аргумента _munito_payload_extras отдаёт прежний плоский low, и замер
+        # мерил бы не автовыбор, а старое поведение (12.11.2026).
+        payload.update(_munito_payload_extras(
+            pick_reasoning_effort(user_text), target.model_id,
+        ))
     return _openai_chat_stream(url, headers, payload)
 
 

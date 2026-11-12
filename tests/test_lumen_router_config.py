@@ -737,12 +737,53 @@ def test_quarantine_window_expires_and_stats_agree_with_routing(monkeypatch):
     ("какая сейчас цена билета", {"needs_freshness": True}, "medium"),
     # Просьба коротко не имеет права опускаться до minimal: на нём glm ошибался.
     ("коротко: сколько будет 27*43", {}, "low"),
-    ("реши задачу ещё раз, ты не прав", {}, "medium"),
+    # Исправление в тексте самого сообщения поднимает ступень: база здесь
+    # medium (семь слов), а «ты не прав» + «перепроверь» дают overthink-шаг
+    # вверх. Прежняя метка medium была следствием правила «короче 40 знаков»,
+    # которое роняло базу в low (регрессия сетки 12.11.2026).
+    ("реши задачу ещё раз, ты не прав", {}, "high"),
     ("реши задачу", {"corrections": 2}, "medium"),
     ("объясни", {"history_len": 60}, "medium"),
 ])
 def test_pick_reasoning_effort_switches_on_request_shape(text, kwargs, expected):
     assert lumen_router_config.pick_reasoning_effort(text, **kwargs) == expected
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    # Короткая болтовня остаётся на low на любом языке: решение по длине, а
+    # не по наличию русских слов (сетка effort_grid.py, 12.11.2026).
+    ("สวัสดี", "low"),
+    ("gracias amigo", "low"),
+    ("تم بخير", "low"),
+    # Вопрос без знака вопроса на любой письменности обязан думать дольше:
+    # раньше «почему небо голубое» и «wat is de hoofdstad» уезжали на low.
+    ("তুমি কে", "medium"),
+    ("आप कौन हैं", "medium"),
+    ("คุณเป็นใคร", "medium"),
+    ("تو کی هستی", "medium"),
+    ("تم کون ہو", "medium"),
+    ("deux fois deux font combien", "medium"),
+    ("quantos dias você tem", "medium"),
+])
+def test_pick_reasoning_effort_question_signal_is_multilingual(text, expected):
+    assert lumen_router_config.pick_reasoning_effort(text) == expected
+
+
+def test_ask_words_split_by_trailing_char_class():
+    # Гласные и носовые знаки деванагари и бенгали не считаются частью слова,
+    # поэтому граница "\b" после них не работает: такие формы ловятся только
+    # подстрокой и обязаны сидеть в tighter-списке, а не в границах слова.
+    for word in ("কে", "कहाँ", "क्यों", "কোথায়"):
+        assert lumen_router_config._boundary_safe(word) is False
+        assert word in lumen_router_config._ASK_WORDS_TIGHT
+        assert word not in lumen_router_config._ASK_WORDS_BOUND
+    for word in ("কখন", "कौन", "что", "wat"):
+        assert lumen_router_config._boundary_safe(word) is True
+        assert word in lumen_router_config._ASK_WORDS_BOUND
+    assert lumen_router_config._ASK_TIGHT_RE.search("শুধু বলো কে")
+    assert lumen_router_config._ASK_WORDS_RE.search("wat is de hoofdstad")
+    # Отрицание «не» (кириллица) не должно подменять казахское «не» (латиница).
+    assert lumen_router_config.pick_reasoning_effort("это не я") == "low"
 
 
 def test_pick_reasoning_effort_never_returns_unknown_level():
