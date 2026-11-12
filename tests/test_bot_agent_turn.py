@@ -433,3 +433,36 @@ def test_search_query_placeholder_exists_in_every_language():
         rendered = t(lang, "progress_search_query", query="курс рубля")
         assert "курс рубля" in rendered, lang
         assert "{query}" not in rendered, lang
+
+
+def test_loop_metrics_reach_the_devtrace(rate_guard_setup, monkeypatch, tmp_path):
+    # Офлайн-разбор ветки возможен только если след различает «искал цикл» и
+    # «искал прежний путь»: без этих полей ревью не отличило бы одну ветку от
+    # другой даже при включённом DEV_TRACE.
+    monkeypatch.setenv("DEV_TRACE", "1")
+    monkeypatch.setenv("DEV_TRACE_PATH", str(tmp_path / "trace.jsonl"))
+    message = rate_guard_setup()
+    message.text = "кто сейчас главный тренер сборной Беларуси?"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+
+    async def fake_turn(**kwargs):
+        result = _turn(queries=["тренер сборной Беларуси"],
+                       snippets=[{"url": "https://a.by/1", "publisher": "a.by"},
+                                 {"url": "https://a.by/2", "publisher": "a.by"}])
+        result.steps = 1
+        result.planning_ms = 700
+        return result
+
+    monkeypatch.setattr(lumen_agent, "run_search_turn", fake_turn)
+    _run_core(message, monkeypatch)
+
+    import lumen_devtrace
+
+    entries = [e for e in lumen_devtrace.read_tail(10) if e.get("kind") == "answer"]
+    assert entries, "след ответа обязан быть записан"
+    flags = entries[-1]["flags"]
+    assert flags["agent"] is True
+    assert flags["agent_steps"] == 1
+    assert flags["agent_planning_ms"] == 700
+    assert flags["effort"] in ("medium", "high")
+    bot.chat_state.pop(123, None)

@@ -1571,6 +1571,12 @@ async def cmd_stats(message: Message) -> None:
 
     # Состояние прокси — из самого breaker'а (раньше команда лезла в четыре глобала напрямую).
     proxy_line = bot._tg_proxy_breaker.status_text()
+    import lumen_search
+    # Слой внешнего поиска: сколько обращений к источникам уже было сегодня и
+    # разрешён ли он вовсе — эту строку owner смотрит после деплоя цикла.
+    _search_calls = lumen_search.search_calls_today()
+    _search_limit = lumen_search.WEB_SEARCH_DAILY_LIMIT
+    _search_on = lumen_search.web_search_is_enabled()
 
     quota_day = bot.GLOBAL_QUOTA.get("quota_day") or "—"
     webhook_text = await _webhook_task
@@ -1587,7 +1593,9 @@ async def cmd_stats(message: Message) -> None:
         f"переключений на резерв: {_day_stats.get('fallbacks', 0)}, "
         f"отказов по лимиту: {_day_stats.get('daily_limit_denials', 0)}\n"
         f"Попыток к моделям: {_day_stats.get('model_attempts', 0)}, "
-        f"пустых: {_day_stats.get('model_failures', 0)}\n\n"
+        f"пустых: {_day_stats.get('model_failures', 0)}\n"
+        f"Внешний поиск: {_search_calls}/{_search_limit} обращений за сутки, "
+        f"свитч {'включён' if _search_on else 'выключен'}\n\n"
         f"<b>Gemini — запросов по моделям (лимит провайдера справочно):</b>\n{gemini_text}\n\n"
         f"{munito_block}"
         f"{image_block}"

@@ -102,6 +102,12 @@ def search_daily_budget_left() -> bool:
     return _search_calls < WEB_SEARCH_DAILY_LIMIT
 
 
+def search_calls_today() -> int:
+    """Сколько обращений к источникам было сегодня: строка состояния в /stats."""
+    _roll_search_day()
+    return _search_calls
+
+
 def note_search_call() -> None:
     # Прокрутка и здесь: иначе первое обращение после полуночи приплюсовалось
     # бы к вчерашнему счётчику и потолок дня сработал бы на день раньше.

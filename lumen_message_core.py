@@ -177,7 +177,7 @@ async def _gather_web_evidence(
     *, chat_id: int, user_prompt: str, clean_prompt: str, previous: str,
     route: list[tuple[str, str]], effort: str | None, status, deadline: float | None,
     history_meta: dict | None,
-) -> tuple[list[dict], list[str], bool]:
+) -> tuple[list[dict], list[str], bool, dict]:
     """Свежие источники для одного сообщения: агентный цикл, под ним — прежний
     один внешний поиск по словам человека.
 
@@ -185,13 +185,13 @@ async def _gather_web_evidence(
     видит результаты и уточняет формулировку (замер 12.11.2026: на «а он точно не
     в клубе?» голова выдаёт два отдельных запроса вместо сырой фразы). Пустой или
     сорванный цикл не имеет права лишить ответа поиска — работает старая ветка.
-    Возвращает (сниппеты, запросы модели, работал ли цикл)."""
+    Возвращает (сниппеты, запросы модели, работал ли цикл, метрики цикла)."""
     import bot
     import lumen_agent
     from lumen_router_config import agent_max_searches
 
     if not web_search_is_enabled():
-        return [], [], False
+        return [], [], False, {}
     queries: list[str] = []
     # Потолок поисков считается от усилия; EFFORT_AUTO=0 даёт effort=None, и тогда
     # цикл молчит целиком — ровно прежний один поиск по словам человека.
@@ -215,10 +215,13 @@ async def _gather_web_evidence(
             raise
         except Exception as exc:
             log.warning("[agent] search turn crashed, falling back to a plain fetch: %s", exc.__class__.__name__)
+        stats: dict = {}
         if turn is not None:
             queries = list(turn.queries)
+            stats = {"steps": turn.steps, "planning_ms": turn.planning_ms,
+                     "searches": turn.searches, "failed": turn.failed}
             if turn.has_evidence:
-                return turn.snippets, queries, True
+                return turn.snippets, queries, True, stats
 
     budget = _snippet_fetch_budget_sec(deadline)
     snippets: list[dict] = []
@@ -230,7 +233,7 @@ async def _gather_web_evidence(
             )
         except Exception as exc:
             log.warning("[web-search] Snippet fetch failed, answering with a no-search note: %s", exc.__class__.__name__)
-    return snippets, queries, False
+    return snippets, queries, False, {}
 
 
 def _initial_status(needs_youtube: bool, needs_website: bool, media_mime: str | None,
@@ -1317,19 +1320,26 @@ async def _handle_message_core(
         ai_prompt += "\n\n" + _fresh_date_context()
     web_search_failed = False
     snippets_injected = False
+    agent_used = False
+    agent_steps = 0
+    agent_planning_ms = 0
     if search_will_run:
         # Сниппеты едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
         # Сбор идёт до старта бюджета маршрута: худшее +8с к 40с лока (параллельный
         # вопрос получит "занято"). Статус-пузырь создаётся до первого этапа,
         # чтобы строки цикла правили уже живой пузырь, а не висели в очереди.
         status = await status_task if status_task is not None else None
-        snippets, model_queries, agent_used = await _gather_web_evidence(
+        snippets, model_queries, agent_used, agent_stats = await _gather_web_evidence(
             chat_id=message.chat.id, user_prompt=ai_prompt, clean_prompt=clean_prompt,
             previous=_previous_user_text(state), route=route, effort=effort, status=status,
             # history_meta здесь ещё не собран (его строят ниже, с медиа-ссылками):
             # прошлые фото цикл не тянет — attach_past выключен внутри.
             deadline=route_deadline, history_meta=None,
         )
+        # Метрики цикла в след и лог: офлайн иначе не отличить ветку цикла от
+        # прежнего поиска (ревью 12.11.2026).
+        agent_steps = int(agent_stats.get("steps") or 0)
+        agent_planning_ms = int(agent_stats.get("planning_ms") or 0)
         if snippets:
             ai_prompt += format_snippets_for_prompt(snippets) + evidence_trace(model_queries)
             snippets_injected = True
@@ -1471,7 +1481,7 @@ async def _handle_message_core(
                 # сырая фраза — иначе «[[SEARCH]]» искало бы по тем же словам, по
                 # которым модель уже сказала, что ответа не хватает.
                 try:
-                    mark_snippets, mark_queries, mark_agent = await _gather_web_evidence(
+                    mark_snippets, mark_queries, mark_agent, mark_stats = await _gather_web_evidence(
                         chat_id=message.chat.id, user_prompt=ai_prompt, clean_prompt=clean_prompt,
                         previous=_previous_user_text(state), route=route, effort=effort,
                         status=status, deadline=route_deadline, history_meta=history_meta,
@@ -1494,8 +1504,8 @@ async def _handle_message_core(
                 else:
                     status.add_done("progress_search_empty")
                 await status.set_phase("progress_thinking", timed=True)
-            log.info("[web-search] The model asked for a search, retrying once (snippets=%d, agent=%s).",
-                     len(mark_snippets), mark_agent)
+            log.info("[web-search] The model asked for a search, retrying once (snippets=%d, agent=%s, steps=%s).",
+                     len(mark_snippets), mark_agent, mark_stats.get("steps"))
             try:
                 # Стрим на втором проходе нужен: человек ждёт живого набора, а не
                 # мёртвого пузырька (allow_stream первого прохода тут ни при чём).
@@ -1639,7 +1649,11 @@ async def _handle_message_core(
             ][-3:],
             flags={"fresh": bool(needs_freshness), "snippets": bool(snippets_injected),
                    "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent),
-                   "truncated": _truncated, "partial": bool(state.get("interrupted"))},
+                   "truncated": _truncated, "partial": bool(state.get("interrupted")),
+                   # Цикл поиска: кто принёс источники, сколько шагов и времени
+                   # ушло на планирование — по этим полям ветка видна в следe.
+                   "effort": effort or "auto-off", "agent": bool(agent_used),
+                   "agent_steps": agent_steps, "agent_planning_ms": agent_planning_ms},
         )
     except Exception as exc:
         lumen_devtrace.record_failure(
