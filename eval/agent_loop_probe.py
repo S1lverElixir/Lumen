@@ -4,6 +4,9 @@
 вызовов, число и формулировки запросов, долинувших источников, время фазы и токены.
 Ключ только из окружения или .env, значение нигде не печатается.
 Запуск:  python eval/agent_loop_probe.py
+Переменные прогона: PROBE_EFFORT (например, high — уровень фиксируется, и вместе с
+ним потолок поисков становится равен двум: проверяется, уточняет ли модель запрос
+после первой выдачи) и LUMEN_ENV_DIR (где искать .env при запуске из worktree).
 """
 from __future__ import annotations
 
@@ -109,7 +112,11 @@ async def main() -> None:
     print(f"голова: {head} · хост {base} · вопросов {len(QUESTIONS)}")
     rows = []
     for question in QUESTIONS:
-        effort = pick_reasoning_effort(question, needs_freshness=True)
+        # PROBE_EFFORT фиксирует уровень, а с ним и потолок поисков: при high
+        # лимит равен двум, и прогон отвечает на вопрос «уточняет ли модель
+        # запрос, увидев выдачу» (после правки 12.11.2026).
+        effort = (os.getenv("PROBE_EFFORT", "").strip()
+                  or pick_reasoning_effort(question, needs_freshness=True))
         limit = agent_max_searches(effort)
         t0 = time.monotonic()
         turn = await lumen_agent.run_search_turn(
