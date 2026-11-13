@@ -47,11 +47,18 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
     },
 }
 
-# Планирующий вызов короткий (замер 12.11.2026: 0.27-0.69s до tool_calls), поэтому
-# 8s на попытку хватает с запасом, а больше цикл и не имеет права тратить.
+# 8 с — доля планирования в бюджете фазы, а не потолок одного вызова: в прозоне
+# планирование занимало 0.27-0.69 с (замер 12.11.2026), но на боевом промпте у него
+# хвост, и в проде 13.11.2026 два вызова из пяти упёрлись ровно в 8 с (planning_ms
+# 8433 и 8723) — цикл умер, ни разу не поискав.
 _STEP_CALL_TIMEOUT_SEC = 8.0
-# Хуже не ответить, чем не поискать: без такого остатка бюджета цикл не Starts и не
-# продолжается — ответ обязан доехать до человека обычным маршрутом.
+# Потолок одного планирующего вызова: он вправе взять весь остаток фазы за вычетом
+# внешнего поиска, но не больше этой величины (та же, что ROUTE_MODEL_TIMEOUT_SEC
+# для одной попытки ответить).
+_STEP_CALL_MAX_SEC = 16.0
+# Хуже не ответить, чем не поискать: без такого остатка бюджета, СВЕРХ резерва на
+# сеть, цикл не начинается и не продолжается — ответ обязан доехать до человека
+# обычным маршрутом.
 _MIN_STEP_BUDGET_SEC = 5.0
 # Преамбула («Ищу актуальные данные.») — строка статуса, а не ответ: один абзац
 # рассуждений занял бы пузырь целиком.
@@ -247,7 +254,10 @@ async def _plan_call(
     if not _munito_model_supports(model_id, "tools"):
         return None
     remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-    if remaining is not None and remaining < _MIN_STEP_BUDGET_SEC:
+    # Планировать бессмысленно, если после вызова не остаётся времени на сеть: резерв
+    # внешнего поиска вычитается из остатка фазы до того, как решаем брать вызов.
+    network_reserve = web_search_timeout_sec()
+    if remaining is not None and remaining < _MIN_STEP_BUDGET_SEC + network_reserve:
         return None
     payload = {
         "model": model_id,
@@ -257,7 +267,8 @@ async def _plan_call(
         "tool_choice": "auto",
         **_munito_payload_extras(effort, model_id),
     }
-    timeout = min(_STEP_CALL_TIMEOUT_SEC, remaining) if remaining is not None else _STEP_CALL_TIMEOUT_SEC
+    timeout = (_STEP_CALL_MAX_SEC if remaining is None
+               else min(_STEP_CALL_MAX_SEC, remaining - network_reserve))
     bot._record_stats_event("model_attempts")
     try:
         resp = await bot._munito_request(
