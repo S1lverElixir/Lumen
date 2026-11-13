@@ -216,8 +216,31 @@ def test_planning_call_sends_effort_and_headroom_timeout(monkeypatch):
 
     asyncio.run(scenario())
     assert calls[0]["json"]["reasoning_effort"] == "xhigh"
-    # Шаг планирования не получает весь бюджет маршрута: потолок — _STEP_CALL_TIMEOUT_SEC.
-    assert calls[0]["deadline"] <= time.monotonic() + lumen_agent._STEP_CALL_TIMEOUT_SEC + 1
+    # Прод 13.11.2026: потолок одного планирования был 8 с, и два вызова из пяти в него
+    # упирались, не успев поискать. Теперь долю фазы считает сама фаза: вызов вправе
+    # взять остаток за вычетом сети, но не больше _STEP_CALL_MAX_SEC.
+    assert calls[0]["deadline"] > time.monotonic() + lumen_agent._STEP_CALL_TIMEOUT_SEC
+    assert calls[0]["deadline"] <= time.monotonic() + lumen_agent._STEP_CALL_MAX_SEC + 1
+
+
+def test_planning_call_leaves_the_network_its_share(monkeypatch):
+    # Планирование, после которого на сеть не осталось времени, человек не видит никак:
+    # хуже не ответить, чем не поискать — при короткой фазе вызов не берётся вовсе.
+    monkeypatch.setattr(lumen_agent, "web_search_timeout_sec", lambda: 6.0)
+    calls, _queries = _install(monkeypatch, [_tool_calls_message("курс евро")])
+
+    async def scenario(deadline_sec):
+        return await lumen_agent.run_search_turn(
+            chat_id=1, user_prompt="курс", clean_prompt="курс", model_id="m-1",
+            effort="medium", max_searches=1, deadline=time.monotonic() + deadline_sec,
+        )
+
+    asyncio.run(scenario(13.0))
+    # Остаток 13 с, из них 6 — резерв внешнего поиска: планирование получает ~7 с.
+    assert calls and 5.0 < calls[0]["deadline"] - time.monotonic() <= 8.0
+    calls.clear()
+    result = asyncio.run(scenario(9.0))
+    assert calls == [] and result.failed is True
 
 
 def test_preamble_is_scrubbed_and_truncated(monkeypatch):

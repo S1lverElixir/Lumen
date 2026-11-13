@@ -177,6 +177,7 @@ These ceilings are fixed in code; change them only with a code edit:
 | `TIKWM_JSON_MAX_BYTES` | `1 MB` | Biggest accepted TikWM metadata body (not the 75 MB media cap). |
 | `MIN_PROXY_SECRET_LENGTH` | `32` | Shortest accepted proxy secret, enforced on both sides. |
 | `_TABLE_SEP_MAX_LEN` | `500` | Widest table-separator line passed to the separator regex. |
+| `evidence_phase_budget_sec` + `_STEP_CALL_MAX_SEC` (code, `lumen_agent.py`) | 22 s at `medium`, 44 s at `high`/`xhigh`; one planning call takes at most 16 s | The evidence phase runs before `ROUTE_TOTAL_BUDGET_SEC` exists, so it carries its own ceiling: per planned search one planning call plus one external search. A single call may now borrow the whole phase left minus `WEB_SEARCH_TIMEOUT_SEC`, capped at 16 s (the same figure one model attempt gets in the route): production 13.11.2026 showed 2 of 5 planning calls hitting the previous flat 8 s, which killed the loop before it ever searched. |
 | `_MAX_CHAT_LOCK_WAITERS` | `3` | Max messages of one chat that may wait for the per-chat lock at once; the rest get "busy" immediately so other chats are not starved. |
 | `TIKTOK_SLIDESHOW_MAX_ITEMS` | `35` | TikTok slides per post cap (Telegram sends 10 per media group). |
 | `MAX_TOTAL_MEMORY_MESSAGES` | `200` | Per-chat ceiling on stored history plus group background lines combined (lumen_memory.py, lumen_chat_state.py). |
