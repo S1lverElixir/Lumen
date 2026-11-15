@@ -381,20 +381,27 @@ def test_non_freshness_prompt_has_no_date_context(rate_guard_setup, monkeypatch)
 def test_zone2_respects_agent_max_searches_zero_kill_switch(rate_guard_setup, monkeypatch):
     # AGENT_MAX_SEARCHES=0 — килл-свитч владельца: флор зоны 2 не имеет права
     # поднимать его до единицы, иначе глушение работало бы асимметрично
-    # (ревью 16.11.2026).
+    # (ревью 16.11.2026). Форма «шпион + подменённая голова»: без головы цикл
+    # пропускался бы ещё до флора, а AssertionError из шпиона глотался бы
+    # except'ом — тест был бы пустым.
     message = rate_guard_setup()
     message.text = "скок стоит терминал старлинк"
     monkeypatch.setenv("AGENT_MAX_SEARCHES", "0")
+    monkeypatch.setattr("lumen_message_core._munito_head", lambda route: "deepseek-ai/deepseek-v4.1-flash-1017")
+    turn_calls: list = []
 
-    async def fail_turn(**kwargs):
-        raise AssertionError("зона 2 не должна обходить килл-свитч владельца")
+    async def spy_turn(**kwargs):
+        turn_calls.append(kwargs)
+        return SimpleNamespace(snippets=[], queries=[], steps=0, planning_ms=0,
+                               searches=0, failed=False, preambles=[], has_evidence=False)
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         return "Без проверки не скажу", False
 
-    monkeypatch.setattr("lumen_agent.run_search_turn", fail_turn)
+    monkeypatch.setattr("lumen_agent.run_search_turn", spy_turn)
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
+    assert not turn_calls, "килл-свитч AGENT_MAX_SEARCHES=0 обязан глушить и зону 2"
     bot.chat_state.pop(123, None)
 
 def test_anaphoric_followup_searches_with_previous_topic(rate_guard_setup, monkeypatch):
