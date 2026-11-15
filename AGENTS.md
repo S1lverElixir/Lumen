@@ -232,6 +232,11 @@ Gemini is the unconditional reserve on every route where Munito answers.
   what the module does, with no extraction history ("вынесено из bot.py").
 - Before writing new code, check whether the repo, the stdlib or an installed dependency already
   does it. New dependencies need approval.
+- Commit subjects and bodies are Cyrillic prose, so they get the same scan as comments: before push
+  or merge, `git log --format=%B` over your own commits for stray non-Cyrillic ideographs and for
+  Latin glued to a Cyrillic word (`部分`, `карантинexpire`, `шагли`). A rewrite of a published branch
+  needs the owner's explicit word, and once another session's merge (dependabot included) lands on
+  `main`, sanitizing there would drop it — so fix these on the branch before the branch is merged.
 
 ## Tests
 - State before adding a test: what behavior it protects, which real regression would make it fail,
