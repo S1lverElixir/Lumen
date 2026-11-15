@@ -490,6 +490,10 @@ def test_detect_intents_by_shape_of_question():
     assert lumen_search.detect_intents("какая сейчас погода в Минске")["weather"] is True
     assert lumen_search.detect_intents("курс евро к рублю сегодня")["fx"] is True
     assert lumen_search.detect_intents("последние новости Беларуси")["news"] is True
+    # «погоді» — украинский местный падеж: класс «погод[аеыоу]» его не берёт,
+    # слово вернуто литералом, чтобы жила погода open-meteo (ревью 16.11.2026).
+    assert lumen_search.detect_intents("якій погоді в Києві")["weather"] is True
+    assert lumen_search.detect_intents("Погоди, дай подумать")["weather"] is False
     # Болтовня не должна звать ни один слой: лишний источник — это лишние секунды.
     assert not any(lumen_search.detect_intents("спасибо, ты классный").values())
 

@@ -91,7 +91,8 @@ live there and not in news feeds (corpus week 15.11.2026: «theoneprobe 1.7.10»
 mods and pop-culture entities, so the signal usually arrives with the query; under that signal
 the entity demotion of the web tier is skipped (news is still demoted), and wiki hosts get an
 authority-style bonus inside the web tier (host matches the domain itself or a subdomain, not a
-substring). The same corpus produced trigger refinements: a bare
+substring; under `wants_fresh` the bonus applies only to dated pages, fact or live tiers — an
+undated wiki page proves no freshness and must not float over a dated news item). The same corpus produced trigger refinements: a bare
 time-word reply («вчера») is a reaction, not a question (`_BARE_TIME_WORDS` in
 `_wants_web_search`); «Погоди» is not weather («погод-» now requires a declension vowel);
 «предпоследняя» is not «последн-» (word boundary added). The two remaining regex hits on chatter
