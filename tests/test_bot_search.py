@@ -383,6 +383,109 @@ def test_anaphoric_followup_searches_with_previous_topic(rate_guard_setup, monke
     bot.chat_state.pop(123, None)
 
 
+# ── зона 2: регекс молчал — решает модель агент-цикла ──
+
+def test_zone2_substantive_message_searches_via_agent_turn(rate_guard_setup, monkeypatch):
+    # Прод 15.11.2026: «есть ли theoneprobe на 1.7.10» — регекс свежести молчал,
+    # агент-цикл не звался вовсе, ответ уходил по памяти. Зона 2: содержательное
+    # сообщение без свежести тоже идёт в цикл, найденное попадает в промпт.
+    message = rate_guard_setup()
+    message.text = "скок стоит терминал старлинк"
+    captured: dict = {}
+    turn_calls: list = []
+
+    class _Turn:
+        snippets = [{"title": "Starlink Standard Kit", "url": "https://www.starlink.com/",
+                     "snippet": "$349", "publisher": "starlink.com", "date": "", "kind": "web"}]
+        queries = ["Starlink Standard Kit price"]
+        steps = 1
+        planning_ms = 500
+        searches = 1
+        failed = False
+        preambles: list = []
+        has_evidence = True
+
+    async def fake_turn(**kwargs):
+        turn_calls.append(kwargs)
+        return _Turn()
+
+    fetched: list = []
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
+        fetched.append(query)
+        return []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        captured["prompt"] = ai_prompt
+        return "ок", False
+
+    # В тестовом окружении ключа Munito нет и маршрут собирается без него:
+    # для зоны 2 подменяем голову, иначе цикл молча пропускается (head=None).
+    monkeypatch.setattr("lumen_message_core._munito_head", lambda route: "deepseek-ai/deepseek-v4.1-flash-1017")
+    monkeypatch.setattr("lumen_agent.run_search_turn", fake_turn)
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert turn_calls, "агент-цикл зоны 2 обязан запускаться на содержательном вопросе без свежести"
+    assert "Web search results" in captured["prompt"]
+    assert "Search queries already executed" in captured["prompt"]
+    assert fetched == [], "в зоне 2 фолбэк-фетч по сырой фразе не делается"
+    bot.chat_state.pop(123, None)
+
+
+def test_zone2_model_decline_is_normal_no_no_search_note(rate_guard_setup, monkeypatch):
+    # Отказ модели искать в зоне 2 — норма: пометка «без live-поиска» на
+    # несвежем вопросе была бы ложью, фолбэк-фетч по сырой фразе — болтовнёй.
+    message = rate_guard_setup()
+    message.text = "скок стоит терминал старлинк"
+
+    class _Turn:
+        snippets: list = []
+        queries: list = []
+        steps = 0
+        planning_ms = 400
+        searches = 0
+        failed = False
+        preambles: list = []
+        has_evidence = False
+
+    async def fake_turn(**kwargs):
+        return _Turn()
+
+    async def fake_fetch(query, **kwargs):
+        raise AssertionError("фолбэк-фетч в зоне 2 не запускается")
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        return "Терминал Starlink стоит около $349", False
+
+    monkeypatch.setattr("lumen_message_core._munito_head", lambda route: "deepseek-ai/deepseek-v4.1-flash-1017")
+    monkeypatch.setattr("lumen_agent.run_search_turn", fake_turn)
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    texts = _outgoing_texts()
+    assert any("около $349" in t for t in texts), "ответ обязан доехать без поиска"
+    assert not any("without live web search" in t for t in texts), "пометка на несвежем вопросе — ложь"
+    bot.chat_state.pop(123, None)
+
+
+def test_zone2_chatter_skips_agent_turn(rate_guard_setup, monkeypatch):
+    # Болтовня не зовёт цикл: каждый лишний планирующий вызов — секунда и токены.
+    message = rate_guard_setup()
+    message.text = "спасибо"
+
+    async def fail_turn(**kwargs):
+        raise AssertionError("агент-цикл не должен зваться на болтовне")
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        return "Всегда пожалуйста", False
+
+    monkeypatch.setattr("lumen_agent.run_search_turn", fail_turn)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    bot.chat_state.pop(123, None)
+
+
 # ── решение о поиске принимает сама модель: маркер [[SEARCH]] ──
 
 

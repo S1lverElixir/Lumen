@@ -89,6 +89,23 @@ def test_looks_like_freshness_query_not_triggered_by_lookalikes():
     assert lumen_router_config._looks_like_freshness_query("последняя версия Blender") is True
 
 
+def test_search_planner_skipped_zones_chatter_out_of_agent_turn():
+    # Зона 2: цикл зовётся только на содержательных сообщениях. Кейсы — из
+    # реального корпуса недели: содержательные проходят, болтовня отсекается.
+    assert lumen_router_config.search_planner_skipped("скок стоит терминал старлинк") is False
+    assert lumen_router_config.search_planner_skipped("чё за кросс игра") is False
+    assert lumen_router_config.search_planner_skipped("расскажи про амурскую калугу") is False
+    assert lumen_router_config.search_planner_skipped("спасибо") is True
+    assert lumen_router_config.search_planner_skipped("ахахахахахаха") is True
+    assert lumen_router_config.search_planner_skipped("ок") is True
+    assert lumen_router_config.search_planner_skipped("привет") is True
+    assert lumen_router_config.search_planner_skipped("/draw кот") is True
+    assert lumen_router_config.search_planner_skipped("") is True
+    assert lumen_router_config.search_planner_skipped("😀🔥👍") is True
+    # «привет, как дела?» с хвостом — не полный матч: пусть решает модель цикла.
+    assert lumen_router_config.search_planner_skipped("привет, как дела?") is False
+
+
 def test_looks_like_freshness_query_detects_schedule_and_forecast():
     # Расширение эвристики (сентябрь 2026): расписание/афиша/прогноз без слова
     # "погода" раньше не считались нуждой в свежей информации.

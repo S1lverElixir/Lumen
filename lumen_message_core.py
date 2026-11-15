@@ -59,6 +59,7 @@ from lumen_router_config import (
     agent_max_searches,
     pick_reasoning_effort,
     recent_corrections,
+    search_planner_skipped,
 )
 from lumen_search import (
     _SearchRequested,
@@ -186,7 +187,7 @@ def _snippet_fetch_budget_sec(deadline: float | None) -> float:
 async def _gather_web_evidence(
     *, chat_id: int, user_prompt: str, clean_prompt: str, previous: str,
     route: list[tuple[str, str]], effort: str | None, status, deadline: float | None,
-    history_meta: dict | None,
+    history_meta: dict | None, allow_fallback_fetch: bool = True, zone2: bool = False,
 ) -> tuple[list[dict], list[str], bool, dict]:
     """Свежие источники для одного сообщения: агентный цикл, под ним — прежний
     один внешний поиск по словам человека.
@@ -195,6 +196,10 @@ async def _gather_web_evidence(
     видит результаты и уточняет формулировку (замер 12.11.2026: на «а он точно не
     в клубе?» голова выдаёт два отдельных запроса вместо сырой фразы). Пустой или
     сорванный цикл не имеет права лишить ответа поиска — работает старая ветка.
+    В зоне 2 (регекс молчал, модель решает сама) фолбэк-фетч по сырой фразе не
+    делается: он ищет болтовню, а отказ модели — нормальный исход (прод 15.11.2026:
+    «theoneprobe» без зоны 2 уходил по памяти); циклу нужен минимум один слот —
+    без него решение «искать или нет» невозможно в принципе.
     Возвращает (сниппеты, запросы модели, работал ли цикл, метрики цикла)."""
     import bot
     import lumen_agent
@@ -206,6 +211,11 @@ async def _gather_web_evidence(
     # Потолок поисков считается от усилия; EFFORT_AUTO=0 даёт effort=None, и тогда
     # цикл молчит целиком — ровно прежний один поиск по словам человека.
     max_searches = agent_max_searches(effort)
+    if zone2 and effort is not None and max_searches < 1:
+        # Решение «искать или нет» требует самого вызова: low-effort не должен
+        # глушить зону 2 в ноль (прод 15.11.2026: «theoneprobe» ушёл по памяти).
+        # EFFORT_AUTO=0 (effort=None) глушит цикл целиком — прежний инвариант.
+        max_searches = 1
     if search_daily_budget_left() <= 0:
         # Дневной потолок обращений исчерпан: цикл всё равно ничего не найдёт,
         # но успеет потратить планирующие вызовы модели (до трёх за сообщение).
@@ -241,7 +251,7 @@ async def _gather_web_evidence(
 
     budget = _snippet_fetch_budget_sec(deadline)
     snippets: list[dict] = []
-    if budget > 0:
+    if budget > 0 and allow_fallback_fetch:
         try:
             snippets = await fetch_web_snippets(
                 clean_prompt, timeout_sec=budget, max_results=web_search_max_results(),
@@ -1313,6 +1323,19 @@ async def _handle_message_core(
         and not needs_website
     )
     search_will_run = need_external_search and web_search_is_enabled()
+    # Зона 2: регекс свежести молчал, но сообщение содержательное — решает модель
+    # агент-цикла (прод 15.11.2026: «theoneprobe» уходил по памяти без поиска).
+    # Медиа, ссылки, YouTube и TikTok идут другими маршрутами, гостям тишина.
+    agent_zone2 = (
+        not need_external_search
+        and web_search_is_enabled()
+        and not wants_tiktok
+        and not needs_youtube
+        and not needs_website
+        and media_mime is None
+        and not is_guest
+        and not search_planner_skipped(clean_prompt)
+    )
     # Живой статус (как в Claude): этапы в одном сообщении, которое потом становится
     # ответом. Личка и группы — решение владельца 12.11.2026: претензии по слабому
     # поиску пришли скриншотами из группы, и без пузыря там не видно ровно того, ради
@@ -1342,13 +1365,15 @@ async def _handle_message_core(
     agent_used = False
     agent_steps = 0
     agent_planning_ms = 0
-    if search_will_run:
+    if search_will_run or agent_zone2:
         # Сниппеты едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
         # Сбор идёт до старта бюджета маршрута и берёт собственный бюджет: 22 с на один
         # поиск при medium и 44 с при high/xhigh (evidence_phase_budget_sec), урезанные
         # остатком MESSAGE_TOTAL_BUDGET_SEC (параллельный вопрос получит "занято").
         # Статус-пузырь создаётся до первого этапа,
         # чтобы строки цикла правили уже живой пузырь, а не висели в очереди.
+        # В зоне 2 раннего пузыря нет (freshness=False): цикл идёт молча, и его
+        # отказ искать — норма, а не «без live-поиска».
         status = await status_task if status_task is not None else None
         snippets, model_queries, agent_used, agent_stats = await _gather_web_evidence(
             chat_id=message.chat.id, user_prompt=ai_prompt, clean_prompt=clean_prompt,
@@ -1356,6 +1381,7 @@ async def _handle_message_core(
             # history_meta здесь ещё не собран (его строят ниже, с медиа-ссылками):
             # прошлые фото цикл не тянет — attach_past выключен внутри.
             deadline=route_deadline, history_meta=None,
+            allow_fallback_fetch=search_will_run, zone2=agent_zone2,
         )
         # Метрики цикла в след и лог: офлайн иначе не отличить ветку цикла от
         # прежнего поиска (ревью 12.11.2026).
@@ -1365,7 +1391,9 @@ async def _handle_message_core(
             ai_prompt += format_snippets_for_prompt(snippets) + evidence_trace(model_queries)
             snippets_injected = True
         else:
-            web_search_failed = True
+            # Пометка «без live-поиска» честна только для свежих вопросов: в зоне 2
+            # отказ модели искать — норма, и пометка была бы ложью.
+            web_search_failed = search_will_run
         # Чем принесены источники — циклом или прежним fetch: по этой строке в проде
         # видно, работает ли надстройка и не ест ли она бюджет молча.
         log.info("[web-search] chat=%s sources=%d agent=%s effort=%s",
