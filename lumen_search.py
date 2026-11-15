@@ -1573,10 +1573,10 @@ _AUTHORITY_HOSTS = (
 
 # Игровые и фан-вики: страницы игр, модов и сериалов живут здесь, а не в новостях.
 # Бонус включается только вики-сигналом запроса: для новостей фандом-страница — шум.
-# «wiki» в сигнале не считается внутри пути ссылки (…/wiki/Пушкин — это URL-сегмент,
-# а не просьба искать вики), поэтому смотрим на соседа слева и справа.
+# Один guard на все слова: сигнал не считается внутри URL-токена (сосед «.», «/» или
+# буква слева/справа — это хост или путь вставленной ссылки, а не просьба искать вики).
 _GAME_WIKI_HOSTS = ("fandom.com", "wiki.gg", "fextralife.com", "wikia.com")
-_GAME_WIKI_HINT_RE = re.compile(r"(?<![/\w])wiki\b(?![/\w])|\bвики\b|\bфандом\b|\bfandom\b", re.IGNORECASE)
+_GAME_WIKI_HINT_RE = re.compile(r"(?<![\w./])(?:wiki|вики|фандом|fandom)(?![\w.])", re.IGNORECASE)
 
 
 def _game_wiki_bonus(item: dict) -> int:
@@ -1651,7 +1651,10 @@ def _rank(items: list[dict], *, wants_fresh: bool, wants_entity: bool,
             kind_rank += 1
         age = _age_days(item.get("date") or "")
         recency = age if age is not None else 10_000
-        authority = _authority(item) + (_game_wiki_bonus(item) if wants_game_wiki else 0)
+        # Бонус фандома не тащит недатированную страницу поверх свежей датированной
+        # новости при wants_fresh: без даты свежесть недоказуема (ревью 16.11.2026).
+        wiki_ok = not wants_fresh or item.get("kind") in ("fact", "live") or age is not None
+        authority = _authority(item) + (_game_wiki_bonus(item) if wants_game_wiki and wiki_ok else 0)
         return (kind_rank, -authority, recency, -(len(item.get("snippet") or "")))
 
     return sorted(filtered or items, key=sort_key)

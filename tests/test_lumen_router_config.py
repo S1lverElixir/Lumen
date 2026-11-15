@@ -81,6 +81,9 @@ def test_looks_like_freshness_query_not_triggered_by_lookalikes():
     # получала поиск и пометку «без интернета».
     assert lumen_router_config._looks_like_freshness_query("Погоди") is False
     assert lumen_router_config._looks_like_freshness_query("ну хз мб только предпоследняя") is False
+    # «погодка» — приятель, а не погода; «погоди» украинское — через «і» и осталось.
+    assert lumen_router_config._looks_like_freshness_query("мой погодка сказал") is False
+    assert lumen_router_config._looks_like_freshness_query("якій погоді") is True
     # Настоящие погода/последние не потерять.
     assert lumen_router_config._looks_like_freshness_query("какая погода в Минске") is True
     assert lumen_router_config._looks_like_freshness_query("последняя версия Blender") is True

@@ -149,7 +149,8 @@ def _wants_web_search(text: str, *, previous: str = "") -> bool:
         return False
     # Голое слово времени — реплика-реакция («вчера», «сегодня» в ответ на «когда?»),
     # а не вопрос: регекс свежести ловит его в одиночку (корпус недели 15.11.2026).
-    if text.strip(" \t\n.,!?:;«»\"'-—…").lower() in _BARE_TIME_WORDS:
+    # Нормализуем до одних букв: эмодзи, скобки и NBSP не делают «вчера» вопросом.
+    if re.sub(r"[\W_]+", "", text, flags=re.IGNORECASE).lower() in _BARE_TIME_WORDS:
         return False
     if _looks_like_freshness_query(text) or _looks_like_search_request(text):
         return True

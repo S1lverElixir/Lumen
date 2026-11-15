@@ -23,6 +23,8 @@ cases = json.loads((ROOT / "eval" / "search_cases.json").read_text(encoding="utf
 false_positives: list[str] = []
 model_zone: list[str] = []
 intent_misses: list[str] = []
+wiki_expected: list[int] = []
+wiki_by_text: list[int] = []
 rows: list[str] = []
 for case in cases:
     question = case["question"]
@@ -34,6 +36,10 @@ for case in cases:
     want_intent = case.get("expect_intent")
     got_intent = next((k for k in ("news", "entity", "weather", "fx", "crypto") if intents[k]), None)
     wiki_signal = lumen_search._wants_game_wiki(question)
+    if case.get("expect_wiki"):
+        wiki_expected.append(case["id"])
+        if wiki_signal:
+            wiki_by_text.append(case["id"])
     verdict = ""
     if not expect and trigger:
         verdict = "ЛОЖНОЕ СРАБАТЫВАНИЕ"
@@ -54,6 +60,10 @@ for case in cases:
 print("\n".join(rows))
 print(f"\nитого: кейсов {len(cases)}, ложных срабатываний регекса {len(false_positives)}, "
       f"модель-зона (закрыто агентным циклом) {len(model_zone)}, интент-промахи {len(intent_misses)}")
+print(f"вики-ожидания: {len(wiki_expected)} (id {wiki_expected}); из них вики-слово в самом "
+      f"тексте: {len(wiki_by_text)}"
+      + (f" (id {wiki_by_text})" if wiki_by_text else " — остальные закрывает модель агент-цикла "
+         "(инструкция добавлять wiki к игровым сущностям), детерминированный слой тут бессилен"))
 if false_positives:
     print(f"ложные: {false_positives}")
 if model_zone:

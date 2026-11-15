@@ -450,6 +450,25 @@ def test_wants_game_wiki_detection():
     assert lumen_search._wants_game_wiki("кто канцлер Германии") is False
     # «wiki» внутри пути вставленной ссылки — URL-сегмент, а не сигнал (ревью 15.11.2026).
     assert lumen_search._wants_game_wiki("https://ru.wikipedia.org/wiki/Пушкин кто это") is False
+    # Один guard на все слова: хост вставленной ссылки (точка-сосед) — тоже не сигнал.
+    assert lumen_search._wants_game_wiki("https://minecraft.fandom.com/wiki/The_One_Probe") is False
+    assert lumen_search._wants_game_wiki("https://wiki.gg/page") is False
+
+
+def test_rank_game_wiki_bonus_does_not_float_undated_page_over_fresh_news():
+    # Ревью 16.11.2026: недатированная фандом-страница с бонусом обгоняла свежую
+    # датированную новость при wants_fresh — возраст без даты недоказуем.
+    items = [
+        {"title": "Свежая новость", "url": "https://news.example/1", "snippet": "s",
+         "publisher": "news.example", "date": "2026-11-16", "kind": "news"},
+        {"title": "Страница вики без даты", "url": "https://sonic.fandom.com/wiki/X",
+         "snippet": "s", "publisher": "sonic.fandom.com", "date": "", "kind": "web"},
+    ]
+    ranked = lumen_search._rank(items, wants_fresh=True, wants_entity=True, wants_game_wiki=True)
+    assert ranked[0]["kind"] == "news"
+    # Без признака свежести прежнее поведение: вики вперёд.
+    ranked = lumen_search._rank(items, wants_fresh=False, wants_entity=True, wants_game_wiki=True)
+    assert ranked[0]["publisher"] == "sonic.fandom.com"
 
 
 def test_game_wiki_bonus_matches_only_the_wiki_hosts():

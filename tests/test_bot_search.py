@@ -99,6 +99,12 @@ def test_bare_time_word_guard_does_not_hide_real_fresh_questions():
     assert lumen_message_core._wants_web_search("что сегодня идёт по телевизору") is True
     assert lumen_message_core._wants_web_search("вчера") is False
     assert lumen_message_core._wants_web_search("сегодня!") is False
+    # Эмодзи, скобки и NBSP не делают реакцию вопросом (ревью 16.11.2026).
+    assert lumen_message_core._wants_web_search("вчера 😢") is False
+    assert lumen_message_core._wants_web_search("(вчера)") is False
+    assert lumen_message_core._wants_web_search("вчера\u00a0?") is False
+    # Реплика с содержанием рядом со словом времени — не реакция.
+    assert lumen_message_core._wants_web_search("а вчера?") is True
 
 
 def test_release_status_question_runs_external_search(rate_guard_setup, monkeypatch):
