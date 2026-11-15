@@ -656,6 +656,18 @@ def test_md_to_html_link_with_underscores_in_url_not_corrupted_by_italic():
     assert "<i>" not in result
 
 
+def test_md_to_html_link_with_parenthesized_url_survives():
+    # Ревью 15.11.2026: вики-URL обязаны содержать скобки («Doom_(1993_video_game)»),
+    # прежний регекс `[^\s()]+` не брал их, ссылка оставалась сырым текстом, а italic
+    # дописывал <i> внутрь. Скобки уровня одной пары в URL допустимы, закрывающая
+    # скобка markdown-ссылки не съедается.
+    result = lumen_formatting._md_to_html("[Doom](https://en.wikipedia.org/wiki/Doom_(1993_video_game))")
+    assert result == '<a href="https://en.wikipedia.org/wiki/Doom_(1993_video_game)">Doom</a>'
+    result = lumen_formatting._md_to_html("[TOP](https://minecraft.fandom.com/wiki/The_One_Probe_(mod))")
+    assert 'href="https://minecraft.fandom.com/wiki/The_One_Probe_(mod)"' in result
+    assert "<i>" not in result
+
+
 def test_md_to_html_link_text_markdown_not_processed_intentionally():
     # Текст ссылки вырезается плейсхолдером в Phase 1 (см. комментарий в коде) —
     # markdown внутри него намеренно не поддерживается (не запрашивалось), выходит

@@ -132,6 +132,10 @@ def _previous_user_text(state: dict) -> str:
     return ""
 
 
+# Голые слова времени: реплика-реакция, а не вопрос о свежих данных.
+_BARE_TIME_WORDS = {"вчера", "сегодня", "завтра", "now", "today", "tomorrow", "yesterday"}
+
+
 def _wants_web_search(text: str, *, previous: str = "") -> bool:
     """Ищет ли бот так же, как искал бы Claude: нужны свежие данные либо явная
     просьба искать. Ссылка на прошлый разговор («помнишь, мы вчера обсуждали») —
@@ -142,6 +146,11 @@ def _wants_web_search(text: str, *, previous: str = "") -> bool:
     if not text:
         return False
     if _PAST_CHAT_RE.search(text):
+        return False
+    # Голое слово времени — реплика-реакция («вчера», «сегодня» в ответ на «когда?»),
+    # а не вопрос: регекс свежести ловит его в одиночку (корпус недели 15.11.2026).
+    # Нормализуем до одних букв: эмодзи, скобки и NBSP не делают «вчера» вопросом.
+    if re.sub(r"[\W_]+", "", text, flags=re.IGNORECASE).lower() in _BARE_TIME_WORDS:
         return False
     if _looks_like_freshness_query(text) or _looks_like_search_request(text):
         return True

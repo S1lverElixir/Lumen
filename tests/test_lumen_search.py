@@ -418,6 +418,66 @@ def test_rank_orders_entity_source_before_news_when_asking_who():
     assert ranked[0]["publisher"] == "ru.wikipedia.org"
 
 
+def test_rank_game_wiki_query_floats_fandom_page_over_forums():
+    items = [
+        {"title": "Обзор на форуме", "url": "https://forum.example/", "snippet": "s",
+         "publisher": "forum.example", "date": "2026-11-11", "kind": "web"},
+        {"title": "The One Probe — Wiki", "url": "https://minecraft.fandom.com/wiki/TOP",
+         "snippet": "s", "publisher": "minecraft.fandom.com", "date": "", "kind": "web"},
+    ]
+    ranked = lumen_search._rank(items, wants_fresh=False, wants_entity=False, wants_game_wiki=True)
+    assert ranked[0]["publisher"] == "minecraft.fandom.com"
+
+
+def test_rank_game_wiki_signal_keeps_web_tier_competitive_under_entity():
+    items = [
+        {"title": "Новость", "url": "https://a.ru/", "snippet": "s", "publisher": "a.ru",
+         "date": "2026-11-11", "kind": "news"},
+        {"title": "Вики мода", "url": "https://ftb.fandom.com/wiki/x", "snippet": "s",
+         "publisher": "ftb.fandom.com", "date": "", "kind": "web"},
+    ]
+    # Без вики-сигнала entity топит web-ярус ниже новости; с сигналом вики-страница
+    # мода выходит вперёд — игровой вопрос живёт в вики, а не в новостях.
+    demoted = lumen_search._rank(items, wants_fresh=False, wants_entity=True)
+    assert [item["kind"] for item in demoted] == ["news", "web"]
+    kept = lumen_search._rank(items, wants_fresh=False, wants_entity=True, wants_game_wiki=True)
+    assert [item["kind"] for item in kept] == ["web", "news"]
+
+
+def test_wants_game_wiki_detection():
+    assert lumen_search._wants_game_wiki("theoneprobe 1.7.10 minecraft wiki") is True
+    assert lumen_search._wants_game_wiki("что за фандом у этой игры") is True
+    assert lumen_search._wants_game_wiki("кто канцлер Германии") is False
+    # «wiki» внутри пути вставленной ссылки — URL-сегмент, а не сигнал (ревью 15.11.2026).
+    assert lumen_search._wants_game_wiki("https://ru.wikipedia.org/wiki/Пушкин кто это") is False
+    # Один guard на все слова: хост вставленной ссылки (точка-сосед) — тоже не сигнал.
+    assert lumen_search._wants_game_wiki("https://minecraft.fandom.com/wiki/The_One_Probe") is False
+    assert lumen_search._wants_game_wiki("https://wiki.gg/page") is False
+
+
+def test_rank_game_wiki_bonus_does_not_float_undated_page_over_fresh_news():
+    # Ревью 16.11.2026: недатированная фандом-страница с бонусом обгоняла свежую
+    # датированную новость при wants_fresh — возраст без даты недоказуем.
+    items = [
+        {"title": "Свежая новость", "url": "https://news.example/1", "snippet": "s",
+         "publisher": "news.example", "date": "2026-11-16", "kind": "news"},
+        {"title": "Страница вики без даты", "url": "https://sonic.fandom.com/wiki/X",
+         "snippet": "s", "publisher": "sonic.fandom.com", "date": "", "kind": "web"},
+    ]
+    ranked = lumen_search._rank(items, wants_fresh=True, wants_entity=True, wants_game_wiki=True)
+    assert ranked[0]["kind"] == "news"
+    # Без признака свежести прежнее поведение: вики вперёд.
+    ranked = lumen_search._rank(items, wants_fresh=False, wants_entity=True, wants_game_wiki=True)
+    assert ranked[0]["publisher"] == "sonic.fandom.com"
+
+
+def test_game_wiki_bonus_matches_only_the_wiki_hosts():
+    assert lumen_search._game_wiki_bonus({"publisher": "minecraft.fandom.com"}) == 2
+    assert lumen_search._game_wiki_bonus({"publisher": "fandom.com"}) == 2
+    # Зеркало с вики-хостом внутри имени — не вики-хост.
+    assert lumen_search._game_wiki_bonus({"publisher": "antifandom.com"}) == 0
+
+
 def test_limit_per_publisher_caps_one_source():
     items = [{"title": f"n{i}", "url": f"https://udf.by/{i}", "snippet": "s",
               "publisher": "udf.by", "date": "", "kind": "news"} for i in range(6)]
@@ -430,6 +490,10 @@ def test_detect_intents_by_shape_of_question():
     assert lumen_search.detect_intents("какая сейчас погода в Минске")["weather"] is True
     assert lumen_search.detect_intents("курс евро к рублю сегодня")["fx"] is True
     assert lumen_search.detect_intents("последние новости Беларуси")["news"] is True
+    # «погоді» — украинский местный падеж: класс «погод[аеыоу]» его не берёт,
+    # слово вернуто литералом, чтобы жила погода open-meteo (ревью 16.11.2026).
+    assert lumen_search.detect_intents("якій погоді в Києві")["weather"] is True
+    assert lumen_search.detect_intents("Погоди, дай подумать")["weather"] is False
     # Болтовня не должна звать ни один слой: лишний источник — это лишние секунды.
     assert not any(lumen_search.detect_intents("спасибо, ты классный").values())
 

@@ -389,7 +389,10 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r"```[a-zA-Z0-9]*\n.*?\n```", _save_block, text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]+`", _save_block, text)
     # Ссылки вырезаем как код: "_" в URL ломает italic/bold. Markdown внутри label не поддерживаем.
-    text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", _save_block, text)
+    # Скобки в URL — одна сбалансированная пара (вики-тайтлы «X_(1993)»); двойное
+    # вложение сознательно не поддерживаем: реальных тайтлов с ним нет, а рекурсивный
+    # регекс рискует бэктрекингом (ревью 16.11.2026).
+    text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", _save_block, text)
 
     # ── Phase 1.3: сырой LaTeX → юникод (см. _scrub_latex выше) — код уже
     # вынесен на предыдущем шаге, поэтому обратные слэши в реальном коде
@@ -448,7 +451,7 @@ def _md_to_html(text: str) -> str:
     for key, orig in _saved.items():
         if not orig.startswith("["):
             continue
-        m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
+        m = re.match(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", orig, re.DOTALL)
         label, url = m.group(1), m.group(2)
         label = _safe_link_label(label, url)
         label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -549,7 +552,7 @@ def _md_to_rich_html(text: str) -> str:
 
     text = re.sub(r"```[a-zA-Z0-9]*\n.*?\n```", lambda m: _take(_code, "CB", m.group(0)), text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]+`", lambda m: _take(_code, "CB", m.group(0)), text)
-    text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", lambda m: _take(_links, "CB", m.group(0)), text)
+    text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", lambda m: _take(_links, "CB", m.group(0)), text)
     text = re.sub(r"\$\$([\s\S]+?)\$\$", lambda m: _take(_math, "MM", (m.group(1), True)), text)
     # Инлайн-форма требует содержимого без пробелов по краям (как в GFM): иначе
     # цены вида "$50 до $100" превратились бы в "формулу". Одиночные "$80 000"
@@ -632,7 +635,7 @@ def _md_to_rich_html(text: str) -> str:
         tag = "tg-math-block" if block else "tg-math"
         text = text.replace(key, f"<{tag}>{latex}</{tag}>")
     for key, orig in _links.items():
-        m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
+        m = re.match(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", orig, re.DOTALL)
         label, url = m.group(1), m.group(2)
         label = _safe_link_label(label, url)
         label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -669,7 +672,7 @@ def _strip_markdown(text: str) -> str:
         _urls[key] = m.group(0)
         return key
     text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", r"\1", text)
+    text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", r"\1", text)
     text = re.sub(r"https?://[^\s()<>]+", _save_url, text)
     text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text, flags=re.DOTALL)
     # Одиночное "_" только вне слова: my_file_name и имена файлов не трогаем.
