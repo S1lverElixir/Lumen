@@ -103,6 +103,20 @@ understanding that the model already provides at ~0.3-0.7 s of planning. The off
 (`eval/search_cases.json`) against the deterministic layers and prints who covers each: the
 regex, or the model (method in `docs/PROMPT_EVAL.md`).
 
+Zone 2 (16.11.2026): the loop is no longer gated behind the freshness regex alone. A regex-silent
+message that is substantive (`search_planner_skipped` in `lumen_router_config.py`: greetings,
+thanks, acks, laughter, emoji-only, bare commands and anything under 12 characters are skipped)
+also runs one agent phase, with a floor of one search slot at any auto effort — the decision
+itself needs the planning call; with `EFFORT_AUTO=0` (effort `None`) or `AGENT_MAX_SEARCHES=0`
+(the owner's kill switch — the floor never overrides an explicit value) the loop stays fully off,
+matching the old invariants. Zone-2 prompts carry the today's date like freshness ones do: the
+model cannot judge «is my knowledge stale» without knowing what day it is. The model declining
+to search is a normal outcome there: no fallback
+fetch on the raw wording and no "answered without live search" note, because on a non-freshness
+message that note would be a lie. Live case that forced this: «есть ли theoneprobe на 1.7.10»
+had `freshness=False`, the loop never ran and the answer went out from memory (Space log
+15.11.2026); zone 2 hands the same message to the head, which now decides.
+
 ### Image generation
 
 `/draw` falls back across providers, not models: Cloudflare Workers AI (`@cf/black-forest-labs/flux-2-klein-4b`, `CLOUDFLARE_IMAGE_MODEL`) is primary and does both generation and reference edits, Pollinations.ai (`sana`) is the reserve and only generates. Measured 09.11.2026, the keyless Pollinations endpoint ignores `model` (it serves `sana` only) and `nologo` (the watermark stays), so the old five-model catalog selected nothing and one failed `/draw` fired five requests at a service that allows one image per 45 seconds per IP. That 402 `FREE_LIMIT` is read as provider overload and puts only that provider on a pause, and so do network failures and 5xx answers coming back through the relay (prod 09.11.2026). A refusal by content moderation is terminal instead, and the same flag is read from the wrapper's `messages[]` and from a `success:false` body at any HTTP status: sana would otherwise redraw exactly the flagged content (review 10.11.2026). Such an attempt costs the person their personal slot too, not only the daily budget — the model computed the picture before the filter rejected it, so a loop of forbidden descriptions would have burned the shared budget in minutes (review 10.11.2026). Every request carries a random `seed` (without one a repeated prompt returns the byte-identical picture, which would make «ещё вариант» look broken) and sana adds `safe=true`; sana also refuses a prompt that is still non-ASCII when it arrives, because Cyrillic is turned into `?` while the URL is parsed. `IMAGE_GLOBAL_CONCURRENCY` generations may run per process and one per user at a time, `IMAGE_DAILY_LIMIT` stops drawing for the day before any provider is called, and the whole chain stays inside `DRAW_TOTAL_BUDGET_SEC`.

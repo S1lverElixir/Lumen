@@ -688,6 +688,13 @@ def agent_max_searches(effort: str | None) -> int:
     return _AGENT_SEARCHES_BY_EFFORT.get(effort, 0)
 
 
+def agent_searches_capped_by_env() -> bool:
+    """AGENT_MAX_SEARCHES выставлен владельцем явно — перекрывает таблицу усилий.
+    Зона 2 не имеет права поднимать такой потолок флором: «0 глушит цикл» —
+    килл-свитч, а не значение по умолчанию (ревью 16.11.2026)."""
+    return bool((os.getenv("AGENT_MAX_SEARCHES", "") or "").strip())
+
+
 def gemini_thinking_for(model_id: str, effort: str | None) -> tuple[str, Any]:
     """Пары (параметр, значение) для thinking_config резерва: у линейки 3.x это
     thinking_level (офиц. docs Gemini: minimal/low/medium/high по модели), у 2.5 —
@@ -1052,6 +1059,35 @@ def _looks_like_freshness_query(text: str) -> bool:
     return bool(_FRESHNESS_QUERY_RE.search(text)) or _looks_like_release_question(text) \
         or _looks_like_named_version_query(text) or _looks_like_en_freshness_query(text) \
         or _looks_like_office_or_state_query(text)
+
+
+# ── Зона 2 агент-цикла: регекс свежести молчит, но содержательное сообщение
+# может нуждаться в поиске — решает сама модель (как у Claude). Болтовня в цикл
+# не входит: каждый лишний планирующий вызов — секунда и токены впустую
+# (замер корпуса 15.11.2026: «скок стоит терминал старлинк» регекс пропускал).
+_SEARCH_PLANNER_SKIP_RE = re.compile(
+    r"^(?:привет+|прив|хай+|hello|hi|здравств\w*|добр\w*\s*(?:утро|день|вечер)"
+    r"|спасибо+|спс|пасиб\w*|благодар\w*|ок+|окей|хорошо|ладно|понятн\w*|понял\b|ясно"
+    r"|угу|ага|ну\s+да|давай|ну\s+давай|не\s+понял\w*|жаль|бывает|жесть|прикол\w*"
+    r"|круто|класс|(?:ах){2,}а?|(?:ха){2,}|хихи|хех|кек|лол|жестк\w*|жёстк\w*"
+    r"|как\s+дела?\??|что\s+нового\??|ты\s+тут\??|альо|алло|ау\??)"
+    r"[\s,.!?…:)(-]*$",
+    re.IGNORECASE,
+)
+
+
+def search_planner_skipped(text: str) -> bool:
+    """Болтовня без содержания: агент-цикл зоны 2 не зовётся вовсе."""
+    if not text:
+        return True
+    if len(text) < 12:
+        return True
+    if text.lstrip().startswith("/"):
+        return True
+    # Только эмодзи и пунктуация — не вопрос.
+    if not re.search(r"[А-Яа-яЁёA-Za-z0-9]", text):
+        return True
+    return bool(_SEARCH_PLANNER_SKIP_RE.match(text.strip()))
 
 
 def _gemini_text_chain(*, needs_freshness: bool) -> list[str]:
