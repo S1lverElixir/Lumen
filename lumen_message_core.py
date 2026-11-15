@@ -57,6 +57,7 @@ from lumen_router_config import (
     _looks_like_heavy_query,
     _looks_like_search_request,
     agent_max_searches,
+    agent_searches_capped_by_env,
     pick_reasoning_effort,
     recent_corrections,
     search_planner_skipped,
@@ -211,10 +212,11 @@ async def _gather_web_evidence(
     # Потолок поисков считается от усилия; EFFORT_AUTO=0 даёт effort=None, и тогда
     # цикл молчит целиком — ровно прежний один поиск по словам человека.
     max_searches = agent_max_searches(effort)
-    if zone2 and effort is not None and max_searches < 1:
+    if zone2 and effort is not None and max_searches < 1 and not agent_searches_capped_by_env():
         # Решение «искать или нет» требует самого вызова: low-effort не должен
         # глушить зону 2 в ноль (прод 15.11.2026: «theoneprobe» ушёл по памяти).
-        # EFFORT_AUTO=0 (effort=None) глушит цикл целиком — прежний инвариант.
+        # EFFORT_AUTO=0 (effort=None) глушит цикл целиком — прежний инвариант,
+        # и AGENT_MAX_SEARCHES=0 владельца флор не обходит (ревью 16.11.2026).
         max_searches = 1
     if search_daily_budget_left() <= 0:
         # Дневной потолок обращений исчерпан: цикл всё равно ничего не найдёт,
@@ -1355,7 +1357,12 @@ async def _handle_message_core(
     # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
     # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Инъекция
     # до промпта — попадает и в пост-хок ретрай, он переиспользует этот ai_prompt.
-    if needs_freshness:
+    # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
+    # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Зоне 2 она
+    # нужда ещё важнее: модель решает «устарело ли моё знание», не зная какого
+    # числа сегодня (ревью 16.11.2026). Инъекция до промпта — попадает и в
+    # пост-хок ретрай, он переиспользует этот ai_prompt.
+    if needs_freshness or agent_zone2:
         ai_prompt += "\n\n" + _fresh_date_context()
     web_search_failed = False
     snippets_injected = False

@@ -688,6 +688,13 @@ def agent_max_searches(effort: str | None) -> int:
     return _AGENT_SEARCHES_BY_EFFORT.get(effort, 0)
 
 
+def agent_searches_capped_by_env() -> bool:
+    """AGENT_MAX_SEARCHES выставлен владельцем явно — перекрывает таблицу усилий.
+    Зона 2 не имеет права поднимать такой потолок флором: «0 глушит цикл» —
+    килл-свитч, а не значение по умолчанию (ревью 16.11.2026)."""
+    return bool((os.getenv("AGENT_MAX_SEARCHES", "") or "").strip())
+
+
 def gemini_thinking_for(model_id: str, effort: str | None) -> tuple[str, Any]:
     """Пары (параметр, значение) для thinking_config резерва: у линейки 3.x это
     thinking_level (офиц. docs Gemini: minimal/low/medium/high по модели), у 2.5 —

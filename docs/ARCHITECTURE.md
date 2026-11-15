@@ -107,8 +107,11 @@ Zone 2 (16.11.2026): the loop is no longer gated behind the freshness regex alon
 message that is substantive (`search_planner_skipped` in `lumen_router_config.py`: greetings,
 thanks, acks, laughter, emoji-only, bare commands and anything under 12 characters are skipped)
 also runs one agent phase, with a floor of one search slot at any auto effort — the decision
-itself needs the planning call; with `EFFORT_AUTO=0` (effort `None`) the loop stays fully off,
-matching the old invariant. The model declining to search is a normal outcome there: no fallback
+itself needs the planning call; with `EFFORT_AUTO=0` (effort `None`) or `AGENT_MAX_SEARCHES=0`
+(the owner's kill switch — the floor never overrides an explicit value) the loop stays fully off,
+matching the old invariants. Zone-2 prompts carry the today's date like freshness ones do: the
+model cannot judge «is my knowledge stale» without knowing what day it is. The model declining
+to search is a normal outcome there: no fallback
 fetch on the raw wording and no "answered without live search" note, because on a non-freshness
 message that note would be a lie. Live case that forced this: «есть ли theoneprobe на 1.7.10»
 had `freshness=False`, the loop never ran and the answer went out from memory (Space log

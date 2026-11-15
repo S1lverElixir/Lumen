@@ -68,7 +68,9 @@ def test_past_chat_reference_does_not_run_external_search(rate_guard_setup, monk
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
     assert calls == []
-    assert "without live web search" not in bot._safe_reply.await_args[0][1]
+    # Пометку сверяем с фактическим текстом ключа, а не выдуманной подстрокой:
+    # «without live web search» ни в одном языковом пакете не существует.
+    assert bot._t(123, "fallback_no_live_search") not in bot._safe_reply.await_args[0][1]
     bot.chat_state.pop(123, None)
 
 
@@ -347,9 +349,11 @@ def test_freshness_prompt_carries_today_date(rate_guard_setup, monkeypatch):
 
 
 def test_non_freshness_prompt_has_no_date_context(rate_guard_setup, monkeypatch):
-    # Вечные вопросы дату не получают: лишний контекст в обычном маршруте не нужен.
+    # Болтовня (skip-лист зоны 2) дату не получает вовсе; содержательный вопрос
+    # без слов свежести дату получает — модель решает «устарело ли моё знание»
+    # (ревью 16.11.2026), свежие вопросы — как и раньше.
     message = rate_guard_setup()
-    message.text = "объясни, как работает рекурсия"
+    message.text = "спасибо"
     captured: dict = {}
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
@@ -359,6 +363,38 @@ def test_non_freshness_prompt_has_no_date_context(rate_guard_setup, monkeypatch)
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
     assert "[Context: today is" not in captured["prompt"]
+
+    message2 = rate_guard_setup()
+    message2.text = "объясни, как работает рекурсия"
+    captured2: dict = {}
+
+    async def fake_run_route2(chat_id, ai_prompt, route, message, **kwargs):
+        captured2["prompt"] = ai_prompt
+        return "ok", False
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route2)
+    asyncio.run(bot._handle_message_core(message2))
+    assert "[Context: today is" in captured2["prompt"]
+    bot.chat_state.pop(123, None)
+
+
+def test_zone2_respects_agent_max_searches_zero_kill_switch(rate_guard_setup, monkeypatch):
+    # AGENT_MAX_SEARCHES=0 — килл-свитч владельца: флор зоны 2 не имеет права
+    # поднимать его до единицы, иначе глушение работало бы асимметрично
+    # (ревью 16.11.2026).
+    message = rate_guard_setup()
+    message.text = "скок стоит терминал старлинк"
+    monkeypatch.setenv("AGENT_MAX_SEARCHES", "0")
+
+    async def fail_turn(**kwargs):
+        raise AssertionError("зона 2 не должна обходить килл-свитч владельца")
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        return "Без проверки не скажу", False
+
+    monkeypatch.setattr("lumen_agent.run_search_turn", fail_turn)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
     bot.chat_state.pop(123, None)
 
 def test_anaphoric_followup_searches_with_previous_topic(rate_guard_setup, monkeypatch):
@@ -465,7 +501,10 @@ def test_zone2_model_decline_is_normal_no_no_search_note(rate_guard_setup, monke
     asyncio.run(bot._handle_message_core(message))
     texts = _outgoing_texts()
     assert any("около $349" in t for t in texts), "ответ обязан доехать без поиска"
-    assert not any("without live web search" in t for t in texts), "пометка на несвежем вопросе — ложь"
+    # Пометка сверяется с фактическим текстом ключей (ревью 16.11.2026: прежний
+    # ассерт ловил подстроку, которой ни в одном языковом пакете нет).
+    assert not any(bot._t(123, "fallback_no_live_search") in t for t in texts)
+    assert not any(bot._t(123, "fallback_no_search") in t for t in texts)
     bot.chat_state.pop(123, None)
 
 
