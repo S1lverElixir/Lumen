@@ -448,6 +448,15 @@ def test_wants_game_wiki_detection():
     assert lumen_search._wants_game_wiki("theoneprobe 1.7.10 minecraft wiki") is True
     assert lumen_search._wants_game_wiki("что за фандом у этой игры") is True
     assert lumen_search._wants_game_wiki("кто канцлер Германии") is False
+    # «wiki» внутри пути вставленной ссылки — URL-сегмент, а не сигнал (ревью 15.11.2026).
+    assert lumen_search._wants_game_wiki("https://ru.wikipedia.org/wiki/Пушкин кто это") is False
+
+
+def test_game_wiki_bonus_matches_only_the_wiki_hosts():
+    assert lumen_search._game_wiki_bonus({"publisher": "minecraft.fandom.com"}) == 2
+    assert lumen_search._game_wiki_bonus({"publisher": "fandom.com"}) == 2
+    # Зеркало с вики-хостом внутри имени — не вики-хост.
+    assert lumen_search._game_wiki_bonus({"publisher": "antifandom.com"}) == 0
 
 
 def test_limit_per_publisher_caps_one_source():

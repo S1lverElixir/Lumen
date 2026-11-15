@@ -82,6 +82,24 @@ from Bing News and Google News instead), not from the code. Deliberately not in 
 owner's decision of 12.11.2026: a `read_page` tool (it needs the Deno relay allowlist and an SSRF
 review first), a Gemini-native function-calling loop, and Gemini thought summaries.
 
+Ranking inside `fetch_web_snippets` stays intent-aware. Game and fan wikis (`fandom.com`,
+`wiki.gg`, `fextralife.com`, `_GAME_WIKI_HOSTS`) float over ordinary web results when the query
+itself signals a wiki ask (`_wants_game_wiki`: «wiki», «вики», «фандом»), because game entities
+live there and not in news feeds (corpus week 15.11.2026: «theoneprobe 1.7.10», «чё за кросс
+игра»). The `web_search` tool description tells the model to append «wiki» to queries for games,
+mods and pop-culture entities, so the signal usually arrives with the query; under that signal
+the entity demotion of the web tier is skipped (news is still demoted), and wiki hosts get an
+authority-style bonus inside the web tier. The same corpus produced trigger refinements: a bare
+time-word reply («вчера») is a reaction, not a question (`_BARE_TIME_WORDS` in
+`_wants_web_search`); «Погоди» is not weather («погод-» now requires a declension vowel);
+«предпоследняя» is not «последн-» (word boundary added). The two remaining regex hits on chatter
+(«закат» inside a draw-like phrase, «сегодня» in banter) are deliberately left to the model
+inside the loop, which declines to search — fixing them in the regex would need semantic
+understanding that the model already provides at ~0.3-0.7 s of planning. The offline probe
+`eval/search_offline_check.py` replays 32 anonymized real-formulation cases
+(`eval/search_cases.json`) against the deterministic layers and prints who covers each: the
+regex, or the model (method in `docs/PROMPT_EVAL.md`).
+
 ### Image generation
 
 `/draw` falls back across providers, not models: Cloudflare Workers AI (`@cf/black-forest-labs/flux-2-klein-4b`, `CLOUDFLARE_IMAGE_MODEL`) is primary and does both generation and reference edits, Pollinations.ai (`sana`) is the reserve and only generates. Measured 09.11.2026, the keyless Pollinations endpoint ignores `model` (it serves `sana` only) and `nologo` (the watermark stays), so the old five-model catalog selected nothing and one failed `/draw` fired five requests at a service that allows one image per 45 seconds per IP. That 402 `FREE_LIMIT` is read as provider overload and puts only that provider on a pause, and so do network failures and 5xx answers coming back through the relay (prod 09.11.2026). A refusal by content moderation is terminal instead, and the same flag is read from the wrapper's `messages[]` and from a `success:false` body at any HTTP status: sana would otherwise redraw exactly the flagged content (review 10.11.2026). Such an attempt costs the person their personal slot too, not only the daily budget — the model computed the picture before the filter rejected it, so a loop of forbidden descriptions would have burned the shared budget in minutes (review 10.11.2026). Every request carries a random `seed` (without one a repeated prompt returns the byte-identical picture, which would make «ещё вариант» look broken) and sana adds `safe=true`; sana also refuses a prompt that is still non-ASCII when it arrives, because Cyrillic is turned into `?` while the URL is parsed. `IMAGE_GLOBAL_CONCURRENCY` generations may run per process and one per user at a time, `IMAGE_DAILY_LIMIT` stops drawing for the day before any provider is called, and the whole chain stays inside `DRAW_TOTAL_BUDGET_SEC`.

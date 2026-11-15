@@ -75,6 +75,17 @@ def test_looks_like_freshness_query_false_for_timeless_questions():
     assert lumen_router_config._looks_like_freshness_query("объясни теорию относительности") is False
 
 
+def test_looks_like_freshness_query_not_triggered_by_lookalikes():
+    # Корпус недели (15.11.2026): «погод-» без ограничения флексий ловил императив
+    # «Погоди», «последн-» без границы слова — «предпоследняя». Обычная болтовня
+    # получала поиск и пометку «без интернета».
+    assert lumen_router_config._looks_like_freshness_query("Погоди") is False
+    assert lumen_router_config._looks_like_freshness_query("ну хз мб только предпоследняя") is False
+    # Настоящие погода/последние не потерять.
+    assert lumen_router_config._looks_like_freshness_query("какая погода в Минске") is True
+    assert lumen_router_config._looks_like_freshness_query("последняя версия Blender") is True
+
+
 def test_looks_like_freshness_query_detects_schedule_and_forecast():
     # Расширение эвристики (сентябрь 2026): расписание/афиша/прогноз без слова
     # "погода" раньше не считались нуждой в свежей информации.

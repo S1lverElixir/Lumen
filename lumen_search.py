@@ -430,7 +430,7 @@ _CURRENCY_ALIASES = {
     "UAH": ("гривна", "гривны", "uah"),
     "BYN": ("белорусский рубль", "byn"),
 }
-_WEATHER_RE = re.compile(r"\bпогод\w*|temperatur\w*|weather|дожд\w*|снег\w*|мороз|ветер|жарк\w*|прогноз\w*\s+погоде?", re.IGNORECASE)
+_WEATHER_RE = re.compile(r"\bпогод[аеыоу]\w*|temperatur\w*|weather|дожд\w*|снег\w*|мороз|ветер|жарк\w*|прогноз\w*\s+погоде?", re.IGNORECASE)
 # Астрономика по дату: слой open-meteo давал рассвет/закат только когда в
 # вопросе стояло слово «погода», а «во сколько завтра рассвет в Москве»
 # искался как свежее — и без единой минуты в сниппетах (офлайн-замер
@@ -1573,13 +1573,15 @@ _AUTHORITY_HOSTS = (
 
 # Игровые и фан-вики: страницы игр, модов и сериалов живут здесь, а не в новостях.
 # Бонус включается только вики-сигналом запроса: для новостей фандом-страница — шум.
+# «wiki» в сигнале не считается внутри пути ссылки (…/wiki/Пушкин — это URL-сегмент,
+# а не просьба искать вики), поэтому смотрим на соседа слева и справа.
 _GAME_WIKI_HOSTS = ("fandom.com", "wiki.gg", "fextralife.com", "wikia.com")
-_GAME_WIKI_HINT_RE = re.compile(r"\bwiki\b|\bвики\b|\bфандом\b|\bfandom\b", re.IGNORECASE)
+_GAME_WIKI_HINT_RE = re.compile(r"(?<![/\w])wiki\b(?![/\w])|\bвики\b|\bфандом\b|\bfandom\b", re.IGNORECASE)
 
 
 def _game_wiki_bonus(item: dict) -> int:
     host = (item.get("publisher") or "").lower()
-    return 2 if any(h in host for h in _GAME_WIKI_HOSTS) else 0
+    return 2 if any(host == h or host.endswith("." + h) for h in _GAME_WIKI_HOSTS) else 0
 
 
 def _wants_game_wiki(text: str) -> bool:

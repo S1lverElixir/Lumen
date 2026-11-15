@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import bot
+import lumen_message_core
 from tests.bot_test_helpers import _FakeStatus, _run_core_capturing_prompt
 
 _DEAD_SEARCH_QUOTA = {("gemini", "gemini-2.5-flash"), ("gemini", "gemini-2.5-flash-lite")}
@@ -69,6 +70,35 @@ def test_past_chat_reference_does_not_run_external_search(rate_guard_setup, monk
     assert calls == []
     assert "without live web search" not in bot._safe_reply.await_args[0][1]
     bot.chat_state.pop(123, None)
+
+
+def test_bare_time_word_reply_does_not_run_external_search(rate_guard_setup, monkeypatch):
+    # Корпус недели (15.11.2026): голая реплика «вчера» ловилась регексом свежести —
+    # поиск запускался на реакцию, не на вопрос.
+    message = rate_guard_setup()
+    message.text = "вчера"
+    _kill_search_quota(monkeypatch)
+    calls = []
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
+        calls.append(query)
+        return []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        return "ok", False
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    asyncio.run(bot._handle_message_core(message))
+    assert calls == []
+    bot.chat_state.pop(123, None)
+
+
+def test_bare_time_word_guard_does_not_hide_real_fresh_questions():
+    # Настоящий вопрос со словом «сегодня» по-прежнему ищется.
+    assert lumen_message_core._wants_web_search("что сегодня идёт по телевизору") is True
+    assert lumen_message_core._wants_web_search("вчера") is False
+    assert lumen_message_core._wants_web_search("сегодня!") is False
 
 
 def test_release_status_question_runs_external_search(rate_guard_setup, monkeypatch):
