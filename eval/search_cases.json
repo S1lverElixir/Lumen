@@ -1,5 +1,5 @@
 {
-  "description": "Поисковые кейсы для офлайн-прогонов eval/search_eval.py. Источник: недельный корпус переписок (ноябрь 2026), анонимизировано: ники, места и персональные детали заменены; лингвистическая форма сохранена. expect_search — нужен ли поиск; expect_intent — слой detect_intents: news|entity|weather|fx|crypto|null (null = не важен); expect_wiki — ожидается ли Википедия в источниках; context — предыдущие сообщения (для follow-up).",
+  "description": "Поисковые кейсы для офлайн-прогонов eval/search_offline_check.py. Источник: недельный корпус переписок (ноябрь 2026), анонимизировано: ники, места и персональные детали заменены; лингвистическая форма сохранена. expect_search — нужен ли поиск; expect_intent — слой detect_intents: news|entity|weather|fx|crypto|null (null = не важен); expect_wiki — ожидается ли вики-семейство (фандом/Википедия) в источниках; context — предыдущие сообщения (для follow-up).",
   "cases": [
     {
       "id": 1,

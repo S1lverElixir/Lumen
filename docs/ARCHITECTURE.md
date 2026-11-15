@@ -84,12 +84,14 @@ review first), a Gemini-native function-calling loop, and Gemini thought summari
 
 Ranking inside `fetch_web_snippets` stays intent-aware. Game and fan wikis (`fandom.com`,
 `wiki.gg`, `fextralife.com`, `_GAME_WIKI_HOSTS`) float over ordinary web results when the query
-itself signals a wiki ask (`_wants_game_wiki`: «wiki», «вики», «фандом»), because game entities
+itself signals a wiki ask (`_wants_game_wiki` via `_GAME_WIKI_HINT_RE`: «wiki», «вики»,
+«фандом», «fandom»; «wiki» не считается внутри пути вставленной ссылки — `…/wiki/X`), because game entities
 live there and not in news feeds (corpus week 15.11.2026: «theoneprobe 1.7.10», «чё за кросс
 игра»). The `web_search` tool description tells the model to append «wiki» to queries for games,
 mods and pop-culture entities, so the signal usually arrives with the query; under that signal
 the entity demotion of the web tier is skipped (news is still demoted), and wiki hosts get an
-authority-style bonus inside the web tier. The same corpus produced trigger refinements: a bare
+authority-style bonus inside the web tier (host matches the domain itself or a subdomain, not a
+substring). The same corpus produced trigger refinements: a bare
 time-word reply («вчера») is a reaction, not a question (`_BARE_TIME_WORDS` in
 `_wants_web_search`); «Погоди» is not weather («погод-» now requires a declension vowel);
 «предпоследняя» is not «последн-» (word boundary added). The two remaining regex hits on chatter
