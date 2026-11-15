@@ -418,6 +418,38 @@ def test_rank_orders_entity_source_before_news_when_asking_who():
     assert ranked[0]["publisher"] == "ru.wikipedia.org"
 
 
+def test_rank_game_wiki_query_floats_fandom_page_over_forums():
+    items = [
+        {"title": "Обзор на форуме", "url": "https://forum.example/", "snippet": "s",
+         "publisher": "forum.example", "date": "2026-11-11", "kind": "web"},
+        {"title": "The One Probe — Wiki", "url": "https://minecraft.fandom.com/wiki/TOP",
+         "snippet": "s", "publisher": "minecraft.fandom.com", "date": "", "kind": "web"},
+    ]
+    ranked = lumen_search._rank(items, wants_fresh=False, wants_entity=False, wants_game_wiki=True)
+    assert ranked[0]["publisher"] == "minecraft.fandom.com"
+
+
+def test_rank_game_wiki_signal_keeps_web_tier_competitive_under_entity():
+    items = [
+        {"title": "Новость", "url": "https://a.ru/", "snippet": "s", "publisher": "a.ru",
+         "date": "2026-11-11", "kind": "news"},
+        {"title": "Вики мода", "url": "https://ftb.fandom.com/wiki/x", "snippet": "s",
+         "publisher": "ftb.fandom.com", "date": "", "kind": "web"},
+    ]
+    # Без вики-сигнала entity топит web-ярус ниже новости; с сигналом вики-страница
+    # мода выходит вперёд — игровой вопрос живёт в вики, а не в новостях.
+    demoted = lumen_search._rank(items, wants_fresh=False, wants_entity=True)
+    assert [item["kind"] for item in demoted] == ["news", "web"]
+    kept = lumen_search._rank(items, wants_fresh=False, wants_entity=True, wants_game_wiki=True)
+    assert [item["kind"] for item in kept] == ["web", "news"]
+
+
+def test_wants_game_wiki_detection():
+    assert lumen_search._wants_game_wiki("theoneprobe 1.7.10 minecraft wiki") is True
+    assert lumen_search._wants_game_wiki("что за фандом у этой игры") is True
+    assert lumen_search._wants_game_wiki("кто канцлер Германии") is False
+
+
 def test_limit_per_publisher_caps_one_source():
     items = [{"title": f"n{i}", "url": f"https://udf.by/{i}", "snippet": "s",
               "publisher": "udf.by", "date": "", "kind": "news"} for i in range(6)]

@@ -1571,6 +1571,22 @@ _AUTHORITY_HOSTS = (
     "reuters.com", "apnews.com", "bbc.com", "bloomberg.com",
 )
 
+# Игровые и фан-вики: страницы игр, модов и сериалов живут здесь, а не в новостях.
+# Бонус включается только вики-сигналом запроса: для новостей фандом-страница — шум.
+_GAME_WIKI_HOSTS = ("fandom.com", "wiki.gg", "fextralife.com", "wikia.com")
+_GAME_WIKI_HINT_RE = re.compile(r"\bwiki\b|\bвики\b|\bфандом\b|\bfandom\b", re.IGNORECASE)
+
+
+def _game_wiki_bonus(item: dict) -> int:
+    host = (item.get("publisher") or "").lower()
+    return 2 if any(h in host for h in _GAME_WIKI_HOSTS) else 0
+
+
+def _wants_game_wiki(text: str) -> bool:
+    """Запрос сам указывает на вики («theoneprobe wiki», «фандом по…»): модель
+    агент-цикла инструкцией в инструменте добавляет wiki к игровым сущностям."""
+    return bool(_GAME_WIKI_HINT_RE.search(text or ""))
+
 
 def _authority(item: dict) -> int:
     host = (item.get("publisher") or "").lower()
@@ -1611,7 +1627,8 @@ def _limit_per_publisher(items: list[dict], cap: int = 2) -> list[dict]:
     return out
 
 
-def _rank(items: list[dict], *, wants_fresh: bool, wants_entity: bool) -> list[dict]:
+def _rank(items: list[dict], *, wants_fresh: bool, wants_entity: bool,
+          wants_game_wiki: bool = False) -> list[dict]:
     """Живые числа (цена, курс, погода) первыми, затем справочный факт, затем свежие
     датированные, потом остальное. Для «сейчас/последний» протухшие статьи отсекаем:
     страница Binance 2022 года по вопросу о цене — это неверный ответ, а не источник
@@ -1625,11 +1642,15 @@ def _rank(items: list[dict], *, wants_fresh: bool, wants_entity: bool) -> list[d
 
     def sort_key(item: dict):
         kind_rank = {"live": 0, "fact": 1, "news": 2, "web": 3}.get(item.get("kind") or "web", 3)
-        if wants_entity and kind_rank > 1:
+        # Демотация news/web на entity-вопросе — для персон и организаций. Игровой
+        # вопрос («theoneprobe wiki») живёт в вики, а не в новостях: при вики-сигнале
+        # web-ярус не топим (новость топим как раньше), фандом-хосты получают бонус.
+        if wants_entity and kind_rank > 1 and (not wants_game_wiki or item.get("kind") == "news"):
             kind_rank += 1
         age = _age_days(item.get("date") or "")
         recency = age if age is not None else 10_000
-        return (kind_rank, -_authority(item), recency, -(len(item.get("snippet") or "")))
+        authority = _authority(item) + (_game_wiki_bonus(item) if wants_game_wiki else 0)
+        return (kind_rank, -authority, recency, -(len(item.get("snippet") or "")))
 
     return sorted(filtered or items, key=sort_key)
 
@@ -1718,7 +1739,8 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
             groups.append(list(res[1]))
 
         merged = _rank(_limit_per_publisher(_dedupe([item for group in groups for item in group])),
-                       wants_fresh=wants_fresh, wants_entity=intents["entity"])
+                       wants_fresh=wants_fresh, wants_entity=intents["entity"],
+                       wants_game_wiki=_wants_game_wiki(text))
         if intents["weather"]:
             merged = _filter_other_city(merged, text)
         if merged:

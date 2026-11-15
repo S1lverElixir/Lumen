@@ -269,6 +269,9 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         "gemini_api": "https://generativelanguage.googleapis.com",
         "huggingface": "https://huggingface.co",
         "groq_api": "https://api.groq.com",
+        # Реальный API-путь справочного слоя поиска: корень отвечал бы 200 и при
+        # недоступном api.php — тот же принцип, что у pollinations_models.
+        "wikipedia_api": "https://ru.wikipedia.org/w/api.php?action=query&meta=siteinfo&format=json",
         # Голое начало адреса: путь /chat/completions без ключа ответил бы 401/404
         # и окрасил живой хост красным.
         "munito_api": urlsplit(bot.MUNITO_BASE_URL)._replace(path="", query="", fragment="").geturl(),
