@@ -83,7 +83,7 @@ owner's decision of 12.11.2026: a `read_page` tool (it needs the Deno relay allo
 review first), a Gemini-native function-calling loop, and Gemini thought summaries.
 
 Ranking inside `fetch_web_snippets` stays intent-aware. Game and fan wikis (`fandom.com`,
-`wiki.gg`, `fextralife.com`, `_GAME_WIKI_HOSTS`) float over ordinary web results when the query
+`wiki.gg`, `fextralife.com`, `wikia.com` — `_GAME_WIKI_HOSTS`) float over ordinary web results when the query
 itself signals a wiki ask (`_wants_game_wiki` via `_GAME_WIKI_HINT_RE`: «wiki», «вики»,
 «фандом», «fandom»; «wiki» не считается внутри пути вставленной ссылки — `…/wiki/X`), because game entities
 live there and not in news feeds (corpus week 15.11.2026: «theoneprobe 1.7.10», «чё за кросс
