@@ -6,6 +6,7 @@ import html as _html
 import logging
 import os
 import re
+import time
 from urllib.parse import urlparse
 
 import aiohttp
@@ -119,11 +120,40 @@ def reset_read_page_counters_for_tests() -> None:
     _USER_READS.clear()
 
 
+# Релей может быть старой ревизией без /read (прод 16.11.2026: Deploy proxy упал,
+# а бот уже умеет инструмент). Отвечать 401/404 на каждый вопрос — трата
+# планирующего вызова; запоминаем отказ на полчаса и сами возвращаемся.
+_RELAY_STALE_AT = 0.0
+_RELAY_RECHECK_SEC = 1800.0
+
+
+def _relay_readable() -> bool:
+    if not _RELAY_STALE_AT:
+        return True
+    return (time.monotonic() - _RELAY_STALE_AT) >= _RELAY_RECHECK_SEC
+
+
+def _note_relay_stale() -> None:
+    """Один лог на переход: стейл-окно не имеет права спамить лог каждым ходом."""
+    global _RELAY_STALE_AT
+    first = not _RELAY_STALE_AT or _relay_readable()
+    _RELAY_STALE_AT = time.monotonic()
+    if first:
+        log.warning("[read-page] relay has no /read yet (401/404); page reading is paused for %d min",
+                    int(_RELAY_RECHECK_SEC // 60))
+
+
+def reset_relay_state_for_tests() -> None:
+    global _RELAY_STALE_AT
+    _RELAY_STALE_AT = 0.0
+
+
 def _read_pages_available() -> bool:
     """Инструмент предлагается, только если чтение реально может сработать:
     включено, бюджет не выбран, прокси и секрет настроены."""
     import bot
-    if not read_page_enabled() or not read_page_budget_left() or not _user_reads_left():
+    if (not read_page_enabled() or not read_page_budget_left()
+            or not _user_reads_left() or not _relay_readable()):
         return False
     return bool(proxy_origin() and (getattr(bot, "LUMEN_PROXY_SECRET", "") or "").strip())
 
@@ -279,6 +309,11 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
             timeout=aiohttp.ClientTimeout(total=timeout or read_page_timeout_sec()),
             allow_redirects=False,
         ) as resp:
+            if resp.status in (401, 404):
+                # Релей старой ревизии: 404 — нет маршрута, 401 — проверка секрета
+                # раньше маршрутизации. Пауза на полчаса, затем повтор.
+                _note_relay_stale()
+                return None
             if resp.status != 200:
                 log.info("[read-page] relay status %s", resp.status)
                 return None

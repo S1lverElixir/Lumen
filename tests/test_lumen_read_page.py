@@ -1,6 +1,8 @@
 """Тесты чтения страницы: извлечение текста, проверка адреса, провенанс и суточный потолок."""
 from __future__ import annotations
 
+import time as _time
+
 import lumen_read_page
 
 
@@ -69,7 +71,6 @@ def test_format_pages_marks_untrusted_text():
 def test_extract_text_is_linear_on_hostile_input():
     # Аудит 16.11.2026: квадратичный регекс на 200 КБ «<script>» держал процесс
     # 18 секунд (2 МБ — десятки минут). Линейный разбор обязан укладываться в секунды.
-    import time as _time
     raw = "<script>" * 262144  # ~2 МБ
     started = _time.monotonic()
     text = lumen_read_page.extract_text(raw, 6000)
@@ -213,3 +214,21 @@ def test_extract_text_keeps_positions_when_lower_changes_length():
     # после каждого блочного тега.
     text = lumen_read_page.extract_text("İstanbul <script>bad()</script> tail text here", 500)
     assert "tail text here" in text
+
+
+def test_relay_stale_pauses_page_reading_and_self_heals(monkeypatch):
+    # Прод 16.11.2026: прокси старой ревизии отвечает 401 на /read, а бот уже
+    # предлагает инструмент. После первого отказа — пауза на полчаса, затем повтор.
+    import bot
+
+    lumen_read_page.reset_read_page_counters_for_tests()
+    lumen_read_page.reset_relay_state_for_tests()
+    monkeypatch.setattr(bot, "TELEGRAM_API_BASE_URL", "https://proxy.example/fetch/api.telegram.org")
+    monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "x" * 32)
+    assert lumen_read_page._read_pages_available() is True
+    lumen_read_page._note_relay_stale()
+    assert lumen_read_page._read_pages_available() is False
+    lumen_read_page._RELAY_STALE_AT -= lumen_read_page._RELAY_RECHECK_SEC + 1
+    assert lumen_read_page._read_pages_available() is True
+    lumen_read_page.reset_relay_state_for_tests()
+    lumen_read_page.reset_read_page_counters_for_tests()
