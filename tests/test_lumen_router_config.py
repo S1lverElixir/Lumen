@@ -979,3 +979,23 @@ def test_recent_corrections_counts_only_short_user_turns():
     ]
     assert lumen_router_config.recent_corrections(history) == 1
     assert lumen_router_config.recent_corrections([]) == 0
+
+
+def test_munito_route_yields_to_gemini_when_daily_ceiling_is_reached(monkeypatch):
+    # Аудит 16.11.2026: MUNITO_DAILY_LIMIT был только цифрой в /stats, и 251-й
+    # запрос получал 429 с остыванием на всех моделях сразу. Потолок обязан
+    # уводить маршрут на безусловный резерв Gemini, а не в шторм отказов.
+    import bot
+
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(lumen_router_config, "_MUNITO_DISABLED", False)
+    saved = dict(bot.GLOBAL_QUOTA.get("munito") or {})
+    try:
+        bot.GLOBAL_QUOTA["munito"] = {
+            model: {"used": int(bot.MUNITO_DAILY_LIMIT)} for model in lumen_router_config._MUNITO_ORDER
+        }
+        assert lumen_router_config._munito_route() == []
+        bot.GLOBAL_QUOTA["munito"] = {model: {"used": 0} for model in lumen_router_config._MUNITO_ORDER}
+        assert lumen_router_config._munito_route()
+    finally:
+        bot.GLOBAL_QUOTA["munito"] = saved

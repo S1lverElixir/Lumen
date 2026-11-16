@@ -1780,12 +1780,30 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
             jobs.append(_task("google_news", _google_news_snippets(session, main_query, news_budget, limit)))
             jobs.append(_task("bing_news", _bing_news_snippets(session, main_query, news_budget, limit)))
 
-        if search_api_provider():
-            jobs.append(_task("search_api", _api_provider_snippets(session, main_query, limit, deadline)))
-        else:
+        async def _web_tier() -> list[dict]:
+            # Ключевой провайдер может вернуть пусто (суточный потолок, протухший
+            # ключ, опечатка в имени): без этого фолбэка весь веб-слой молчал бы
+            # до конца суток, хотя документы обещают старые слои (аудит 16.11.2026).
+            if search_api_provider():
+                keyed = await _api_provider_snippets(session, main_query, limit, deadline)
+                diagnostics["search_api"] = len(keyed)
+                if keyed:
+                    return keyed
+                log.info("[web-search] keyed provider empty, falling back to scraping layers")
             web_budget = max(0.5, deadline - time.monotonic())
-            jobs.append(_task("duckduckgo", _ddg_source(session, main_query, deadline, limit)))
-            jobs.append(_task("bing_web", _bing_web_snippets(session, alt_query, web_budget, limit)))
+            ddg, bing = await asyncio.gather(
+                _ddg_source(session, main_query, deadline, limit),
+                _bing_web_snippets(session, alt_query, web_budget, limit),
+                return_exceptions=True,
+            )
+            out: list[dict] = []
+            for name, res in (("duckduckgo", ddg), ("bing_web", bing)):
+                items = [] if isinstance(res, BaseException) else list(res or [])
+                diagnostics[name] = len(items)
+                out.extend(items)
+            return out
+
+        jobs.append(_task("web", _web_tier()))
 
         gathered = await asyncio.gather(*[job for job in jobs], return_exceptions=True)
         groups: list[list[dict]] = []

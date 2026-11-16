@@ -252,6 +252,33 @@ def test_fetch_web_snippets_falls_back_to_rss_when_ddg_returns_empty(monkeypatch
     assert "bing_web=1" in caplog.text
 
 
+def test_keyed_provider_empty_still_queries_scraping_layers(monkeypatch, caplog):
+    # Аудит 16.11.2026: при заданном SEARCH_API_PROVIDER и пустом ответе ключевого
+    # провайдера (суточный потолок, протухший ключ, опечатка в имени) безключевые
+    # слои не ставились вовсе — весь веб молчал до конца суток, хотя документы
+    # обещают обратное.
+    monkeypatch.setenv("SEARCH_API_PROVIDER", "tavily")
+    monkeypatch.setenv("TAVILY_API_KEY", "fake-key-for-test")
+    lumen_search.reset_search_counters_for_tests()
+    session = _RoutedSession({
+        lumen_search._BING_SEARCH_URL: _RSS_FIXTURE,
+    })
+    monkeypatch.setattr(
+        lumen_search, "aiohttp",
+        SimpleNamespace(ClientSession=lambda *args, **kwargs: session,
+                        ClientTimeout=aiohttp.ClientTimeout),
+    )
+    try:
+        with caplog.at_level(logging.INFO, logger="bot"):
+            out = asyncio.run(lumen_search.fetch_web_snippets("что с ДЦ Яндекса"))
+        assert [item["url"] for item in out] == ["https://example.com/fresh"]
+        assert lumen_search._BING_SEARCH_URL in session.requested
+        assert "keyed provider empty" in caplog.text
+        assert "bing_web=1" in caplog.text
+    finally:
+        lumen_search.reset_search_counters_for_tests()
+
+
 def test_fetch_web_snippets_parses_stubbed_page(monkeypatch, caplog):
     monkeypatch.setattr(lumen_search, "aiohttp", _stub_aiohttp(_StubResp(200, _DDG_FIXTURE)))
     with caplog.at_level(logging.INFO, logger="bot"):

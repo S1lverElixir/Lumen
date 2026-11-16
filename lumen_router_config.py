@@ -308,10 +308,38 @@ def _munito_active() -> bool:
         return False
 
 
+def _munito_requests_today() -> int:
+    """Сумма успешных ответов Munito за квотный день: то же число, что показывает
+    /stats. Планирующие вызовы и сорвавшиеся попытки сюда не входят, поэтому
+    метр осторожный (меньше реального расхода) — это защита от шторма 429, а не
+    биллинг."""
+    import bot
+    sub = bot.GLOBAL_QUOTA.get("munito") or {}
+    total = 0
+    for entry in sub.values():
+        if isinstance(entry, dict):
+            try:
+                total += int(entry.get("used") or 0)
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
 def _munito_route() -> list[tuple[str, str]]:
     """Пусто без ключа или под выключателем: маршрут тогда целиком идёт в Gemini."""
     if not _munito_active():
         return []
+    try:
+        import bot
+        if _munito_requests_today() >= bot.MUNITO_DAILY_LIMIT:
+            # Суточный бюджет провайдера исчерпан: молча уходим на безусловный
+            # резерв Gemini. Раньше потолок был только цифрой в /stats, и 251-й
+            # запрос получал 429 с остыванием на всех моделях сразу (аудит 16.11.2026).
+            return []
+    except Exception as exc:
+        # Битое состояние квоты не имеет права обнулить маршрут целиком: считаем
+        # потолок невыясненным и пробуем как раньше.
+        log.debug("[router] Munito daily ceiling unreadable, assuming available: %s", exc)
     return [("munito", m) for m in _skip_exhausted("munito", _MUNITO_ORDER)]
 
 
