@@ -1,0 +1,18 @@
+name: Relay secret (Deno)
+on:
+  workflow_dispatch:
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Update relay secret
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          NEW_SECRET: ${{ secrets.LUMEN_PROXY_SECRET }}
+        run: |
+          deno deploy env update-value LUMEN_PROXY_SECRET "$NEW_SECRET" \
+            --org silverelixir --app lumen-proxy --token "$DENO_DEPLOY_TOKEN" \
+            --json --non-interactive
