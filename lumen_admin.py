@@ -336,7 +336,17 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         results[tasks[task]] = {"error": "diag budget exceeded", "elapsed_sec": diag_budget, "ok": False}
     with contextlib.suppress(Exception):
         await asyncio.gather(*pending, return_exceptions=True)
-    return {"diagnostics": results, "telegram_api_base_configured": bot.TELEGRAM_API_BASE_URL}
+    # Состояние хранилища — здесь же: «замороженная» запись чатов после сбоя
+    # индекса иначе видна только в логе (аудит 16.11.2026).
+    import lumen_chat_state as lcs
+    state_info = {
+        "ready": bool(getattr(bot, "_state_ready", True)),
+        "index_unreadable": bool(lcs._state_load_failed),
+        "quota_unreadable": bool(lcs._quota_load_failed),
+        "persist_frozen_chats": len(lcs._chat_snapshot_unloaded),
+    }
+    return {"diagnostics": results, "state": state_info,
+            "telegram_api_base_configured": bot.TELEGRAM_API_BASE_URL}
 
 @app.get("/export_state")
 async def export_state(request: Request) -> Any:
