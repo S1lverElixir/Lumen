@@ -311,6 +311,12 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
         time.monotonic() + bot.MESSAGE_TOTAL_BUDGET_SEC
     )
     ltoken = None if bot._LOG_CHAT.get() else bot._LOG_CHAT.set(f"chat={chat_id}")
+    # Альбомы и pick-кнопки приходят фоновой задачей/колбэком, минуя handle_message:
+    # без области здесь /stop в фазе поиска на этих путях не работает (аудит 16.11.2026).
+    _stop_scope = chat_id if message.chat is not None else None
+    if _stop_scope is not None:
+        bot._begin_stream_stop_scope(
+            _stop_scope, getattr(getattr(message, "from_user", None), "id", None))
     # Автор для карантина моделей: pick-кнопки приходят колбэком и раньше считались
     # чатом, а не человеком (аудит 16.11.2026).
     utoken = None
@@ -354,6 +360,8 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
             bot._LOG_CHAT.reset(ltoken)
         if utoken is not None:
             bot._LOG_USER.reset(utoken)
+        if _stop_scope is not None:
+            bot._end_stream_stop_scope(_stop_scope)
 
 
 async def _process_media_group_buffers(mgid: str) -> None:
@@ -1429,6 +1437,7 @@ async def _handle_message_core(
             # Остановка во время поиска: отвечать уже нечего, но пузырь этапа
             # обязан закрыться пометкой, а не висеть «Ищу…» до таймаута.
             log.info("[stop] stopped by the user during the evidence phase")
+            bot._consume_stream_stop(message.chat.id)
             if status is not None:
                 with contextlib.suppress(Exception):
                     await status.stop()

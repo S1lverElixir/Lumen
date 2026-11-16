@@ -29,7 +29,7 @@ _BREAK_TAGS = frozenset((
 ))
 # Маркеры рамки доказательств вырезаются из текста страницы: иначе чужая страница
 # закрывает блок «[/Fetched page]» и говорит уже от лица промпта (аудит 16.11.2026).
-_FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched page[^\]]*\]")
+_FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched[\s ​-‏ ]*page[^\]]*\]")
 
 _READ_DAY = ""
 _READ_CALLS = 0

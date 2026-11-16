@@ -50,6 +50,7 @@ from lumen_quotas import (
     _maybe_alert_gemini_exhausted,
     _image_budget_exhausted,
     _image_neurons_total,
+    recover_global_quota,
     _image_provider_block_reason,
     _image_provider_ready,
     _image_usage_total,
@@ -85,6 +86,7 @@ __all__ = [
     "_maybe_alert_gemini_exhausted",
     "_image_budget_exhausted",
     "_image_neurons_total",
+    "recover_global_quota",
     "_image_provider_block_reason",
     "_image_provider_ready",
     "_image_usage_total",
@@ -529,20 +531,31 @@ def _recover_index_ids() -> bool:
             return False
         if not isinstance(parsed, list):
             return False
+        valid = 0
         for cid in parsed:
             try:
                 ids.add(int(cid))
+                valid += 1
             except Exception:
                 continue
+        if parsed and valid == 0:
+            # Список без единого числа — битый индекс, а не пустой: перезапись
+            # осиротила бы все пер-чат ключи (второй проход аудита 16.11.2026).
+            _state_load_failed = True
+            log.warning('[state] Chat index holds no numeric ids — keeping the write guard.')
+            return False
     if raw is None:
         # None — это и «ключа нет», и «шлюз ответил без result». Пустым индексом
         # такое считать нельзя: снятие защиты потеряло бы чужие id (аудит 16.11.2026).
         log.warning('[state] Chat index retry returned no body — keeping the write guard.')
         return False
+    # Вытесненные и удалённые id не воскрешаем: старый удалённый индекс ещё
+    # содержит их (второй проход аудита 16.11.2026).
+    ids = {cid for cid in ids if cid not in _pending_chat_deletions}
     _index_extra_ids.update(ids)
-    # Восстановленные чаты ещё не прочитаны: их первое сообщение не имеет права
-    # записать пустой снимок поверх полной удалённой истории (аудит 16.11.2026).
-    _chat_snapshot_unloaded.update(ids)
+    # Замораживаем только те, чей снимок не прочитан (нет в памяти): живые чаты
+    # обязаны сохраняться дальше (второй проход аудита 16.11.2026).
+    _chat_snapshot_unloaded.update(cid for cid in ids if cid not in chat_state)
     _state_load_failed = False
     log.info('[state] Chat index recovered after the startup failure: %d remote id(s) merged.', len(ids))
     return True
@@ -777,7 +790,7 @@ async def _flush_dirty_state_once() -> None:
                     if _index_generation == started_index_generation:
                         _index_dirty = False
         if _quota_dirty:
-            if _quota_load_failed:
+            if _quota_load_failed and not bot.recover_global_quota():
                 # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
                 log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
             else:
@@ -906,14 +919,17 @@ def load_state_from_disk() -> None:
                 for cid, raw in pool.map(_read_one, ids):
                     if isinstance(raw, Exception):
                         _chat_snapshot_unloaded.add(cid)
+                        _index_extra_ids.add(cid)
                         log.warning('[state] Failed to read chat %s: %s', cid, raw)
                         continue
                     if not raw:
+                        _index_extra_ids.add(cid)
                         continue
                     try:
                         parsed_chat = json.loads(raw)
                     except Exception as exc:
                         _chat_snapshot_unloaded.add(cid)
+                        _index_extra_ids.add(cid)
                         log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
                         continue
                     try:
@@ -921,6 +937,7 @@ def load_state_from_disk() -> None:
                     except Exception as exc:
                         # Одна битая запись не обрывает восстановление остальных чатов.
                         _chat_snapshot_unloaded.add(cid)
+                        _index_extra_ids.add(cid)
                         log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
                         continue
                     if cid in chat_state:

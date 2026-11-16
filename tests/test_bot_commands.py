@@ -2761,7 +2761,7 @@ def test_inline_draw_send_failure_reports_service_error(monkeypatch):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
-        if "photo" in kwargs:
+        if "photo" in kwargs or "document" in kwargs:
             return None
         return await method(*args, **kwargs)
 

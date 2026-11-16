@@ -245,6 +245,10 @@ export function isPrivateAddress(ip: string): boolean {
   if (low.startsWith("::")) return true;
   if (low.startsWith("64:ff9b")) return true;
   if (low.startsWith("ff")) return true;
+  // Полные формы и 6to4: "0:0:0:0:0:0:0:1", "0:0:0:0:0:ffff:7f00:1", "2002:…".
+  if (low.startsWith("0:")) return true;
+  if (low.startsWith("2002:")) return true;
+  if (low.startsWith("fec")) return true;
   if (low.startsWith("fc") || low.startsWith("fd")) return true;
   if (low.startsWith("fe8") || low.startsWith("fe9") || low.startsWith("fea") || low.startsWith("feb")) return true;
   return false;

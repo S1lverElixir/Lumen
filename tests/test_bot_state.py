@@ -4194,3 +4194,86 @@ def test_index_recovery_keeps_the_guard_when_the_read_returns_no_body():
         assert lcs._state_load_failed is True
     finally:
         lcs._state_load_failed, lcs._quota_load_failed, lcs._index_retry_last_ts = orig
+
+
+def test_index_keeps_the_id_of_an_unreadable_chat():
+    # Второй проход аудита 16.11.2026: id недочитанного чата выпадал из индекса,
+    # и его пер-чат ключ оставался сиротой навсегда.
+    import lumen_chat_state as lcs
+
+    good, broken, new = 999731, 999732, 999733
+    remote = {
+        lcs.CHAT_INDEX_KEY: json.dumps([good, broken]),
+        f"lumen:chat:{good}": json.dumps({"history": []}),
+    }
+    payloads = {}
+
+    def fake_read(key, path):
+        if key == f"lumen:chat:{broken}":
+            raise OSError("Upstash 500 (transient)")
+        return remote.get(key)
+
+    def fake_write(key, path, payload):
+        payloads[key] = payload
+        return True
+
+    orig = (lcs._state_load_failed, set(lcs._chat_snapshot_unloaded), set(lcs._index_extra_ids))
+    try:
+        with patch("bot._storage_read_text", side_effect=fake_read),              patch("bot._storage_write_text", side_effect=fake_write),              patch("bot.load_global_quota"):
+            bot.load_state_from_disk()
+            bot.get_state(new)
+            asyncio.run(bot._flush_dirty_state_once())
+        assert broken in json.loads(payloads[lcs.CHAT_INDEX_KEY])
+    finally:
+        lcs._state_load_failed, frozen, extra_ids = orig
+        lcs._chat_snapshot_unloaded.clear()
+        lcs._chat_snapshot_unloaded.update(frozen)
+        lcs._index_extra_ids.clear()
+        lcs._index_extra_ids.update(extra_ids)
+        for cid in (good, broken, new):
+            bot.chat_state.pop(cid, None)
+
+
+def test_quota_none_body_keeps_the_write_guard():
+    # Аудит 16.11.2026 (второй проход): None — и «ключа нет», и «шлюз ответил без
+    # result». После сбоя флаг обязан остаться, иначе пустая квота затирает баны.
+    import lumen_chat_state as lcs
+
+    orig = lcs._quota_load_failed
+    lcs._quota_load_failed = True
+    try:
+        with patch("bot._storage_read_text", return_value=None):
+            bot.load_global_quota()
+        assert lcs._quota_load_failed is True
+        with patch("bot._storage_write_text") as writer:
+            bot.save_global_quota()
+        writer.assert_not_called()
+    finally:
+        lcs._quota_load_failed = orig
+
+
+def test_index_recovery_freezes_only_unread_chats():
+    # Второй проход аудита 16.11.2026: восстановление вешало вечный запрет записи
+    # на ВСЕ id из индекса, включая живые чаты с разговором в памяти.
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, set(lcs._index_extra_ids),
+            set(lcs._chat_snapshot_unloaded), lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._index_extra_ids.clear()
+    lcs._chat_snapshot_unloaded.clear()
+    lcs._index_retry_last_ts = 0.0
+    bot.chat_state[111] = {"history": []}
+    try:
+        with patch("bot._storage_read_text", side_effect=lambda key, path: json.dumps([111, 222])):
+            assert lcs._recover_index_ids() is True
+        assert 111 not in lcs._chat_snapshot_unloaded
+        assert 222 in lcs._chat_snapshot_unloaded
+        assert 222 in lcs._index_extra_ids
+    finally:
+        (lcs._state_load_failed, extra_ids, frozen, lcs._index_retry_last_ts) = orig
+        lcs._index_extra_ids.clear()
+        lcs._index_extra_ids.update(extra_ids)
+        lcs._chat_snapshot_unloaded.clear()
+        lcs._chat_snapshot_unloaded.update(frozen)
+        bot.chat_state.pop(111, None)

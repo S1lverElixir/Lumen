@@ -824,6 +824,7 @@ async def _run_streaming_reply(
         # осознанного стопа не запускается, «продолжи» работает через interrupted.
         state["interrupted"] = True
         state["stopped_by_user"] = True
+        bot._consume_stream_stop(chat_id)
         bot.mark_state_dirty(chat_id)
         if sent_messages:
             with contextlib.suppress(Exception):

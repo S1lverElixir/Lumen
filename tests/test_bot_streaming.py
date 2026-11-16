@@ -1653,3 +1653,20 @@ def test_stop_permissions_and_idempotency():
     finally:
         bot._end_stream_stop_scope(424242)
     assert bot._STREAM_STOPS.get(424242) is None
+
+
+def test_stop_flag_is_consumed_and_does_not_kill_the_next_queued_question():
+    # Второй проход аудита 16.11.2026: флаг на чат переживал апдейт, и второй
+    # вопрос, ждавший лок, гас на первой же проверке стрима.
+    bot._STREAM_STOPS.clear()
+    bot._begin_stream_stop_scope(515151, 100)
+    bot._begin_stream_stop_scope(515151, 200)
+    try:
+        assert bot._request_stream_stop(515151, 100) is True
+        bot._consume_stream_stop(515151)
+        assert bot._stream_stop_requested(515151) is False
+        assert bot._request_stream_stop(515151, 200) is True
+    finally:
+        bot._end_stream_stop_scope(515151)
+        bot._end_stream_stop_scope(515151)
+    assert bot._STREAM_STOPS.get(515151) is None

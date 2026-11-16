@@ -105,8 +105,13 @@ def load_global_quota() -> None:
     import lumen_chat_state as lcs
     try:
         raw = bot._storage_read_text("lumen:global_quota", lcs.GLOBAL_QUOTA_FILE)
+        if raw is None:
+            # None — и «ключа нет», и «шлюз ответил без result»: флаг не трогаем.
+            # На первом запуске он и так False, а после сбоя остаётся защита
+            # (второй проход аудита 16.11.2026).
+            return
         if not raw:
-            # Пусто — первый запуск, а не отказ: сбрасывать нечего.
+            # Пустая строка — ключ есть, но пуст: сбрасывать нечего.
             lcs._quota_load_failed = False
             return
         loaded = json.loads(raw)
@@ -171,10 +176,32 @@ def load_global_quota() -> None:
     # старте, а не ждать первого сообщения после полуночи или ближайшего часового тика.
     bot._reset_quota_if_new_day()
 
+_quota_retry_last_ts = 0.0
+_QUOTA_RETRY_SEC = 60.0
+
+
+def recover_global_quota() -> bool:
+    """Повторное чтение квоты после стартового сбоя, не чаще раза в минуту:
+    без него баны и дневные счётчики терялись до конца жизни процесса."""
+    global _quota_retry_last_ts
+    import lumen_chat_state as lcs
+    if not lcs._quota_load_failed:
+        return True
+    now = time.monotonic()
+    if now - _quota_retry_last_ts < _QUOTA_RETRY_SEC:
+        return False
+    _quota_retry_last_ts = now
+    try:
+        load_global_quota()
+    except Exception as exc:
+        log.warning("[quota] Retry failed: %s", exc)
+    return not lcs._quota_load_failed
+
+
 def save_global_quota() -> None:
     import bot
     import lumen_chat_state as lcs
-    if lcs._quota_load_failed:
+    if lcs._quota_load_failed and not recover_global_quota():
         # Стартовая загрузка не удалась: удалённая квота новее пустой памяти, не затираем.
         log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
         return

@@ -134,6 +134,18 @@ def _stream_stop_requested(chat_id: int) -> bool:
     return bool(event is not None and event.is_set())
 
 
+def _consume_stream_stop(chat_id: int) -> None:
+    """Остановка исполнена: флаг и автор сбрасываются, иначе следующий апдейт
+    в очереди того же чата гаснет молча (второй проход аудита 16.11.2026)."""
+    entry = _STREAM_STOPS.get(chat_id)
+    if not entry:
+        return
+    event = entry.get("event")
+    if event is not None:
+        event.clear()
+    entry["user_id"] = None
+
+
 def _request_stream_stop(chat_id: int, user_id: int | None = None) -> bool:
     """True — флаг поставлен. Чужой человек в группе остановить ответ не может."""
     entry = _STREAM_STOPS.get(chat_id)
@@ -708,6 +720,7 @@ from lumen_chat_state import (
     _image_usage_total,
     _image_budget_exhausted,
     _image_neurons_total,
+    recover_global_quota,
     _image_provider_block_reason,
     _image_provider_ready,
     _note_image_success,
@@ -1102,6 +1115,7 @@ __all__ = [
     "_image_usage_total",
     "_image_budget_exhausted",
     "_image_neurons_total",
+    "recover_global_quota",
     "_image_provider_block_reason",
     "_image_provider_ready",
     "_note_image_success",
