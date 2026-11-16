@@ -30,7 +30,11 @@ _BREAK_TAGS = frozenset((
 ))
 # Маркеры рамки доказательств вырезаются из текста страницы: иначе чужая страница
 # закрывает блок «[/Fetched page]» и говорит уже от лица промпта (аудит 16.11.2026).
-_FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched[\s ​-‏ ]*page[^\]]*\]")
+_FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]]*\]")
+# Форматы и нулевой ширины снимаем ДО шаблона: иначе "[﻿fetched page]" и
+# "fetched<ZWSP>page" проходили как данные и закрывали рамку (аудит 16.11.2026).
+_FORMAT_CHARS_RE = re.compile(
+    "[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]")
 _TAG_NAME_RE = re.compile(r"<([a-z][a-z0-9]*)")
 
 _READ_DAY = ""
@@ -332,7 +336,7 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
 
 
 def _frame_safe(text: str) -> str:
-    return _FRAME_MARK_RE.sub(" ", text or "")
+    return _FRAME_MARK_RE.sub(" ", _FORMAT_CHARS_RE.sub("", text or ""))
 
 
 def format_pages_for_prompt(pages: list[dict]) -> str:
