@@ -908,3 +908,46 @@ def test_publisher_human_name_survives_the_host_filter():
     # адресов не имеет права выдумывать источник, которого в выдаче нет.
     aggregator = {"title": "T", "url": "https://bing.com/news?id=1", "publisher": "bing.com"}
     assert lumen_search.clean_publisher(aggregator) == "bing.com"
+
+
+def test_keyed_provider_has_its_own_daily_ceiling(monkeypatch):
+    # Аудит 16.11.2026: общий потолок WEB_SEARCH_DAILY_LIMIT=300 при месячном
+    # бесплатном лимите провайдера порядка 1000 обращений выжигал бы весь тариф
+    # за три-четыре дня. Ключевой провайдер получает свой дневной счётчик.
+    from unittest.mock import MagicMock
+
+    lumen_search.reset_search_counters_for_tests()
+    monkeypatch.setenv("TAVILY_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("SEARCH_API_PROVIDER", "tavily")
+    monkeypatch.setenv("SEARCH_API_DAILY_LIMIT", "1")
+    try:
+        assert lumen_search.search_api_budget_left()
+        lumen_search.note_search_api_call()
+        assert not lumen_search.search_api_budget_left()
+        session = MagicMock()
+        snippets = asyncio.run(lumen_search._api_provider_snippets(
+            session, "погода в гомеле", 5, time.monotonic() + 2))
+        assert snippets == []
+        assert session.post.call_count == 0
+        assert session.get.call_count == 0
+    finally:
+        lumen_search.reset_search_counters_for_tests()
+
+
+def test_keyed_provider_counter_rolls_with_the_quota_day(monkeypatch):
+    # Тот же quota-day, что у моделей и карантина: иначе обращение после полуночи
+    # приплюсовывалось бы к вчерашнему счётчику и потолок срабатывал бы раньше.
+    import bot
+
+    lumen_search.reset_search_counters_for_tests()
+    monkeypatch.setenv("SEARCH_API_DAILY_LIMIT", "1")
+    today = {"d": "2099-01-01"}
+    monkeypatch.setattr(bot, "_current_quota_day", lambda: today["d"])
+    try:
+        lumen_search.note_search_api_call()
+        assert not lumen_search.search_api_budget_left()
+        today["d"] = "2099-01-02"
+        assert lumen_search.search_api_budget_left()
+        assert lumen_search.search_api_calls_today() == 0
+    finally:
+        lumen_search.reset_search_counters_for_tests()

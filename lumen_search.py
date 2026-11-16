@@ -121,8 +121,49 @@ def note_search_call() -> None:
 def reset_search_counters_for_tests() -> None:
     """Счётчик глобальный и дневной: тесту нужен явный сброс, иначе порядок файлов
     решает, кто упрётся в потолок."""
-    global _search_day, _search_calls
+    global _search_day, _search_calls, _search_api_day, _search_api_calls
     _search_day, _search_calls = "", 0
+    _search_api_day, _search_api_calls = "", 0
+
+
+# Потолок обращений к провайдеру ПО КЛЮЧУ, отдельно от WEB_SEARCH_DAILY_LIMIT:
+# у бесплатных тарифов Tavily/Brave/Exa месячный лимит порядка 1000 обращений,
+# и общий потолок 300/сутки выжег бы месяц за три-четыре дня (аудит 16.11.2026).
+# 25 в сутки — это 750 в месяц, запас под лимит 1000; SEARCH_API_DAILY_LIMIT
+# перекрывает число, когда владелец выберет провайдера и его тариф.
+_search_api_day = ""
+_search_api_calls = 0
+
+
+def _search_api_limit() -> int:
+    try:
+        return max(0, int((os.getenv("SEARCH_API_DAILY_LIMIT", "") or "25").strip()))
+    except (TypeError, ValueError):
+        return 25
+
+
+def _roll_search_api_day() -> None:
+    import bot
+    global _search_api_day, _search_api_calls
+    today = bot._current_quota_day()
+    if today != _search_api_day:
+        _search_api_day, _search_api_calls = today, 0
+
+
+def search_api_budget_left() -> bool:
+    _roll_search_api_day()
+    return _search_api_calls < _search_api_limit()
+
+
+def search_api_calls_today() -> int:
+    _roll_search_api_day()
+    return _search_api_calls
+
+
+def note_search_api_call() -> None:
+    _roll_search_api_day()
+    global _search_api_calls
+    _search_api_calls += 1
 
 
 def web_search_max_results() -> int:
@@ -1446,9 +1487,17 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
     """Tavily/Brave/Exa: те же (title,url,snippet), но с настоящими URL и короткими
     цитатами. Ключа нет — источник молча отсутствует, работают безключевые слои."""
     provider = search_api_provider()
+    if not provider:
+        return []
+    if not search_api_budget_left():
+        # Дневной потолок ключевого провайдера исчерпан: уходим на слои без ключа,
+        # как при отсутствии ключа (аудит 16.11.2026).
+        log.info("[web-search] keyed provider daily ceiling reached (%s)", provider)
+        return []
     budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
     try:
         if provider == "tavily" and os.getenv("TAVILY_API_KEY"):
+            note_search_api_call()
             async with session.post("https://api.tavily.com/search",
                                     headers={"Authorization": f"Bearer {os.environ['TAVILY_API_KEY']}",
                                              "Content-Type": "application/json"},
@@ -1462,6 +1511,7 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                      "date": (r.get("published_date") or "")[:10], "kind": "web"}
                     for r in results if r.get("url")]
         if provider == "brave" and os.getenv("BRAVE_API_KEY"):
+            note_search_api_call()
             async with session.get("https://api.search.brave.com/res/v1/web/search",
                                    params={"q": query, "count": limit},
                                    headers={"X-Subscription-Token": os.environ["BRAVE_API_KEY"],
@@ -1475,6 +1525,7 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                      "date": (r.get("page_age") or "")[:10], "kind": "web"}
                     for r in results if r.get("url")]
         if provider == "exa" and os.getenv("EXA_API_KEY"):
+            note_search_api_call()
             async with session.post("https://api.exa.ai/search",
                                     headers={"x-api-key": os.environ["EXA_API_KEY"],
                                              "Content-Type": "application/json"},
