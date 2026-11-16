@@ -16,3 +16,11 @@ jobs:
           deno deploy env update-value LUMEN_PROXY_SECRET "$NEW_SECRET" \
             --org silverelixir --app lumen-proxy --token "$DENO_DEPLOY_TOKEN" \
             --json --non-interactive
+      - name: Update backup relay secret
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          NEW_SECRET: ${{ secrets.LUMEN_PROXY_SECRET }}
+        run: |
+          deno deploy env update-value LUMEN_PROXY_SECRET "$NEW_SECRET" \
+            --org silverelixir --app lumen-proxy-backup --token "$DENO_DEPLOY_TOKEN" \
+            --json --non-interactive
