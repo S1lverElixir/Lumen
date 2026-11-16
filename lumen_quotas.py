@@ -231,6 +231,10 @@ def _record_quota_usage(provider: str, model_id: str, *, service: bool = False) 
 # Тот же QuotaEntry, что у текстовых моделей: used на успехе, exhausted_at до завтра,
 # cooldown_until на короткую перегрузку. Отдельного хранилища не заводим.
 IMAGE_QUOTA_PROVIDER = "image"
+# Один «юнит» бюджета — 104.2 Neuron: столько стоит одна генерация klein-4b
+# (80 генераций = 8336 Neuron из 10 000 бесплатных). Правка дороже: плюс 21 Neuron
+# на мегапиксель входа, то есть 12 МП фото ≈ 3.4 юнита (аудит 16.11.2026).
+IMAGE_UNIT_NEURONS = 104.2
 
 
 def _image_usage_total() -> int:
@@ -249,11 +253,35 @@ def _image_usage_total() -> int:
     return total
 
 
-def _image_budget_exhausted() -> bool:
-    """Общий дневной бюджет картинок: отказ до обращения к провайдеру, а не после.
-    Владелец без лимита — ему нужен живой прогон фичи в диагностике."""
+def _image_neurons_total() -> float:
+    """Израсходовано Neuron за квотный день. Старый снапшот без веса считается по
+    числу картинок: апгрейд не имеет права обнулить уже потраченный бюджет."""
     import bot
-    return _image_usage_total() >= bot.IMAGE_DAILY_LIMIT
+    bot._reset_quota_if_new_day()
+    sub = GLOBAL_QUOTA.get(IMAGE_QUOTA_PROVIDER)
+    if not isinstance(sub, dict):
+        return 0.0
+    total = 0.0
+    for entry in sub.values():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            neurons = entry.get("neurons")
+            if neurons is None:
+                total += max(0, int(entry.get("used") or 0)) * IMAGE_UNIT_NEURONS
+            else:
+                total += max(0.0, float(neurons))
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _image_budget_exhausted() -> bool:
+    """Общий дневной бюджет картинок в Neuron: отказ до обращения к провайдеру.
+    Раньше считались штуки, и тяжёлая правка 12 МП списывала треть бюджета,
+    оставаясь одной из 80 (аудит 16.11.2026). Владелец без лимита."""
+    import bot
+    return _image_neurons_total() >= bot.IMAGE_DAILY_NEURONS
 
 
 def _image_provider_block_reason(provider: str) -> str | None:
@@ -275,10 +303,16 @@ def _image_provider_ready(provider: str) -> bool:
     return _image_provider_block_reason(provider) is None
 
 
-def _note_image_success(provider: str) -> None:
-    """И used++, и снятие обеих меток — делает _record_quota_usage."""
+def _note_image_success(provider: str, *, units: float = 1.0) -> None:
+    """used++ для /stats и лимита человека, плюс вес в Neuron для бюджета провайдера.
+    Единица — генерация (104.2 Neuron); правка передаёт свой вес с мегапикселями."""
     import bot
-    bot._record_quota_usage(IMAGE_QUOTA_PROVIDER, provider)
+    entry = bot._quota_entry(IMAGE_QUOTA_PROVIDER, provider)
+    entry["used"] = int(entry.get("used") or 0) + 1
+    entry["neurons"] = float(entry.get("neurons") or 0.0) + max(0.0, float(units)) * IMAGE_UNIT_NEURONS
+    entry["exhausted_at"] = None
+    entry["cooldown_until"] = None
+    bot.mark_quota_dirty()
 
 
 def _note_image_rate_limited(provider: str, *, retry_after_sec: float | None = None) -> None:

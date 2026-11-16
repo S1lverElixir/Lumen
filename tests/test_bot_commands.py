@@ -4480,3 +4480,34 @@ def test_register_bot_profile_writes_everything_when_reads_are_unavailable(monke
     bot._profile_queue.clear()
     assert asyncio.run(bot._register_bot_profile()) == len(bot._profile_payloads())
     assert len(calls) == len(bot._profile_payloads())
+
+def test_image_budget_counts_neurons_not_only_pictures():
+    # Аудит 16.11.2026: тяжёлая правка 12 МП списывает около трети бесплатного
+    # бюджета, оставаясь «одной из 80». Бюджет считается в Neuron; штуки остаются
+    # для /stats и лимита человека. Старый снапшот без веса не обнуляет бюджет.
+    import json as _json
+    import lumen_quotas as lq
+
+    real_quota = _json.loads(_json.dumps(bot.GLOBAL_QUOTA))
+    real_limit = bot.IMAGE_DAILY_NEURONS
+    try:
+        bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+        bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER] = {}
+        bot._note_image_success("cloudflare")
+        assert bot._image_usage_total() == 1
+        assert abs(bot._image_neurons_total() - lq.IMAGE_UNIT_NEURONS) < 0.01
+        assert bot._image_budget_exhausted() is False
+
+        bot._note_image_success("cloudflare", units=3.4)
+        assert bot._image_usage_total() == 2
+        bot.IMAGE_DAILY_NEURONS = int(lq.IMAGE_UNIT_NEURONS * 4)
+        assert len(bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER]) == 1
+        assert bot._image_budget_exhausted() is True
+
+        bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER] = {"cloudflare": {"used": 80}}
+        bot.IMAGE_DAILY_NEURONS = int(lq.IMAGE_UNIT_NEURONS * 80)
+        assert bot._image_budget_exhausted() is True
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.IMAGE_DAILY_NEURONS = real_limit

@@ -516,6 +516,9 @@ async def inline_draw(
         # Один или два референса (multi-image): список приходит из резолвера,
         # одиночный tuple поддерживается для совместимости вызовов.
         ref_items = reference if isinstance(reference, list) else ([reference] if reference else [])
+        # Вес попытки в бюджете провайдера: генерация — 1.0, правка — плюс 21 Neuron
+        # на мегапиксель входа (12 МП фото ≈ 3.4 юнита; аудит 16.11.2026).
+        charge_units = 1.0
         if ref_items:
             ref_bytes = [item[0] for item in ref_items[:2]]
             # Кадр правки повторяет ориентацию первого референса: 16:9 фото иначе
@@ -529,6 +532,8 @@ async def inline_draw(
                     _ref_dims[0] * _ref_dims[1] / 1e6, _ref_dims[0], _ref_dims[1],
                 )
             width, height = bot.size_for_reference(_ref_dims)
+            if _ref_dims:
+                charge_units = 1.0 + 0.2015 * (_ref_dims[0] * _ref_dims[1] / 1e6)
 
             async def _edit_call(session, text, timeout_sec=None, _w=width, _h=height):
                 return await bot._cloudflare_edit_to_image(
@@ -600,7 +605,7 @@ async def inline_draw(
                 # его 12 секунд иначе уходили бы сверх потолка (ревью 10.11.2026).
                 attempt_timeout = max(1.0, min(bot.IMAGE_ATTEMPT_TIMEOUT_SEC, deadline - time.monotonic()))
                 image_bytes = await call(session, text, timeout_sec=attempt_timeout)
-                bot._note_image_success(provider)
+                bot._note_image_success(provider, units=charge_units)
                 generated = True
                 break
             except ImageRateLimitedError as exc:
@@ -625,7 +630,7 @@ async def inline_draw(
                 # поэтому попытка идёт в общий дневной бюджет: без этого цикл из
                 # запрещённых описаний выжигал бы квоту провайдера у всего чата
                 # (ревью 10.11.2026).
-                bot._note_image_success(provider)
+                bot._note_image_success(provider, units=charge_units)
                 log.warning("[draw] Provider %s refused by content moderation — chain stopped.", provider)
                 break
             except Exception as exc:
@@ -1564,7 +1569,7 @@ async def cmd_stats(message: Message) -> None:
         _state = {"budget": "бюджет выбран до завтра", "cooldown": "пауза после перегрузки"}.get(_blocked or "", "готов")
         _image_states.append(f"  • {_provider}: {_state}")
     image_block = (
-        f"<b>Картинки — {bot._image_usage_total()}/{bot.IMAGE_DAILY_LIMIT} за сутки:</b>\n"
+        f"<b>Картинки — {bot._image_usage_total()}/{bot.IMAGE_DAILY_LIMIT} за сутки ({bot._image_neurons_total():.0f}/{bot.IMAGE_DAILY_NEURONS} Neuron):</b>\n"
         + "\n".join(_image_states) + "\n\n"
     )
     _quarantined_now = bot._quarantine_status()

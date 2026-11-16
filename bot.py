@@ -573,6 +573,9 @@ DRAW_CONTEXT_TIMEOUT_SEC = _env_number("DRAW_CONTEXT_TIMEOUT_SEC", 10, min_value
 # видит «сервис недоступен» (замер 10.11.2026). Без счётчика каждый новый
 # человек бился бы в провайдера, у которого день кончился.
 IMAGE_DAILY_LIMIT = _env_number("IMAGE_DAILY_LIMIT", 80, cast=int, min_value=1)
+# Бюджет картинок в Neuron: 80 генераций × 104.2 = 8336 из 10 000 бесплатных,
+# 8300 оставляет запас; правка весит 1 + 0.2 на МП входа (аудит 16.11.2026).
+IMAGE_DAILY_NEURONS = _env_number("IMAGE_DAILY_NEURONS", 8300, cast=int, min_value=1)
 # Картинка — самый дорогой по памяти и по бюджету вызов в боте, поэтому общий
 # семафор: раньше параллельные /draw из разных чатов складывали в RAM до 30 МБ каждый
 # без предела (аудит 09.11.2026, тот же класс, что MEDIA_GLOBAL_CONCURRENCY).
@@ -691,6 +694,7 @@ from lumen_chat_state import (
     _record_stats_event,
     _image_usage_total,
     _image_budget_exhausted,
+    _image_neurons_total,
     _image_provider_block_reason,
     _image_provider_ready,
     _note_image_success,
@@ -1084,6 +1088,7 @@ __all__ = [
     "_record_quota_usage",
     "_image_usage_total",
     "_image_budget_exhausted",
+    "_image_neurons_total",
     "_image_provider_block_reason",
     "_image_provider_ready",
     "_note_image_success",
