@@ -1473,6 +1473,12 @@ async def _handle_message_core(
             # Остановка во время поиска: отвечать уже нечего, но пузырь этапа
             # обязан закрыться пометкой, а не висеть «Ищу…» до таймаута.
             log.info("[stop] stopped by the user during the evidence phase")
+            # Остановка в фазе поиска тоже ход: в devtrace иначе её нет вовсе,
+            # и разбор «почему ответа не было» упирается в пустоту (аудит 16.11.2026).
+            lumen_devtrace.record_failure(
+                message.chat.id, user_text=clean_prompt,
+                error="stopped during the evidence phase",
+            )
             bot._consume_stream_stop(message.chat.id)
             if status is not None:
                 with contextlib.suppress(Exception):

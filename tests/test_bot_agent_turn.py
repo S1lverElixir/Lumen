@@ -609,6 +609,12 @@ def test_stop_during_evidence_skips_fallback_fetch(rate_guard_setup, monkeypatch
         bot._request_stream_stop(message.chat.id)
         return _turn()
 
+    traces = []
+
+    def fake_trace(chat_id, **kwargs):
+        traces.append(kwargs.get("error") or "")
+
+    monkeypatch.setattr("lumen_message_core.lumen_devtrace.record_failure", fake_trace)
     monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
     monkeypatch.setattr(lumen_agent, "run_search_turn", empty_turn)
     bot._begin_stream_stop_scope(message.chat.id, None)
@@ -616,6 +622,7 @@ def test_stop_during_evidence_skips_fallback_fetch(rate_guard_setup, monkeypatch
         _run_core(message, monkeypatch, captured={})
         assert seen["fetch"] == 0
         assert bot._stream_stop_requested(message.chat.id) is False
+        assert traces and "stopped" in traces[0]
     finally:
         bot._end_stream_stop_scope(message.chat.id)
         bot.chat_state.pop(123, None)
