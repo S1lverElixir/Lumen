@@ -15,6 +15,7 @@ import {
   isPrivateAddress,
   resolveReadTarget,
   limitStreamBytes,
+  warnOnTruncation,
   resolveTarget,
 } from "./proxy.ts";
 
@@ -511,4 +512,41 @@ Deno.test("read: маршрут отдаёт только текст, кап и 
     html as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS,
   );
   assertEquals(noSecret.status, 401);
+});
+
+Deno.test("warnOnTruncation рвёт ответ сверх капа", async () => {
+  const src = new ReadableStream({
+    start(c) {
+      c.enqueue(new Uint8Array(4));
+      c.close();
+    },
+  });
+  const capped = warnOnTruncation(src, 3, "example.com");
+  assert(capped !== null, "поток обязан остаться потоком");
+  const reader = capped!.getReader();
+  let failed = false;
+  try {
+    await reader.read();
+  } catch {
+    failed = true;
+  }
+  assert(failed, "поток обязан упасть после капа");
+});
+
+Deno.test("handleRequest HEAD отдаёт пустое тело, таймаут апстрима — 504", async () => {
+  const headReq = new Request("https://proxy.test/fetch/api.telegram.org/bot1/getMe", {
+    method: "HEAD",
+    headers: AUTH_HEADERS,
+  });
+  const withBody = () => Promise.resolve(new Response("data", { headers: { "content-type": "text/plain" } }));
+  const headRes = await handleRequest(headReq, withBody as typeof fetch, TEST_SECRET);
+  assertEquals(await headRes.text(), "");
+
+  const timeout = () => Promise.reject(new DOMException("t", "TimeoutError"));
+  const res = await handleRequest(
+    new Request("https://proxy.test/fetch/api.telegram.org/bot1/getMe", { headers: AUTH_HEADERS }),
+    timeout as typeof fetch,
+    TEST_SECRET,
+  );
+  assertEquals(res.status, 504);
 });

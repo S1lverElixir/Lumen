@@ -64,6 +64,29 @@ export const MIN_PROXY_SECRET_LENGTH = 32;
 
 export class BodyTooLargeError extends Error {}
 
+// Кап ответа с видимым следом: без него обрыв смотрелся как успешный 200 с
+// коротким телом (JSON падал при разборе, файл — тихо битый; аудит 16.11.2026).
+// В лог уходит только хост и граница, без пути и query (в пути Telegram живёт токен).
+export function warnOnTruncation(
+  stream: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+  host: string,
+): ReadableStream<Uint8Array> | null {
+  if (!stream) return stream;
+  let total = 0;
+  return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        console.warn(`[proxy] ${host} response truncated at ${maxBytes} bytes`);
+        controller.error(new BodyTooLargeError(`Response exceeds ${maxBytes} byte cap`));
+        return;
+      }
+      controller.enqueue(chunk);
+    },
+  }));
+}
+
 export function limitStreamBytes(
   stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
@@ -274,7 +297,7 @@ async function handleReadPage(
   const type = (upstream.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
   if (!READ_ALLOWED_TYPES.has(type)) return new Response("Unsupported content type", { status: 415 });
   if (upstream.status !== 200) return new Response("Upstream status " + upstream.status, { status: 502 });
-  return new Response(limitStreamBytes(upstream.body, READ_PAGE_MAX_BYTES), {
+  return new Response(warnOnTruncation(upstream.body, READ_PAGE_MAX_BYTES, new URL(target.url).host), {
     status: 200,
     headers: { "content-type": type },
   });
@@ -360,7 +383,11 @@ export async function handleRequest(
   }
 
   const respHeaders = buildResponseHeaders(upstreamResp.headers);
-  return new Response(limitStreamBytes(upstreamResp.body, maxBodyBytes), {
+  // HEAD обязан ответить без тела; кап ответа оставляет след в логе.
+  const cappedBody = req.method === "HEAD"
+    ? null
+    : warnOnTruncation(upstreamResp.body, maxBodyBytes, new URL(target.url).host);
+  return new Response(cappedBody, {
     status: upstreamResp.status,
     headers: respHeaders,
   });
