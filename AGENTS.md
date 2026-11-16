@@ -103,13 +103,14 @@ production on 12.11.2026, so change a fact and update this file in the same comm
   every green CI run on `main`, not only when the tip's diff touches `proxy/`: the old conditional
   base was `HEAD~1` for a linear push, so a proxy change riding in a multi-commit push was invisible
   and both Deno apps kept the previous revision (09.11.2026). The diff is still printed as a warning
-  for the log. Deploying the same code again is idempotent and costs half a minute. Since 16.11.2026 the two deploy
-  steps are gated by the repository variable `DENO_PROXY_DEPLOY` and stay skipped by default: tokens
-  from Deno's new console do not authenticate the classic `deployctl` (the API answers with a
-  sign-in page even with a fresh token), and Deno Deploy is being sunset in April 2027. The relay
-  stays on its last classic revision, so `/read` answers 401 and page reading pauses itself; the
-  owner picks the migration target before setting the variable. A skipped step never means a
-  deployed proxy, and `docs/ARCHITECTURE.md` "Deploy paths" keeps the manual recipe.
+  for the log. Deploying the same code again is idempotent and costs half a minute. Since 16.11.2026 the relay lives on
+  Cloudflare Workers (`worker/worker.ts`, same contract: `/fetch/<host>/...` and `/read`); the Space
+  variables `TELEGRAM_API_BASE_URL` and `..._FALLBACKS` point at
+  `https://lumen-proxy.egor-kuzko-04.workers.dev/fetch/api.telegram.org`, and the worker secret
+  `LUMEN_PROXY_SECRET` must equal the Space secret of the same name. Workers rejects
+  `redirect:"error"`, so the port uses `redirect:"manual"` and refuses 3xx itself. Deno deploy steps
+  stay gated by `DENO_PROXY_DEPLOY` and skipped (classic tokens no longer authenticate, Deno Deploy
+  sunsets in April 2027); a skipped step never means a deployed relay.
 - Container egress is blocked or hangs toward Telegram, TikWM and `api.cloudflare.com`: those hosts
   are reachable only through the allowlist in `proxy/proxy.ts`. Public pages are a separate case:
   since 16.11.2026 the proxy has a guarded `/read` route (any public https name, SSRF checks after
