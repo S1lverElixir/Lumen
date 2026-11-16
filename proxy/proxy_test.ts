@@ -12,6 +12,7 @@ import {
   buildForwardHeaders,
   buildResponseHeaders,
   handleRequest,
+  READ_PAGE_MAX_BYTES,
   isPrivateAddress,
   resolveReadTarget,
   limitStreamBytes,
@@ -494,7 +495,7 @@ Deno.test("read: маршрут отдаёт только текст, кап и 
   const html = () => Promise.resolve(new Response("<html>hi</html>", { headers: { "content-type": "text/html; charset=utf-8" } }));
   const ok = await handleRequest(req("https://example.com/"), html as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
   assertEquals(ok.status, 200);
-  assertEquals(ok.headers.get("content-type"), "text/html");
+  assert((ok.headers.get("content-type") ?? "").startsWith("text/html"), "content-type с charset");
 
   const png = () => Promise.resolve(new Response("x", { headers: { "content-type": "image/png" } }));
   const refused = await handleRequest(req("https://example.com/"), png as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
@@ -549,4 +550,35 @@ Deno.test("handleRequest HEAD отдаёт пустое тело, таймаут
     TEST_SECRET,
   );
   assertEquals(res.status, 504);
+});
+
+Deno.test("read: hex-виды и зарезервированные диапазоны считаются приватными", () => {
+  for (const ip of ["::ffff:7f00:1", "::127.0.0.1", "64:ff9b::10.0.0.1", "ff02::1", "192.0.0.8", "198.51.100.4", "203.0.113.9"]) {
+    assert(isPrivateAddress(ip), "должен быть приватным: " + ip);
+  }
+});
+
+Deno.test("read: charset пробрасывается, слишком большая страница обрезается, а не рвётся", async () => {
+  const req = new Request("https://proxy.test/read?url=" + encodeURIComponent("https://example.com/"), { headers: AUTH_HEADERS });
+  const cp1251 = () => Promise.resolve(new Response("<html>привет</html>", {
+    headers: { "content-type": "text/html; charset=windows-1251" },
+  }));
+  const res = await handleRequest(req, cp1251 as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(res.headers.get("content-type"), "text/html; charset=windows-1251");
+
+  const huge = () => {
+    const chunk = new Uint8Array(1024 * 1024);
+    return Promise.resolve(new Response(new ReadableStream({
+      start(c) {
+        c.enqueue(chunk);
+        c.enqueue(chunk);
+        c.enqueue(chunk);
+        c.close();
+      },
+    }), { headers: { "content-type": "text/html" } }));
+  };
+  const capped = await handleRequest(req, huge as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(capped.status, 200);
+  const body = await capped.arrayBuffer();
+  assert(body.byteLength <= READ_PAGE_MAX_BYTES + 1024 * 1024, "тело не должно расти бесконечно");
 });

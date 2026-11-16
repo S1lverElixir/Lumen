@@ -202,7 +202,10 @@ class AgentTurnResult:
 
     @property
     def has_evidence(self) -> bool:
-        return bool(self.snippets)
+        # Прочитанная страница — такое же доказательство, как сниппет: без этого
+        # сценарий «прочитай эту ссылку» выбрасывал её и отвечал по памяти
+        # (аудит 16.11.2026).
+        return bool(self.snippets or self.pages)
 
 
 def evidence_phase_budget_sec(max_searches: int) -> float:
@@ -291,13 +294,13 @@ def _read_pages_per_turn() -> int:
 
 
 def _tools_for_turn() -> list[dict]:
-    """Чтение страниц предлагается только когда оно реально работает: включено и
-    прокси настроен. Иначе модель не должна видеть инструмент, который молча
-    вернёт пустоту."""
-    from lumen_read_page import read_page_enabled, proxy_origin
+    """Чтение страниц предлагается только когда оно реально работает: включено,
+    прокси и секрет настроены, бюджет не выбран. Иначе модель не должна видеть
+    инструмент, который молча вернёт пустоту."""
+    from lumen_read_page import _read_pages_available
 
     tools = [WEB_SEARCH_TOOL]
-    if read_page_enabled() and proxy_origin():
+    if _read_pages_available():
         tools.append(READ_PAGE_TOOL)
     return tools
 
@@ -417,8 +420,8 @@ async def run_search_turn(
 
     by_query: dict[str, list[dict]] = {}
     searches_left = max_searches
-    from lumen_read_page import page_url_allowed_for_turn, proxy_origin, read_page_enabled
-    pages_left = _read_pages_per_turn() if (read_page_enabled() and proxy_origin()) else 0
+    from lumen_read_page import _read_pages_available, page_url_allowed_for_turn
+    pages_left = _read_pages_per_turn() if _read_pages_available() else 0
     while result.steps < _MAX_STEPS and (searches_left > 0 or pages_left > 0):
         _plan_started = time.monotonic()
         message = await _plan_call(messages, model_id=model_id, effort=effort,
@@ -507,7 +510,8 @@ async def run_search_turn(
             if status is not None:
                 with contextlib.suppress(Exception):
                     await status.set_phase("progress_reading_link")
-            timeout = 10.0
+            from lumen_read_page import read_page_timeout_sec
+            timeout = read_page_timeout_sec()
             if deadline is not None:
                 timeout = max(2.0, min(timeout, deadline - time.monotonic()))
             text = await _one_read(url, timeout=timeout)

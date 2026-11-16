@@ -17,11 +17,19 @@ log = logging.getLogger("bot")
 # та же проверка стоит второй линией, чтобы бот не отправлял заведомо плохой URL.
 _HEADERS = {"Accept": "text/html,text/plain;q=0.9,*/*;q=0.1", "User-Agent": "Lumen/1.0"}
 _ALLOWED_TYPES = ("text/html", "text/plain", "application/xhtml+xml")
-_SCRIPT_RE = re.compile(r"(?is)<(script|style|noscript|template|svg)[^>]*>.*?</\1>")
-_BLOCK_RE = re.compile(r"(?i)</?(p|div|br|li|tr|h[1-6]|section|article|header|footer|blockquote|pre|table|ul|ol)[^>]*>")
-_TAG_RE = re.compile(r"(?s)<[^>]+>")
 _WS_RE = re.compile(r"[ \t\f\v]+")
 _NL_RE = re.compile(r"\n{3,}")
+# Потолок сырого HTML до разбора: 2 МБ спама из незакрытых «<script>» вешали
+# процесс на десятки секунд квадратичным регексом (аудит 16.11.2026).
+_RAW_MAX_CHARS = 300_000
+_BLOCK_ELEMENTS = ("script", "style", "noscript", "template", "svg")
+_BREAK_TAGS = frozenset((
+    "p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+    "section", "article", "header", "footer", "blockquote", "pre", "table", "ul", "ol",
+))
+# Маркеры рамки доказательств вырезаются из текста страницы: иначе чужая страница
+# закрывает блок «[/Fetched page]» и говорит уже от лица промпта (аудит 16.11.2026).
+_FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched page[^\]]*\]")
 
 _READ_DAY = ""
 _READ_CALLS = 0
@@ -84,6 +92,15 @@ def reset_read_page_counters_for_tests() -> None:
     _READ_DAY, _READ_CALLS = "", 0
 
 
+def _read_pages_available() -> bool:
+    """Инструмент предлагается, только если чтение реально может сработать:
+    включено, бюджет не выбран, прокси и секрет настроены."""
+    import bot
+    if not read_page_enabled() or not read_page_budget_left():
+        return False
+    return bool(proxy_origin() and (getattr(bot, "LUMEN_PROXY_SECRET", "") or "").strip())
+
+
 def proxy_origin() -> str:
     """Базовый адрес прокси без пути /fetch/<host>: берём из уже настроенного
     Telegram-транспорта, отдельной переменной не заводим."""
@@ -93,12 +110,59 @@ def proxy_origin() -> str:
     return base[:idx] if idx > 0 else ""
 
 
+def _strip_block_elements(raw: str) -> str:
+    """Линейное вырезание script/style/…: find вместо `.*?`, который на незакрытом
+    теге сканирует строку до конца на каждой позиции."""
+    lower = raw.lower()
+    out: list[str] = []
+    pos = 0
+    n = len(raw)
+    while pos < n:
+        best = -1
+        best_tag = ""
+        for tag in _BLOCK_ELEMENTS:
+            idx = lower.find("<" + tag, pos)
+            if idx != -1 and (best == -1 or idx < best):
+                best, best_tag = idx, tag
+        if best == -1:
+            out.append(raw[pos:])
+            break
+        out.append(raw[pos:best])
+        close = lower.find("</" + best_tag, best)
+        if close == -1:
+            # Незакрытый блок режем до конца: иначе его «текст» уедет в промпт.
+            break
+        gt = lower.find(">", close)
+        pos = n if gt == -1 else gt + 1
+    return "".join(out)
+
+
+def _strip_tags_linear(raw: str) -> str:
+    """Теги в пробел, блочные — в перенос строки; один проход по строке."""
+    out: list[str] = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        lt = raw.find("<", i)
+        if lt == -1:
+            out.append(raw[i:])
+            break
+        out.append(raw[i:lt])
+        gt = raw.find(">", lt)
+        if gt == -1:
+            out.append(raw[lt:])
+            break
+        name = raw[lt + 1:gt].strip().lstrip("/").split(None, 1)[0].lower() if gt > lt + 1 else ""
+        out.append("\n" if name in _BREAK_TAGS else " ")
+        i = gt + 1
+    return "".join(out)
+
+
 def extract_text(raw: str, limit: int) -> str:
-    """Текст страницы без разметки: скрипты и стили выброшены, блочные теги стали
+    """Текст страницы без разметки: скрипты выброшены линейно, блочные теги стали
     переносами, сущности раскрыты, пробелы схлопнуты, длина обрезана."""
-    text = _SCRIPT_RE.sub(" ", raw or "")
-    text = _BLOCK_RE.sub("\n", text)
-    text = _TAG_RE.sub(" ", text)
+    text = _strip_block_elements((raw or "")[:_RAW_MAX_CHARS])
+    text = _strip_tags_linear(text)
     text = _html.unescape(text)
     text = _WS_RE.sub(" ", text)
     text = "\n".join(line.strip() for line in text.splitlines())
@@ -107,19 +171,22 @@ def extract_text(raw: str, limit: int) -> str:
 
 
 def url_is_readable(url: str) -> bool:
-    """Второй рубеж к проверке прокси: публичный https-адрес без кредов и порта."""
-    from lumen_search import url_host_is_public
+    """Второй рубеж к проверке прокси: публичный https-адрес без кредов и порта.
+    Всё тело в try: parsed.port на «:99999» бросает ValueError, и исключение
+    вылетало из фазы доказательств целиком (аудит 16.11.2026)."""
     try:
+        from lumen_search import url_host_is_public
         parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return False
+        if parsed.username or parsed.password:
+            return False
+        port = parsed.port
+        if port and port != 443:
+            return False
+        return url_host_is_public(url)
     except Exception:
         return False
-    if parsed.scheme != "https" or not parsed.hostname:
-        return False
-    if parsed.username or parsed.password:
-        return False
-    if parsed.port and parsed.port != 443:
-        return False
-    return url_host_is_public(url)
 
 
 def page_url_allowed_for_turn(url: str, *, user_text: str, snippets: list[dict], pages: list[dict]) -> bool:
@@ -182,13 +249,17 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
     return text or None
 
 
+def _frame_safe(text: str) -> str:
+    return _FRAME_MARK_RE.sub(" ", text or "")
+
+
 def format_pages_for_prompt(pages: list[dict]) -> str:
     """Блок прочитанных страниц для промпта: те же правила недоверенных данных,
     что у сниппетов, и явная метка, что это страница, а не выдача."""
     blocks: list[str] = []
     for page in pages or []:
-        url = (page.get("url") or "").strip()
-        text = (page.get("text") or "").strip()
+        url = _frame_safe((page.get("url") or "").strip())
+        text = _frame_safe((page.get("text") or "").strip())
         if not url or not text:
             continue
         blocks.append(
@@ -202,4 +273,4 @@ def format_pages_for_prompt(pages: list[dict]) -> str:
 def read_page_tool_result(url: str, text: str | None) -> str:
     if not text:
         return "[read_page returned no readable text for this URL]"
-    return f"[Fetched page: {url}]\n{text}\n[/Fetched page]"
+    return f"[Fetched page: {_frame_safe(url)}]\n{_frame_safe(text)}\n[/Fetched page]"

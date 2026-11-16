@@ -71,15 +71,27 @@ export function warnOnTruncation(
   stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
   host: string,
+  // "error" — целостность файла важнее (Telegram-загрузки): обрыв обязан быть виден.
+  // "close" — усечённый текст страницы полезнее ошибки: читаем начало и закрываемся.
+  mode: "error" | "close" = "error",
 ): ReadableStream<Uint8Array> | null {
   if (!stream) return stream;
   let total = 0;
+  let truncated = false;
   return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
+      if (truncated) {
+        // Режим "close": остаток вычитывается и выбрасывается, поток закроется
+        // сам на конце апстрима — тело не растёт, ошибки клиенту нет.
+        return;
+      }
       total += chunk.byteLength;
       if (total > maxBytes) {
+        truncated = true;
         console.warn(`[proxy] ${host} response truncated at ${maxBytes} bytes`);
-        controller.error(new BodyTooLargeError(`Response exceeds ${maxBytes} byte cap`));
+        if (mode === "error") {
+          controller.error(new BodyTooLargeError(`Response exceeds ${maxBytes} byte cap`));
+        }
         return;
       }
       controller.enqueue(chunk);
@@ -220,14 +232,22 @@ export function isPrivateAddress(ip: string): boolean {
     if (a === 192 && b === 168) return true;
     if (a === 100 && b >= 64 && b <= 127) return true;
     if (a === 198 && (b === 18 || b === 19)) return true;
+    // Зарезервированные диапазоны: 192.0.0.0/24, TEST-NET-2/3.
+    if (a === 192 && b === 0) return true;
+    if (a === 198 && b === 51) return true;
+    if (a === 203 && b === 0) return true;
     return a >= 224;
   }
   const low = ip.toLowerCase();
-  if (low === "::" || low === "::1") return true;
+  // Сжатая форма «::…» покрывает сам «::», петлю, IPv4-mapped/compatible
+  // (в том числе hex-вид ::ffff:7f00:1) и NAT64 64:ff9b::/96 — все они
+  // маршрутизируются внутрь или в чужой транслятор (аудит 16.11.2026).
+  if (low.startsWith("::")) return true;
+  if (low.startsWith("64:ff9b")) return true;
+  if (low.startsWith("ff")) return true;
   if (low.startsWith("fc") || low.startsWith("fd")) return true;
   if (low.startsWith("fe8") || low.startsWith("fe9") || low.startsWith("fea") || low.startsWith("feb")) return true;
-  const mapped = low.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  return mapped ? isPrivateAddress(mapped[1]) : false;
+  return false;
 }
 
 export type ReadTarget =
@@ -294,13 +314,18 @@ async function handleReadPage(
     }
     return new Response("Read failed", { status: 502 });
   }
-  const type = (upstream.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  const rawType = upstream.headers.get("content-type") ?? "";
+  const type = rawType.split(";")[0].trim().toLowerCase();
   if (!READ_ALLOWED_TYPES.has(type)) return new Response("Unsupported content type", { status: 415 });
   if (upstream.status !== 200) return new Response("Upstream status " + upstream.status, { status: 502 });
-  return new Response(warnOnTruncation(upstream.body, READ_PAGE_MAX_BYTES, new URL(target.url).host), {
-    status: 200,
-    headers: { "content-type": type },
-  });
+  // charset пробрасывается: страницы в windows-1251 иначе декодировались угадыванием.
+  return new Response(
+    warnOnTruncation(upstream.body, READ_PAGE_MAX_BYTES, new URL(target.url).host, "close"),
+    {
+      status: 200,
+      headers: { "content-type": rawType || type },
+    },
+  );
 }
 
 // fetchImpl — точка подмены для тестов: реальная сеть юнитам не нужна.

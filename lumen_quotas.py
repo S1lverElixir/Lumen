@@ -107,7 +107,7 @@ def load_global_quota() -> None:
         raw = bot._storage_read_text("lumen:global_quota", lcs.GLOBAL_QUOTA_FILE)
         if not raw:
             # Пусто — первый запуск, а не отказ: сбрасывать нечего.
-            lcs._state_load_failed = False
+            lcs._quota_load_failed = False
             return
         loaded = json.loads(raw)
         if isinstance(loaded, dict):
@@ -161,10 +161,10 @@ def load_global_quota() -> None:
             raw_ts = loaded.get("last_storage_write_ts")
             if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool) and raw_ts > 0:
                 GLOBAL_QUOTA["last_storage_write_ts"] = float(raw_ts)
-        lcs._state_load_failed = False
+        lcs._quota_load_failed = False
     except Exception as exc:
         # Чтение/разбор упали — память недостоверна, перезапись запрещена (см. флаг).
-        lcs._state_load_failed = True
+        lcs._quota_load_failed = True
         log.warning("[quota] Failed to load global quota: %s", exc)
     # Проверяем сразу после загрузки — если бот был перезапущен уже на следующие
     # сутки (обычное дело при редеплое), счётчики должны обнулиться сразу на
@@ -174,7 +174,7 @@ def load_global_quota() -> None:
 def save_global_quota() -> None:
     import bot
     import lumen_chat_state as lcs
-    if lcs._state_load_failed:
+    if lcs._quota_load_failed:
         # Стартовая загрузка не удалась: удалённая квота новее пустой памяти, не затираем.
         log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
         return

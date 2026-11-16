@@ -905,6 +905,7 @@ def test_inline_draw_global_budget_refuses_before_provider(monkeypatch):
     # человек бился бы в провайдера, у которого день кончился (аудит 09.11.2026).
     chat_id = 999437
     monkeypatch.setattr(bot, "IMAGE_DAILY_LIMIT", 2)
+    monkeypatch.setattr(bot, "IMAGE_DAILY_NEURONS", 208)
     bot._note_image_success("pollinations")
     bot._note_image_success("pollinations")
 

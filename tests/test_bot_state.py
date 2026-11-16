@@ -753,13 +753,13 @@ def test_startup_load_failure_blocks_quota_overwrite():
     real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
     orig_throttle = lq._last_quota_check_monotonic
     orig_quota_dirty = lcs._quota_dirty
-    lcs._state_load_failed = False
+    lcs._quota_load_failed = False
     try:
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
         lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         with patch("bot._storage_read_text", side_effect=RuntimeError("Upstash down")):
             bot.load_global_quota()
-        assert lcs._state_load_failed is True
+        assert lcs._quota_load_failed is True
         assert lcs._quota_dirty is True
         bot._dirty_chat_ids.clear()
         bot._pending_chat_deletions.clear()
@@ -4152,3 +4152,45 @@ def test_daily_refusals_leave_a_log_line(monkeypatch, caplog):
         assert asyncio.run(core._reject_rate_limited_message(slow)) is True
     assert slow.sent, "отказ обязан дойти до человека"
     assert _calls(caplog.records, "[rate-limit] replied with the flood notice"), caplog.text
+
+
+def test_quota_failure_is_not_lifted_by_an_index_recovery():
+    # Аудит 16.11.2026: удачный ретрай индекса снимал общий флаг и открывал запись
+    # пустой квоты поверх банов и дневных счётчиков. Флаги обязаны быть раздельными.
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, lcs._quota_load_failed,
+            set(lcs._index_extra_ids), lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._quota_load_failed = True
+    lcs._index_extra_ids.clear()
+    lcs._index_retry_last_ts = 0.0
+    try:
+        with patch("bot._storage_read_text", side_effect=lambda key, path: json.dumps([777])):
+            assert lcs._recover_index_ids() is True
+        assert lcs._state_load_failed is False
+        assert lcs._quota_load_failed is True
+        assert 777 in lcs._chat_snapshot_unloaded
+    finally:
+        lcs._state_load_failed, lcs._quota_load_failed, extra, retry = orig
+        lcs._index_extra_ids.clear()
+        lcs._index_extra_ids.update(extra)
+        lcs._index_retry_last_ts = retry
+        lcs._chat_snapshot_unloaded.discard(777)
+
+
+def test_index_recovery_keeps_the_guard_when_the_read_returns_no_body():
+    # None — и «ключа нет», и «шлюз ответил без result». Пустым индексом это
+    # считать нельзя: снятие защиты потеряло бы чужие id (аудит 16.11.2026).
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, lcs._quota_load_failed, lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._quota_load_failed = False
+    lcs._index_retry_last_ts = 0.0
+    try:
+        with patch("bot._storage_read_text", return_value=None):
+            assert lcs._recover_index_ids() is False
+        assert lcs._state_load_failed is True
+    finally:
+        lcs._state_load_failed, lcs._quota_load_failed, lcs._index_retry_last_ts = orig

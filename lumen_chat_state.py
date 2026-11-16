@@ -534,7 +534,15 @@ def _recover_index_ids() -> bool:
                 ids.add(int(cid))
             except Exception:
                 continue
+    if raw is None:
+        # None — это и «ключа нет», и «шлюз ответил без result». Пустым индексом
+        # такое считать нельзя: снятие защиты потеряло бы чужие id (аудит 16.11.2026).
+        log.warning('[state] Chat index retry returned no body — keeping the write guard.')
+        return False
     _index_extra_ids.update(ids)
+    # Восстановленные чаты ещё не прочитаны: их первое сообщение не имеет права
+    # записать пустой снимок поверх полной удалённой истории (аудит 16.11.2026).
+    _chat_snapshot_unloaded.update(ids)
     _state_load_failed = False
     log.info('[state] Chat index recovered after the startup failure: %d remote id(s) merged.', len(ids))
     return True
@@ -590,6 +598,10 @@ _quota_generation = 0
 # Отказ стартовой загрузки: пока стоит, индекс и квоту не перезаписываем,
 # иначе первый флаш затрёт хорошие удалённые данные пустым снимком (аудит A5-2).
 _state_load_failed = False
+# Отказ ЧТЕНИЯ КВОТЫ — отдельный флаг: снятие защиты индекса после удачного
+# ретрая не имеет права разблокировать запись пустой квоты поверх банов и
+# дневных счётчиков (аудит 16.11.2026).
+_quota_load_failed = False
 # id из удалённого индекса, прочитанного ПОВТОРНО после стартового сбоя: индекс
 # собирается слиянием, а не заменой нашими чатами (аудит 16.11.2026 — новые чаты
 # получали ключ, но выпадали из индекса и после рестарта оставались сиротами).
@@ -748,7 +760,7 @@ async def _flush_dirty_state_once() -> None:
             if _state_load_failed:
                 # Удалённый индекс новее пустой памяти — не затираем, очередь живёт дальше.
                 # Один повтор чтения в минуту: удалённые id сливаем, а не заменяем.
-                if not _recover_index_ids():
+                if not await asyncio.to_thread(_recover_index_ids):
                     log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
                 else:
                     index_payload = json.dumps(_index_ids())
@@ -765,7 +777,7 @@ async def _flush_dirty_state_once() -> None:
                     if _index_generation == started_index_generation:
                         _index_dirty = False
         if _quota_dirty:
-            if _state_load_failed:
+            if _quota_load_failed:
                 # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
                 log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
             else:
@@ -841,9 +853,10 @@ def _flush_state_now() -> None:
 
 def load_state_from_disk() -> None:
     import bot
-    global _state_load_failed, _index_retry_last_ts
+    global _state_load_failed, _quota_load_failed, _index_retry_last_ts
     # Новая попытка снимает старый отказ; неуспех ниже выставит его заново.
     _state_load_failed = False
+    _quota_load_failed = False
     _index_extra_ids.clear()
     _index_retry_last_ts = 0.0
     _chat_snapshot_unloaded.clear()

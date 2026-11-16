@@ -316,6 +316,9 @@ def _munito_requests_today() -> int:
     метр осторожный (меньше реального расхода) — это защита от шторма 429, а не
     биллинг."""
     import bot
+    # Прокрутка суток: без неё первую минуту после полуночи PT маршрут видел
+    # вчерашние 250 и молча уходил на Gemini (аудит 16.11.2026).
+    bot._reset_quota_if_new_day()
     sub = bot.GLOBAL_QUOTA.get("munito") or {}
     total = 0
     for entry in sub.values():
