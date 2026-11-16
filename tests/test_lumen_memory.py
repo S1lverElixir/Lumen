@@ -134,3 +134,44 @@ def test_env_positive_parses_and_falls_back(monkeypatch):
     assert lumen_memory._env_positive("PHOTO_CONTEXT_MAX", 2) == 2
     monkeypatch.setenv("PHOTO_CONTEXT_MAX", "-3")
     assert lumen_memory._env_positive("PHOTO_CONTEXT_MAX", 2) == 0
+
+
+def test_past_photos_reach_gemini_contents_up_to_the_limit(monkeypatch):
+    # Критика полноты 16.11.2026: число фото проверялось только по константам.
+    # Здесь считаем реальные inline-части в собранном ходе.
+    import asyncio
+    import bot
+    import lumen_routes
+
+    now = time.time()
+    history = [
+        {"role": "user", "content": "", "sender": "@u", "ts": now,
+         "media": [{"file_id": f"p{i}", "mime": "image/jpeg"}]}
+        for i in range(6)
+    ]
+    chat_id = 999771
+    bot.chat_state[chat_id] = {"history": history}
+
+    async def fake_fetch(file_id, mime):
+        return b"img", mime
+
+    async def fake_hist(_history):
+        return []
+
+    def images(contents):
+        return sum(1 for c in contents for part in (c.parts or [])
+                   if getattr(part, "inline_data", None))
+
+    monkeypatch.setattr(bot, "_fetch_media", fake_fetch)
+    monkeypatch.setattr(bot, "_gemini_history_contents", fake_hist)
+    try:
+        ref = asyncio.run(lumen_routes._build_gemini_turn_contents(
+            chat_id, "посмотри на те фото"))
+        plain = asyncio.run(lumen_routes._build_gemini_turn_contents(chat_id, "привет"))
+        off = asyncio.run(lumen_routes._build_gemini_turn_contents(
+            chat_id, "привет", history_meta={"attach_past": False}))
+        assert images(ref) == lumen_memory.PHOTO_CONTEXT_MAX_REFERENCED
+        assert images(plain) == lumen_memory.PHOTO_CONTEXT_MAX
+        assert images(off) == 0
+    finally:
+        bot.chat_state.pop(chat_id, None)
