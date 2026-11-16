@@ -1530,6 +1530,11 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                      "publisher": urllib.parse.urlparse(r.get("url") or "").netloc.removeprefix("www."),
                      "date": (r.get("published_date") or "")[:10], "kind": "web"}
                     for r in results if r.get("url")]
+        if provider == "tavily":
+            # Сюда попадаем, когда провайдер выбран, а ключа в env нет: без этой
+            # строки слой молчит неотличимо от пустой выдачи (прод 16.11.2026).
+            log.info("[web-search] tavily key missing in env")
+            return []
         if provider == "brave" and os.getenv("BRAVE_API_KEY"):
             note_search_api_call()
             async with session.get("https://api.search.brave.com/res/v1/web/search",
