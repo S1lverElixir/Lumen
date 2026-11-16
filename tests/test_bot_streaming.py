@@ -1451,6 +1451,23 @@ def test_live_stream_is_not_cut_by_the_route_budget(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
+def test_stream_extension_never_exceeds_the_message_budget():
+    # Аудит 16.11.2026: продление живого стрима (STREAM_ROUTE_MAX_SEC) не учитывало
+    # остаток MESSAGE_TOTAL_BUDGET_SEC, хотя комментарий в bot.py обещает min(свой
+    # таймаут, остаток) на каждом этапе. Без клампа поиск на 40 с плюс 55 с стрима
+    # держали лок чата дольше заявленного потолка сообщения.
+    from lumen_streaming import _stream_deadline
+
+    now = time.monotonic()
+    token = bot._MSG_DEADLINE.set(now + 3.0)
+    try:
+        assert _stream_deadline(now - 1.0, now) <= now + 3.05
+    finally:
+        bot._MSG_DEADLINE.reset(token)
+    # Вне handle_message потолка нет: продление длинного ответа работает как раньше.
+    assert _stream_deadline(now - 1.0, now) == now + bot.STREAM_ROUTE_STALL_GRACE_SEC
+
+
 def test_group_catchup_uses_the_shorter_ceiling():
     # В группе лок чата общий: длинный хвост не должен держать его 20 секунд.
     import lumen_typing_pace

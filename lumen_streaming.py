@@ -205,6 +205,20 @@ def _remaining_budget(deadline: float | None) -> float:
         return float("inf")
     return max(0.0, deadline - time.monotonic())
 
+def _stream_deadline(overall_start_ts: float, now_piece: float) -> float:
+    """Дедлайн живого стрима: продление для длинного ответа, но не дальше
+    потолка сообщения (аудит 16.11.2026: фаза поиска плюс продление выходили
+    за MESSAGE_TOTAL_BUDGET_SEC, который обещан как потолок всего сообщения)."""
+    import bot
+
+    deadline = min(overall_start_ts + bot.STREAM_ROUTE_MAX_SEC,
+                   now_piece + bot.STREAM_ROUTE_STALL_GRACE_SEC)
+    message_left = bot._msg_remaining_sec()
+    if message_left is not None:
+        deadline = min(deadline, now_piece + message_left)
+    return deadline
+
+
 def _stream_wait(bot: Any, deadline: float | None) -> float:
     """Таймаут на ОДНУ операцию стрима: не больше межкускового капа и не больше
     остатка бюджета маршрута. Раньше ожидание шло в обход бюджета, и кусок мог ждать
@@ -527,8 +541,7 @@ async def _run_streaming_reply(
             # прибывают, бюджет продлевается на grace-окно с потолком ниже 60 с,
             # которые срезает релей; lock чата по-прежнему держится MESSAGE_TOTAL_BUDGET_SEC.
             if deadline is not None:
-                deadline = min(overall_start_ts + bot.STREAM_ROUTE_MAX_SEC,
-                               now_piece + bot.STREAM_ROUTE_STALL_GRACE_SEC)
+                deadline = _stream_deadline(overall_start_ts, now_piece)
                 if now_piece > deadline:
                     raise bot.RouteBudgetExceededError([f"{provider}:{model_id}"])
             first_piece = first_piece_ts is None
