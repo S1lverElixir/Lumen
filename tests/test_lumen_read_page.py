@@ -111,3 +111,81 @@ def test_read_page_has_a_per_person_share(monkeypatch):
     finally:
         bot._LOG_USER.reset(t1)
         lumen_read_page.reset_read_page_counters_for_tests()
+
+
+def test_read_page_fetches_through_the_relay_with_the_secret(monkeypatch):
+    # Аудит 16.11.2026: отдельного теста на сам read_page() не было, и мёртвый
+    # маршрут с вырезанным секретом гейт не ловил. Здесь проверяется весь путь:
+    # адрес прокси, секрет в заголовке, разбор и лимит.
+    import asyncio
+    import bot
+
+    lumen_read_page.reset_read_page_counters_for_tests()
+    monkeypatch.setattr(bot, "TELEGRAM_API_BASE_URL", "https://proxy.example/fetch/api.telegram.org")
+    monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "x" * 32)
+    seen = {}
+
+    class _Resp:
+        status = 200
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        async def text(self, errors="replace"):
+            return "<html><body><p>Текст &amp; факт</p></body></html>"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Session:
+        def get(self, url, params=None, headers=None, timeout=None, allow_redirects=None):
+            seen.update(url=url, params=params, headers=headers)
+            return _Resp()
+
+    async def fake_session():
+        return _Session()
+
+    monkeypatch.setattr(bot, "_get_http_session", fake_session)
+    token = bot._LOG_USER.set("user=1")
+    try:
+        text = asyncio.run(lumen_read_page.read_page("https://example.com/a"))
+    finally:
+        bot._LOG_USER.reset(token)
+        lumen_read_page.reset_read_page_counters_for_tests()
+    assert text == "Текст & факт"
+    assert seen["url"] == "https://proxy.example/read"
+    assert seen["params"] == {"url": "https://example.com/a"}
+    assert seen["headers"]["X-Lumen-Proxy-Secret"] == "x" * 32
+
+
+def test_read_page_returns_none_on_a_relay_error(monkeypatch):
+    import asyncio
+    import bot
+
+    lumen_read_page.reset_read_page_counters_for_tests()
+    monkeypatch.setattr(bot, "TELEGRAM_API_BASE_URL", "https://proxy.example/fetch/api.telegram.org")
+    monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "x" * 32)
+
+    class _Resp:
+        status = 401
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            return _Resp()
+
+    async def fake_session():
+        return _Session()
+
+    monkeypatch.setattr(bot, "_get_http_session", fake_session)
+    try:
+        assert asyncio.run(lumen_read_page.read_page("https://example.com/a")) is None
+    finally:
+        lumen_read_page.reset_read_page_counters_for_tests()
