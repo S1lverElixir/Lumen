@@ -339,12 +339,17 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
     return {"diagnostics": results, "telegram_api_base_configured": bot.TELEGRAM_API_BASE_URL}
 
 @app.get("/export_state")
-async def export_state(request: Request) -> dict[str, Any]:
+async def export_state(request: Request) -> Any:
     """Ручной бэкап для cron: эфемерный диск и тир Upstash без реплики; гейт ADMIN_PANEL_KEY."""
     if not _check_admin_key(request):
         _log_denied(request, "GET /export_state")
         return _forbidden()
     import bot
+    if not getattr(bot, "_state_ready", True):
+        # Бэкап во время загрузки — пустой или частичный, а state-backup.yml
+        # закоммитил бы его как дневной (аудит 16.11.2026). Пусть cron повторит.
+        log.info("[admin] /export_state requested while state is still loading, asking to retry")
+        return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     # Снимок живых структур: экспорт отдавал ссылки на мутабельные объекты —
     # запись между возвратом и сериализацией ответа давала несогласованный бэкап.
     chats = {str(cid): _serialize_chat_state(state) for cid, state in list(bot.chat_state.items())}

@@ -259,6 +259,22 @@ def test_export_state_rejects_missing_or_wrong_key():
         bot.ADMIN_PANEL_KEY = original
 
 
+def test_export_state_refuses_while_state_is_loading():
+    # Аудит 16.11.2026: бэкап во время загрузки — пустой или частичный, а
+    # state-backup.yml закоммитил бы его как дневной. Ожидаем 503 и просьбу повторить.
+    original_key = bot.ADMIN_PANEL_KEY
+    original_ready = getattr(bot, "_state_ready", True)
+    bot.ADMIN_PANEL_KEY = "real-admin-key"
+    bot._state_ready = False
+    try:
+        result = asyncio.run(bot.export_state(
+            _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+        assert getattr(result, "status_code", None) == 503
+    finally:
+        bot.ADMIN_PANEL_KEY = original_key
+        bot._state_ready = original_ready
+
+
 def test_export_state_logs_denied_attempt(caplog):
     import logging
     original = bot.ADMIN_PANEL_KEY
