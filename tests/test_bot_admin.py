@@ -1036,4 +1036,3 @@ def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():
     err = asyncio.run(bot.probe_url(_BoomSession(), "http://x", redact="abc123"))
     assert err["ok"] is False
     assert "abc123" not in err["error"] and "<TOKEN>" in err["error"]
-
