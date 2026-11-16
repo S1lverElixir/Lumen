@@ -372,16 +372,16 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
     return text or None
 
 
+# Само слово отличительное: без него из скобок любой глубины маркер не собрать.
+_FRAME_WORDS_RE = re.compile(r"(?i)fetched")
+
+
 def _frame_safe(text: str) -> str:
     clean = _FORMAT_CHARS_RE.sub("", text or "")
-    # Один проход собирал маркер заново из вложенности ("[/Fetched[fetched page]page]"
-    # -> "[/Fetched page]"); повторяем до устойчивого текста (аудит 16.11.2026).
-    for _ in range(10):
-        replaced = _FRAME_MARK_RE.sub(" ", clean)
-        if replaced == clean:
-            return replaced
-        clean = replaced
-    return clean
+    clean = _FRAME_MARK_RE.sub(" ", clean)
+    # Остаток "Fetched" (<-> "page") вырезаем словом: вложенность любой глубины
+    # больше не собирает маркер заново (финальная проверка 16.11.2026).
+    return _FRAME_WORDS_RE.sub(" ", clean)
 
 
 def _frame_safe_url(url: str) -> str:

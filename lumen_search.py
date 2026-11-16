@@ -1951,6 +1951,7 @@ def _source_label(item: dict) -> str:
 
 _SNIPPET_INVIS_RE = re.compile("[\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufe0f\u3164\ufeff]")
 _SNIPPET_FRAME_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]\n]{0,200}\]?")
+_SNIPPET_FRAME_WORDS_RE = re.compile(r"(?i)fetched")
 
 
 def _one_line(text: str) -> str:
@@ -1959,12 +1960,10 @@ def _one_line(text: str) -> str:
     (аудит 16.11.2026)."""
     clean = _SNIPPET_INVIS_RE.sub("", text or "")
     clean = " ".join(clean.splitlines())
-    for _ in range(10):
-        replaced = _SNIPPET_FRAME_RE.sub(" ", clean)
-        if replaced == clean:
-            return replaced
-        clean = replaced
-    return clean
+    # Сначала скобочная форма, затем само слово: вложенность любой глубины не
+    # собирает маркер заново (финальная проверка 16.11.2026).
+    clean = _SNIPPET_FRAME_RE.sub(" ", clean)
+    return _SNIPPET_FRAME_WORDS_RE.sub(" ", clean)
 
 
 def format_snippets_for_prompt(snippets: list[dict]) -> str:
