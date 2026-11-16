@@ -3428,3 +3428,36 @@ for _profile_key, _profile_table in (
     for _lang, _text in _profile_table.items():
         if _lang not in STRINGS[_profile_key]:
             LANG_PACKS.setdefault(_lang, {})[_profile_key] = _text
+
+# Остановка ответа (аудит 16.11.2026): ключ живёт отдельной картой, чтобы не резать
+# 25 блоков ради одной короткой строки; t() читает LANG_PACKS, тест сверяет обе таблицы.
+_STREAM_NOTE_STOPPED: dict[str, str] = {
+    'ar': '\n\nتم الإيقاف.',
+    'be': '\n\nСпынена.',
+    'bn': '\n\nথামানো হয়েছে।',
+    'de': '\n\nGestoppt.',
+    'en': '\n\nStopped.',
+    'es': '\n\nDetenido.',
+    'fa': '\n\nمتوقف شد.',
+    'fil': '\n\nItinigil.',
+    'fr': '\n\nArrêté.',
+    'hi': '\n\nरोका गया।',
+    'id': '\n\nDihentikan.',
+    'it': '\n\nFermato.',
+    'kk': '\n\nТоқтатылды.',
+    'ms': '\n\nDihentikan.',
+    'nl': '\n\nGestopt.',
+    'pl': '\n\nZatrzymano.',
+    'pt': '\n\nParado.',
+    'ru': '\n\nОстановлено.',
+    'th': '\n\nหยุดแล้ว',
+    'tr': '\n\nDurduruldu.',
+    'uk': '\n\nЗупинено.',
+    'ur': '\n\nروک دیا گیا۔',
+    'uz': "\n\nTo'xtatildi.",
+    'vi': '\n\nĐã dừng.',
+    'zu': '\n\nKumisiwe.',
+}
+STRINGS["stream_note_stopped"] = _STREAM_NOTE_STOPPED
+for _lang_code, _note_text in _STREAM_NOTE_STOPPED.items():
+    LANG_PACKS.setdefault(_lang_code, {})["stream_note_stopped"] = _note_text

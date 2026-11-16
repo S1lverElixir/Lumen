@@ -341,6 +341,10 @@ async def _munito_stream_pieces(model_id: str, messages: list[dict], *, deadline
     ):
         yield piece
 
+class _StoppedByUser(Exception):
+    """Явная остановка через /stop: не сбой модели, истории и квоте это не ошибка."""
+
+
 async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
     deadline: float | None = None, status=None, history_text=None,
@@ -350,6 +354,8 @@ async def _run_streaming_reply(
     """Стриминг: генератор кусков + плейсхолдер, чанкинг, троттлинг, обрыв при утечке/инъекции, HTML-финал, запись в историю. Возвращает (ответ, плейсхолдер): успех — (текст, None); сбой до показа — (None, плейсхолдер для следующей модели); сбой после — (показанное + пометка, None)."""
     import bot
     state = bot.get_state(chat_id)
+    # Флаг остановки живёт на чат: /stop его выставляет, цикл читает на каждом куске.
+    bot._begin_stream_stop_scope(chat_id, getattr(getattr(message, "from_user", None), "id", None))
 
     sent_messages: list[Message] = []
     full_text = ""
@@ -513,6 +519,8 @@ async def _run_streaming_reply(
                 await paint_task
             paint_task = None
         while True:
+            if bot._stream_stop_requested(chat_id):
+                raise _StoppedByUser()
             if read_task is None:
                 read_task = asyncio.ensure_future(iterator.__anext__())
             if first_piece_ts is None:
@@ -534,6 +542,10 @@ async def _run_streaming_reply(
             read_task = None
             if not piece:
                 continue
+            # Второй контроль остановки: генератор мог выставить флаг между yield'ами,
+            # и кусок, приехавший сразу после, обязан быть отброшен, а не показан.
+            if bot._stream_stop_requested(chat_id):
+                raise _StoppedByUser()
             now_piece = time.monotonic()
             # Общий бюджет маршрута — и на стрим, но живой стрим не режем по
             # 40-секундному капит: прод 11.11.2026 оборвал им 5700-символьный ответ
@@ -801,6 +813,19 @@ async def _run_streaming_reply(
                     body = header_md + "\n\n" + final_text
                 await bot._edit_message_quietly(sent_messages[-1], body, call_timeout=15.0)
 
+    except _StoppedByUser:
+        # Остановка человеком: частичный текст остаётся на экране и ложится в
+        # историю ниже. stream_interrupted НЕ ставим — автопродолжение после
+        # осознанного стопа не запускается, «продолжи» работает через interrupted.
+        state["interrupted"] = True
+        bot.mark_state_dirty(chat_id)
+        if sent_messages:
+            with contextlib.suppress(Exception):
+                tail_text = full_text[covered_len:] if frozen or covered_len else full_text
+                note = bot._t(message.chat.id, "stream_note_stopped")
+                await bot._tg_call(sent_messages[-1].edit_text,
+                                   _append_note_fit(tail_text, note, bot.TG_MAX_LEN),
+                                   parse_mode=ParseMode.HTML, call_timeout=15.0)
     except _SearchRequested:
         # Не сбой модели: остывка, карантин и model_failures тут ни при чём.
         raise
@@ -859,6 +884,7 @@ async def _run_streaming_reply(
             state["stream_interrupted"] = True
             bot.mark_state_dirty(chat_id)
     finally:
+        bot._end_stream_stop_scope(chat_id)
         # Ранний выход (плейсхолдер не отправился) оставляет запрос первого куска
         # висеть: гасим, иначе он живёт до таймаута провайдера. Висящий read_task
         # следующего куска гасим тем же образом до aclose генератора.

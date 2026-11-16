@@ -1298,6 +1298,17 @@ async def cmd_tts(message: Message) -> None:
     await bot.inline_tts(message, text)
 
 
+async def cmd_stop(message: Message) -> None:
+    """Остановка текущего ответа. В меню команды нет, как у /help: это аварийный
+    контроль, а не витрина. Молчаливо игнорирует чужого человека в группе и
+    вызов, когда стрима нет — лишнее сообщение в чат не пишем (аудит 16.11.2026)."""
+    import bot
+    if not bot.STOP_COMMAND_ENABLED:
+        return
+    sender = message.from_user.id if getattr(message, "from_user", None) is not None else None
+    bot._request_stream_stop(message.chat.id, sender)
+
+
 async def cmd_reset(message: Message) -> None:
     """Сброс истории чата. В меню. Личка — всем, группа — админам/владельцу."""
     import bot

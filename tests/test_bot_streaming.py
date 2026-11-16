@@ -1468,6 +1468,53 @@ def test_stream_extension_never_exceeds_the_message_budget():
     assert _stream_deadline(now - 1.0, now) == now + bot.STREAM_ROUTE_STALL_GRACE_SEC
 
 
+def test_stop_ends_the_stream_and_keeps_the_partial_answer():
+    # Аудит 16.11.2026: остановка ответа — обещанный контроль. Частичный текст
+    # остаётся на экране и ложится в историю; хвост, пришедший после остановки,
+    # в ответ не попадает; автопродолжение после осознанного стопа не запускается.
+    chat_id = 999313
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def pieces():
+        yield "Первый кусок текста. "
+        bot._request_stream_stop(chat_id)
+        yield "этот кусок не должен попасть в ответ"
+
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-stop",
+            piece_agen=pieces(), deadline=time.monotonic() + 30,
+        ))
+        assert answer is not None and "Первый кусок текста." in answer
+        assert "не должен попасть" not in answer
+        note = bot._t(chat_id, "stream_note_stopped").strip()
+        assert any(note in (text or "") for text, _ in incoming.sent[0].edits)
+        assert bot.chat_state[chat_id]["interrupted"] is True
+        assert bot.chat_state[chat_id].get("stream_interrupted") is None
+        assert bot._STREAM_STOPS.get(chat_id) is None
+    finally:
+        bot.chat_state.pop(chat_id, None)
+        bot._STREAM_STOPS.pop(chat_id, None)
+
+
+def test_stop_command_is_silent_without_an_active_stream():
+    from types import SimpleNamespace
+    import lumen_commands
+
+    sent = []
+
+    async def answer(*args, **kwargs):
+        sent.append(args)
+
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=999314),
+        from_user=SimpleNamespace(id=777001),
+        answer=answer,
+    )
+    asyncio.run(lumen_commands.cmd_stop(message))
+    assert sent == []
+
+
 def test_group_catchup_uses_the_shorter_ceiling():
     # В группе лок чата общий: длинный хвост не должен держать его 20 секунд.
     import lumen_typing_pace

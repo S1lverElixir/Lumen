@@ -98,6 +98,40 @@ _MSG_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("ms
 # ответ человеку, а не новый: без флага 30 сообщений съедались за 15 (аудит 16.11.2026).
 _ANSWER_COUNTED: contextvars.ContextVar[bool] = contextvars.ContextVar("answer_counted", default=False)
 
+# Остановка ответа (аудит 16.11.2026): /stop выставляет флаг, цикл стрима выходит на
+# следующем куске, частичный текст остаётся на экране и ложится в историю. Один
+# активный стрим на чат; пользователь = автор вопроса, отказ молчаливый.
+_STREAM_STOPS: dict[int, dict[str, object]] = {}
+
+
+def _begin_stream_stop_scope(chat_id: int, user_id: int | None) -> None:
+    _STREAM_STOPS[chat_id] = {"event": asyncio.Event(), "user_id": user_id}
+
+
+def _end_stream_stop_scope(chat_id: int) -> None:
+    _STREAM_STOPS.pop(chat_id, None)
+
+
+def _stream_stop_requested(chat_id: int) -> bool:
+    entry = _STREAM_STOPS.get(chat_id)
+    event = entry.get("event") if entry else None
+    return bool(event is not None and event.is_set())
+
+
+def _request_stream_stop(chat_id: int, user_id: int | None = None) -> bool:
+    """True — флаг поставлен. Чужой человек в группе остановить ответ не может."""
+    entry = _STREAM_STOPS.get(chat_id)
+    if not entry:
+        return False
+    owner = entry.get("user_id")
+    if owner is not None and user_id is not None and user_id != owner and user_id != OWNER_ID:
+        return False
+    event = entry.get("event")
+    if event is None or event.is_set():
+        return False
+    event.set()
+    return True
+
 
 def _msg_remaining_sec() -> float | None:
     """Сколько осталось до потолка сообщения; None — обработка вне handle_message."""
@@ -446,6 +480,8 @@ FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
 # человек видел «Соединение прервалось». Потолок держим ниже 60 с — дольше релей
 # (proxy/proxy.ts) обрывает upstream сам.
 STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10)
+# Остановка ответа командой /stop: выключатель, как у остальных новых слоёв.
+STOP_COMMAND_ENABLED = (os.getenv("STOP_COMMAND_ENABLED", "1") or "").strip().lower() not in ("0", "false", "off")
 STREAM_ROUTE_STALL_GRACE_SEC = _env_number("STREAM_ROUTE_STALL_GRACE_SEC", 20, min_value=2)
 # Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
 # дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).
@@ -1343,6 +1379,7 @@ def message_mentions_bot(message: Message) -> bool:
 # и регистрация хендлеров явными register (тот же порядок, то же поведение).
 from lumen_commands import (
     cmd_start,
+    cmd_stop,
     inline_draw,
     _translate_draw_prompt,
     resolve_draw_request,
@@ -1372,6 +1409,7 @@ dp.message.register(cmd_draw, Command("draw"))
 dp.callback_query.register(handle_draw_more_callback, F.data == "draw:more")
 dp.message.register(cmd_tts, Command("tts"))
 dp.message.register(cmd_reset, Command("reset"))
+dp.message.register(cmd_stop, Command("stop"))
 dp.message.register(cmd_lang, Command("lang"))
 dp.callback_query.register(handle_lang_callback, F.data.startswith("lang:"))
 dp.message.register(cmd_logs, Command("logs"))
