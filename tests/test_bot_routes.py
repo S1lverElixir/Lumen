@@ -2196,3 +2196,26 @@ def test_munito_success_logs_token_usage_when_api_returns_it(caplog, monkeypatch
         bot.chat_state.pop(chat_id, None)
         caplog.clear()
 
+
+def test_run_route_empty_stream_after_stop_does_not_spend_slot(monkeypatch):
+    # Аудит 16.11.2026: остановка до первого куска отдавала пустой ответ, но
+    # слот дневного лимита уже списывался.
+    chat_id = 999305
+    placeholder = _FakeSentMessage()
+    recorded = []
+
+    async def fake_stream(cid, prompt, message, model_id, **kwargs):
+        return "", placeholder
+
+    def fake_record(user_key, gemini=False):
+        recorded.append((user_key, gemini))
+
+    monkeypatch.setattr(bot, "_try_munito_streaming", fake_stream)
+    monkeypatch.setattr(bot, "_record_user_daily", fake_record)
+    try:
+        route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017")]
+        ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
+        assert ans == ""
+        assert recorded == []
+    finally:
+        bot.chat_state.pop(chat_id, None)

@@ -1010,8 +1010,11 @@ async def _run_route(
                     reusable_placeholder = placeholder
                 if streamed is not None:
                     log.info('[router] chat=%s response received via streaming (%s:%s)', chat_id, provider, stream_model)
-                    _count_user_answer(provider)
-                    _note_answered(provider, stream_model)
+                    # Остановка до первого куска: пузырь закрыт пометкой, ответа нет,
+                    # слот не списываем (низкая находка аудита 16.11.2026).
+                    if (streamed or "").strip():
+                        _count_user_answer(provider)
+                        _note_answered(provider, stream_model)
                     return streamed, True
         try:
             if provider == "gemini":
