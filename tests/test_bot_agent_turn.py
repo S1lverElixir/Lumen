@@ -636,7 +636,11 @@ def test_gemini_reserve_loop_gets_phase_deadline(rate_guard_setup, monkeypatch):
         seen["deadline"] = kwargs["deadline"]
         return _turn()
 
+    async def no_fetch(*args, **kwargs):
+        return []
+
     monkeypatch.setattr(lumen_agent_gemini, "run_search_turn", fake_turn)
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", no_fetch)
     try:
         _run_core(message, monkeypatch, captured={})
         assert seen.get("deadline") is not None
