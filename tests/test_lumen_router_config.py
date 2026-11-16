@@ -694,6 +694,31 @@ def test_quarantine_needs_bad_answers_from_more_than_one_chat(monkeypatch):
         lumen_router_config._QUARANTINE.clear()
 
 
+def test_quarantine_counts_one_person_across_their_chats(monkeypatch):
+    # Аудит 16.11.2026: вклад в карантин считает человек, а не чат. Два чата одного
+    # человека раньше давали два вклада и вдвоём выключали модель всем остальным.
+    import bot
+    _munito_mode(monkeypatch)
+    head = lumen_router_config._MUNITO_ORDER[0]
+    lumen_router_config._QUARANTINE.clear()
+    tokens = []
+    try:
+        for chat in ("chat=1", "chat=2"):
+            tokens.append((bot._LOG_CHAT, bot._LOG_CHAT.set(chat)))
+            tokens.append((bot._LOG_USER, bot._LOG_USER.set("user=7")))
+            bot._record_model_outcome("munito", head, bad=True)
+            bot._record_model_outcome("munito", head, bad=True)
+        assert bot._is_quarantined("munito", head) is False
+        # Другой человек в том же чате даёт третий вклад — порог достигнут.
+        tokens.append((bot._LOG_USER, bot._LOG_USER.set("user=8")))
+        bot._record_model_outcome("munito", head, bad=True)
+        assert bot._is_quarantined("munito", head) is True
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+        lumen_router_config._QUARANTINE.clear()
+
+
 def test_quarantine_never_empties_route_and_success_resets(caplog):
     # Последняя доступная модель не карантинится де-факто: пустой маршрут не возвращаем.
     import bot

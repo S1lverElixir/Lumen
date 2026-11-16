@@ -1413,6 +1413,9 @@ def test_stream_search_marker_never_reaches_the_screen_and_keeps_the_bubble():
         ["[[SE", "ARCH]]", " этот хвост не дойдёт"])
     incoming = _FakeIncomingMessage(chat_id)
     original_client = bot.client
+    saved_gemini = dict(bot.GLOBAL_QUOTA.get("gemini") or {})
+    before_used = sum(int((e or {}).get("used") or 0)
+                      for e in saved_gemini.values() if isinstance(e, dict))
     bot.client = fake_client
     try:
         with pytest.raises(lumen_search._SearchRequested) as caught:
@@ -1420,8 +1423,13 @@ def test_stream_search_marker_never_reaches_the_screen_and_keeps_the_bubble():
         assert incoming.sent[0].edits == []
         assert caught.value.placeholder is incoming.sent[0]
         assert bot.chat_state[chat_id].get("history") == []
+        after_used = sum(int((e or {}).get("used") or 0)
+                         for e in (bot.GLOBAL_QUOTA.get("gemini") or {}).values() if isinstance(e, dict))
+        # Решение «нужен поиск» — тоже вызов провайдера: расход записан (аудит 16.11.2026).
+        assert after_used == before_used + 1
     finally:
         bot.client = original_client
+        bot.GLOBAL_QUOTA["gemini"] = saved_gemini
         bot.chat_state.pop(chat_id, None)
 
 

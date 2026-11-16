@@ -88,6 +88,9 @@ def _current_log_secrets() -> tuple[str, ...]:
 # Метка текущего чата на всех строках обработки: aiogram печатает только update
 # id, и собрать путь одного запроса по логу было нельзя (прод 27.10.2026).
 _LOG_CHAT: contextvars.ContextVar[str] = contextvars.ContextVar("log_chat", default="")
+# Автор запроса для вклада в карантин моделей: два чата одного человека — это
+# один человек, а не два источника плохих ответов (аудит 16.11.2026).
+_LOG_USER: contextvars.ContextVar[str] = contextvars.ContextVar("log_user", default="")
 
 # Общий дедлайн сообщения: каждый этап берёт min(свой таймаут, остаток), иначе
 # лок + поиск + маршрут + саммари в сумме давали до двух минут (аудит 27.10.2026).
@@ -1452,6 +1455,7 @@ async def handle_message(message: Message) -> None:
     # Метка чата на всех строках обработки (см. _LOG_CHAT); сброс в finally —
     # иначе значение утечёт в следующий апдейт этого же процесса.
     token = _LOG_CHAT.set(f"chat={message.chat.id if message.chat else 0}")
+    utoken = _LOG_USER.set(f"user={message.from_user.id if getattr(message, 'from_user', None) else 0}")
     # Потолок сообщения ставится здесь: альбомные задачи наследуют контекст.
     dtoken = _MSG_DEADLINE.set(time.monotonic() + MESSAGE_TOTAL_BUDGET_SEC)
     # Сброс на входе: значение не имеет права утечь в следующий апдейт.
@@ -1460,6 +1464,7 @@ async def handle_message(message: Message) -> None:
         await _handle_message(message)
     finally:
         _LOG_CHAT.reset(token)
+        _LOG_USER.reset(utoken)
         _ANSWER_COUNTED.reset(ctoken)
         _MSG_DEADLINE.reset(dtoken)
 

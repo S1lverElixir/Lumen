@@ -828,6 +828,9 @@ async def _run_streaming_reply(
                                    parse_mode=ParseMode.HTML, call_timeout=15.0)
     except _SearchRequested:
         # Не сбой модели: остывка, карантин и model_failures тут ни при чём.
+        # Но вызов провайдера уже стоил денег провайдера: расход пишем, лимит
+        # человека — нет (его спишет настоящий ответ; аудит 16.11.2026).
+        bot._record_quota_usage(provider, model_id)
         raise
     except Exception as exc:
         if _is_empty_like(full_text):

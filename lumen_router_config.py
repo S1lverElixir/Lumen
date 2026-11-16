@@ -230,12 +230,14 @@ def _record_model_outcome(provider: str, model_id: str, *, bad: bool) -> None:
         entry.update({"bad": 0, "since": time.monotonic()})
         entry.pop("by_chat", None)
     threshold = _quarantine_threshold()
-    chat = str(bot._LOG_CHAT.get() or "")
-    if chat:
+    # Источник вклада — человек, а не чат: два чата одного человека раньше давали
+    # два независимых вклада и вдвоём выключали модель всем (аудит 16.11.2026).
+    actor = str(bot._LOG_USER.get() or bot._LOG_CHAT.get() or "")
+    if actor:
         per_chat = entry.setdefault("by_chat", {})
-        if int(per_chat.get(chat) or 0) >= max(1, threshold - 1):
+        if int(per_chat.get(actor) or 0) >= max(1, threshold - 1):
             return
-        per_chat[chat] = int(per_chat.get(chat) or 0) + 1
+        per_chat[actor] = int(per_chat.get(actor) or 0) + 1
     entry["bad"] = int(entry.get("bad") or 0) + 1
     if entry["bad"] == threshold:
         log.warning(
