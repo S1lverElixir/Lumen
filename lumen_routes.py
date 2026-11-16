@@ -942,6 +942,11 @@ async def _run_route(
     # С 05.11.2026 в счёт идёт только Gemini: у Munito лимит оконный на стороне
     # провайдера, своя суточная метка ему не нужна.
     def _count_user_answer(provider_name: str) -> None:
+        # Один апдейт — одно списание: ретрай после [[SEARCH]], повтор за свежестью
+        # и автопродолжение входят в _run_route повторно (аудит 16.11.2026).
+        if bot._ANSWER_COUNTED.get():
+            return
+        bot._ANSWER_COUNTED.set(True)
         bot._record_user_daily(bot._user_key_for_message(message), gemini=provider_name == "gemini")
         bot._record_stats_event("answers_sent")
 

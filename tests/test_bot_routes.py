@@ -2077,6 +2077,40 @@ def test_run_route_counts_fallback_and_total_failure(monkeypatch):
     bot.chat_state.pop(chat_id, None)
 
 
+def test_answers_are_counted_once_per_update(monkeypatch):
+    # Аудит 16.11.2026: ретрай после [[SEARCH]], повтор за свежестью и
+    # автопродолжение входят в _run_route повторно, и каждый успешный проход
+    # добавлял +1 к суточному лимиту. 30 сообщений съедались за 15.
+    from types import SimpleNamespace
+
+    chat_id = 999308
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777014)
+    monkeypatch.setattr(bot, "ask_munito_text", AsyncMock(return_value="ok"))
+    route = [("munito", "probe/m1")]
+    saved_stats = dict(bot.GLOBAL_QUOTA.get("stats") or {})
+
+    async def scenario() -> None:
+        # Оба прохода — в одной задаче, как в проде: contextvar живёт в контексте
+        # обработчика, а не в отдельном asyncio.run.
+        token = bot._ANSWER_COUNTED.set(False)
+        try:
+            await bot._run_route(chat_id, "раз", route, incoming)
+            await bot._run_route(chat_id, "два", route, incoming)
+        finally:
+            bot._ANSWER_COUNTED.reset(token)
+
+    try:
+        asyncio.run(scenario())
+        entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("777014") or {}
+        assert entry.get("total") == 1
+        assert (bot.GLOBAL_QUOTA.get("stats") or {}).get("answers_sent") == saved_stats.get("answers_sent", 0) + 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777014", None)
+        bot.GLOBAL_QUOTA["stats"] = saved_stats
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_daily_limit_denial_counted_and_refused(rate_guard_setup, monkeypatch):
     # Что защищает: счётчик отказов по дневному лимиту вместе с самим отказом.
     # Регрессия: отказ есть, а счётчик не растёт — /stats врёт. Старые тесты

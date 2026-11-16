@@ -93,6 +93,11 @@ _LOG_CHAT: contextvars.ContextVar[str] = contextvars.ContextVar("log_chat", defa
 # лок + поиск + маршрут + саммари в сумме давали до двух минут (аудит 27.10.2026).
 _MSG_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("msg_deadline", default=None)
 
+# Один апдейт = одно списание суточного лимита. Второй и третий проходы маршрута
+# (ретрай после [[SEARCH]], повтор за свежестью, автопродолжение) — это тот же
+# ответ человеку, а не новый: без флага 30 сообщений съедались за 15 (аудит 16.11.2026).
+_ANSWER_COUNTED: contextvars.ContextVar[bool] = contextvars.ContextVar("answer_counted", default=False)
+
 
 def _msg_remaining_sec() -> float | None:
     """Сколько осталось до потолка сообщения; None — обработка вне handle_message."""
@@ -1411,10 +1416,13 @@ async def handle_message(message: Message) -> None:
     token = _LOG_CHAT.set(f"chat={message.chat.id if message.chat else 0}")
     # Потолок сообщения ставится здесь: альбомные задачи наследуют контекст.
     dtoken = _MSG_DEADLINE.set(time.monotonic() + MESSAGE_TOTAL_BUDGET_SEC)
+    # Сброс на входе: значение не имеет права утечь в следующий апдейт.
+    ctoken = _ANSWER_COUNTED.set(False)
     try:
         await _handle_message(message)
     finally:
         _LOG_CHAT.reset(token)
+        _ANSWER_COUNTED.reset(ctoken)
         _MSG_DEADLINE.reset(dtoken)
 
 
@@ -1497,11 +1505,11 @@ _PROFILE_FIELDS: tuple[tuple[str, str, str], ...] = (
 # шторм «Flood control exceeded on method 'SetMyName'. Retry in 79522 seconds» с
 # 17:44 до 17:47 — и у живых людей в эти минуты рвались ответы. Поэтому очередь
 # раздаётся по одному вызову с паузой, а на первом же отказе встает: долбить
-# Telegram нельзя, остаток добирает часовой цикл.
-# Второй вывод того же замера: штраф копят повторные записи, а перезапуск
-# Space после деплоя писал все поля заново. Отсюда два правила — не слать
-# локализованное поле, если текст совпадает с дефолтным (имя «Lumen» одинаков
-# во всех паках: 19 вызовов SetMyName сворачиваются в один), и сверять с
+# Telegram нельзя, остаток добирает часовой цикл.
+# Второй вывод того же замера: штраф копят повторные записи, а перезапуск
+# Space после деплоя писал все поля заново. Отсюда два правила — не слать
+# локализованное поле, если текст совпадает с дефолтным (имя «Lumen» одинаков
+# во всех паках: 19 вызовов SetMyName сворачиваются в один), и сверять с
 # Telegram перед записью: то, что уже стоит, не пишется вовсе.
 _profile_queue: list[tuple[str, dict[str, str]]] = []
 _PROFILE_CALL_GAP_SEC = 0.6
