@@ -4512,3 +4512,31 @@ def test_image_budget_counts_neurons_not_only_pictures():
         bot.GLOBAL_QUOTA.clear()
         bot.GLOBAL_QUOTA.update(real_quota)
         bot.IMAGE_DAILY_NEURONS = real_limit
+
+
+def test_inline_draw_falls_back_to_document_when_photo_is_rejected(monkeypatch):
+    # Telegram не принимает фото больше 10 МБ, а провайдер может вернуть до 30 МБ:
+    # без фолбэка картинка терялась уже после списания бюджета (аудит 16.11.2026).
+    chat_id = 999438
+    sent = {"document": 0}
+
+    async def fake_image(session, prompt, timeout_sec=None, **_):
+        return b"PNG fake bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return None
+
+        async def send_document(self, **kwargs):
+            sent["document"] += 1
+            return SimpleNamespace()
+
+    _one_image_provider(monkeypatch, fake_image)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        assert sent["document"] == 1
+    finally:
+        bot.chat_state.pop(chat_id, None)

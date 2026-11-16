@@ -690,7 +690,21 @@ async def inline_draw(
                 call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
             )
             if sent is None:
-                raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
+                # Фото больше 10 МБ Telegram не принимает, а провайдер отдаёт до
+                # IMAGE_MAX_BYTES: без второго пути человек терял уже оплаченную
+                # генерацию (аудит 16.11.2026).
+                sent = await bot._tg_call(
+                    bot.bot.send_document,
+                    chat_id=cid,
+                    document=BufferedInputFile(
+                        image_bytes, filename=image_filename(image_bytes) or "generated.jpg"),
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    reply_to_message_id=message.message_id,
+                    call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+                )
+            if sent is None:
+                raise RuntimeError("Telegram send_photo/send_document failed: connection timeout or proxy unavailable")
             # Как в ChatGPT: «повторить» есть только у последней картинки. Снимаем
             # клавиатуру с предыдущей уже после успешной отправки, иначе сбой отправки
             # оставлял чат без единой рабочей кнопки (ревью 10.11.2026). Клавиатура
