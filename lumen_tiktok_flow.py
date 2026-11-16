@@ -515,10 +515,11 @@ async def _try_send_tiktok_slideshow(
                               # Пауза между группами — против анти-флуда.
                              await asyncio.sleep(0.3)
               total_elapsed = time.perf_counter() - started_at
+              sent_videos = sum(1 for item in media_items if isinstance(item, InputMediaVideo))
               log.info(
                    '[tiktok] Slideshow delivered: %d of %d slides (%d video, %d photo) in %d group(s), %.1f MB, download %.1fs, send %.1fs.',
-                   len(media_items), len(images_to_fetch), len(probe_results),
-                   len(media_items) - len(probe_results),
+                   len(media_items), len(images_to_fetch), sent_videos,
+                   len(media_items) - sent_videos,
                    len(_chunk_tiktok_media_items(media_items)),
                    downloaded_bytes / (1024 * 1024),
                    download_elapsed, total_elapsed - download_elapsed,

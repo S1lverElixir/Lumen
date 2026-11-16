@@ -785,7 +785,9 @@ async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, uni
     return None
 
 
-async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> dict[str, str] | None:
+async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> tuple[dict[str, str] | None, bool]:
+    """(метаданные, был ли сбой временным). Временный сбой не кэшируем: иначе
+    один таймаут iTunes навсегда лишал трек точных полей (аудит 16.11.2026)."""
     try:
         async with session.get(
             "https://itunes.apple.com/lookup",
@@ -793,23 +795,23 @@ async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> dict[st
             timeout=aiohttp.ClientTimeout(total=6.0),
         ) as resp:
             if resp.status != 200:
-                return None
+                return None, False
             payload = json.loads(await resp.text(errors="ignore"))
     except Exception as exc:
         log.info("[tiktok-music] iTunes lookup failed: %s", exc)
-        return None
+        return None, True
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list) or not results:
-        return None
+        return None, False
     track = results[0]
     title = (track.get("trackName") or "").strip()
     artist = (track.get("artistName") or "").strip()
     if not title or not artist:
-        return None
+        return None, False
     artwork = track.get("artworkUrl600") or track.get("artworkUrl100") or ""
     if artwork:
         artwork = re.sub(r"/\d+x\d+bb\.", "/600x600bb.", artwork)
-    return {"title": title, "artist": artist, "cover": artwork}
+    return {"title": title, "artist": artist, "cover": artwork}, False
 
 
 async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: dict) -> dict[str, str] | None:
@@ -831,8 +833,8 @@ async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: 
         if sound_id and not was_paused and time.monotonic() >= _DSP_DISABLED_UNTIL:
             _DSP_TRACK_CACHE[sound_id] = None
         return None
-    track = await _itunes_track(session, song_id)
-    if sound_id:
+    track, transient = await _itunes_track(session, song_id)
+    if sound_id and not transient:
         _DSP_TRACK_CACHE[sound_id] = track
     if track:
         log.info(

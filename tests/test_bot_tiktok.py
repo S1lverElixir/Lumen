@@ -2349,3 +2349,26 @@ def test_slideshow_of_video_files_falls_back_to_single_video(monkeypatch):
         assert result is False
     finally:
         bot.chat_state.pop(999989, None)
+
+
+def test_itunes_transient_failure_is_not_cached(monkeypatch):
+    # Проверка правок 16.11.2026: один таймаут iTunes навсегда кэшировал None.
+    import lumen_tiktok
+    original_cache = dict(lumen_tiktok._DSP_TRACK_CACHE)
+    lumen_tiktok._DSP_TRACK_CACHE.clear()
+
+    async def fake_song_id(session, video_id, unique_id):
+        return "555"
+
+    async def fake_itunes(session, song_id):
+        return None, True
+
+    monkeypatch.setattr(lumen_tiktok, "_tiktok_dsp_song_id", fake_song_id)
+    monkeypatch.setattr(lumen_tiktok, "_itunes_track", fake_itunes)
+    try:
+        media_data = {"id": "1", "author": {"unique_id": "u"}, "music_info": {"id": "s1"}}
+        assert asyncio.run(lumen_tiktok._fetch_dsp_track_metadata(None, media_data)) is None
+        assert "s1" not in lumen_tiktok._DSP_TRACK_CACHE
+    finally:
+        lumen_tiktok._DSP_TRACK_CACHE.clear()
+        lumen_tiktok._DSP_TRACK_CACHE.update(original_cache)
