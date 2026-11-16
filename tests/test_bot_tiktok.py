@@ -2279,3 +2279,73 @@ def test_photo_post_without_downloaded_slides_fails_honestly(monkeypatch):
             ))
     finally:
         bot.chat_state.pop(999987, None)
+
+
+def test_slideshow_reports_slides_dropped_by_telegram_cap(monkeypatch):
+    # Проверка правок 16.11.2026: слайд сверх лимита Telegram выкидывался молча,
+    # и строка "N из M" не появлялась.
+    import lumen_tiktok_flow
+
+    class _GroupBot:
+        def __init__(self):
+            self.groups = []
+
+        async def send_media_group(self, **kwargs):
+            self.groups.append(kwargs["media"])
+            return SimpleNamespace()
+
+    telegram_bot = _GroupBot()
+    replies = []
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return b"0" * (2000 if url.endswith("2.jpg") else 500)
+
+    async def fake_reply(message, text, **kwargs):
+        replies.append(text)
+        return SimpleNamespace()
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(lumen_tiktok_flow, "_TG_PHOTO_MAX_BYTES", 1000)
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_safe_reply", fake_reply)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "_delete_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "bot", telegram_bot)
+    incoming = _FakeIncomingMessage(999988)
+    incoming.message_id = 10
+    media_data = {"images": ["http://x/1.jpg", "http://x/2.jpg", "http://x/3.jpg"]}
+    try:
+        result = asyncio.run(bot._try_send_tiktok_slideshow(
+            None, media_data, incoming, None, "author", {},
+        ))
+        assert result is True
+        assert len(telegram_bot.groups) == 1 and len(telegram_bot.groups[0]) == 2
+        assert replies and "2" in replies[0]
+    finally:
+        bot.chat_state.pop(999988, None)
+
+
+def test_slideshow_of_video_files_falls_back_to_single_video(monkeypatch):
+    # Проверка правок 16.11.2026: пост, чьи "слайды" сами mp4, не должен
+    # получать отказ — его честно отдаёт обычная видео-ветка.
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return None
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "_delete_message_quietly", fake_edit)
+    incoming = _FakeIncomingMessage(999989)
+    incoming.message_id = 11
+    media_data = {"images": ["http://x/1.mp4", "http://x/2.mp4"], "play": "http://x/p.mp4"}
+    try:
+        result = asyncio.run(bot._try_send_tiktok_slideshow(
+            None, media_data, incoming, None, "author", {},
+        ))
+        assert result is False
+    finally:
+        bot.chat_state.pop(999989, None)

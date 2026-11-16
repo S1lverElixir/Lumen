@@ -430,14 +430,17 @@ async def _try_send_tiktok_slideshow(
               probed = await asyncio.gather(*(_probe_bounded(downloaded[i]) for i in video_indices))
               probe_results = dict(zip(video_indices, probed))
          media_items: list[Any] = []
+         capped_slides = 0
          for idx, item_bytes in enumerate(downloaded):
               if not item_bytes:
                    continue
               if idx in probe_results and len(item_bytes) > _TG_VIDEO_MAX_BYTES:
                    log.warning("[tiktok] Slide %d skipped: %d MB over the 50 MB video cap.", idx, len(item_bytes) // (1024 * 1024))
+                   capped_slides += 1
                    continue
               if idx not in probe_results and len(item_bytes) > _TG_PHOTO_MAX_BYTES:
                    log.warning("[tiktok] Slide %d skipped: %d MB over the 10 MB photo cap.", idx, len(item_bytes) // (1024 * 1024))
+                   capped_slides += 1
                    continue
               if idx in probe_results:
                     # Видео-слайд — как видео со звуком-как-есть, плюс те же duration/size/thumbnail, что у цельного видео (иначе Telegram не распознаёт контейнер).
@@ -458,7 +461,10 @@ async def _try_send_tiktok_slideshow(
                    media_items.append(InputMediaPhoto(media=BufferedInputFile(item_bytes, filename=f"photo_{idx}.jpg")))
          if not media_items:
               # У фото-поста play — аудиодорожка: ветка видео скачала бы её как
-              # mp4 и выдала за видео (внешний аудит 16.11.2026).
+              # mp4 и выдала за видео (внешний аудит 16.11.2026). Но если слайды
+              # сами видеофайлы, честнее упасть в обычную видео-ветку.
+              if any(str(u).lower().split("?")[0].endswith((".mp4", ".m4v", ".webm")) for u in fetch_urls):
+                   return False
               raise TikTokUserFacingError(bot._t(message.chat.id, "tiktok_generic_fail"))
          if media_items:
               # Статус держим до конца (включая музыку ниже) — иначе человек висит в тишине, пока качается трек.
@@ -519,7 +525,7 @@ async def _try_send_tiktok_slideshow(
               )
               await _send_tiktok_music(session, media_data, message, author, headers)
               await _status_delete(status)
-              if skipped_slides:
+              if skipped_slides or capped_slides:
                    # Кадров пришло меньше, чем обещал статус. Тот же локализованный
                    # шаблон счётчика, уже без анимации: молча показать 5 из 12 —
                    # выглядит как «бот съел половину поста» (аудит 01.11.2026).
