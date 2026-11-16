@@ -582,8 +582,42 @@ def test_load_state_clean_on_first_start_without_index_or_legacy():
             lumen_chat_state._state_load_failed = orig_failed
 
 
-def test_load_state_does_not_overwrite_chat_whose_snapshot_was_not_restored():
-    # Регрессия аудита run-2: транзиентный сбой чтения одного чата на старте оставлял
+def test_index_recovery_merges_remote_ids_instead_of_replacing(monkeypatch):
+    # Аудит 16.11.2026: после сбоя чтения индекса новый чат получал per-chat ключ,
+    # но в индекс не попадал и после рестарта оставался сиротой. Повторное чтение
+    # сливает удалённые id с нашими, а не заменяет их.
+    import json as _json
+    import lumen_chat_state as lcs
+
+    remote_id, new_id = 515151, 525252
+    written = {}
+
+    def fake_write(key, path, payload):
+        written["index"] = payload
+        return True
+
+    orig = (lcs._state_load_failed, set(lcs._index_extra_ids), lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._index_extra_ids.clear()
+    lcs._index_retry_last_ts = 0.0
+    bot.chat_state[new_id] = {"history": []}
+    try:
+        with patch("bot._storage_read_text", side_effect=lambda key, path: _json.dumps([remote_id])), \
+             patch("bot._storage_write_text", side_effect=fake_write):
+            assert lcs._recover_index_ids() is True
+            assert lcs._state_load_failed is False
+            assert remote_id in lcs._index_extra_ids
+            assert lcs._save_chat_index() is True
+        assert _json.loads(written["index"]) == sorted([remote_id, new_id])
+    finally:
+        lcs._state_load_failed, extra, retry = orig
+        lcs._index_extra_ids.clear()
+        lcs._index_extra_ids.update(extra)
+        lcs._index_retry_last_ts = retry
+        bot.chat_state.pop(new_id, None)
+
+
+def test_load_state_does_not_overwrite_chat_whose_snapshot_was_not_restored():    # Регрессия аудита run-2: транзиентный сбой чтения одного чата на старте оставлял
     # его вне памяти, а первый же флаш после нового сообщения затирал полную удалённую
     # историю однострочным снимком — потеря была необратимой и молчаливой.
     good, broken = 999721, 999722
@@ -614,7 +648,9 @@ def test_load_state_does_not_overwrite_chat_whose_snapshot_was_not_restored():
         bot._dirty_chat_ids.clear()
         try:
             bot.load_state_from_disk()
-            assert lumen_chat_state._state_load_failed is True
+            # Один нечитаемый чат больше не блокирует индекс и квоту: он защищён
+            # пер-чат, а глобальный флаг остаётся чистым (аудит 16.11.2026).
+            assert lumen_chat_state._state_load_failed is False
             assert broken in lumen_chat_state._chat_snapshot_unloaded
             bot.get_state(broken)
             bot.mark_state_dirty(broken)
@@ -731,6 +767,7 @@ def test_startup_load_failure_blocks_index_overwrite_but_not_new_chats(caplog):
         with patch("bot._save_chat_payload", return_value=True) as mock_chat, \
                 patch("bot._save_chat_index_payload", return_value=True) as mock_index, \
                 patch("bot._save_quota_payload", return_value=True) as mock_quota, \
+                patch("bot._storage_read_text", side_effect=RuntimeError("Upstash down")), \
                 caplog.at_level(logging.WARNING, logger="bot"):
             asyncio.run(bot._flush_dirty_state_once())
             mock_index.assert_not_called()

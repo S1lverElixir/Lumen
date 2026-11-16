@@ -497,11 +497,51 @@ def _resolve_nick(state: dict[str, Any], nick: str) -> str | None:
     return None
 
 
+def _index_ids() -> list[int]:
+    return sorted(set(chat_state.keys()) | _index_extra_ids)
+
+
+def _recover_index_ids() -> bool:
+    """Повторное чтение индекса после стартового сбоя: удалённые id надо слить,
+    а не заменить своими. Не чаще раза в минуту, чтобы лежащий Upstash не получал
+    запрос на каждый флаш."""
+    global _state_load_failed, _index_retry_last_ts
+    if not _state_load_failed:
+        return True
+    now = time.monotonic()
+    if now - _index_retry_last_ts < _INDEX_RETRY_SEC:
+        return False
+    _index_retry_last_ts = now
+    import bot
+    try:
+        raw = bot._storage_read_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE)
+    except Exception as exc:
+        log.warning('[state] Chat index retry failed: %s', exc)
+        return False
+    ids: set[int] = set()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return False
+        if not isinstance(parsed, list):
+            return False
+        for cid in parsed:
+            try:
+                ids.add(int(cid))
+            except Exception:
+                continue
+    _index_extra_ids.update(ids)
+    _state_load_failed = False
+    log.info('[state] Chat index recovered after the startup failure: %d remote id(s) merged.', len(ids))
+    return True
+
+
 def _save_chat_index() -> bool:
     """True/False для повтора в _flush_state_now: раньше неуспех молча терялся (аудит A5-1)."""
     import bot
     try:
-        ids = sorted(chat_state.keys())
+        ids = _index_ids()
         bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, json.dumps(ids))
         _note_storage_write()
         return True
@@ -547,6 +587,12 @@ _quota_generation = 0
 # Отказ стартовой загрузки: пока стоит, индекс и квоту не перезаписываем,
 # иначе первый флаш затрёт хорошие удалённые данные пустым снимком (аудит A5-2).
 _state_load_failed = False
+# id из удалённого индекса, прочитанного ПОВТОРНО после стартового сбоя: индекс
+# собирается слиянием, а не заменой нашими чатами (аудит 16.11.2026 — новые чаты
+# получали ключ, но выпадали из индекса и после рестарта оставались сиротами).
+_index_extra_ids: set[int] = set()
+_index_retry_last_ts = 0.0
+_INDEX_RETRY_SEC = 60.0
 # Чаты, чей удалённый снимок НЕ восстановился: их ключи нельзя перезаписывать
 # однострочным снимком из памяти — удалённая копия полнее (аудит run-2, 08.11.2026).
 _chat_snapshot_unloaded: set[int] = set()
@@ -695,9 +741,17 @@ async def _flush_dirty_state_once() -> None:
             # Снапшот ключей — здесь (см. комментарий у _save_chat_to_storage_limited).
             if _state_load_failed:
                 # Удалённый индекс новее пустой памяти — не затираем, очередь живёт дальше.
-                log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+                # Один повтор чтения в минуту: удалённые id сливаем, а не заменяем.
+                if not _recover_index_ids():
+                    log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+                else:
+                    index_payload = json.dumps(_index_ids())
+                    started_index_generation = _index_generation
+                    if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
+                        if _index_generation == started_index_generation:
+                            _index_dirty = False
             else:
-                index_payload = json.dumps(sorted(chat_state.keys()))
+                index_payload = json.dumps(_index_ids())
                 started_index_generation = _index_generation
                 if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
                     # Сбрасываем, только если за время записи никто не мутировал:
@@ -760,7 +814,14 @@ def _flush_state_now() -> None:
     if _index_dirty:
         if _state_load_failed:
             # Удалённый индекс новее пустой памяти — не затираем (аудит A5-2).
-            log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+            if _recover_index_ids():
+                try:
+                    if bot._save_chat_index() is True:
+                        _index_dirty = False
+                except Exception as exc:
+                    log.warning("[state] Saving chat index failed: %s", exc)
+            else:
+                log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
         else:
             try:
                 index_saved = bot._save_chat_index()
@@ -774,9 +835,11 @@ def _flush_state_now() -> None:
 
 def load_state_from_disk() -> None:
     import bot
-    global _state_load_failed
+    global _state_load_failed, _index_retry_last_ts
     # Новая попытка снимает старый отказ; неуспех ниже выставит его заново.
     _state_load_failed = False
+    _index_extra_ids.clear()
+    _index_retry_last_ts = 0.0
     _chat_snapshot_unloaded.clear()
     bot.load_global_quota()
 
@@ -795,6 +858,9 @@ def load_state_from_disk() -> None:
         try:
             chat_ids = json.loads(index_raw)
         except Exception as exc:
+            # Состав удалённых чатов неизвестен: перезапись индекса потеряла бы
+            # пер-чат записи, которых нет в legacy-блобе (аудит 16.11.2026).
+            _state_load_failed = True
             log.warning('[state] Failed to parse chat index: %s', exc)
             chat_ids = None
         if isinstance(chat_ids, list):
@@ -807,7 +873,6 @@ def load_state_from_disk() -> None:
                 try:
                     raw = bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
                 except Exception as exc:
-                    _state_load_failed = True
                     _chat_snapshot_unloaded.add(cid)
                     log.warning('[state] Failed to read chat %s: %s', cid, exc)
                     continue
@@ -816,7 +881,6 @@ def load_state_from_disk() -> None:
                 try:
                     s = json.loads(raw)
                 except Exception as exc:
-                    _state_load_failed = True
                     _chat_snapshot_unloaded.add(cid)
                     log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
                     continue
@@ -824,7 +888,6 @@ def load_state_from_disk() -> None:
                     bot._restore_single_chat(cid, s)
                 except Exception as exc:
                     # Одна битая запись не обрывает восстановление остальных чатов.
-                    _state_load_failed = True
                     _chat_snapshot_unloaded.add(cid)
                     log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
                     continue
@@ -962,6 +1025,7 @@ def _prune_old_chats() -> None:
     removed_ids = removable[:to_remove]
     for cid in removed_ids:
         chat_state.pop(cid, None)
+        _index_extra_ids.discard(cid)
         bot._chat_locks.pop(cid, None)
     # Вытесненные чаты должны реально исчезнуть из хранилища (иначе их собственные
     # ключи/файлы бесхозно копятся вечно) — ставим в очередь на удаление,
