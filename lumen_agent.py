@@ -74,6 +74,10 @@ _MAX_STEPS = 3
 # Фаза идёт ДО бюджета маршрута и раньше не была ограничена ничем, кроме собственной
 # пары таймаутов: замер 12.11.2026 — три шага съедали ~42 с до начала ответа.
 _STEP_PHASE_SEC = _STEP_CALL_TIMEOUT_SEC + 6.0  # 6 = дефолт WEB_SEARCH_TIMEOUT_SEC
+# Жёсткий потолок всей фазы: 3 поиска по формуле дали бы 66 с и оставили маршруту
+# меньше 24 с из 90; лучше два полных поиска, чем три, после которых нечем ответить
+# (аудит 16.11.2026, эталон Claude — 1-3 поиска на простой факт).
+_PHASE_HARD_CAP_SEC = 45.0
 
 _IDENTITY_NAMES: tuple[str, ...] = ()
 
@@ -175,10 +179,12 @@ class AgentTurnResult:
 
 def evidence_phase_budget_sec(max_searches: int) -> float:
     """Сколько секунд может занять вся фаза: на каждый запланированный поиск пара
-    «планирование + сеть», но не больше потолка шагов. Отдельная граница нужна
-    потому, что планирующие вызовы идут вне бюджета маршрута."""
+    «планирование + сеть», но не больше потолка шагов и не больше жёсткого потолка
+    фазы. Отдельная граница нужна потому, что планирующие вызовы идут вне бюджета
+    маршрута."""
     per_step = _STEP_PHASE_SEC + _STEP_CALL_TIMEOUT_SEC
-    return float(max(_STEP_PHASE_SEC, min(max_searches, _MAX_STEPS) * per_step))
+    return float(min(_PHASE_HARD_CAP_SEC,
+                     max(_STEP_PHASE_SEC, min(max_searches, _MAX_STEPS) * per_step)))
 
 
 def agent_turn_enabled() -> bool:

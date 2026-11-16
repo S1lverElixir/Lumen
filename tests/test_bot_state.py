@@ -511,11 +511,47 @@ def test_load_state_falls_back_to_legacy_blob_on_corrupt_index():
         try:
             bot.load_state_from_disk()
             assert bot.chat_state[4242]["history"] == [{"role": "user", "content": "привет"}]
+            # Битый индекс: блоб мог быть старше per-chat ключей, поэтому чат
+            # помечен как «снимок не восстановлен» и обратно не пишется.
+            assert 4242 in lumen_chat_state._chat_snapshot_unloaded
         finally:
             bot.chat_state.pop(4242, None)
+            lumen_chat_state._chat_snapshot_unloaded.discard(4242)
             bot._dirty_chat_ids.clear()
             bot._dirty_chat_ids.update(was_dirty)
             lumen_chat_state._index_dirty = False
+
+
+def test_load_state_does_not_rewrite_legacy_blob_when_index_read_fails():
+    # Аудит 16.11.2026: транзиентный сбой ЧТЕНИЯ индекса (429 на одном запросе)
+    # уводил загрузку в legacy-блоб, блоб помечался грязным, и первый флаш
+    # перезаписывал per-chat ключи старым снимком — потеря свежей истории.
+    import json
+    legacy = {"5151": {"history": [{"role": "user", "content": "старое"}], "lang": "ru"}}
+
+    def fake_read(key, path):
+        if "index" in str(key).lower() or str(path).endswith("index.json"):
+            raise RuntimeError("upstash 429")
+        if key == "lumen:chat_state":
+            return json.dumps(legacy)
+        return None
+
+    written = []
+    with patch("bot._storage_read_text", side_effect=fake_read), \
+         patch("bot._storage_write_text", side_effect=lambda *a, **k: written.append(a)):
+        was_dirty = set(bot._dirty_chat_ids)
+        try:
+            bot.load_state_from_disk()
+            assert bot.chat_state[5151]["history"][0]["content"] == "старое"
+            assert 5151 in lumen_chat_state._chat_snapshot_unloaded
+            assert 5151 not in bot._dirty_chat_ids
+            assert lumen_chat_state._save_chat_payload(5151, "{}") is False
+            assert written == []
+        finally:
+            bot.chat_state.pop(5151, None)
+            bot._dirty_chat_ids.clear()
+            bot._dirty_chat_ids.update(was_dirty)
+            lumen_chat_state._chat_snapshot_unloaded.discard(5151)
 
 
 def test_load_state_flags_failed_when_index_corrupt_and_no_legacy():

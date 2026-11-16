@@ -462,6 +462,9 @@ def test_evidence_phase_budget_is_bounded_by_steps():
     many = lumen_agent.evidence_phase_budget_sec(9)
     assert one < many
     assert many == lumen_agent.evidence_phase_budget_sec(lumen_agent._MAX_STEPS)
+    # Жёсткий потолок фазы: три поиска по формуле дали бы 66 с и оставили маршруту
+    # меньше 24 с из 90 (аудит 16.11.2026).
+    assert many == lumen_agent._PHASE_HARD_CAP_SEC
 
 def test_model_query_is_cleaned_before_it_reaches_the_bubble():
     # Ревью приватности 12.11.2026: запрос пишет модель, и в него попадают имя

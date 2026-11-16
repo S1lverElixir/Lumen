@@ -926,7 +926,7 @@ def test_munito_payload_extras_drops_field_for_unsupported_model(monkeypatch):
 
 
 @pytest.mark.parametrize(("effort", "expected"), [
-    ("low", 0), ("medium", 1), ("high", 2), ("xhigh", 2), (None, 0),
+    ("low", 0), ("medium", 2), ("high", 2), ("xhigh", 3), (None, 0),
 ])
 def test_agent_max_searches_follows_effort(monkeypatch, effort, expected):
     monkeypatch.delenv("AGENT_MAX_SEARCHES", raising=False)
@@ -936,7 +936,7 @@ def test_agent_max_searches_follows_effort(monkeypatch, effort, expected):
 def test_agent_searches_table_names_searches_not_steps():
     # Револьвер ревью: лимит обязан считаться поисками. Если в таблице снова
     # окажутся шаги, одна строка с тремя tool_calls израсходует «один поиск».
-    assert lumen_router_config._AGENT_SEARCHES_BY_EFFORT["medium"] == 1
+    assert lumen_router_config._AGENT_SEARCHES_BY_EFFORT["medium"] == 2
     assert "AGENT_MAX_SEARCHES" in lumen_router_config.agent_max_searches.__doc__
 
 
@@ -955,7 +955,7 @@ def test_agent_max_searches_env_override(monkeypatch):
     monkeypatch.setenv("AGENT_MAX_SEARCHES", "3")
     assert lumen_router_config.agent_max_searches("medium") == 3
     monkeypatch.setenv("AGENT_MAX_SEARCHES", "не число")
-    assert lumen_router_config.agent_max_searches("medium") == 1
+    assert lumen_router_config.agent_max_searches("medium") == 2
 
 
 @pytest.mark.parametrize(("model_id", "effort", "expected"), [

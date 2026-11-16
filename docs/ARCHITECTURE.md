@@ -51,7 +51,7 @@ Since 12.11.2026 a freshness-flagged message does not search the user's wording 
 agentic phase first, which is what Claude does with its server-side `web_search` tool: the model is
 given a client-side `web_search` function (`tool_choice: "auto"`), writes its own standalone queries,
 sees what came back and may refine the wording. One query is one search; `pick_reasoning_effort`
-bounds them (`medium` 1, `high`/`xhigh` 2, `_MAX_STEPS` 3 as a loop guard), extra `tool_calls` in an
+bounds them (`medium` 2, `high` 2, `xhigh` 3, `_MAX_STEPS` 3 as a loop guard), extra `tool_calls` in an
 over-budget step are dropped rather than executed, and the whole phase carries its own deadline
 (`evidence_phase_budget_sec` inside `MESSAGE_TOTAL_BUDGET_SEC`) because it runs before the route
 budget exists.
@@ -77,7 +77,7 @@ cost (`eval/agent_loop_probe.py`, 12.11.2026): 11 of 12 questions searched, 3.12
 ≈5.9K tokens per planning call. Re-measured on the evening of 12.11.2026 after the effort-signal
 change, same probe and the same 12 questions: 11 of 12 searched, mean 4.36 s, median 4.66 s, p95
 4.94 s, worst 5.13 s — the phase keeps a fourfold margin against its own ceiling instead
-(`lumen_agent.evidence_phase_budget_sec`: 22 s at medium, 44 s at high/xhigh, inside `MESSAGE_TOTAL_BUDGET_SEC`); `ROUTE_TOTAL_BUDGET_SEC` does not bound the phase at all — it starts only after the phase returns, and the one exception is a voice note whose transcription already spent part of it. The probe measures the phase with a short transcript, so the first production night corrected the shape of the ceiling inside it: 5 planning calls logged 13.11.2026 gave 2.0-2.7 s, 6.4 s and two that ran into the then-flat 8 s cap (`planning_ms=8433`, `8723`) and ended the loop with no search at all. A planning call now gets the phase left minus one external search, capped at 16 s (`_STEP_CALL_MAX_SEC`), and is skipped entirely when what is left cannot feed both the call and the search. The slower mean came from DuckDuckGo lite and Wikidata timing out (the block was built
+(`lumen_agent.evidence_phase_budget_sec`: 44 s at medium/high, 45 s at xhigh under a hard phase cap, inside `MESSAGE_TOTAL_BUDGET_SEC`); `ROUTE_TOTAL_BUDGET_SEC` does not bound the phase at all — it starts only after the phase returns, and the one exception is a voice note whose transcription already spent part of it. The probe measures the phase with a short transcript, so the first production night corrected the shape of the ceiling inside it: 5 planning calls logged 13.11.2026 gave 2.0-2.7 s, 6.4 s and two that ran into the then-flat 8 s cap (`planning_ms=8433`, `8723`) and ended the loop with no search at all. A planning call now gets the phase left minus one external search, capped at 16 s (`_STEP_CALL_MAX_SEC`), and is skipped entirely when what is left cannot feed both the call and the search. The slower mean came from DuckDuckGo lite and Wikidata timing out (the block was built
 from Bing News and Google News instead), not from the code. Deliberately not in this branch, by the
 owner's decision of 12.11.2026: a `read_page` tool (it needs the Deno relay allowlist and an SSRF
 review first), a Gemini-native function-calling loop, and Gemini thought summaries.

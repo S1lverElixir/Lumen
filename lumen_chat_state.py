@@ -781,9 +781,11 @@ def load_state_from_disk() -> None:
     bot.load_global_quota()
 
     index_raw = None
+    index_read_failed = False
     try:
         index_raw = bot._storage_read_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE)
     except Exception as exc:
+        index_read_failed = True
         _state_load_failed = True
         log.warning("[state] Reading chat index failed, falling back to legacy combined blob: %s", exc)
 
@@ -863,7 +865,21 @@ def load_state_from_disk() -> None:
             '[state] Restored states for %d chats (migrated from the old shared storage format — will be rewritten in the new per-chat format on next flush).',
             len(chat_state),
         )
-        bot.mark_state_dirty()
+        if index_read_failed or index_raw is not None:
+            # Индекс не прочитан (или битый), а per-chat ключи могут быть НОВЕЕ блоба:
+            # восстановленное из блоба годится только для ответов, писать его обратно
+            # нельзя, иначе старый снимок затрёт более свежую историю (аудит 16.11.2026).
+            for _cid in list(chat_state):
+                try:
+                    _chat_snapshot_unloaded.add(int(_cid))
+                except Exception:
+                    continue
+            log.warning(
+                '[state] Restored %d chats from the legacy blob for answering only; remote per-chat data is kept.',
+                len(chat_state),
+            )
+        else:
+            bot.mark_state_dirty()
     except Exception as exc:
         _state_load_failed = True
         log.warning("[state] Restoring states failed: %s", exc)
