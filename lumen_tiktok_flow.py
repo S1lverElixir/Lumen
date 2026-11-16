@@ -37,6 +37,12 @@ from lumen_tiktok import (
 )
 from lumen_status import StatusMessage
 
+# Лимиты Telegram на один файл: фото 10 МБ, видео 50 МБ. Слайд качается с
+# резервом до TIKTOK_DOWNLOAD_MAX_BYTES; переполненный по типу слайд выкидываем,
+# иначе Telegram отклоняет всю группу разом (внешний аудит 16.11.2026).
+_TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+_TG_VIDEO_MAX_BYTES = 50 * 1024 * 1024
+
 
 def _status_message(status: "StatusMessage | Message | None"):
     """Реальное сообщение статуса для правок ошибок (актор или голый Message)."""
@@ -427,6 +433,12 @@ async def _try_send_tiktok_slideshow(
          for idx, item_bytes in enumerate(downloaded):
               if not item_bytes:
                    continue
+              if idx in probe_results and len(item_bytes) > _TG_VIDEO_MAX_BYTES:
+                   log.warning("[tiktok] Slide %d skipped: %d MB over the 50 MB video cap.", idx, len(item_bytes) // (1024 * 1024))
+                   continue
+              if idx not in probe_results and len(item_bytes) > _TG_PHOTO_MAX_BYTES:
+                   log.warning("[tiktok] Slide %d skipped: %d MB over the 10 MB photo cap.", idx, len(item_bytes) // (1024 * 1024))
+                   continue
               if idx in probe_results:
                     # Видео-слайд — как видео со звуком-как-есть, плюс те же duration/size/thumbnail, что у цельного видео (иначе Telegram не распознаёт контейнер).
                    duration, width, height, thumb_bytes = probe_results[idx]
@@ -444,12 +456,23 @@ async def _try_send_tiktok_slideshow(
                    media_items.append(InputMediaVideo(**video_kwargs))
               else:
                    media_items.append(InputMediaPhoto(media=BufferedInputFile(item_bytes, filename=f"photo_{idx}.jpg")))
+         if not media_items:
+              # У фото-поста play — аудиодорожка: ветка видео скачала бы её как
+              # mp4 и выдала за видео (внешний аудит 16.11.2026).
+              raise TikTokUserFacingError(bot._t(message.chat.id, "tiktok_generic_fail"))
          if media_items:
               # Статус держим до конца (включая музыку ниже) — иначе человек висит в тишине, пока качается трек.
               if len(media_items) == 1:
                     # Один уцелевший слайд — обычным send_photo/send_video: media group требует минимум 2.
                    only_item = media_items[0]
                    if isinstance(only_item, InputMediaVideo):
+                        # Те же duration/size/thumbnail, что у группы: без них
+                        # одиночный слайд уходил сырым файлом 0:00 (внешний аудит 16.11.2026).
+                        slide_kwargs: dict[str, Any] = {}
+                        for attr in ("duration", "width", "height", "thumbnail"):
+                             value = getattr(only_item, attr, None)
+                             if value:
+                                  slide_kwargs[attr] = value
                         sent_slide = await bot._tg_call(
                              bot.bot.send_video,
                              chat_id=message.chat.id, video=only_item.media,
@@ -457,6 +480,7 @@ async def _try_send_tiktok_slideshow(
                              call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
                              # Без слепого ретрая: повтор отправки после сбоя дал бы дубль.
                              retries=0,
+                             **slide_kwargs,
                         )
                    else:
                         sent_slide = await bot._tg_call(

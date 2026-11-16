@@ -822,9 +822,13 @@ async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: 
     unique_id = (media_data.get("author") or {}).get("unique_id") or ""
     if not video_id or not unique_id:
         return None
+    # None кэшируем только когда страница реально прочитана и DSP-трека в ней нет.
+    # Кулдаун/недоступность — не приговор звуку: иначе один антибот навсегда
+    # отправлял трек к полям TikWM до рестарта (внешний аудит 16.11.2026).
+    was_paused = time.monotonic() < _DSP_DISABLED_UNTIL
     song_id = await _tiktok_dsp_song_id(session, video_id, unique_id)
     if not song_id:
-        if sound_id:
+        if sound_id and not was_paused and time.monotonic() >= _DSP_DISABLED_UNTIL:
             _DSP_TRACK_CACHE[sound_id] = None
         return None
     track = await _itunes_track(session, song_id)

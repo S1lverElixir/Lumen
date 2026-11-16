@@ -2194,3 +2194,88 @@ def test_group_tiktok_link_passive_only_when_mention_required(monkeypatch):
     assert core._should_only_record_passively(msg, text, is_private=True, is_guest=False, mentioned=False) is False
     assert core._should_only_record_passively(msg, text, is_private=False, is_guest=False, mentioned=True) is False
 
+
+def test_dsp_cooldown_does_not_cache_negative_result():
+    # Внешний аудит 16.11.2026: один антибот TikTok кэшировал None навсегда,
+    # и трек этого поста до рестарта брался из полей TikWM.
+    class _NoCallSession:
+        def get(self, *args, **kwargs):
+            raise AssertionError("DSP page must not be requested during cooldown")
+
+    original_cache = dict(lumen_tiktok._DSP_TRACK_CACHE)
+    original_disabled = lumen_tiktok._DSP_DISABLED_UNTIL
+    lumen_tiktok._DSP_TRACK_CACHE.clear()
+    lumen_tiktok._DSP_DISABLED_UNTIL = time.monotonic() + 300
+    try:
+        media_data = {"id": "1", "author": {"unique_id": "user"}, "music_info": {"id": "sound-1"}}
+        assert asyncio.run(lumen_tiktok._fetch_dsp_track_metadata(_NoCallSession(), media_data)) is None
+        assert "sound-1" not in lumen_tiktok._DSP_TRACK_CACHE
+    finally:
+        lumen_tiktok._DSP_TRACK_CACHE.clear()
+        lumen_tiktok._DSP_TRACK_CACHE.update(original_cache)
+        lumen_tiktok._DSP_DISABLED_UNTIL = original_disabled
+
+
+def test_single_video_slide_keeps_duration_and_thumbnail(monkeypatch):
+    # Внешний аудит 16.11.2026: одинокий видео-слайд уходил без duration/size/
+    # thumbnail, то есть сырым файлом 0:00.
+    sent = {}
+
+    class _VideoBot:
+        async def send_video(self, **kwargs):
+            sent.update(kwargs)
+            return SimpleNamespace()
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        if url.endswith("2.jpg"):
+            return None
+        return b"----ftyp" + b"0" * 100
+
+    async def fake_probe(data):
+        return 12, 1080, 1920, b"thumb"
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_probe_and_thumbnail_from_bytes", fake_probe)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "_delete_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "bot", _VideoBot())
+    incoming = _FakeIncomingMessage(999986)
+    incoming.message_id = 8
+    media_data = {"images": ["http://x/1.jpg", "http://x/2.jpg"]}
+    try:
+        result = asyncio.run(bot._try_send_tiktok_slideshow(
+            None, media_data, incoming, None, "author", {},
+        ))
+        assert result is True
+        assert sent.get("duration") == 12
+        assert sent.get("width") == 1080 and sent.get("height") == 1920
+        assert sent.get("thumbnail") is not None
+    finally:
+        bot.chat_state.pop(999986, None)
+
+
+def test_photo_post_without_downloaded_slides_fails_honestly(monkeypatch):
+    # Внешний аудит 16.11.2026: у фото-поста play — аудиодорожка, и пустая
+    # ветка слайдов качала её как mp4 вместо честного отказа.
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return None
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    monkeypatch.setattr(bot, "_delete_message_quietly", fake_edit)
+    incoming = _FakeIncomingMessage(999987)
+    incoming.message_id = 9
+    media_data = {"images": ["http://x/1.jpg"]}
+    try:
+        with pytest.raises(lumen_tiktok.TikTokUserFacingError):
+            asyncio.run(bot._try_send_tiktok_slideshow(
+                None, media_data, incoming, None, "author", {},
+            ))
+    finally:
+        bot.chat_state.pop(999987, None)
