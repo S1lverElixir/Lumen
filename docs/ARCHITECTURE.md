@@ -44,6 +44,10 @@ The route matrix below is the code as of 16.11.2026 (`_build_route` in `lumen_ro
 | `/tts` | `GEMINI_TTS_MODELS` only |
 | Draw request | Cloudflare Workers AI first, Pollinations as the reserve — fallback is per provider, not per model |
 | TikTok link | TikWM download path (no chat model involved) |
+| Document or PDF | Not `image/*`, so the video/audio branch applies: Gemini heavy or search chain only (Gemini reads PDFs natively) |
+| Sticker | `image/webp` falls under the image row: Munito vision first, Gemini heavy as the reserve |
+| Album (`media_group_id`) | Buffered and answered once under the chat lock; every photo inside follows the image row |
+| Edited message | Delivered (`ALLOWED_UPDATES`) but has no handler: an edit never starts a new answer |
 
 Within a provider block the order is re-sorted by measured latency before the first call; each model is tried at most once and a failure moves to the next candidate, all bounded by `ROUTE_TOTAL_BUDGET_SEC`.
 

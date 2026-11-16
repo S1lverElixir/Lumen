@@ -1040,3 +1040,15 @@ def test_munito_ceiling_reads_zero_on_a_new_quota_day(monkeypatch):
     finally:
         bot.GLOBAL_QUOTA.clear()
         bot.GLOBAL_QUOTA.update(real)
+
+
+def test_build_route_classifies_pdf_and_sticker(monkeypatch):
+    # Критика полноты 16.11.2026: классы входов документ/стикер не проверялись.
+    # PDF — не картинка, поэтому идёт в Gemini-цепочку как видео/аудио;
+    # стикер — image/webp, то есть обычная картинка Munito с резервом Gemini.
+    _munito_mode(monkeypatch)
+    pdf = _route_for(media_mime="application/pdf")
+    assert pdf == lumen_router_config._gemini_route(lumen_router_config.GEMINI_HEAVY_CHAIN)
+    sticker = _route_for(media_mime="image/webp")
+    assert sticker[0][0] == "munito"
+    assert any(provider == "gemini" for provider, _ in sticker)
