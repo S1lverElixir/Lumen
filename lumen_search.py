@@ -1497,6 +1497,12 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
     цитатами. Ключа нет — источник молча отсутствует, работают безключевые слои."""
     provider = search_api_provider()
     if not provider:
+        # Провайдер не выбран: либо SEARCH_API_PROVIDER не задан и ключа нет в env,
+        # либо ключ пуст. Строка нужна, чтобы отличать это от пустой выдачи
+        # (прод 16.11.2026: Tavily «настроен», а слой молчит).
+        log.info("[web-search] keyed provider off (tavily_key=%s brave_key=%s exa_key=%s)",
+                 bool(os.getenv("TAVILY_API_KEY")), bool(os.getenv("BRAVE_API_KEY")),
+                 bool(os.getenv("EXA_API_KEY")))
         return []
     if not search_api_budget_left():
         # Дневной потолок ключевого провайдера исчерпан: уходим на слои без ключа,
