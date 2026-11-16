@@ -54,6 +54,14 @@ jobs:
 
       - run: deno lint proxy/proxy.ts
 
+      # Workers-релей: контракт тот же, тесты чистых функций офлайн. Node 24
+      # выполняет TypeScript без сборки (strip-types по умолчанию).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - run: node --test worker/worker.test.ts
+
       # проверка requirements.txt на известные CVE в зафиксированных версиях —
       # requirements-dev.txt (pytest/pyflakes/pip-audit) не сканируем: это
       # dev-инструменты, не попадающие в рантайм-образ (см. Dockerfile/.dockerignore)
