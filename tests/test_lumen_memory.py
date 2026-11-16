@@ -117,3 +117,20 @@ def test_summary_input_keeps_previous_memory_when_body_is_long():
     digest = lumen_memory.summary_input("PREVIOUS FACT", entries, max_chars=500)
     assert digest.startswith("Previous memory:\nPREVIOUS FACT")
     assert "Messages leaving the short-term window:" in digest
+
+def test_photo_context_limit_rises_on_an_explicit_media_reference():
+    # Аудит 16.11.2026: эталон Claude видит все изображения переписки; у нас цена —
+    # токены и скачивание, поэтому база 2, а явная ссылка на фото разрешает больше.
+    assert lumen_memory.photo_context_limit("привет, как дела") == lumen_memory.PHOTO_CONTEXT_MAX
+    assert lumen_memory.photo_context_limit("посмотри на те фото") == max(
+        lumen_memory.PHOTO_CONTEXT_MAX, lumen_memory.PHOTO_CONTEXT_MAX_REFERENCED)
+    assert lumen_memory.PHOTO_CONTEXT_MAX_REFERENCED >= lumen_memory.PHOTO_CONTEXT_MAX
+
+
+def test_env_positive_parses_and_falls_back(monkeypatch):
+    monkeypatch.setenv("PHOTO_CONTEXT_MAX", "7")
+    assert lumen_memory._env_positive("PHOTO_CONTEXT_MAX", 2) == 7
+    monkeypatch.setenv("PHOTO_CONTEXT_MAX", "abc")
+    assert lumen_memory._env_positive("PHOTO_CONTEXT_MAX", 2) == 2
+    monkeypatch.setenv("PHOTO_CONTEXT_MAX", "-3")
+    assert lumen_memory._env_positive("PHOTO_CONTEXT_MAX", 2) == 0

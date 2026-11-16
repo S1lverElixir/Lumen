@@ -1,6 +1,7 @@
 """lumen_memory.py — единая память чата: лог с авторами и медиа, форматирование и выбор прошлых фото."""
 from __future__ import annotations
 
+import os
 import re
 import time
 from datetime import datetime
@@ -16,9 +17,31 @@ MAX_MEMORY_MESSAGES = 200
 MEMORY_KEEP_MESSAGES = 150
 # Сколько старых сообщений может ждать сводку при сбое: без капа состояние росло бы вечно.
 MAX_MEMORY_PENDING = 400
-# Фото видит модель, пока они в последних 30 сообщениях; максимум 2, иначе галерея.
-PHOTO_CONTEXT_WINDOW = 30
-PHOTO_CONTEXT_MAX = 2
+# Фото видит модель, пока они в последних 30 сообщениях; база — 2, явная ссылка
+# на медиа поднимает потолок до 4 (эталон Claude видит все изображения переписки,
+# у нас цена — входные токены и скачивание файла на каждое сообщение, аудит 16.11.2026).
+def _env_positive(name: str, default: int) -> int:
+    try:
+        return max(0, int((os.getenv(name, "") or str(default)).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+PHOTO_CONTEXT_WINDOW = _env_positive("PHOTO_CONTEXT_WINDOW", 30)
+PHOTO_CONTEXT_MAX = _env_positive("PHOTO_CONTEXT_MAX", 2)
+PHOTO_CONTEXT_MAX_REFERENCED = _env_positive("PHOTO_CONTEXT_MAX_REFERENCED", 4)
+
+
+def photo_context_limit(user_text: str) -> int:
+    """Сколько прошлых фото приложить к ходу: явная ссылка на фото/видео/стикер
+    ("те фото", "первое") разрешает больше, обычная реплика — базу."""
+    from lumen_message_parse import _looks_like_media_reference
+    try:
+        if _looks_like_media_reference(user_text or ""):
+            return max(PHOTO_CONTEXT_MAX, PHOTO_CONTEXT_MAX_REFERENCED)
+    except Exception:
+        pass
+    return PHOTO_CONTEXT_MAX
 # «Сейчас кину фото, что мне идёт?» — просьба перед фото, не старше 5 минут и 3 реплик.
 PENDING_INSTRUCTION_WINDOW_SEC = 300.0
 PENDING_INSTRUCTION_WINDOW_MSGS = 3

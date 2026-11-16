@@ -791,7 +791,7 @@ async def _build_gemini_turn_contents(
         past = lumen_memory.recent_media(
             state, "photo",
             window=lumen_memory.PHOTO_CONTEXT_WINDOW,
-            max_items=lumen_memory.PHOTO_CONTEXT_MAX,
+            max_items=lumen_memory.photo_context_limit(user_text),
             skip_file_ids=skip,
         )
         if past:
@@ -841,7 +841,7 @@ async def _build_openai_turn_messages(
         past = lumen_memory.recent_media(
             state, "photo",
             window=lumen_memory.PHOTO_CONTEXT_WINDOW,
-            max_items=lumen_memory.PHOTO_CONTEXT_MAX,
+            max_items=lumen_memory.photo_context_limit(user_text),
             skip_file_ids=skip,
         )
         if past:

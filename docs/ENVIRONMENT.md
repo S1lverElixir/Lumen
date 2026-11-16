@@ -173,7 +173,7 @@ These ceilings are fixed in code; change them only with a code edit:
 | `MAX_TOTAL_MEMORY_MESSAGES` | `200` | Max stored messages per chat, group background included. |
 | `QUOTA_RATE_LIMIT_COOLDOWN_SEC` | `600` | Cooldown after a rate-limit hit. |
 | `HISTORY_SUMMARIZE_KEEP` | `150` | Recent messages kept verbatim when older history is summarized. |
-| `PHOTO_CONTEXT_WINDOW` / `PHOTO_CONTEXT_MAX` | `30` / `2` | Recent-photo context window and how many photos are attached. |
+| `PHOTO_CONTEXT_WINDOW` / `PHOTO_CONTEXT_MAX` / `PHOTO_CONTEXT_MAX_REFERENCED` | `30` / `2` / `4` | Recent-photo context window and how many photos are attached. The base is 2; a message that explicitly refers to media ("these photos", "the first one") raises it to `PHOTO_CONTEXT_MAX_REFERENCED`. Claude sees every image of the conversation; each extra photo here costs image tokens and one Telegram download per message, which is why the default stays low (audit 16.11.2026). |
 | `MAX_MEMORY_PENDING` | `400` | Messages waiting for a failed summary before the oldest are dropped. |
 | `MEMORY_SUMMARY_RETRY_SEC` | `60` | Delay between retries of a failed summary. |
 | `TG_MAX_LEN` | `4096` | Telegram message limit in UTF-16 code units; chunking and HTML fit are measured against it. |
