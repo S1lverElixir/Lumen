@@ -247,7 +247,9 @@ async def _gather_web_evidence(
         if turn is not None:
             queries = list(turn.queries)
             stats = {"steps": turn.steps, "planning_ms": turn.planning_ms,
-                     "searches": turn.searches, "failed": turn.failed}
+                     "searches": turn.searches, "failed": turn.failed,
+                     "pages": list(getattr(turn, "pages", []) or []),
+                     "reads": int(getattr(turn, "reads", 0) or 0)}
             if turn.has_evidence:
                 return turn.snippets, queries, True, stats
 
@@ -1391,8 +1393,16 @@ async def _handle_message_core(
         # прежнего поиска (ревью 12.11.2026).
         agent_steps = int(agent_stats.get("steps") or 0)
         agent_planning_ms = int(agent_stats.get("planning_ms") or 0)
-        if snippets:
-            ai_prompt += format_snippets_for_prompt(snippets) + evidence_trace(model_queries)
+        agent_pages = list(agent_stats.get("pages") or [])
+        if snippets or agent_pages:
+            if snippets:
+                ai_prompt += format_snippets_for_prompt(snippets)
+            if agent_pages:
+                # Прочитанные страницы — тот же недоверенный текст, но полнее
+                # сниппета: идут отдельным блоком после выдачи (аудит 16.11.2026).
+                from lumen_read_page import format_pages_for_prompt
+                ai_prompt += format_pages_for_prompt(agent_pages)
+            ai_prompt += evidence_trace(model_queries)
             snippets_injected = True
         else:
             # Пометка «без live-поиска» честна только для свежих вопросов: в зоне 2

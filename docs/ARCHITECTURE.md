@@ -82,6 +82,8 @@ from Bing News and Google News instead), not from the code. Deliberately not in 
 owner's decision of 12.11.2026: a `read_page` tool (it needs the Deno relay allowlist and an SSRF
 review first), a Gemini-native function-calling loop, and Gemini thought summaries.
 
+Reading a full page (`read_page`, audit 16.11.2026) is the second tool in the same loop: when a snippet is not enough the model calls `read_page` with a URL, and the bot fetches it through the proxy's `/read` route. The URL must have appeared in the person's message, in this turn's search results or in an already read page — a model-invented address is never fetched (Claude's provenance rule). The proxy route is deliberately not an `ALLOWED_HOSTS` entry: it accepts any public https name, rejects IP literals, credentials, non-443 ports and private/special addresses after resolving both A and AAAA records, follows no redirects, accepts only text/HTML/plain and caps the body at 2 MB; Python repeats the public-host check as a second line. The extracted text (scripts and markup removed, `READ_PAGE_MAX_CHARS` kept) joins the prompt after the snippet block, marked as untrusted page text, and counts as live evidence. A failed read degrades to the snippet-only answer; `READ_PAGE_ENABLED=0` or an unconfigured proxy removes the tool from the request entirely.
+
 Ranking inside `fetch_web_snippets` stays intent-aware. Game and fan wikis (`fandom.com`,
 `wiki.gg`, `fextralife.com`, `wikia.com` — `_GAME_WIKI_HOSTS`) float over ordinary web results when the query
 itself signals a wiki ask (`_wants_game_wiki` via `_GAME_WIKI_HINT_RE`: «wiki», «вики»,

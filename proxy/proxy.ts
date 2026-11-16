@@ -178,12 +178,115 @@ export function buildResponseHeaders(upstreamHeaders: Headers): Headers {
   return headers;
 }
 
+// ── Чтение страниц (/read) ──
+// Отдельный маршрут, а не запись в ALLOWED_HOSTS: allowlist не масштабируется на
+// «любой публичный сайт», а открытый релей отдал бы аккаунт под абьюз (аудит 16.11.2026).
+// Правила повторяют эталон Claude: только https, только публичные имена, без
+// кредов и нестандартных портов, без редиректов, только текст.
+export const READ_PAGE_MAX_BYTES = 2 * 1024 * 1024;
+export const READ_PAGE_TIMEOUT_MS = 15_000;
+const READ_ALLOWED_TYPES = new Set(["text/html", "text/plain", "application/xhtml+xml"]);
+
+export function isPrivateAddress(ip: string): boolean {
+  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const a = Number(v4[1]), b = Number(v4[2]);
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true;
+    return a >= 224;
+  }
+  const low = ip.toLowerCase();
+  if (low === "::" || low === "::1") return true;
+  if (low.startsWith("fc") || low.startsWith("fd")) return true;
+  if (low.startsWith("fe8") || low.startsWith("fe9") || low.startsWith("fea") || low.startsWith("feb")) return true;
+  const mapped = low.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  return mapped ? isPrivateAddress(mapped[1]) : false;
+}
+
+export type ReadTarget =
+  | { ok: true; url: string }
+  | { ok: false; status: 400 | 403 | 502; message: string };
+
+export async function resolveReadTarget(
+  raw: string,
+  resolveDnsImpl: (name: string, type: "A" | "AAAA") => Promise<string[]> = (n, t) => Deno.resolveDns(n, t),
+): Promise<ReadTarget> {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { ok: false, status: 400, message: "Bad URL" };
+  }
+  if (parsed.protocol !== "https:") return { ok: false, status: 403, message: "Only https is allowed" };
+  if (parsed.username || parsed.password) return { ok: false, status: 403, message: "Credentials are not allowed" };
+  if (parsed.port && parsed.port !== "443") return { ok: false, status: 403, message: "Only the default https port is allowed" };
+  const host = parsed.hostname.toLowerCase();
+  if (!host || host === "localhost" || !host.includes(".") || host.endsWith(".local") || host.endsWith(".internal")) {
+    return { ok: false, status: 403, message: "Host is not a public name" };
+  }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(":")) {
+    return { ok: false, status: 403, message: "IP literals are not allowed" };
+  }
+  // Резолвим оба семейства и проверяем КАЖДЫЙ адрес: имя может указать на
+  // приватный адрес и без литерала (защита от подмены после резолва).
+  const addrs: string[] = [];
+  for (const type of ["A", "AAAA"] as const) {
+    try {
+      addrs.push(...await resolveDnsImpl(host, type));
+    } catch {
+      // Нет записей этого типа — не ошибка.
+    }
+  }
+  if (addrs.length === 0) return { ok: false, status: 502, message: "Host did not resolve" };
+  if (addrs.some(isPrivateAddress)) return { ok: false, status: 403, message: "Host resolves to a private address" };
+  return { ok: true, url: parsed.toString() };
+}
+
+async function handleReadPage(
+  req: Request,
+  url: URL,
+  fetchImpl: typeof fetch,
+  resolveDnsImpl?: (name: string, type: "A" | "AAAA") => Promise<string[]>,
+): Promise<Response> {
+  if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
+  const target = await resolveReadTarget(url.searchParams.get("url") ?? "", resolveDnsImpl);
+  if (!target.ok) return new Response(target.message, { status: target.status });
+  let upstream: Response;
+  try {
+    upstream = await fetchImpl(target.url, {
+      method: "GET",
+      // Никаких куки и авторизации: страница читается как анонимный посетитель.
+      headers: { "user-agent": "Lumen/1.0", "accept": "text/html,text/plain;q=0.9,*/*;q=0.1" },
+      // Редирект мог бы вывести за пределы проверенного адреса.
+      redirect: "error",
+      signal: AbortSignal.timeout(READ_PAGE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      return new Response("Read timed out", { status: 504 });
+    }
+    return new Response("Read failed", { status: 502 });
+  }
+  const type = (upstream.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (!READ_ALLOWED_TYPES.has(type)) return new Response("Unsupported content type", { status: 415 });
+  if (upstream.status !== 200) return new Response("Upstream status " + upstream.status, { status: 502 });
+  return new Response(limitStreamBytes(upstream.body, READ_PAGE_MAX_BYTES), {
+    status: 200,
+    headers: { "content-type": type },
+  });
+}
+
 // fetchImpl — точка подмены для тестов: реальная сеть юнитам не нужна.
 export async function handleRequest(
   req: Request,
   fetchImpl: typeof fetch = fetch,
   proxySecret: string | undefined = undefined,
   maxBodyBytes: number = MAX_REQUEST_BODY_BYTES,
+  resolveReadDnsImpl?: (name: string, type: "A" | "AAAA") => Promise<string[]>,
 ): Promise<Response> {
   if (
     !proxySecret || proxySecret.length < MIN_PROXY_SECRET_LENGTH ||
@@ -208,6 +311,9 @@ export async function handleRequest(
   }
 
   const url = new URL(req.url);
+  if (url.pathname === "/read") {
+    return await handleReadPage(req, url, fetchImpl, resolveReadDnsImpl);
+  }
   const target = resolveTarget(url.pathname, url.search);
   if (!target.ok) {
     return new Response(target.message, { status: target.status });

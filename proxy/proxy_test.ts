@@ -12,6 +12,8 @@ import {
   buildForwardHeaders,
   buildResponseHeaders,
   handleRequest,
+  isPrivateAddress,
+  resolveReadTarget,
   limitStreamBytes,
   resolveTarget,
 } from "./proxy.ts";
@@ -445,4 +447,68 @@ Deno.test("buildForwardHeaders убирает расширенный hop-by-hop 
     assertEquals(forwarded.has(name), false);
   }
   assertEquals(forwarded.get("x-custom"), "keep");
+});
+
+const PUBLIC_DNS = () => Promise.resolve(["93.184.216.34"]);
+
+Deno.test("read: приватные адреса распознаются в обоих семействах", () => {
+  for (const ip of ["10.0.0.5", "127.0.0.1", "169.254.169.254", "172.16.9.9", "192.168.1.1", "100.64.0.1", "224.0.0.1"]) {
+    assert(isPrivateAddress(ip), "должен быть приватным: " + ip);
+  }
+  for (const ip of ["::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1"]) {
+    assert(isPrivateAddress(ip), "должен быть приватным: " + ip);
+  }
+  for (const ip of ["93.184.216.34", "2606:2800:220:1::1"]) {
+    assert(!isPrivateAddress(ip), "должен быть публичным: " + ip);
+  }
+});
+
+Deno.test("read: цель обязана быть публичным https без кредов и нестандартного порта", async () => {
+  const bad = [
+    "http://example.com/x",
+    "https://127.0.0.1/x",
+    "https://[::1]/x",
+    "https://localhost/x",
+    "https://printer.local/x",
+    "https://user:pass@example.com/",
+    "https://example.com:8443/x",
+    "ftp://example.com/x",
+  ];
+  for (const raw of bad) {
+    const r = await resolveReadTarget(raw, PUBLIC_DNS);
+    assert(!r.ok, "должен быть отвергнут: " + raw);
+  }
+  const priv = await resolveReadTarget("https://example.com/x", () => Promise.resolve(["10.1.2.3"]));
+  assert(!priv.ok, "имя, ведущее на приватный адрес, отвергается");
+  const none = await resolveReadTarget("https://example.com/x", () => Promise.reject(new Error("nx")));
+  assert(!none.ok, "неразрешимое имя отвергается");
+  const good = await resolveReadTarget("https://example.com/article?x=1", PUBLIC_DNS);
+  assert(good.ok, "публичный https проходит");
+});
+
+Deno.test("read: маршрут отдаёт только текст, кап и редирект держатся", async () => {
+  const req = (url: string, method = "GET") =>
+    new Request("https://proxy.test/read?url=" + encodeURIComponent(url), { method, headers: AUTH_HEADERS });
+
+  const html = () => Promise.resolve(new Response("<html>hi</html>", { headers: { "content-type": "text/html; charset=utf-8" } }));
+  const ok = await handleRequest(req("https://example.com/"), html as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(ok.status, 200);
+  assertEquals(ok.headers.get("content-type"), "text/html");
+
+  const png = () => Promise.resolve(new Response("x", { headers: { "content-type": "image/png" } }));
+  const refused = await handleRequest(req("https://example.com/"), png as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(refused.status, 415);
+
+  const redirect = () => Promise.reject(new DOMException("redirect", "TypeError"));
+  const failed = await handleRequest(req("https://example.com/"), redirect as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(failed.status, 502);
+
+  const post = await handleRequest(req("https://example.com/", "POST"), html as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(post.status, 405);
+
+  const noSecret = await handleRequest(
+    new Request("https://proxy.test/read?url=" + encodeURIComponent("https://example.com/")),
+    html as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS,
+  );
+  assertEquals(noSecret.status, 401);
 });

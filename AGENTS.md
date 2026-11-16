@@ -108,7 +108,10 @@ production on 12.11.2026, so change a fact and update this file in the same comm
   fallback proxy" finished as success; a manual run from Actions (needs no token) or `deno deploy`
   by hand (recipe in `docs/ARCHITECTURE.md`, "Deploy paths") stays the fallback.
 - Container egress is blocked or hangs toward Telegram, TikWM and `api.cloudflare.com`: those hosts
-  are reachable only through the allowlist in `proxy/proxy.ts`. Adding a provider without an
+  are reachable only through the allowlist in `proxy/proxy.ts`. Public pages are a separate case:
+  since 16.11.2026 the proxy has a guarded `/read` route (any public https name, SSRF checks after
+  DNS resolution, no redirects, text only, 2 MB cap), and the bot only asks for a URL that already
+  appeared in the message, the search results or a page it read. Adding a provider without an
   allowlist entry times out in production while every local test passes: change the allowlist,
   deploy the proxy, then ask the owner to confirm with `/diag`. The relay itself has limits no
   local run shows: it kills an upstream at 60 s (`504`), refuses a request body over 100 MB

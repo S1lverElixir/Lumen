@@ -506,3 +506,67 @@ def test_status_query_never_keeps_model_name_version_or_debris():
                    "котик в сапогах мультик", "Fable 5.2 release date",
                    "сколько законов о рекламе в Беларуси"):
         assert lumen_agent._safe_query_text(honest) == honest, honest
+
+def _read_page_message(url: str) -> dict:
+    return {
+        "choices": [{
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": "read_1",
+                    "type": "function",
+                    "function": {"name": "read_page", "arguments": '{"url": "' + url + '"}'},
+                }],
+            }
+        }]
+    }
+
+
+def test_search_turn_reads_a_page_named_in_the_message(monkeypatch):
+    # Аудит 16.11.2026: чтение страницы — отдельный канал доказательств. URL обязан
+    # быть в сообщении человека, а прочитанный текст едет в result.pages.
+    import bot
+    import lumen_read_page
+
+    monkeypatch.setattr(bot, "TELEGRAM_API_BASE_URL", "https://proxy.example/fetch/api.telegram.org")
+    monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "x" * 32)
+    reads = []
+
+    async def fake_read(url, *, timeout=None):
+        reads.append(url)
+        return "Полный текст страницы про X."
+
+    monkeypatch.setattr(lumen_read_page, "read_page", fake_read)
+    _install(monkeypatch, [_read_page_message("https://example.org/page"), _text_message("")])
+    result = asyncio.run(lumen_agent.run_search_turn(
+        chat_id=1, user_prompt="прочитай https://example.org/page",
+        clean_prompt="прочитай https://example.org/page",
+        model_id="m-1", effort="high", max_searches=1,
+    ))
+    assert reads == ["https://example.org/page"]
+    assert result.pages and "Полный текст" in result.pages[0]["text"]
+    assert result.reads == 1
+
+
+def test_search_turn_refuses_a_page_url_the_model_invented(monkeypatch):
+    # Провенанс: адрес, которого не было ни в сообщении, ни в выдаче, не читается.
+    import bot
+    import lumen_read_page
+
+    monkeypatch.setattr(bot, "TELEGRAM_API_BASE_URL", "https://proxy.example/fetch/api.telegram.org")
+    monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "x" * 32)
+    reads = []
+
+    async def fake_read(url, *, timeout=None):
+        reads.append(url)
+        return "не должно случиться"
+
+    monkeypatch.setattr(lumen_read_page, "read_page", fake_read)
+    _install(monkeypatch, [_read_page_message("https://invented.example/secret")])
+    result = asyncio.run(lumen_agent.run_search_turn(
+        chat_id=1, user_prompt="прочитай страницу", clean_prompt="прочитай страницу",
+        model_id="m-1", effort="high", max_searches=1,
+    ))
+    assert reads == []
+    assert result.pages == []
+    assert result.failed is True
