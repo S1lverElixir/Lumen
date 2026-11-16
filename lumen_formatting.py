@@ -436,7 +436,7 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", _save_block, text)
     # Голые ссылки прячем до inline-разметки: "__b__" и "*x*" в пути — часть
     # адреса, а не жирный/курсив (внешний аудит 16.11.2026).
-    text = re.sub(r"https?://[^\s<>\"'`*~]+", _save_block, text)
+    text = re.sub(r"https?://[^\s<>\"'`*~|]+", _save_block, text)
 
     # ── Phase 1.3: сырой LaTeX → юникод (см. _scrub_latex выше) — код уже
     # вынесен на предыдущем шаге, поэтому обратные слэши в реальном коде
@@ -489,7 +489,7 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
     # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
     # как в _strip_markdown (внешний аудит 16.11.2026).
-    text = re.sub(r"(?<!\w)__([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\w)__([^\n]+?)__(?!\w)", r"<b>\1</b>", text)
     text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
     text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
@@ -554,7 +554,7 @@ def _rich_inline(text: str) -> str:
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
     # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
     # как в _strip_markdown (внешний аудит 16.11.2026).
-    text = re.sub(r"(?<!\w)__([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\w)__([^\n]+?)__(?!\w)", r"<b>\1</b>", text)
     text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
     text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
@@ -626,7 +626,7 @@ def _md_to_rich_html(text: str) -> str:
     text = re.sub(r"`[^`\n]+`", lambda m: _take(_code, "CB", m.group(0)), text)
     text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", lambda m: _take(_links, "CB", m.group(0)), text)
     # Голые ссылки прячем и в рич-пути: "__b__" в пути — адрес, не жирный.
-    text = re.sub(r"https?://[^\s<>\"'`*~]+", lambda m: _take(_bare, "CB", m.group(0)), text)
+    text = re.sub(r"https?://[^\s<>\"'`*~|]+", lambda m: _take(_bare, "CB", m.group(0)), text)
     text = re.sub(r"\$\$([\s\S]+?)\$\$", lambda m: _take(_math, "MM", (m.group(1), True)), text)
     # Инлайн-форма требует содержимого без пробелов по краям (как в GFM): иначе
     # цены вида "$50 до $100" превратились бы в "формулу". Одиночные "$80 000"
@@ -693,7 +693,7 @@ def _md_to_rich_html(text: str) -> str:
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
     # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
     # как в _strip_markdown (внешний аудит 16.11.2026).
-    text = re.sub(r"(?<!\w)__([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\w)__([^\n]+?)__(?!\w)", r"<b>\1</b>", text)
     text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
     text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)

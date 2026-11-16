@@ -923,3 +923,12 @@ def test_emphasis_glued_to_a_bare_url_still_works():
     assert _md_to_html("**см. https://x.com/a**") == "<b>см. https://x.com/a</b>"
     assert _md_to_html("*https://x.com/a*") == "<i>https://x.com/a</i>"
     assert "https://x.com/a" in _md_to_rich_html("**см. https://x.com/a**")
+
+
+def test_underscores_inside_bold_and_pipe_after_url():
+    # Финальный проверяющий 16.11.2026: "__total_cost__" перестал жирниться,
+    # а ссылка в ячейке таблицы без пробелов забирала разделитель "|".
+    from lumen_formatting import _md_to_html, _md_to_rich_html
+    assert _md_to_html("__total_cost__") == "<b>total_cost</b>"
+    table = "| a | b |" + chr(10) + "|---|---|" + chr(10) + "| https://x.com/a|z |"
+    assert _md_to_rich_html(table).count("<td>") == 2

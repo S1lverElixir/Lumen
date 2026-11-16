@@ -1711,7 +1711,8 @@ async def _handle_message_core(
                 retry_budget = web_search_timeout_sec()
                 if route_deadline is not None:
                     retry_budget = min(retry_budget, max(0.0, route_deadline - time.monotonic()))
-                if retry_budget > 0 and web_search_is_enabled():
+                if (retry_budget > 0 and web_search_is_enabled()
+                        and not bot._stream_stop_requested(message.chat.id)):
                     retry_snippets = await fetch_web_snippets(
                         clean_prompt, timeout_sec=retry_budget, max_results=web_search_max_results(),
                         context=_previous_user_text(state),

@@ -373,7 +373,15 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
 
 
 def _frame_safe(text: str) -> str:
-    return _FRAME_MARK_RE.sub(" ", _FORMAT_CHARS_RE.sub("", text or ""))
+    clean = _FORMAT_CHARS_RE.sub("", text or "")
+    # Один проход собирал маркер заново из вложенности ("[/Fetched[fetched page]page]"
+    # -> "[/Fetched page]"); повторяем до устойчивого текста (аудит 16.11.2026).
+    for _ in range(10):
+        replaced = _FRAME_MARK_RE.sub(" ", clean)
+        if replaced == clean:
+            return replaced
+        clean = replaced
+    return clean
 
 
 def _frame_safe_url(url: str) -> str:

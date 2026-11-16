@@ -1958,7 +1958,13 @@ def _one_line(text: str) -> str:
     заголовок с переводом строки открывал блок страницы от лица промпта
     (аудит 16.11.2026)."""
     clean = _SNIPPET_INVIS_RE.sub("", text or "")
-    return _SNIPPET_FRAME_RE.sub(" ", " ".join(clean.splitlines()))
+    clean = " ".join(clean.splitlines())
+    for _ in range(10):
+        replaced = _SNIPPET_FRAME_RE.sub(" ", clean)
+        if replaced == clean:
+            return replaced
+        clean = replaced
+    return clean
 
 
 def format_snippets_for_prompt(snippets: list[dict]) -> str:
