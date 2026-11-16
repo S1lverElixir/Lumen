@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import re
 import time
 from datetime import datetime
@@ -1287,10 +1288,14 @@ async def _handle_message_core(
             route_shape[-1][1] += 1
         else:
             route_shape.append([provider, 1])
+    # Пин владельца (MUNITO_REASONING_EFFORT) перекрывает автовыбор в момент
+    # запроса; без него лог показывал вычисленный уровень, а уходил другой
+    # (аудит 16.11.2026: лог и факт расходились молча).
+    _effort_pin = (os.getenv("MUNITO_REASONING_EFFORT") or "").strip()
     log.info(
-        '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s effort=%s searches<=%d route=%s (%d)',
+        '[router] chat=%s heavy=%s freshness=%s youtube=%s website=%s media=%s effort=%s pin=%s searches<=%d route=%s (%d)',
         message.chat.id, is_heavy, needs_freshness, needs_youtube, needs_website, media_mime,
-        effort or "auto-off", max_searches,
+        effort or "auto-off", _effort_pin or "-", max_searches,
         " -> ".join(f"{p}:{n}" for p, n in route_shape), len(route),
     )
 
