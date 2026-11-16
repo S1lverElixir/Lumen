@@ -4308,3 +4308,22 @@ def test_index_outage_blocks_all_chat_writes_until_recovery():
         lcs._created_during_outage.clear()
         lcs._created_during_outage.update(created)
         bot.chat_state.pop(424242, None)
+
+
+def test_index_recovery_throttles_only_after_a_real_attempt():
+    # CI 16.11.2026: на свежем раннере monotonic() меньше минуты, и «ноль» читался
+    # как недавняя попытка — ретрай молчал. Ноль обязан значить «ещё не пробовали».
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    try:
+        lcs._index_retry_last_ts = 0.0
+        with patch("bot._storage_read_text", return_value="[]"):
+            assert lcs._recover_index_ids() is True
+        lcs._state_load_failed = True
+        lcs._index_retry_last_ts = time.monotonic()
+        with patch("bot._storage_read_text", return_value="[]"):
+            assert lcs._recover_index_ids() is False
+    finally:
+        lcs._state_load_failed, lcs._index_retry_last_ts = orig

@@ -520,7 +520,9 @@ def _recover_index_ids() -> bool:
     if not _state_load_failed:
         return True
     now = time.monotonic()
-    if now - _index_retry_last_ts < _INDEX_RETRY_SEC:
+    # Ноль — «ещё не пробовали»: на свежем раннере monotonic() меньше минуты,
+    # и без этой проверки первый же ретрай считался бы слишком частым (CI 16.11).
+    if _index_retry_last_ts and now - _index_retry_last_ts < _INDEX_RETRY_SEC:
         return False
     _index_retry_last_ts = now
     import bot
