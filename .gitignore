@@ -33,3 +33,4 @@ audit-*.md
 .idea/
 .vscode/
 .qoder/
+worker/.wrangler/
