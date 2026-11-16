@@ -196,6 +196,13 @@ async def webhook_handler(request: Request) -> Any:
         if isinstance(body, dict) and _is_duplicate_update(body.get("update_id")):
             log.info("[webhook] Duplicate update_id %s ignored", body.get("update_id"))
             return {"ok": True}
+        # Перепроверка капа прямо перед create_task: между первой проверкой и этим
+        # местом есть await'ы (чтение тела), и пачка одновременных POST проходила
+        # на пустом наборе, создавая больше задач, чем кап (аудит 16.11.2026).
+        if len(bot._inflight_tasks) >= WEBHOOK_MAX_INFLIGHT_TASKS:
+            log.warning("[webhook] In-flight cap reached after body read (%d), asking Telegram to retry",
+                        len(bot._inflight_tasks))
+            return JSONResponse(status_code=503, content={"ok": False, "retry": True})
         bot._track_inflight_task(asyncio.create_task(bot._process_raw_update(body)))
     except Exception as exc:
         log.warning("[webhook] Failed to process incoming update: %s", exc, exc_info=True)

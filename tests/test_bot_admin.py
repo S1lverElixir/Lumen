@@ -357,6 +357,55 @@ def test_webhook_handler_accepts_valid_secret_and_dispatches_update():
         bot._process_raw_update = original_process
 
 
+def test_webhook_rechecks_inflight_cap_after_body_read(monkeypatch):
+    # Аудит 16.11.2026: кап проверялся только до чтения тела, а между проверкой и
+    # create_task есть await'ы; пачка одновременных POST проходила на пустом наборе
+    # и создавала больше задач, чем кап. Перепроверка стоит прямо перед create_task.
+    from types import SimpleNamespace
+    import lumen_admin
+
+    original_secret = bot.WEBHOOK_SECRET
+    original_bot_obj = bot.bot
+    original_process = bot._process_raw_update
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    bot.bot = object()
+    bot._inflight_tasks.clear()
+    filler: set = set()
+    calls = []
+
+    async def _noop() -> None:
+        return None
+
+    def fake_dedupe(_update_id):
+        # Заполняем набор ровно в окне между первой проверкой и create_task.
+        while len(filler) < lumen_admin.WEBHOOK_MAX_INFLIGHT_TASKS:
+            task = asyncio.create_task(_noop())
+            filler.add(task)
+        bot._inflight_tasks.update(filler)
+        return False
+
+    async def fake_process(raw_update):
+        calls.append(raw_update)
+
+    monkeypatch.setattr(lumen_admin, "_is_duplicate_update", fake_dedupe)
+    bot._process_raw_update = fake_process
+    try:
+        req = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 424242},
+        )
+        result = asyncio.run(_run_webhook_handler(req))
+        assert getattr(result, "status_code", None) == 503
+        assert calls == []
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        bot.bot = original_bot_obj
+        bot._process_raw_update = original_process
+        for task in filler:
+            task.cancel()
+        bot._inflight_tasks.clear()
+
+
 def test_webhook_handler_rejects_invalid_or_missing_secret_and_does_not_dispatch():
     original_secret = bot.WEBHOOK_SECRET
     original_process = bot._process_raw_update

@@ -477,7 +477,13 @@ def test_tg_call_does_not_retry_client_errors(monkeypatch, exc_cls):
 
     saved = _save_breaker_state()
     try:
+        # Аудит 16.11.2026: валидный JSON от Telegram — признак живого прокси.
+        # Без сброса счётчика следующая единичная заминка прокси глушила все чаты.
+        bot._tg_proxy_breaker.note_failure()
+        bot._tg_proxy_breaker.note_failure()
+        assert bot._tg_proxy_breaker.consecutive_failures == 2
         assert asyncio.run(bot._tg_call(always_bad, retries=2)) is None
+        assert bot._tg_proxy_breaker.consecutive_failures == 0
     finally:
         _restore_breaker_state(saved)
     assert len(calls) == 1
