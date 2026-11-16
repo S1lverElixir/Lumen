@@ -838,12 +838,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "uk": "Пробую ще раз…",
     },
     "progress_thought_for": {
-        "be": "Абдумванне: {sec} с",
+        "be": "Думаў {sec} с",
         "en": "Thought for {sec} seconds",
         "es": "Pensé durante {sec} s",
         "kk": "Ойлауға {sec} с кетті",
-        "ru": "Обдумывание: {sec} с",
-        "uk": "Обдумування: {sec} с",
+        "ru": "Думал {sec} с",
+        "uk": "Думав {sec} с",
     },
     "progress_seconds": {
         "be": "{sec} с",
@@ -3232,7 +3232,7 @@ def t(lang: str | None, key: str, **kwargs: object) -> str:
     text = LANG_PACKS.get(lang, {}).get(key) or table.get(lang) or table.get(DEFAULT_LANG) or key
     if kwargs.get("count") == 1:
         text = _COUNT_ONE_FORMS.get(key, {}).get(lang, text)
-    if kwargs.get("sec") == 1:
+    if kwargs.get("sec") == 1:
         text = _TIMED_ONE_FORMS.get(key, {}).get(lang, text)
     elif key == "progress_thinking" and kwargs.get("sec") == 0:
         # Claude при нуле печатает только фразу (smoke 11.11.2026: «Thinking…

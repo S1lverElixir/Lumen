@@ -196,7 +196,7 @@ def test_progress_strings_plural_and_zero_across_languages():
     assert t("ru", "progress_thinking", sec=0) == "Думаю…"
     assert t("ru", "progress_thinking", sec=1) == "Думаю… 1 с"
     assert t("ru", "progress_thinking", sec=2) == "Думаю… 2 с"
-    assert t("ru", "progress_thought_for", sec=5) == "Обдумывание: 5 с"
+    assert t("ru", "progress_thought_for", sec=5) == "Думал 5 с"
     assert t("zu", "progress_thought_for", sec=1) == "Ngicabange umzuzwana ongu-1"
     assert t("zu", "progress_thought_for", sec=5) == "Ngicabange imizuzwana engu-5"
     assert t("uz", "progress_thinking", sec=0) == "O'ylayapman…"

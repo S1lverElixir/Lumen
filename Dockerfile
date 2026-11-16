@@ -45,6 +45,13 @@ RUN pip install -r /app/requirements.txt
 
 COPY . /app
 
+# Непривилегированный пользователь: бот пишет только внутри /app (bot.log и
+# локальный фолбэк состояния) и во временные файлы ffmpeg, поэтому каталог
+# отдаём ему до переключения USER (решение владельца 16.11.2026).
+RUN useradd --create-home --uid 10001 app \
+    && chown -R app:app /app
+USER app
+
 EXPOSE 7860
 
 # Дешёвая проба живости — in-memory "/" без сетевых вызовов (см. healthcheck в
