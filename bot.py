@@ -510,6 +510,9 @@ FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
 STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10)
 # Остановка ответа командой /stop: выключатель, как у остальных новых слоёв.
 STOP_COMMAND_ENABLED = (os.getenv("STOP_COMMAND_ENABLED", "1") or "").strip().lower() not in ("0", "false", "off")
+# Кнопка «Остановить» под ответом: по умолчанию выключена до живого смоука —
+# она добавляет две правки на каждый ответ, а бюджет правок в группе общий.
+STOP_BUTTON_ENABLED = (os.getenv("STOP_BUTTON_ENABLED", "0") or "").strip().lower() in ("1", "true", "on")
 STREAM_ROUTE_STALL_GRACE_SEC = _env_number("STREAM_ROUTE_STALL_GRACE_SEC", 20, min_value=2)
 # Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
 # дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).
@@ -1415,6 +1418,7 @@ def message_mentions_bot(message: Message) -> bool:
 from lumen_commands import (
     cmd_start,
     cmd_stop,
+    handle_stop_callback,
     inline_draw,
     _translate_draw_prompt,
     resolve_draw_request,
@@ -1445,6 +1449,7 @@ dp.callback_query.register(handle_draw_more_callback, F.data == "draw:more")
 dp.message.register(cmd_tts, Command("tts"))
 dp.message.register(cmd_reset, Command("reset"))
 dp.message.register(cmd_stop, Command("stop"))
+dp.callback_query.register(handle_stop_callback, F.data.startswith("stop:"))
 dp.message.register(cmd_lang, Command("lang"))
 dp.callback_query.register(handle_lang_callback, F.data.startswith("lang:"))
 dp.message.register(cmd_logs, Command("logs"))

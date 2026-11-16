@@ -1319,6 +1319,20 @@ async def cmd_tts(message: Message) -> None:
     await bot.inline_tts(message, text)
 
 
+async def handle_stop_callback(query: CallbackQuery) -> None:
+    """Кнопка «Остановить» под ответом: права и семантика те же, что у /stop —
+    автор вопроса или владелец; чужое нажатие молча не срабатывает."""
+    import bot
+    with contextlib.suppress(Exception):
+        await query.answer()
+    if not bot.STOP_BUTTON_ENABLED:
+        return
+    chat_id = query.message.chat.id if getattr(query, "message", None) is not None and query.message.chat else 0
+    sender = query.from_user.id if getattr(query, "from_user", None) is not None else None
+    if chat_id:
+        bot._request_stream_stop(chat_id, sender)
+
+
 async def cmd_stop(message: Message) -> None:
     """Остановка текущего ответа. В меню команды нет, как у /help: это аварийный
     контроль, а не витрина. Молчаливо игнорирует чужого человека в группе и

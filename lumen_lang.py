@@ -3461,3 +3461,35 @@ _STREAM_NOTE_STOPPED: dict[str, str] = {
 STRINGS["stream_note_stopped"] = _STREAM_NOTE_STOPPED
 for _lang_code, _note_text in _STREAM_NOTE_STOPPED.items():
     LANG_PACKS.setdefault(_lang_code, {})["stream_note_stopped"] = _note_text
+
+# Кнопка «Остановить» под ответом (аудит 16.11.2026): ключ отдельной картой.
+_STOP_BUTTON_LABELS: dict[str, str] = {
+    'ar': 'إيقاف',
+    'be': 'Спыніць',
+    'bn': 'থামান',
+    'de': 'Stoppen',
+    'en': 'Stop',
+    'es': 'Detener',
+    'fa': 'توقف',
+    'fil': 'Itigil',
+    'fr': 'Arrêter',
+    'hi': 'रोकें',
+    'id': 'Hentikan',
+    'it': 'Ferma',
+    'kk': 'Тоқтату',
+    'ms': 'Hentikan',
+    'nl': 'Stoppen',
+    'pl': 'Zatrzymaj',
+    'pt': 'Parar',
+    'ru': 'Остановить',
+    'th': 'หยุด',
+    'tr': 'Durdur',
+    'uk': 'Зупинити',
+    'ur': 'روکیں',
+    'uz': "To'xtatish",
+    'vi': 'Dừng',
+    'zu': 'Misa',
+}
+STRINGS["stop_button"] = _STOP_BUTTON_LABELS
+for _lang_code, _label in _STOP_BUTTON_LABELS.items():
+    LANG_PACKS.setdefault(_lang_code, {})["stop_button"] = _label

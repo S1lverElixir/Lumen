@@ -12,7 +12,7 @@ import time
 from typing import Any
 import aiohttp
 from aiogram.enums import ChatType, ParseMode
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from lumen_errors import _is_empty_like
 from lumen_formatting import _md_to_html, _split_text_chunks, _strip_provider_artifacts, _tg_len, _truncate_html_to_fit
@@ -348,6 +348,17 @@ class _StoppedByUser(Exception):
     """Явная остановка через /stop: не сбой модели, истории и квоте это не ошибка."""
 
 
+def _stop_button_markup(chat_id: int):
+    """Клавиатура «Остановить» или None. Выключено по умолчанию: кнопка добавляет
+    две правки на каждый ответ, а бюджет правок в группе общий (аудит 16.11.2026)."""
+    import bot
+    if not getattr(bot, "STOP_BUTTON_ENABLED", False):
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=bot._t(chat_id, "stop_button"), callback_data=f"stop:{chat_id}"),
+    ]])
+
+
 async def _run_streaming_reply(
     chat_id: int, user_text: str, message: Message, *, provider: str, model_id: str, piece_agen,
     deadline: float | None = None, status=None, history_text=None,
@@ -359,6 +370,10 @@ async def _run_streaming_reply(
     state = bot.get_state(chat_id)
     # Флаг остановки живёт на чат: /stop его выставляет, цикл читает на каждом куске.
     bot._begin_stream_stop_scope(chat_id, getattr(getattr(message, "from_user", None), "id", None))
+    # Инициализация ДО try: early-return (плейсхолдер не отправился) обязан видеть
+    # эти имена в finally.
+    stop_button_on = False
+    _markup_edit = None
 
     sent_messages: list[Message] = []
     full_text = ""
@@ -485,6 +500,14 @@ async def _run_streaming_reply(
         # Попытка к модели состоялась (запрос уже ушёл в генератор кусков);
         # пустой считают только ранний обрыв до показа — частичный ответ показан.
         bot._record_stats_event("model_attempts")
+
+        # Кнопка «Остановить» под пузырём: одна правка на старте, снимается в finally.
+        _markup_edit = getattr(placeholder, "edit_reply_markup", None)
+        _stop_markup = _stop_button_markup(chat_id)
+        if _stop_markup is not None and _markup_edit is not None:
+            await bot._tg_call(_markup_edit, reply_markup=_stop_markup,
+                               call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
+            stop_button_on = True
 
         first_chunk_limit = _model_first_chunk_limit(_model_speed_key(provider, model_id), bot.FIRST_CHUNK_TIMEOUT_SEC)
         if deadline is not None:
@@ -895,6 +918,11 @@ async def _run_streaming_reply(
             bot.mark_state_dirty(chat_id)
     finally:
         bot._end_stream_stop_scope(chat_id)
+        if stop_button_on and _markup_edit is not None:
+            # Кнопка не имеет права пережить ответ: снимаем её тем же сообщением.
+            with contextlib.suppress(Exception):
+                await bot._tg_call(_markup_edit, reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                                   call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
         # Ранний выход (плейсхолдер не отправился) оставляет запрос первого куска
         # висеть: гасим, иначе он живёт до таймаута провайдера. Висящий read_task
         # следующего куска гасим тем же образом до aclose генератора.

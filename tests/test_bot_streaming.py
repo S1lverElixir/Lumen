@@ -1670,3 +1670,44 @@ def test_stop_flag_is_consumed_and_does_not_kill_the_next_queued_question():
         bot._end_stream_stop_scope(515151)
         bot._end_stream_stop_scope(515151)
     assert bot._STREAM_STOPS.get(515151) is None
+
+
+def test_stop_button_is_off_by_default_and_wired_when_on(monkeypatch):
+    # Аудит 16.11.2026: кнопка добавляет две правки на ответ, поэтому по умолчанию
+    # выключена до живого смоука; включённая несёт локализованную подпись и callback
+    # на конкретный чат.
+    import lumen_streaming
+
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", False)
+    assert lumen_streaming._stop_button_markup(1) is None
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    kb = lumen_streaming._stop_button_markup(424242)
+    assert kb is not None
+    btn = kb.inline_keyboard[0][0]
+    assert btn.callback_data == "stop:424242"
+    assert btn.text == bot._t(424242, "stop_button")
+
+
+def test_stop_callback_stops_only_for_the_author(monkeypatch):
+    from types import SimpleNamespace
+    import lumen_commands
+
+    bot._STREAM_STOPS.clear()
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    answered = []
+
+    async def answer(*args, **kwargs):
+        answered.append(True)
+
+    q = SimpleNamespace(
+        data="stop:77", from_user=SimpleNamespace(id=5),
+        message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
+    )
+    bot._begin_stream_stop_scope(77, 5)
+    try:
+        asyncio.run(lumen_commands.handle_stop_callback(q))
+        assert bot._stream_stop_requested(77) is True
+        assert answered
+    finally:
+        bot._end_stream_stop_scope(77)
+        bot._STREAM_STOPS.clear()
