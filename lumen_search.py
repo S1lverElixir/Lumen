@@ -1513,7 +1513,12 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                                     json={"query": query, "max_results": limit, "search_depth": "basic"},
                                     timeout=budget) as resp:
                 resp.raise_for_status()
-                results = (json.loads(await resp.text()) or {}).get("results") or []
+                _payload = json.loads(await resp.text()) or {}
+                results = _payload.get("results") or []
+                # Диагностика пустого ключевого слоя: статус и число результатов,
+                # без ключа и текста запроса (прод 16.11.2026: Tavily отвечал пусто).
+                log.info("[web-search] tavily status=%s results=%d keys=%s",
+                         resp.status, len(results), sorted(_payload)[:6])
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("content") or "", _SNIPPET_MAX_CHARS),
                      "publisher": urllib.parse.urlparse(r.get("url") or "").netloc.removeprefix("www."),
