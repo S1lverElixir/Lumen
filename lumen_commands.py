@@ -693,16 +693,18 @@ async def inline_draw(
                 # Фото больше 10 МБ Telegram не принимает, а провайдер отдаёт до
                 # IMAGE_MAX_BYTES: без второго пути человек терял уже оплаченную
                 # генерацию (аудит 16.11.2026).
-                sent = await bot._tg_call(
-                    bot.bot.send_document,
-                    chat_id=cid,
-                    document=BufferedInputFile(
-                        image_bytes, filename=image_filename(image_bytes) or "generated.jpg"),
-                    caption=caption,
-                    reply_markup=reply_markup,
-                    reply_to_message_id=message.message_id,
-                    call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
-                )
+                _send_doc = getattr(bot.bot, "send_document", None)
+                if _send_doc is not None:
+                    sent = await bot._tg_call(
+                        _send_doc,
+                        chat_id=cid,
+                        document=BufferedInputFile(
+                            image_bytes, filename=image_filename(image_bytes) or "generated.jpg"),
+                        caption=caption,
+                        reply_markup=reply_markup,
+                        reply_to_message_id=message.message_id,
+                        call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+                    )
             if sent is None:
                 raise RuntimeError("Telegram send_photo/send_document failed: connection timeout or proxy unavailable")
             # Как в ChatGPT: «повторить» есть только у последней картинки. Снимаем
@@ -1705,6 +1707,7 @@ async def cmd_selftest(message: Message) -> None:
     # У слоя поиска своя пробы нет: важнее переключатели и остаток дневного
     # бюджета обращений — по этой строке видно, активен ли цикл после рестарта.
     import lumen_agent
+    import lumen_read_page
     import lumen_search
     rows.append(
         f"Поиск: {'включён' if lumen_search.web_search_is_enabled() else 'выключен'}"
@@ -1713,6 +1716,8 @@ async def cmd_selftest(message: Message) -> None:
         f"/{lumen_search.WEB_SEARCH_DAILY_LIMIT}"
         + (f" · по ключу {lumen_search.search_api_calls_today()}/{lumen_search._search_api_limit()}"
            if lumen_search.search_api_provider() else "")
+        + (f" · страниц {lumen_read_page.read_page_calls_today()}/{lumen_read_page.read_page_daily_limit()}"
+           if lumen_read_page.proxy_origin() else "")
     )
     try:
         session = await bot._get_http_session()
