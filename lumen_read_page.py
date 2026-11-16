@@ -142,6 +142,10 @@ def _strip_block_elements(raw: str) -> str:
     ограниченным регексом. Никаких find по всему остатку на каждую позицию —
     на 2 МБ «<script>» это давало квадратичное время (аудит 16.11.2026)."""
     lower = raw.lower()
+    if len(lower) != len(raw):
+        # lower() редко меняет длину (İ → i + точка), и тогда индексы сдвигаются:
+        # ищем по исходной строке, теряя регистронезависимость только в этом случае.
+        lower = raw
     out: list[str] = []
     disabled: set[str] = set()
     pos = 0
@@ -191,7 +195,11 @@ def _strip_tags_linear(raw: str) -> str:
         if gt == -1:
             out.append(raw[lt:])
             break
-        name = raw[lt + 1:gt].strip().lstrip("/").split(None, 1)[0].lower() if gt > lt + 1 else ""
+        inner = raw[lt + 1:gt].strip().lstrip("/")
+        parts_inner = inner.split(None, 1)
+        # «<>» и «</>» дают пустое имя: раньше это был IndexError, и страница
+        # не читалась вовсе, хотя квота уже списана (третий проход аудита 16.11.2026).
+        name = parts_inner[0].lower() if parts_inner else ""
         out.append("\n" if name in _BREAK_TAGS else " ")
         i = gt + 1
     return "".join(out)

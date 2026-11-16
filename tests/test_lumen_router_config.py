@@ -1024,3 +1024,18 @@ def test_munito_route_yields_to_gemini_when_daily_ceiling_is_reached(monkeypatch
         assert lumen_router_config._munito_route()
     finally:
         bot.GLOBAL_QUOTA["munito"] = saved
+
+
+def test_munito_ceiling_reads_zero_on_a_new_quota_day(monkeypatch):
+    # Третий проход аудита 16.11.2026: троттл сброса суток не давал роутеру увидеть
+    # новый день, и первую минуту после полуночи PT он читал вчерашние 250.
+    import bot
+
+    real = dict(bot.GLOBAL_QUOTA)
+    try:
+        bot.GLOBAL_QUOTA["quota_day"] = "2000-01-01"
+        bot.GLOBAL_QUOTA["munito"] = {m: {"used": 10 ** 6} for m in lumen_router_config._MUNITO_ORDER}
+        assert lumen_router_config._munito_requests_today() == 0
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real)

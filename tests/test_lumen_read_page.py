@@ -198,3 +198,18 @@ def test_extract_text_keeps_content_around_lookalike_script_tags():
         '<div data-x="<script>">важный текст</div><p>хвост</p>', 5000)
     assert "b" in lumen_read_page.extract_text("<scripture>b</scripture>", 5000)
     assert "после" in lumen_read_page.extract_text("<script>evil()</script>после", 5000)
+
+
+def test_extract_text_survives_empty_and_odd_tags():
+    # Третий проход аудита 16.11.2026: «<>» и «</>» давали IndexError, и страница
+    # не читалась вовсе, хотя квота уже списана.
+    assert lumen_read_page.extract_text("< >", 500) == ""
+    assert "a" in lumen_read_page.extract_text("a </> b", 500)
+    assert "b" in lumen_read_page.extract_text("a </> b", 500)
+
+
+def test_extract_text_keeps_positions_when_lower_changes_length():
+    # İ в нижнем регистре длиннее на символ: индексы уезжали и съедали букву
+    # после каждого блочного тега.
+    text = lumen_read_page.extract_text("İstanbul <script>bad()</script> tail text here", 500)
+    assert "tail text here" in text
