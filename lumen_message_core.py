@@ -311,6 +311,12 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
         time.monotonic() + bot.MESSAGE_TOTAL_BUDGET_SEC
     )
     ltoken = None if bot._LOG_CHAT.get() else bot._LOG_CHAT.set(f"chat={chat_id}")
+    # Автор для карантина моделей: pick-кнопки приходят колбэком и раньше считались
+    # чатом, а не человеком (аудит 16.11.2026).
+    utoken = None
+    _sender = getattr(message, "from_user", None)
+    if not bot._LOG_USER.get() and _sender is not None:
+        utoken = bot._LOG_USER.set(f"user={getattr(_sender, 'id', 0)}")
     try:
         remaining = bot._msg_remaining_sec()
         lock_timeout = bot.CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(bot.CHAT_LOCK_TIMEOUT_SEC, remaining))
@@ -346,6 +352,8 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
             bot._MSG_DEADLINE.reset(dtoken)
         if ltoken is not None:
             bot._LOG_CHAT.reset(ltoken)
+        if utoken is not None:
+            bot._LOG_USER.reset(utoken)
 
 
 async def _process_media_group_buffers(mgid: str) -> None:

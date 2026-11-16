@@ -33,6 +33,27 @@ _FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched page[^\]]*\]")
 
 _READ_DAY = ""
 _READ_CALLS = 0
+# Доля одного человека в общем суточном потолке: без неё 38 сообщений одного
+# человека выжигали все 75 чтений на остальных (аудит 16.11.2026).
+_USER_READS: dict[str, int] = {}
+
+
+def read_page_user_limit() -> int:
+    try:
+        return max(0, int((os.getenv("READ_PAGE_USER_DAILY_LIMIT", "") or "10").strip()))
+    except (TypeError, ValueError):
+        return 10
+
+
+def _user_key() -> str:
+    import bot
+    return str(bot._LOG_USER.get() or bot._LOG_CHAT.get() or "")
+
+
+def _user_reads_left() -> bool:
+    _roll_day()
+    key = _user_key()
+    return not key or _USER_READS.get(key, 0) < read_page_user_limit()
 
 
 def read_page_enabled() -> bool:
@@ -69,6 +90,7 @@ def _roll_day() -> None:
     today = bot._current_quota_day()
     if today != _READ_DAY:
         _READ_DAY, _READ_CALLS = today, 0
+        _USER_READS.clear()
 
 
 def read_page_budget_left() -> bool:
@@ -85,18 +107,22 @@ def note_read_page_call() -> None:
     _roll_day()
     global _READ_CALLS
     _READ_CALLS += 1
+    key = _user_key()
+    if key:
+        _USER_READS[key] = _USER_READS.get(key, 0) + 1
 
 
 def reset_read_page_counters_for_tests() -> None:
     global _READ_DAY, _READ_CALLS
     _READ_DAY, _READ_CALLS = "", 0
+    _USER_READS.clear()
 
 
 def _read_pages_available() -> bool:
     """Инструмент предлагается, только если чтение реально может сработать:
     включено, бюджет не выбран, прокси и секрет настроены."""
     import bot
-    if not read_page_enabled() or not read_page_budget_left():
+    if not read_page_enabled() or not read_page_budget_left() or not _user_reads_left():
         return False
     return bool(proxy_origin() and (getattr(bot, "LUMEN_PROXY_SECRET", "") or "").strip())
 
@@ -213,7 +239,7 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
     import bot
     from lumen_telegram_transport import PROXY_AUTH_HEADER
 
-    if not read_page_enabled() or not read_page_budget_left():
+    if not read_page_enabled() or not read_page_budget_left() or not _user_reads_left():
         return None
     if not url_is_readable(url):
         return None

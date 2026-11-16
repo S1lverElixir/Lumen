@@ -89,3 +89,25 @@ def test_page_text_cannot_close_the_evidence_frame():
     # Ровно одна открывающая и одна закрывающая рамка — наши.
     assert block.count("[Fetched page: ") == 1
     assert block.count("[/Fetched page]") == 1
+
+
+def test_read_page_has_a_per_person_share(monkeypatch):
+    # Аудит 16.11.2026: 38 сообщений одного человека выжигали общий потолок чтений.
+    import bot
+    import lumen_read_page
+
+    lumen_read_page.reset_read_page_counters_for_tests()
+    monkeypatch.setenv("READ_PAGE_USER_DAILY_LIMIT", "1")
+    t1 = bot._LOG_USER.set("user=42")
+    try:
+        assert lumen_read_page._user_reads_left() is True
+        lumen_read_page.note_read_page_call()
+        assert lumen_read_page._user_reads_left() is False
+        t2 = bot._LOG_USER.set("user=43")
+        try:
+            assert lumen_read_page._user_reads_left() is True
+        finally:
+            bot._LOG_USER.reset(t2)
+    finally:
+        bot._LOG_USER.reset(t1)
+        lumen_read_page.reset_read_page_counters_for_tests()
