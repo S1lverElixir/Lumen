@@ -870,3 +870,34 @@ def test_split_text_chunks_never_ends_a_chunk_on_a_heading():
     assert len(chunks) > 1
     for chunk in chunks[:-1]:
         assert not chunk.rstrip().endswith("## Итоги"), chunk[-60:]
+
+
+def test_inline_markup_keeps_word_underscores_and_nests_triple():
+    # Внешний аудит 16.11.2026: "_" внутри имени файла и URL резались курсивом,
+    # а "***x***" давал пересечённые теги и терял разметку всего чанка.
+    from lumen_formatting import _md_to_html
+    html = _md_to_html("файл my_file_name.txt и https://example.com/a_b_c")
+    assert "my_file_name.txt" in html
+    assert "https://example.com/a_b_c" in html
+    assert _md_to_html("***важно***") == "<b><i>важно</i></b>"
+    assert _md_to_html("метод __init__ и *курс*") == "метод __init__ и <i>курс</i>"
+
+
+def test_long_table_never_splits_into_raw_pipes():
+    # Внешний аудит 16.11.2026: 120-строчная таблица резалась на чанки, и
+    # хвостовые куски без шапки уходили человеку сырыми "|".
+    from lumen_formatting import _md_to_html, _split_text_chunks
+    rows = ["| Модель | Описание |", "|---|---|"] + [f"| M{i} | текст {i} |" for i in range(120)]
+    chunks = _split_text_chunks(chr(10).join(rows), 3000)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert "|" not in _md_to_html(chunk)
+
+
+def test_unclosed_code_fence_is_closed_in_final_html():
+    # Внешний аудит 16.11.2026: оборванный ответ с незакрытым ``` показывал
+    # человеку буквальный забор, хотя стрим хвост закрывал.
+    from lumen_formatting import _md_to_html
+    html = _md_to_html("код:" + chr(10) + "```python" + chr(10) + "x = 1")
+    assert "```" not in html
+    assert "x = 1" in html

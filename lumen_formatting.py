@@ -61,6 +61,25 @@ def _split_table_cells(line: str) -> list[str]:
         s = s[:-1]
     return [c.strip() for c in s.split("|")]
 
+def _convert_orphan_table_rows(text: str) -> str:
+    """Строки таблицы без шапки (ответ разрезан на несколько сообщений) в
+    "• a — b": иначе человек видел сырые "|" (внешний аудит 16.11.2026)."""
+    if "|" not in text:
+        return text
+    out: list[str] = []
+    for line in text.split(chr(10)):
+        stripped = line.strip()
+        if (stripped.startswith("|") and stripped.endswith("|")
+                and line.count("|") >= 2):
+            cells = [c.strip() for c in stripped[1:-1].split("|")]
+            cells = [c for c in cells if c and not set(c) <= set("-: ")]
+            if len(cells) >= 2:
+                out.append("• " + " — ".join(cells))
+                continue
+        out.append(line)
+    return chr(10).join(out)
+
+
 def _convert_markdown_tables_to_lists(text: str) -> str:
     """Telegram не рендерит таблицы: блок "заголовок + дефисы + строки" разворачиваем
     в "• Заголовок: значение". Rich-путь шлёт настоящий <table>."""
@@ -376,6 +395,12 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r"<pre>(.*?)</pre>", lambda m: f"```\n{m.group(1)}\n```", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
 
+    # Незакрытый ``` модель оставляет в оборванном ответе; стрим хвост
+    # дозакрывал, финальная сборка показывала человеку буквальный забор
+    # (внешний аудит 16.11.2026).
+    if text.count("```") % 2:
+        text = text.rstrip() + "\n```"
+
     # ── Фаза 1: вырезаем код до обработки ────────────────
     _saved: dict[str, str] = {}
     _counter = [0]
@@ -430,13 +455,24 @@ def _md_to_html(text: str) -> str:
     # tables_to_lists выше) — код уже вынесен на предыдущем шаге, поэтому "|"
     # внутри кода (например, битовое ИЛИ в Rust/C) сюда не попадёт.
     text = _convert_markdown_tables_to_lists(text)
+    # Хвост таблицы без шапки — после основного разбора, чтобы не трогать
+    # распознанные таблицы (внешний аудит 16.11.2026).
+    text = _convert_orphan_table_rows(text)
 
     # ── Фаза 2: экранируем остальное в HTML ────────────────────────────────────────
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     # ── Фаза 3: применяем markdown ───────────────────────────────────────────────
-    text = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", text, flags=re.DOTALL)
-    text = re.sub(r"(\*|_)(.*?)\1", r"<i>\2</i>", text)
+    # Тройное выделение первым: иначе "***x***" давал пересечённые
+    # <b><i>…</b></i>, Telegram такой HTML отвергал и весь чанк терял разметку
+    # (внешний аудит 16.11.2026).
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text, flags=re.DOTALL)
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
+    # как в _strip_markdown (внешний аудит 16.11.2026).
+    text = re.sub(r"(?<!\w)__(?=[^_\n]*[\s\u0400-\u04FF])([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
 
     # ── Phase 3.5: blockquote-сентинелы → настоящие <blockquote> ─────────────
@@ -489,8 +525,16 @@ def _rich_inline(text: str) -> str:
     Плейсхолдеры кода/ссылок (символы \x00) намеренно не трогаются — они
     восстанавливаются позже общим финалом, как и в _md_to_html."""
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", text, flags=re.DOTALL)
-    text = re.sub(r"(\*|_)(.*?)\1", r"<i>\2</i>", text)
+    # Тройное выделение первым: иначе "***x***" давал пересечённые
+    # <b><i>…</b></i>, Telegram такой HTML отвергал и весь чанк терял разметку
+    # (внешний аудит 16.11.2026).
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text, flags=re.DOTALL)
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
+    # как в _strip_markdown (внешний аудит 16.11.2026).
+    text = re.sub(r"(?<!\w)__(?=[^_\n]*[\s\u0400-\u04FF])([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
     return text
 
@@ -595,7 +639,7 @@ def _md_to_rich_html(text: str) -> str:
                     continue
         out.append(line)
         i += 1
-    text = "\n".join(out)
+    text = _convert_orphan_table_rows("\n".join(out))
 
     # Остаточный LaTex ВНЕ разделителей ($…$, \[…\]) → юникод, как в обычном пути.
     # Раньше rich-путь его не трогал, и пользователь видел "\frac{1}{2}" и "\alpha\times\beta"
@@ -612,8 +656,16 @@ def _md_to_rich_html(text: str) -> str:
 
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    text = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", text, flags=re.DOTALL)
-    text = re.sub(r"(\*|_)(.*?)\1", r"<i>\2</i>", text)
+    # Тройное выделение первым: иначе "***x***" давал пересечённые
+    # <b><i>…</b></i>, Telegram такой HTML отвергал и весь чанк терял разметку
+    # (внешний аудит 16.11.2026).
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text, flags=re.DOTALL)
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
+    # как в _strip_markdown (внешний аудит 16.11.2026).
+    text = re.sub(r"(?<!\w)__(?=[^_\n]*[\s\u0400-\u04FF])([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
 
     text = text.replace(_BLOCKQUOTE_START, "<blockquote>").replace(_BLOCKQUOTE_END, "</blockquote>")

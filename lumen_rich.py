@@ -21,6 +21,7 @@ from aiogram.types import (
 from lumen_formatting import (
     _md_to_html,
     _md_to_rich_html,
+    _tg_len,
     _split_text_chunks,
     _strip_markdown,
     _truncate_html_to_fit,
@@ -133,9 +134,14 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
             # Сначала рич (таблицы/заголовки/математика), при любом неуспехе —
             # обычный HTML-путь ниже. Reply threading — только у первого чанка.
             # При выключенном риче не тратим время на конвертацию (0.3-0.7 мс/чанк).
-            rich_res = await bot._try_send_rich(message, _md_to_rich_html(chunk), is_first_chunk=(i == 0), **chunk_kwargs)
-            if rich_res is not None:
-                continue
+            # Длина рич-HTML не проверялась: чанк в пределах 4096 по markdown
+            # раздувался разметкой и получал 400 с молчаливым фолбэком на HTML
+            # (внешний аудит 16.11.2026). Слишком длинный шлём сразу обычным путём.
+            rich_html = _md_to_rich_html(chunk)
+            if _tg_len(rich_html) <= bot.TG_MAX_LEN:
+                rich_res = await bot._try_send_rich(message, rich_html, is_first_chunk=(i == 0), **chunk_kwargs)
+                if rich_res is not None:
+                    continue
         if i == 0:
             res = await bot._tg_call(
                 sender, _md_to_html(chunk) if parse_html else chunk,

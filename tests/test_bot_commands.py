@@ -4540,3 +4540,15 @@ def test_inline_draw_falls_back_to_document_when_photo_is_rejected(monkeypatch):
         assert sent["document"] == 1
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def test_bare_read_trigger_does_not_swallow_explain_requests():
+    # Внешний аудит 16.11.2026: «прочти инструкцию и объясни, что делать»
+    # озвучивалось вместо ответа. Голые «прочти/зачитай» остаются TTS только
+    # без глагола пересказа.
+    from lumen_message_parse import _tts_trigger_is_speech
+    assert _tts_trigger_is_speech("прочти", " инструкцию и объясни, что делать") is False
+    assert _tts_trigger_is_speech("прочтите", " текст и перескажите кратко") is False
+    assert _tts_trigger_is_speech("зачитай", " этот абзац") is True
+    assert _tts_trigger_is_speech("прочти вслух", " мою историю") is True
+    assert _tts_trigger_is_speech("озвучь", " инструкцию и объясни") is True

@@ -21,7 +21,14 @@ def extract_url(text: str) -> str | None:
     m = re.search(r"https?://[^\s]+", text)
     if not m:
          return None
-    return m.group(0).rstrip(".,!?;:)>]'\"")
+    url = m.group(0)
+    # Закрывающую скобку срезаем только при дисбалансе: иначе адрес
+    # "…/Doom_(1993_video_game)" терял скобку и не читался (внешний аудит 16.11.2026).
+    while url and url[-1] in ".,!?;:>'\"])":
+        if url[-1] == ")" and url.count("(") >= url.count(")"):
+            break
+        url = url[:-1]
+    return url
 
 def is_tiktok(url: str) -> bool:
     try:
@@ -303,6 +310,34 @@ def _strip_trigger_fillers(text_lower: str) -> tuple[str, int]:
     m = _DRAW_FILLER_RE.match(text_lower)
     cut = len(m.group(0)) if m else 0
     return text_lower[cut:], cut
+
+
+# «draw a table of the results» — просьба собрать таблицу словами, а не картинку
+# (внешний аудит 16.11.2026). Слабый английский глагол без визуального объекта
+# в начале остатка уходит обычной модели; русские триггеры не ограничены.
+_WEAK_DRAW_PREFIXES = frozenset(("draw a", "draw an", "draw me", "paint", "paint me", "sketch"))
+_DRAW_TEXTUAL_TAIL_RE = re.compile(
+    r"^(?:a |an |the )?(?:table|list|comparison|conclusion|summary)\b", re.IGNORECASE)
+
+
+def _draw_trigger_is_visual(trigger: str, rest: str) -> bool:
+    """Слабый английский префикс рисует, только если дальше объект картинки."""
+    if trigger not in _WEAK_DRAW_PREFIXES:
+        return True
+    return not _DRAW_TEXTUAL_TAIL_RE.match(rest.lstrip(" ,:;\t"))
+
+
+# «прочти инструкцию и объясни, что делать» — просьба разобраться, а не озвучить
+# (внешний аудит 16.11.2026). Голые «прочти/зачитай» без глагола пересказа
+# остаются озвучкой: «зачитай этот абзац» — именно TTS.
+_TTS_BARE_READ = frozenset(("прочти", "прочтите", "зачитай", "зачитайте"))
+_TTS_EXPLAIN_RE = re.compile(r"\b(?:объясни|объясните|расскажи|расскажите|перескажи|перескажите)\b")
+
+
+def _tts_trigger_is_speech(trigger: str, rest: str) -> bool:
+    if trigger not in _TTS_BARE_READ:
+        return True
+    return not _TTS_EXPLAIN_RE.search(rest)
 
 
 def _match_trigger_with_fillers(text_lower: str, prefixes) -> tuple[str | None, int]:

@@ -411,3 +411,15 @@ def test_core_variants_count_survives_anaphora(rate_guard_setup, monkeypatch):
                        "A ginger cat on the moon, photorealistic.")
     asyncio.run(bot._handle_message_core(message))
     assert bot.inline_draw.await_count == 3, bot.inline_draw.await_args_list
+
+
+def test_weak_english_draw_prefix_needs_a_visual_object():
+    # Внешний аудит 16.11.2026: «draw a table of the results» уходило в
+    # генерацию картинки и жгло личный слот. Русские триггеры не ограничены.
+    from lumen_message_parse import _draw_trigger_is_visual
+    assert _draw_trigger_is_visual("draw a", " table of the results") is False
+    assert _draw_trigger_is_visual("draw a", " comparison of both") is False
+    assert _draw_trigger_is_visual("paint", " the elevator scene") is True
+    assert _draw_trigger_is_visual("draw a", " cat in a hat") is True
+    assert _draw_trigger_is_visual("нарисуй", " таблицу сравнения") is True
+    assert _draw_trigger_is_visual("sketch", " a list of ideas") is False

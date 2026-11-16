@@ -33,6 +33,8 @@ from lumen_message_parse import (
     _has_visual_signal,
     _is_anaphoric_draw_request,
     _match_trigger_with_fillers,
+    _draw_trigger_is_visual,
+    _tts_trigger_is_speech,
     _split_image_variants,
     _wants_style_reference,
     _NO_MEDIA_NOTE,
@@ -1037,6 +1039,15 @@ async def _handle_message_core(
     matched_tts_trigger, _tts_cut = _match_trigger_with_fillers(
         lower_prompt, TTS_TRIGGER_PREFIXES,
     )
+    # Ложные срабатывания на живой речи: «draw a table of the results» — таблица
+    # словами, «прочти инструкцию и объясни» — разбор, а не озвучка (внешний
+    # аудит 16.11.2026). Срез тоже снимаем, иначе триггер выпадал из вопроса.
+    if matched_draw_trigger and not _draw_trigger_is_visual(
+            matched_draw_trigger, lower_prompt[_draw_cut + len(matched_draw_trigger):]):
+        matched_draw_trigger, _draw_cut = None, 0
+    if matched_tts_trigger and not _tts_trigger_is_speech(
+            matched_tts_trigger, lower_prompt[_tts_cut + len(matched_tts_trigger):]):
+        matched_tts_trigger, _tts_cut = None, 0
     # Тело фразы: срез даёт сам матчер — ровно до найденного триггера.
     _prompt_text = clean_prompt[max(_draw_cut, _edit_cut, _tts_cut):]
 
