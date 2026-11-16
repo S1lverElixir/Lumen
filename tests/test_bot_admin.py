@@ -361,7 +361,6 @@ def test_webhook_rechecks_inflight_cap_after_body_read(monkeypatch):
     # Аудит 16.11.2026: кап проверялся только до чтения тела, а между проверкой и
     # create_task есть await'ы; пачка одновременных POST проходила на пустом наборе
     # и создавала больше задач, чем кап. Перепроверка стоит прямо перед create_task.
-    from types import SimpleNamespace
     import lumen_admin
 
     original_secret = bot.WEBHOOK_SECRET
