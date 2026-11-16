@@ -1697,6 +1697,8 @@ async def cmd_selftest(message: Message) -> None:
         f" · цикл: {'включён' if lumen_agent.agent_turn_enabled() else 'выключен'}"
         f" · обращений сегодня {lumen_search.search_calls_today()}"
         f"/{lumen_search.WEB_SEARCH_DAILY_LIMIT}"
+        + (f" · по ключу {lumen_search.search_api_calls_today()}/{lumen_search._search_api_limit()}"
+           if lumen_search.search_api_provider() else "")
     )
     try:
         session = await bot._get_http_session()

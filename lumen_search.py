@@ -136,10 +136,16 @@ _search_api_calls = 0
 
 
 def _search_api_limit() -> int:
-    try:
-        return max(0, int((os.getenv("SEARCH_API_DAILY_LIMIT", "") or "25").strip()))
-    except (TypeError, ValueError):
-        return 25
+    raw = (os.getenv("SEARCH_API_DAILY_LIMIT", "") or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            pass
+    # Дефолт из тарифа провайдера, а не одно число для всех: у Tavily 1000 кредитов
+    # в месяц и поиск стоит 2 кредита (12/сутки ≈ 720), у Brave 2000 запросов
+    # (50/сутки ≈ 1500), у Exa базовая тысяча (25/сутки ≈ 750). Аудит 16.11.2026.
+    return {"tavily": 12, "brave": 50, "exa": 25}.get(search_api_provider(), 12)
 
 
 def _roll_search_api_day() -> None:

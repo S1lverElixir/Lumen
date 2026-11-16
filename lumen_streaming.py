@@ -319,7 +319,10 @@ async def _remember_turn(
     import bot
     hist_text = _history_user_text(history_text if history_text is not None else user_text)
     lumen_memory.append_user_from_meta(state, hist_text, history_meta)
-    lumen_memory.append_assistant(state, answer)
+    # Остановка до первого куска: вопрос остаётся в истории, пустой ответ — нет
+    # (иначе модель в следующем ходе видит реплику «бот промолчал»).
+    if (answer or "").strip():
+        lumen_memory.append_assistant(state, answer)
     await bot._trim_history(state["history"], state)
 
 
@@ -529,6 +532,8 @@ async def _run_streaming_reply(
                 wait_left = max(0.0, next_paint_ts - time.monotonic())
             done, _pending = await asyncio.wait({read_task}, timeout=wait_left)
             if read_task not in done:
+                if bot._stream_stop_requested(chat_id):
+                    raise _StoppedByUser()
                 now_tick = time.monotonic()
                 if deadline is not None and now_tick > deadline:
                     raise bot.RouteBudgetExceededError([f"{provider}:{model_id}"])
@@ -818,6 +823,7 @@ async def _run_streaming_reply(
         # историю ниже. stream_interrupted НЕ ставим — автопродолжение после
         # осознанного стопа не запускается, «продолжи» работает через interrupted.
         state["interrupted"] = True
+        state["stopped_by_user"] = True
         bot.mark_state_dirty(chat_id)
         if sent_messages:
             with contextlib.suppress(Exception):

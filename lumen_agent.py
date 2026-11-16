@@ -423,6 +423,11 @@ async def run_search_turn(
     from lumen_read_page import _read_pages_available, page_url_allowed_for_turn
     pages_left = _read_pages_per_turn() if _read_pages_available() else 0
     while result.steps < _MAX_STEPS and (searches_left > 0 or pages_left > 0):
+        if bot._stream_stop_requested(chat_id):
+            # Остановка человеком: дальше искать незачем, ответ ему не нужен.
+            log.info("[agent] stopped by the user during the evidence phase")
+            result.failed = True
+            break
         _plan_started = time.monotonic()
         message = await _plan_call(messages, model_id=model_id, effort=effort,
                                    deadline=deadline, chat_id=chat_id)

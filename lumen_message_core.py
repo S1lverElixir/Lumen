@@ -1417,6 +1417,17 @@ async def _handle_message_core(
         # видно, работает ли надстройка и не ест ли она бюджет молча.
         log.info("[web-search] chat=%s sources=%d agent=%s effort=%s",
                  message.chat.id, len(snippets), agent_used, effort or "auto-off")
+        if bot._stream_stop_requested(message.chat.id):
+            # Остановка во время поиска: отвечать уже нечего, но пузырь этапа
+            # обязан закрыться пометкой, а не висеть «Ищу…» до таймаута.
+            log.info("[stop] stopped by the user during the evidence phase")
+            if status is not None:
+                with contextlib.suppress(Exception):
+                    await status.stop()
+                await bot._edit_message_quietly(
+                    status.message, bot._t(message.chat.id, "stream_note_stopped").strip())
+            bot.mark_state_dirty(message.chat.id)
+            return
         if status is not None:
             # Один закрытый этап на ВЁС ответ: два «поискал · нашёл N» в трейсе
             # читались как ложь, а «нашёл 1» рядом с «ничего не нашёл» — хуже
@@ -1722,7 +1733,10 @@ async def _handle_message_core(
             await bot._safe_reply(message, ans)
         # Частичный стрим тоже «успешен» для вызывающего, но его пометка
         # «продолжи» должна пережить этот блок (аудит 27.10.2026).
-        if state.pop("stream_interrupted", False) or _cut_by_cap:
+        # Осознанный стоп — тоже «можно продолжить», но автопродолжение не
+        # запускается: флаг stream_interrupted для него и ставится отдельно.
+        _stopped_by_user = bool(state.pop("stopped_by_user", False))
+        if state.pop("stream_interrupted", False) or _cut_by_cap or _stopped_by_user:
             state["interrupted"] = True
         else:
             state.pop("interrupted", None)
@@ -1744,6 +1758,7 @@ async def _handle_message_core(
             flags={"fresh": bool(needs_freshness), "snippets": bool(snippets_injected),
                    "grounded": bool(answered_grounded), "streamed": bool(reply_already_sent),
                    "truncated": _truncated, "partial": bool(state.get("interrupted")),
+                   "stopped": _stopped_by_user,
                    # Цикл поиска: кто принёс источники, сколько шагов и времени
                    # ушло на планирование — по этим полям ветка видна в следe.
                    "effort": effort or "auto-off", "agent": bool(agent_used),

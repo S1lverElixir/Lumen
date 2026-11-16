@@ -1498,6 +1498,7 @@ def test_stop_ends_the_stream_and_keeps_the_partial_answer():
         note = bot._t(chat_id, "stream_note_stopped").strip()
         assert any(note in (text or "") for text, _ in incoming.sent[0].edits)
         assert bot.chat_state[chat_id]["interrupted"] is True
+        assert bot.chat_state[chat_id].get("stopped_by_user") is True
         assert bot.chat_state[chat_id].get("stream_interrupted") is None
         assert bot._STREAM_STOPS.get(chat_id) is None
     finally:
@@ -1632,3 +1633,23 @@ def test_catchup_survives_zero_typing_tick_setting(monkeypatch):
             lumen_typing_pace._speed_ema[pace_key] = saved_ema
         else:
             lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+
+def test_stop_permissions_and_idempotency():
+    # Аудит 16.11.2026: чужой человек в группе остановить ответ не может, повторный
+    # /stop ничего не делает, область снимается без утечки на следующий ответ.
+    bot._STREAM_STOPS.clear()
+    bot._begin_stream_stop_scope(424242, 100)
+    try:
+        assert bot._request_stream_stop(424242, 999) is False
+        assert bot._stream_stop_requested(424242) is False
+        assert bot._request_stream_stop(424242, 100) is True
+        assert bot._stream_stop_requested(424242) is True
+        assert bot._request_stream_stop(424242, 100) is False
+        # Вложенная область (стрим) не снимает внешнюю и не теряет флаг.
+        bot._begin_stream_stop_scope(424242, 100)
+        bot._end_stream_stop_scope(424242)
+        assert bot._stream_stop_requested(424242) is True
+    finally:
+        bot._end_stream_stop_scope(424242)
+    assert bot._STREAM_STOPS.get(424242) is None

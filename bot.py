@@ -108,11 +108,24 @@ _STREAM_STOPS: dict[int, dict[str, object]] = {}
 
 
 def _begin_stream_stop_scope(chat_id: int, user_id: int | None) -> None:
-    _STREAM_STOPS[chat_id] = {"event": asyncio.Event(), "user_id": user_id}
+    """Область с глубиной: внешняя ставится на весь апдейт (чтобы /stop работал и
+    во время фазы поиска), внутренняя — на стрим. Флаг переживает вложенную область."""
+    entry = _STREAM_STOPS.get(chat_id)
+    if entry is None:
+        entry = {"event": asyncio.Event(), "user_id": user_id, "depth": 0}
+        _STREAM_STOPS[chat_id] = entry
+    if user_id is not None and entry.get("user_id") is None:
+        entry["user_id"] = user_id
+    entry["depth"] = int(entry.get("depth") or 0) + 1
 
 
 def _end_stream_stop_scope(chat_id: int) -> None:
-    _STREAM_STOPS.pop(chat_id, None)
+    entry = _STREAM_STOPS.get(chat_id)
+    if not entry:
+        return
+    entry["depth"] = int(entry.get("depth") or 0) - 1
+    if entry["depth"] <= 0:
+        _STREAM_STOPS.pop(chat_id, None)
 
 
 def _stream_stop_requested(chat_id: int) -> bool:
@@ -1465,9 +1478,16 @@ async def handle_message(message: Message) -> None:
     dtoken = _MSG_DEADLINE.set(time.monotonic() + MESSAGE_TOTAL_BUDGET_SEC)
     # Сброс на входе: значение не имеет права утечь в следующий апдейт.
     ctoken = _ANSWER_COUNTED.set(False)
+    # /stop обязан приниматься с первой секунды, включая фазу поиска (аудит 16.11.2026).
+    _stop_chat = message.chat.id if getattr(message, "chat", None) is not None else None
+    if _stop_chat is not None:
+        _begin_stream_stop_scope(
+            _stop_chat, message.from_user.id if getattr(message, "from_user", None) else None)
     try:
         await _handle_message(message)
     finally:
+        if _stop_chat is not None:
+            _end_stream_stop_scope(_stop_chat)
         _LOG_CHAT.reset(token)
         _LOG_USER.reset(utoken)
         _ANSWER_COUNTED.reset(ctoken)
