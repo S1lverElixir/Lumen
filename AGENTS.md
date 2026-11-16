@@ -174,6 +174,12 @@ Gemini is the unconditional reserve on every route where Munito answers.
   reach the model-failure marks (mechanics in `docs/ARCHITECTURE.md`). Effort is derived per message
   (`EFFORT_AUTO`, on by default) and also caps searches; non-empty `MUNITO_REASONING_EFFORT` pins it,
   empty drops the field.
+- Since 16.11.2026 the text loop can also read a page (`read_page`): the model asks, the bot fetches
+  through the proxy's guarded `/read` route (public https only, after DNS checks, text, 2 MB cap), and
+  only a URL that already appeared in the message, in this turn's results or in an already read page is
+  fetched. The Gemini reserve has the same `web_search` loop behind `GEMINI_AGENT_TURN_ENABLED` (off by
+  default until a live run). `/stop` halts a streaming answer — the partial text stays and «продолжи»
+  continues it; the button is `STOP_BUTTON_ENABLED`, also off by default.
 - Limits are derived, not picked: a daily cap sits under the provider's real free-tier budget with
   headroom, and per-user caps follow the existing family (one for messages, one per heavy feature).
   The global cap is what protects a shared provider, so a reflexively small number is not safety.
