@@ -18,3 +18,7 @@ must be rotated on both relay projects and the Space together. The relay's
 `/read` route is an SSRF surface on purpose: it accepts public https pages only,
 checks every resolved address and follows no redirects; server-side request
 forgery or a redirect-based bypass is exactly the class of report wanted here.
+Known residual risk: the check resolves the name and the connection resolves it
+again, so a domain that flips its DNS answer between the two lookups (rebinding,
+TTL 0) could still reach an internal address from the relay; reports that turn
+this into a working bypass are wanted.

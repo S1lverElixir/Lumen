@@ -1791,7 +1791,11 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
             # ключ, опечатка в имени): без этого фолбэка весь веб-слой молчал бы
             # до конца суток, хотя документы обещают старые слои (аудит 16.11.2026).
             if search_api_provider():
-                keyed = await _api_provider_snippets(session, main_query, limit, deadline)
+                # Ключевому слою — 60 % остатка: зависший платный поиск иначе съедал
+                # весь дедлайн, и обещанному фолбэку оставалось полсекунды
+                # (аудит 16.11.2026).
+                keyed_deadline = time.monotonic() + max(0.5, (deadline - time.monotonic()) * 0.6)
+                keyed = await _api_provider_snippets(session, main_query, limit, keyed_deadline)
                 diagnostics["search_api"] = len(keyed)
                 if keyed:
                     return keyed

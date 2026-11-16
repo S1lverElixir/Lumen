@@ -1436,7 +1436,11 @@ async def _handle_message_core(
             with contextlib.suppress(Exception):
                 if snippets and not search_step_reported:
                     status.add_done("progress_search_done", count=len(snippets))
-                    status.set_sources([clean_publisher(item) for item in snippets if clean_publisher(item)])
+                    # Прочитанные страницы — тоже источники в пузыре: модель может
+                    # сослаться на URL, которого человек не видел (аудит 16.11.2026).
+                    _src_items = list(snippets) + [
+                        {"url": page.get("url") or "", "publisher": ""} for page in agent_pages]
+                    status.set_sources([clean_publisher(item) for item in _src_items if clean_publisher(item)])
                     search_step_reported = True
                 elif not snippets and not search_step_reported:
                     status.add_done("progress_search_empty")
@@ -1587,8 +1591,14 @@ async def _handle_message_core(
                     )
                 except Exception as exc:
                     log.warning("[web-search] Search requested by the model failed: %s", exc.__class__.__name__)
-            if mark_snippets:
-                ai_prompt += format_snippets_for_prompt(mark_snippets) + evidence_trace(mark_queries)
+            mark_pages = list(mark_stats.get("pages") or [])
+            if mark_snippets or mark_pages:
+                if mark_snippets:
+                    ai_prompt += format_snippets_for_prompt(mark_snippets)
+                if mark_pages:
+                    from lumen_read_page import format_pages_for_prompt
+                    ai_prompt += format_pages_for_prompt(mark_pages)
+                ai_prompt += evidence_trace(mark_queries)
                 snippets_injected = True
                 # Сниппеты есть: пометка «без поиска» была бы ложью.
                 web_search_failed = False
@@ -1600,7 +1610,9 @@ async def _handle_message_core(
                 with contextlib.suppress(Exception):
                     if mark_snippets and not search_step_reported:
                         status.add_done("progress_search_done", count=len(mark_snippets))
-                        status.set_sources([clean_publisher(item) for item in mark_snippets
+                        _src_items = list(mark_snippets) + [
+                            {"url": page.get("url") or "", "publisher": ""} for page in mark_pages]
+                        status.set_sources([clean_publisher(item) for item in _src_items
                                             if clean_publisher(item)])
                         search_step_reported = True
                     elif not mark_snippets and not search_step_reported:
