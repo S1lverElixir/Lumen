@@ -230,6 +230,12 @@ def _last_storage_write_ts() -> float | None:
 def _save_chat_to_storage(chat_id: int, state: dict[str, Any]) -> bool:
     """True/False для повтора во флаше: раньше сбой молча терял историю до рестарта."""
     import bot
+    if _state_load_failed:
+        # Индекс не прочитан: неизвестно, какие чаты уже есть удалённо. Пока флаг
+        # стоит, ни один чат не пишем — иначе первое сообщение в старый чат затирает
+        # историю раньше, чем ретрай перечислит id (третий проход 16.11.2026).
+        log.debug("[state] Skip chat %s shutdown save: chat index unreadable.", chat_id)
+        return False
     if chat_id in _chat_snapshot_unloaded:
         # Тот же защитный пропуск, что и в async-флаше: shutdown-путь на HF Space
         # отрабатывает почти при каждой перезапуске (аудит run-2, ревью 08.11.2026).
@@ -551,11 +557,14 @@ def _recover_index_ids() -> bool:
         return False
     # Вытесненные и удалённые id не воскрешаем: старый удалённый индекс ещё
     # содержит их (второй проход аудита 16.11.2026).
-    ids = {cid for cid in ids if cid not in _pending_chat_deletions}
+    ids = {cid for cid in ids if cid not in _pending_chat_deletions and cid not in _deleted_chat_ids}
     _index_extra_ids.update(ids)
     # Замораживаем только те, чей снимок не прочитан (нет в памяти): живые чаты
     # обязаны сохраняться дальше (второй проход аудита 16.11.2026).
     _chat_snapshot_unloaded.update(cid for cid in ids if cid not in chat_state)
+    # Созданные во время сбоя чаты тоже не имеют права затирать удалённую копию.
+    _chat_snapshot_unloaded.update(_created_during_outage)
+    _created_during_outage.clear()
     _state_load_failed = False
     log.info('[state] Chat index recovered after the startup failure: %d remote id(s) merged.', len(ids))
     return True
@@ -619,6 +628,11 @@ _quota_load_failed = False
 # собирается слиянием, а не заменой нашими чатами (аудит 16.11.2026 — новые чаты
 # получали ключ, но выпадали из индекса и после рестарта оставались сиротами).
 _index_extra_ids: set[int] = set()
+# Чаты, созданные в памяти, пока индекс был нечитаем: их удалённой копии мы не
+# видели, поэтому после восстановления они замораживаются, а не перезаписываются.
+_created_during_outage: set[int] = set()
+# id, реально удалённые этим процессом: ретрай индекса не имеет права их вернуть.
+_deleted_chat_ids: set[int] = set()
 _index_retry_last_ts = 0.0
 _INDEX_RETRY_SEC = 60.0
 # Параллельные чтения чатов на старте: Upstash/диск отвечает десятки миллисекунд,
@@ -661,6 +675,10 @@ async def _save_chat_to_storage_limited(chat_id: int, state: dict[str, Any]) -> 
 def _save_chat_payload(chat_id: int, payload: str) -> bool:
     """Только блокирующая запись готового снапшота (см. выше) — для to_thread."""
     import bot
+    if _state_load_failed:
+        # См. shutdown-путь: неизвестный набор удалённых чатов запрещает запись.
+        log.debug("[state] Skip chat %s save: chat index unreadable, keeping remote data intact.", chat_id)
+        return False
     if chat_id in _chat_snapshot_unloaded:
         # Снятие защиты — только полная перезагрузка состояния (старт процесса);
         # в пределах жизни процесса ключ бережём, очередь остаётся грязной.
@@ -871,6 +889,8 @@ def load_state_from_disk() -> None:
     _state_load_failed = False
     _quota_load_failed = False
     _index_extra_ids.clear()
+    _created_during_outage.clear()
+    _deleted_chat_ids.clear()
     _index_retry_last_ts = 0.0
     _chat_snapshot_unloaded.clear()
     bot.load_global_quota()
@@ -1000,6 +1020,8 @@ def load_state_from_disk() -> None:
 def get_state(chat_id: int) -> dict[str, Any]:
     import bot
     if chat_id not in chat_state:
+        if _state_load_failed:
+            _created_during_outage.add(chat_id)
         chat_state[chat_id] = {
             "history": [],
             "memory_summary": "",
@@ -1080,6 +1102,7 @@ def _prune_old_chats() -> None:
     # Вытесненные чаты должны реально исчезнуть из хранилища (иначе их собственные
     # ключи/файлы бесхозно копятся вечно) — ставим в очередь на удаление,
     # обрабатывается в _flush_dirty_state вместе с обычным сбросом.
+    _deleted_chat_ids.update(removed_ids)
     _pending_chat_deletions.update(removed_ids)
     _dirty_chat_ids.difference_update(removed_ids)
     if removed_ids:

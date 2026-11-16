@@ -4277,3 +4277,34 @@ def test_index_recovery_freezes_only_unread_chats():
         lcs._chat_snapshot_unloaded.clear()
         lcs._chat_snapshot_unloaded.update(frozen)
         bot.chat_state.pop(111, None)
+
+
+def test_index_outage_blocks_all_chat_writes_until_recovery():
+    # Третий проход аудита 16.11.2026: при нечитаемом индексе первое сообщение в
+    # старый чат затирало историю раньше, чем ретрай перечислит id.
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, set(lcs._chat_snapshot_unloaded),
+            set(lcs._created_during_outage), lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._chat_snapshot_unloaded.clear()
+    lcs._created_during_outage.clear()
+    lcs._index_retry_last_ts = 0.0
+    try:
+        with patch("bot._storage_write_text") as writer:
+            assert lcs._save_chat_payload(424242, "{}") is False
+        writer.assert_not_called()
+        # Чат, созданный во время сбоя, после восстановления заморожен: его
+        # удалённой копии мы не видели.
+        bot.chat_state[424242] = {"history": []}
+        lcs._created_during_outage.add(424242)
+        with patch("bot._storage_read_text", return_value="[]"):
+            assert lcs._recover_index_ids() is True
+        assert 424242 in lcs._chat_snapshot_unloaded
+    finally:
+        (lcs._state_load_failed, frozen, created, lcs._index_retry_last_ts) = orig
+        lcs._chat_snapshot_unloaded.clear()
+        lcs._chat_snapshot_unloaded.update(frozen)
+        lcs._created_during_outage.clear()
+        lcs._created_during_outage.update(created)
+        bot.chat_state.pop(424242, None)

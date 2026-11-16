@@ -1016,6 +1016,7 @@ def test_munito_route_yields_to_gemini_when_daily_ceiling_is_reached(monkeypatch
     monkeypatch.setattr(lumen_router_config, "_MUNITO_DISABLED", False)
     saved = dict(bot.GLOBAL_QUOTA.get("munito") or {})
     try:
+        bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
         bot.GLOBAL_QUOTA["munito"] = {
             model: {"used": int(bot.MUNITO_DAILY_LIMIT)} for model in lumen_router_config._MUNITO_ORDER
         }
