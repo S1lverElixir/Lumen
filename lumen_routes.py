@@ -1062,9 +1062,13 @@ async def _run_route(
                     await bot._delete_message_quietly(reusable_placeholder)
                 reusable_placeholder = None
                 if reused:
-                    _count_user_answer(provider)
+                    # Пустой ответ (остановка до первого куска) не списывает слот:
+                    # человек не получил ничего, а лимит — про ответы (аудит 16.11.2026).
+                    if (ans or "").strip():
+                        _count_user_answer(provider)
                     return ans, True
-            _count_user_answer(provider)
+            if (ans or "").strip():
+                _count_user_answer(provider)
             return ans, False
         except _SearchRequested as req:
             # Не неудача провайдера: следующая модель ничего не изменит, а пузырь
