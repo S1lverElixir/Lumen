@@ -228,14 +228,16 @@ async def _gather_web_evidence(
         # «без live-поиска» (ревью приватности 12.11.2026).
         max_searches = 0
     head = _munito_head(route) if max_searches > 0 else None
-    if head is not None and lumen_agent.agent_turn_enabled():
-        turn = None
-        # deadline маршрута здесь ещё не выставлен (его считают перед маршрутом),
-        # поэтому фаза берёт собственный бюджет внутри бюджета сообщения: иначе
-        # планирующие вызовы шли вовсе без границы.
+    # deadline маршрута здесь ещё не выставлен (его считают перед маршрутом),
+    # поэтому фаза берёт собственный бюджет внутри бюджета сообщения: иначе
+    # планирующие вызовы шли вовсе без границы. Считаем один раз на оба цикла.
+    phase_deadline = None
+    if max_searches > 0:
         phase_deadline = deadline if deadline is not None else bot._deadline_within_message(
             lumen_agent.evidence_phase_budget_sec(max_searches)
         )
+    if head is not None and lumen_agent.agent_turn_enabled():
+        turn = None
         try:
             turn = await lumen_agent.run_search_turn(
                 chat_id=chat_id, user_prompt=user_prompt, clean_prompt=clean_prompt,
@@ -265,7 +267,7 @@ async def _gather_web_evidence(
             _gturn = await _gemini_search_turn(
                 chat_id=chat_id, user_prompt=user_prompt, clean_prompt=clean_prompt,
                 model_id=_gemini_head, effort=effort, max_searches=max_searches,
-                status=status, deadline=deadline, history_meta=history_meta,
+                status=status, deadline=phase_deadline, history_meta=history_meta,
             )
         except asyncio.CancelledError:
             raise
@@ -281,7 +283,7 @@ async def _gather_web_evidence(
 
     budget = _snippet_fetch_budget_sec(deadline)
     snippets: list[dict] = []
-    if budget > 0 and allow_fallback_fetch:
+    if budget > 0 and allow_fallback_fetch and not bot._stream_stop_requested(chat_id):
         try:
             snippets = await fetch_web_snippets(
                 clean_prompt, timeout_sec=budget, max_results=web_search_max_results(),

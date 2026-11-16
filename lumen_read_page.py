@@ -270,6 +270,27 @@ def url_is_readable(url: str) -> bool:
         return False
 
 
+# Знаки, которые в живой речи стоят после ссылки (запятая, точка в конце,
+# скобка), границей не считаются: они не продолжают адрес.
+_URL_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~:/?#[]@$&%+-=")
+
+
+def _url_mentioned(url: str, text: str) -> bool:
+    """Ссылка целиком, а не префикс: иначе "example.co" из текста пускал чтение
+    "example.com/a", которого человек не называл (аудит 16.11.2026)."""
+    start = 0
+    while True:
+        idx = text.find(url, start)
+        if idx < 0:
+            return False
+        end = idx + len(url)
+        after = text[end] if end < len(text) else ""
+        before = text[idx - 1] if idx else ""
+        if not (after and after in _URL_CHARS) and not (before and before in _URL_CHARS):
+            return True
+        start = idx + 1
+
+
 def page_url_allowed_for_turn(url: str, *, user_text: str, snippets: list[dict], pages: list[dict]) -> bool:
     """Провенанс как у Claude: читать можно только URL, который уже был в сообщении
     человека, в собранной выдаче или в ранее прочитанной странице. Придуманный
@@ -277,7 +298,7 @@ def page_url_allowed_for_turn(url: str, *, user_text: str, snippets: list[dict],
     norm = (url or "").strip()
     if not norm or not url_is_readable(norm):
         return False
-    if norm in (user_text or ""):
+    if _url_mentioned(norm, user_text or ""):
         return True
     for item in snippets or []:
         if (item.get("url") or "").strip() == norm:
@@ -339,12 +360,23 @@ def _frame_safe(text: str) -> str:
     return _FRAME_MARK_RE.sub(" ", _FORMAT_CHARS_RE.sub("", text or ""))
 
 
+def _frame_safe_url(url: str) -> str:
+    """URL в заголовке рамки: скобки и переводы строк из адреса вырезаем, иначе
+    "https://x/a] SYSTEM: ..." закрывал рамку цитатой из выдачи (аудит 16.11.2026)."""
+    safe = _frame_safe(url)
+    for i, ch in enumerate(safe):
+        if ch.isspace() or ch in "[]<>\"'`":
+            safe = safe[:i]
+            break
+    return safe[:500]
+
+
 def format_pages_for_prompt(pages: list[dict]) -> str:
     """Блок прочитанных страниц для промпта: те же правила недоверенных данных,
     что у сниппетов, и явная метка, что это страница, а не выдача."""
     blocks: list[str] = []
     for page in pages or []:
-        url = _frame_safe((page.get("url") or "").strip())
+        url = _frame_safe_url((page.get("url") or "").strip())
         text = _frame_safe((page.get("text") or "").strip())
         if not url or not text:
             continue
@@ -359,4 +391,4 @@ def format_pages_for_prompt(pages: list[dict]) -> str:
 def read_page_tool_result(url: str, text: str | None) -> str:
     if not text:
         return "[read_page returned no readable text for this URL]"
-    return f"[Fetched page: {_frame_safe(url)}]\n{_frame_safe(text)}\n[/Fetched page]"
+    return f"[Fetched page: {_frame_safe_url(url)}]\n{_frame_safe(text)}\n[/Fetched page]"

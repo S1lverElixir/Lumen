@@ -1949,6 +1949,15 @@ def _source_label(item: dict) -> str:
     return host or ""
 
 
+_SNIPPET_FRAME_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]]*\]")
+
+
+def _one_line(text: str) -> str:
+    """Чужая строка выдачи — одна строка без маркеров рамки: иначе заголовок с
+    переводом строки открывал блок страницы от лица промпта (аудит 16.11.2026)."""
+    return _SNIPPET_FRAME_RE.sub(" ", " ".join((text or "").splitlines()))
+
+
 def format_snippets_for_prompt(snippets: list[dict]) -> str:
     """Блок выдачи в хвост промпта: чужие данные, не инструкции — та же оговорка, что у url_context в системном промпте."""
     header = (
@@ -1961,8 +1970,8 @@ def format_snippets_for_prompt(snippets: list[dict]) -> str:
     lines = [header.rstrip("\n")]
     total = len(header)
     for item in snippets:
-        title = (item.get("title") or "").strip()
-        snippet = (item.get("snippet") or "").strip()
+        title = _one_line((item.get("title") or "").strip())
+        snippet = _one_line((item.get("snippet") or "").strip())
         # Google News кладёт заголовок ещё и в description: дубль съедает место в промпте.
         if snippet and title and _clean_text(snippet, len(title))[:len(title)] == title:
             snippet = snippet[len(title):].strip(" —·,")
@@ -1971,7 +1980,7 @@ def format_snippets_for_prompt(snippets: list[dict]) -> str:
         if not body:
             continue
         tail = ""
-        url = (item.get("url") or "").strip()
+        url = _one_line((item.get("url") or "").strip())
         if url and len(url) <= _MAX_URL_IN_BLOCK and "news.google.com" not in url:
             tail = f" ({url})"
         elif label:

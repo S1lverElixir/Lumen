@@ -518,7 +518,9 @@ async def run_search_turn(
             from lumen_read_page import read_page_timeout_sec
             timeout = read_page_timeout_sec()
             if deadline is not None:
-                timeout = max(2.0, min(timeout, deadline - time.monotonic()))
+                # Пол 0.5 с вместо 2: два чтения у самого дедлайна добавляли до
+                # четырёх секунд сверх фазового бюджета (аудит 16.11.2026).
+                timeout = max(0.5, min(timeout, deadline - time.monotonic()))
             text = await _one_read(url, timeout=timeout)
             read_results[str(call.get("id") or "")] = text
             if text:
