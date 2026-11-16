@@ -48,18 +48,14 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
 
-      - name: Check proxy changes
-        id: proxy_changed
-        # При ручном запуске всегда деплоим (иначе было бы нечего запускать).
-        if: github.event_name == 'workflow_dispatch'
-        run: echo "changed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Check proxy changes on CI trigger
+      - name: Report proxy changes on CI trigger
         id: proxy_changed_ci
         if: github.event_name != 'workflow_dispatch'
         run: |
-          # Мержи — по базе слияния, а не HEAD~1: иначе мультикоммитные пуши
-          # в main проверяли бы только последний коммит.
+          # Дифф печатается для лога и истории, но деплой от него больше не зависит:
+          # база HEAD~1 пропускала правку proxy/ в линейном мультикоммитном пуше,
+          # и прогон выглядел зелёным со skipped-шагами (инцидент 09.11.2026,
+          # аудит 16.11.2026). Деплой идемпотентен, поэтому выполняется всегда.
           if git rev-parse --verify HEAD^2 >/dev/null 2>&1; then
             base="$(git merge-base HEAD^1 HEAD^2)"
           else
@@ -67,19 +63,19 @@ jobs:
           fi
           if git diff --name-only "$base" HEAD | grep -q '^proxy/'; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "proxy/ changed in this push; deploying."
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::proxy/ unchanged in the last step of this push; still deploying because a linear multi-commit push can hide a proxy change."
           fi
 
       - name: Deploy to primary proxy
-        if: steps.proxy_changed.outputs.changed == 'true' || steps.proxy_changed_ci.outputs.changed == 'true'
         uses: denoland/deployctl@35381c73621e1731268f80e51b54718d086f1e64 # v1
         with:
           project: ${{ secrets.DENO_PROXY_PROJECT }}
           entrypoint: proxy/proxy.ts
 
       - name: Deploy to fallback proxy
-        if: steps.proxy_changed.outputs.changed == 'true' || steps.proxy_changed_ci.outputs.changed == 'true'
         uses: denoland/deployctl@35381c73621e1731268f80e51b54718d086f1e64 # v1
         with:
           project: ${{ secrets.DENO_PROXY_PROJECT_FALLBACK }}

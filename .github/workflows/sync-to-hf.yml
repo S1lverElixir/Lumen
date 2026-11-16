@@ -47,7 +47,21 @@ jobs:
         run: |
           set -euo pipefail
           git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
-          git fetch hf main || true
+          # Сетевой/авторизационный сбой чтения прод-ветки нельзя глотать `|| true`:
+          # тогда уходила ветка else и коммит пушился БЕЗ lease, молча затирая
+          # хотфикс на Space — ровно тот случай, от которого проверка ниже (аудит 16.11.2026).
+          if ! git fetch hf main; then
+            set +e
+            git ls-remote --exit-code --heads hf main >/dev/null 2>&1
+            rc=$?
+            set -e
+            # rc=2 — ветки main на Space ещё нет (первый деплой), только тогда пуш без lease.
+            if [ "$rc" -ne 2 ]; then
+              echo "Cannot read HF Space main — refusing to push without lease." >&2
+              exit 1
+            fi
+            echo "HF Space has no main branch yet — first deploy."
+          fi
           # Хотфикс, залитый напрямую на Space, нельзя молча перезаписать:
           # сначала проверяем, что удалённая ветка — предок деплоимого коммита,
           # и только потом пушим с lease на конкретный SHA (аудит 28.10.2026).
