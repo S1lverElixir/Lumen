@@ -30,11 +30,11 @@ _BREAK_TAGS = frozenset((
 ))
 # Маркеры рамки доказательств вырезаются из текста страницы: иначе чужая страница
 # закрывает блок «[/Fetched page]» и говорит уже от лица промпта (аудит 16.11.2026).
-_FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]]*\]")
+_FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]\n]{0,200}\]?")
 # Форматы и нулевой ширины снимаем ДО шаблона: иначе "[﻿fetched page]" и
 # "fetched<ZWSP>page" проходили как данные и закрывали рамку (аудит 16.11.2026).
 _FORMAT_CHARS_RE = re.compile(
-    "[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]")
+    "[\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufe0f\u3164\ufeff]")
 _TAG_NAME_RE = re.compile(r"<([a-z][a-z0-9]*)")
 
 _READ_DAY = ""
@@ -270,23 +270,35 @@ def url_is_readable(url: str) -> bool:
         return False
 
 
-# Знаки, которые в живой речи стоят после ссылки (запятая, точка в конце,
-# скобка), границей не считаются: они не продолжают адрес.
+# Знаки, которые продолжают адрес; точка — только если дальше идёт путь.
 _URL_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~:/?#[]@$&%+-=")
+
+
+def _continues_url(text: str, pos: int) -> bool:
+    """Продолжает ли символ на позиции ссылку из текста."""
+    ch = text[pos]
+    if ch == ".":
+        nxt = text[pos + 1] if pos + 1 < len(text) else ""
+        return bool(nxt) and (nxt.isalnum() or nxt in "_-/~")
+    if ch in "?!,;:'\")[]":
+        return False
+    return ch.isalnum() or ch in _URL_CHARS
 
 
 def _url_mentioned(url: str, text: str) -> bool:
     """Ссылка целиком, а не префикс: иначе "example.co" из текста пускал чтение
-    "example.com/a", которого человек не называл (аудит 16.11.2026)."""
+    "example.com/a", которого человек не называл (аудит 16.11.2026). Точка,
+    вопрос и скобка в конце — пунктуация, а не продолжение адреса."""
     start = 0
     while True:
         idx = text.find(url, start)
         if idx < 0:
             return False
         end = idx + len(url)
-        after = text[end] if end < len(text) else ""
+        continued_after = end < len(text) and _continues_url(text, end)
         before = text[idx - 1] if idx else ""
-        if not (after and after in _URL_CHARS) and not (before and before in _URL_CHARS):
+        glued_before = bool(before) and before in _URL_CHARS
+        if not continued_after and not glued_before:
             return True
         start = idx + 1
 

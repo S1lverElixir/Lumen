@@ -589,3 +589,34 @@ def test_spent_daily_search_budget_does_not_spend_planning_calls(rate_guard_setu
     # свежести: цикл тут ни при чём, важны ноль планирующих вызовов.
     assert seen["fetch"] >= 1, "прежний один поиск остаётся и честно вернёт пустоту"
     bot.chat_state.pop(123, None)
+
+
+def test_stop_during_evidence_skips_fallback_fetch(rate_guard_setup, monkeypatch):
+    # Аудит 16.11.2026: /stop в фазе поиска всё равно делал резервный запрос
+    # по сырой фразе (до 6 с и один учтённый поиск) до проверки флага.
+    message = rate_guard_setup()
+    message.text = "какая сейчас ключевая ставка"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    seen = {"fetch": 0}
+
+    async def fake_fetch(*args, **kwargs):
+        seen["fetch"] += 1
+        return []
+
+    async def empty_turn(**kwargs):
+        # Стоп приходит, пока идёт планирование: область уже стоит (её ставит
+        # обёртка апдейта), флаг выставляется внутри фазы.
+        bot._request_stream_stop(message.chat.id)
+        return _turn()
+
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr(lumen_agent, "run_search_turn", empty_turn)
+    bot._begin_stream_stop_scope(message.chat.id, None)
+    try:
+        _run_core(message, monkeypatch, captured={})
+        assert seen["fetch"] == 0
+        assert bot._stream_stop_requested(message.chat.id) is False
+    finally:
+        bot._end_stream_stop_scope(message.chat.id)
+        bot.chat_state.pop(123, None)
+        bot._STREAM_STOPS.pop(message.chat.id, None)

@@ -1949,13 +1949,16 @@ def _source_label(item: dict) -> str:
     return host or ""
 
 
-_SNIPPET_FRAME_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]]*\]")
+_SNIPPET_INVIS_RE = re.compile("[\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufe0f\u3164\ufeff]")
+_SNIPPET_FRAME_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]\n]{0,200}\]?")
 
 
 def _one_line(text: str) -> str:
-    """Чужая строка выдачи — одна строка без маркеров рамки: иначе заголовок с
-    переводом строки открывал блок страницы от лица промпта (аудит 16.11.2026)."""
-    return _SNIPPET_FRAME_RE.sub(" ", " ".join((text or "").splitlines()))
+    """Чужая строка выдачи — одна строка без маркеров рамки и невидимок: иначе
+    заголовок с переводом строки открывал блок страницы от лица промпта
+    (аудит 16.11.2026)."""
+    clean = _SNIPPET_INVIS_RE.sub("", text or "")
+    return _SNIPPET_FRAME_RE.sub(" ", " ".join(clean.splitlines()))
 
 
 def format_snippets_for_prompt(snippets: list[dict]) -> str:
@@ -1975,7 +1978,12 @@ def format_snippets_for_prompt(snippets: list[dict]) -> str:
         # Google News кладёт заголовок ещё и в description: дубль съедает место в промпте.
         if snippet and title and _clean_text(snippet, len(title))[:len(title)] == title:
             snippet = snippet[len(title):].strip(" —·,")
-        label = _source_label(item)
+        try:
+            label = _one_line(_source_label(item))
+        except Exception:
+            # Имя издания — чужие данные: непарная скобка в нём раньше роняла
+            # весь блок выдачи (внешний аудит 16.11.2026).
+            label = ""
         body = " — ".join(part for part in (title or snippet, snippet if title else "") if part)
         if not body:
             continue
