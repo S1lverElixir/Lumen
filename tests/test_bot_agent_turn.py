@@ -620,3 +620,25 @@ def test_stop_during_evidence_skips_fallback_fetch(rate_guard_setup, monkeypatch
         bot._end_stream_stop_scope(message.chat.id)
         bot.chat_state.pop(123, None)
         bot._STREAM_STOPS.pop(message.chat.id, None)
+
+
+def test_gemini_reserve_loop_gets_phase_deadline(rate_guard_setup, monkeypatch):
+    # Аудит 16.11.2026: в ветке Gemini deadline был None, и три шага цикла
+    # могли дойти до 66 с вместо 45. Фазовый дедлайн считается один раз.
+    message = rate_guard_setup()
+    message.text = "кто сейчас канцлер Германии?"
+    monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
+    import lumen_agent_gemini
+    monkeypatch.setattr(lumen_agent_gemini, "gemini_agent_enabled", lambda: True)
+    seen = {}
+
+    async def fake_turn(**kwargs):
+        seen["deadline"] = kwargs["deadline"]
+        return _turn()
+
+    monkeypatch.setattr(lumen_agent_gemini, "run_search_turn", fake_turn)
+    try:
+        _run_core(message, monkeypatch, captured={})
+        assert seen.get("deadline") is not None
+    finally:
+        bot.chat_state.pop(123, None)
