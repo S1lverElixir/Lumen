@@ -420,10 +420,11 @@ def test_weak_english_draw_prefix_needs_a_visual_object():
     assert _draw_trigger_is_visual("draw a", " table of the results") is False
     assert _draw_trigger_is_visual("can you draw", " a table of the results") is False
     assert _draw_trigger_is_visual("please draw", " a comparison of both") is False
+    assert _draw_trigger_is_visual("please draw", " a table of the results and a short conclusion") is False
+    assert _draw_trigger_is_visual("draw a", " table with the results") is False
     assert _draw_trigger_is_visual("draw a", " comparison of both") is False
     assert _draw_trigger_is_visual("paint", " the elevator scene") is True
     assert _draw_trigger_is_visual("draw a", " cat in a hat") is True
-    assert _draw_trigger_is_visual("draw a", " table with a vase on it") is True
     assert _draw_trigger_is_visual("draw a", " summary card of the stats") is True
     assert _draw_trigger_is_visual("нарисуй", " таблицу сравнения") is True
     assert _draw_trigger_is_visual("sketch", " a list of ideas") is False

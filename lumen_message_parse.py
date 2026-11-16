@@ -319,21 +319,22 @@ _WEAK_DRAW_PREFIXES = frozenset(("draw a", "draw an", "draw me", "paint", "paint
 # Любой триггер, кончающийся глаголом рисования, тоже слабый: "can you draw" и
 # "please draw" иначе проходили мимо проверки (проверка правок 16.11.2026).
 _WEAK_DRAW_LAST_WORDS = frozenset(("draw", "paint", "sketch"))
+# Текстовые артефакты — ответ модели словами. "summary card/poster/…" остаются
+# картинками: это визуальный объект, а не пересказ (проверка правок 16.11.2026).
 _DRAW_TEXTUAL_TAIL_RE = re.compile(
     r"^(?:a |an |the )?(?:table|list|comparison|conclusion|summary)\b"
     r"(?!\s+(?:card|poster|infographic|chart|diagram|image|picture))", re.IGNORECASE)
-# "draw a table with a vase" — стол как мебель, картинка нужна.
-_DRAW_VISUAL_MODIFIER_RE = re.compile(r"\b(?:with|on|holding|and|с|со|на)\b", re.IGNORECASE)
 
 
 def _draw_trigger_is_visual(trigger: str, rest: str) -> bool:
-    """Слабый английский триггер рисует, только если дальше объект картинки."""
+    """Слабый английский триггер рисует, только если дальше объект картинки.
+    Модификатор ("table with a vase") не спасает: «table of the results» и
+    «table with the results» — одно и то же, а лишний рисованный ответ жжёт
+    личный слот; редкий стол-мебель человек спросит как «photo of a table»."""
     words = trigger.split()
     if trigger not in _WEAK_DRAW_PREFIXES and not (words and words[-1] in _WEAK_DRAW_LAST_WORDS):
         return True
     tail = rest.lstrip(" ,:;\t")
-    if _DRAW_VISUAL_MODIFIER_RE.search(tail):
-        return True
     return not _DRAW_TEXTUAL_TAIL_RE.match(tail)
 
 

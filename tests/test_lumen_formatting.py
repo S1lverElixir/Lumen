@@ -904,3 +904,14 @@ def test_unclosed_code_fence_is_closed_in_final_html():
     html = _md_to_html("код:" + chr(10) + "```python" + chr(10) + "x = 1")
     assert "```" not in html
     assert "x = 1" in html
+
+
+def test_bare_urls_are_not_touched_by_inline_markup():
+    # Проверка правок 16.11.2026: "__b__" в пути ссылки становилось жирным.
+    from lumen_formatting import _md_to_html, _md_to_rich_html
+    url = "https://x.dev/a/__b__/c"
+    assert url in _md_to_html("см. " + url)
+    assert url in _md_to_rich_html("см. " + url)
+    # Жирное двойным подчёркиванием по-прежнему работает, но не через перенос строки.
+    assert _md_to_html("This is __important__") == "This is <b>important</b>"
+    assert _md_to_html("Имя: __" + chr(10) + "Дата: __").count("<b>") == 0
