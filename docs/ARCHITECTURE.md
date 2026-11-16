@@ -48,6 +48,9 @@ The route matrix below is the code as of 16.11.2026 (`_build_route` in `lumen_ro
 | Sticker | `image/webp` falls under the image row: Munito vision first, Gemini heavy as the reserve |
 | Album (`media_group_id`) | Buffered and answered once under the chat lock; every photo inside follows the image row |
 | Edited message | Delivered (`ALLOWED_UPDATES`) but has no handler: an edit never starts a new answer |
+| Group message without a mention | Passive background: recorded into history for context, no model call and no answer; a TikTok link is the exception and downloads unless `TIKTOK_GROUP_REQUIRE_MENTION=1` |
+| Guest chat | Inline guest mode: the answer returns through `answerGuestQuery` as one HTML article, never a stream |
+| Reply to an earlier photo | The replied photo is the current attachment (`skip_file_ids` keeps it out of the "past photos" block) |
 
 Within a provider block the order is re-sorted by measured latency before the first call; each model is tried at most once and a failure moves to the next candidate, all bounded by `ROUTE_TOTAL_BUDGET_SEC`.
 

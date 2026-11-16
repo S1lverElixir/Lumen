@@ -4327,3 +4327,20 @@ def test_index_recovery_throttles_only_after_a_real_attempt():
             assert lcs._recover_index_ids() is False
     finally:
         lcs._state_load_failed, lcs._index_retry_last_ts = orig
+
+
+def test_group_without_mention_is_passive_for_plain_text_only(monkeypatch):
+    # Критика полноты 16.11.2026: класс «группа без упоминания» был проверен
+    # только на альбоме, а правило шире: фон, кроме выбора кнопки и TikTok.
+    import lumen_message_core as M
+    msg = SimpleNamespace(_pick_resolved=False)
+    passive = lambda text, **kw: M._should_only_record_passively(
+        msg, text, **{"is_private": False, "is_guest": False, "mentioned": False, **kw})
+    assert passive("привет всем") is True
+    assert passive("привет", is_private=True) is False
+    assert passive("привет", is_guest=True) is False
+    assert passive("привет", mentioned=True) is False
+    monkeypatch.setattr(bot, "TIKTOK_GROUP_REQUIRE_MENTION", False)
+    assert passive("https://www.tiktok.com/@a/video/1") is False
+    monkeypatch.setattr(bot, "TIKTOK_GROUP_REQUIRE_MENTION", True)
+    assert passive("https://www.tiktok.com/@a/video/1") is True
