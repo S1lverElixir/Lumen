@@ -103,14 +103,15 @@ production on 12.11.2026, so change a fact and update this file in the same comm
   every green CI run on `main`, not only when the tip's diff touches `proxy/`: the old conditional
   base was `HEAD~1` for a linear push, so a proxy change riding in a multi-commit push was invisible
   and both Deno apps kept the previous revision (09.11.2026). The diff is still printed as a warning
-  for the log. Deploying the same code again is idempotent and costs half a minute. Since 16.11.2026 the relay lives on
-  Cloudflare Workers (`worker/worker.ts`, same contract: `/fetch/<host>/...` and `/read`); the Space
-  variables `TELEGRAM_API_BASE_URL` and `..._FALLBACKS` point at
-  `https://lumen-proxy.egor-kuzko-04.workers.dev/fetch/api.telegram.org`, and the worker secret
-  `LUMEN_PROXY_SECRET` must equal the Space secret of the same name. Workers rejects
-  `redirect:"error"`, so the port uses `redirect:"manual"` and refuses 3xx itself. Deno deploy steps
-  stay gated by `DENO_PROXY_DEPLOY` and skipped (classic tokens no longer authenticate, Deno Deploy
-  sunsets in April 2027); a skipped step never means a deployed relay.
+  for the log. Deploying the same code again is idempotent and costs half a minute. The relay still runs on the classic
+  Deno apps (`lumen-proxy`, `lumen-proxy-backup`), because the Space cannot reach
+  `*.workers.dev` (getMe fails with ClientConnectorError), even though the Workers port in
+  `worker/worker.ts` passes its own tests. Rotating `LUMEN_PROXY_SECRET` means updating the Space
+  secret AND both Deno apps: the manual `Relay secret (Deno)` workflow
+  (`relay-deno.yml`) does it from GitHub Secrets without printing values. The Deno deploy steps stay
+  gated by `DENO_PROXY_DEPLOY` and skipped; a skipped step never means a deployed relay. The Workers
+  port becomes usable only behind a host the Space can reach (a custom domain on a Cloudflare zone
+  or another host).
 - Container egress is blocked or hangs toward Telegram, TikWM and `api.cloudflare.com`: those hosts
   are reachable only through the allowlist in `proxy/proxy.ts`. Public pages are a separate case:
   since 16.11.2026 the proxy has a guarded `/read` route (any public https name, SSRF checks after
