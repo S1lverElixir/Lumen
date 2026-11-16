@@ -70,10 +70,12 @@ jobs:
           fi
 
       - name: Deploy to primary proxy
-        # OIDC сломался 16.11.2026: deployctl получает HTML «Sign In | Deploy»
-        # (Deno Deploy объявляет закрытие в апреле 2027). Если владелец добавит
-        # секрет DENO_DEPLOY_TOKEN, deployctl возьмёт его из окружения; пустое
-        # значение оставляет прежний OIDC-путь.
+        # Deno Deploy закрывается в апреле 2027, а новые токены консоли не
+        # проходят старый deployctl: API отвечает страницей входа (16.11.2026,
+        # с новым токеном то же). Пока релей не мигрирован, шаги выключены и
+        # job остаётся зелёным; включаются репозиторной переменной
+        # DENO_PROXY_DEPLOY=1, когда появится рабочий путь выкатки.
+        if: vars.DENO_PROXY_DEPLOY == '1'
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
         uses: denoland/deployctl@35381c73621e1731268f80e51b54718d086f1e64 # v1
@@ -82,6 +84,7 @@ jobs:
           entrypoint: proxy/proxy.ts
 
       - name: Deploy to fallback proxy
+        if: vars.DENO_PROXY_DEPLOY == '1'
         env:
           DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
         uses: denoland/deployctl@35381c73621e1731268f80e51b54718d086f1e64 # v1
