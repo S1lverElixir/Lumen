@@ -189,3 +189,12 @@ def test_read_page_returns_none_on_a_relay_error(monkeypatch):
         assert asyncio.run(lumen_read_page.read_page("https://example.com/a")) is None
     finally:
         lumen_read_page.reset_read_page_counters_for_tests()
+
+
+def test_extract_text_keeps_content_around_lookalike_script_tags():
+    # Второй проход аудита 16.11.2026: «<scripture>» и «<script» внутри атрибута
+    # резали страницу до конца — важный текст пропадал.
+    assert "важный текст" in lumen_read_page.extract_text(
+        '<div data-x="<script>">важный текст</div><p>хвост</p>', 5000)
+    assert "b" in lumen_read_page.extract_text("<scripture>b</scripture>", 5000)
+    assert "после" in lumen_read_page.extract_text("<script>evil()</script>после", 5000)

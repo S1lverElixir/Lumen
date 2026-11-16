@@ -330,13 +330,23 @@ def _munito_requests_today() -> int:
     return total
 
 
+_MUNITO_CEILING_DAY = ""
+
+
 def _munito_route() -> list[tuple[str, str]]:
     """Пусто без ключа или под выключателем: маршрут тогда целиком идёт в Gemini."""
+    global _MUNITO_CEILING_DAY
     if not _munito_active():
         return []
     try:
         import bot
-        if _munito_requests_today() >= bot.MUNITO_DAILY_LIMIT:
+        _used = _munito_requests_today()
+        if _used >= bot.MUNITO_DAILY_LIMIT:
+            # Одна строка на квотный день: иначе оператор не отличит исчерпанный
+            # бюджет от выключенного провайдера (второй проход аудита 16.11.2026).
+            if _MUNITO_CEILING_DAY != bot._current_quota_day():
+                _MUNITO_CEILING_DAY = bot._current_quota_day()
+                log.warning("[router] Munito daily ceiling reached (%d) — routes use the Gemini reserve", _used)
             # Суточный бюджет провайдера исчерпан: молча уходим на безусловный
             # резерв Gemini. Раньше потолок был только цифрой в /stats, и 251-й
             # запрос получал 429 с остыванием на всех моделях сразу (аудит 16.11.2026).

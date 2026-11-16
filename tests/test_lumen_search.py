@@ -978,3 +978,10 @@ def test_keyed_provider_counter_rolls_with_the_quota_day(monkeypatch):
         assert lumen_search.search_api_calls_today() == 0
     finally:
         lumen_search.reset_search_counters_for_tests()
+
+
+def test_public_host_filter_survives_an_out_of_range_port():
+    # Второй проход аудита 16.11.2026: .port на «:99999» бросал ValueError и
+    # глушил весь DDG-слой.
+    assert lumen_search.url_host_is_public("https://example.com:99999/x") is False
+    assert lumen_search.url_host_is_public("https://example.com:abc/x") is False

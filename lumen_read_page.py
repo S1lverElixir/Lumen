@@ -30,6 +30,7 @@ _BREAK_TAGS = frozenset((
 # Маркеры рамки доказательств вырезаются из текста страницы: иначе чужая страница
 # закрывает блок «[/Fetched page]» и говорит уже от лица промпта (аудит 16.11.2026).
 _FRAME_MARK_RE = re.compile(r"(?i)\[\s*/?\s*fetched[\s ​-‏ ]*page[^\]]*\]")
+_TAG_NAME_RE = re.compile(r"<([a-z][a-z0-9]*)")
 
 _READ_DAY = ""
 _READ_CALLS = 0
@@ -137,29 +138,41 @@ def proxy_origin() -> str:
 
 
 def _strip_block_elements(raw: str) -> str:
-    """Линейное вырезание script/style/…: find вместо `.*?`, который на незакрытом
-    теге сканирует строку до конца на каждой позиции."""
+    """Линейное вырезание script/style/…: один проход по '<', имя тега читается
+    ограниченным регексом. Никаких find по всему остатку на каждую позицию —
+    на 2 МБ «<script>» это давало квадратичное время (аудит 16.11.2026)."""
     lower = raw.lower()
     out: list[str] = []
+    disabled: set[str] = set()
     pos = 0
     n = len(raw)
     while pos < n:
-        best = -1
-        best_tag = ""
-        for tag in _BLOCK_ELEMENTS:
-            idx = lower.find("<" + tag, pos)
-            if idx != -1 and (best == -1 or idx < best):
-                best, best_tag = idx, tag
-        if best == -1:
+        lt = lower.find("<", pos)
+        if lt == -1:
             out.append(raw[pos:])
             break
-        out.append(raw[pos:best])
-        close = lower.find("</" + best_tag, best)
-        if close == -1:
-            # Незакрытый блок режем до конца: иначе его «текст» уедет в промпт.
+        out.append(raw[pos:lt])
+        match = _TAG_NAME_RE.match(lower, lt, min(n, lt + 40))
+        gt = lower.find(">", lt)
+        if gt == -1:
+            out.append(raw[lt:])
             break
-        gt = lower.find(">", close)
-        pos = n if gt == -1 else gt + 1
+        if not match or match.group(1) not in _BLOCK_ELEMENTS or match.group(1) in disabled:
+            out.append(raw[lt:gt + 1])
+            pos = gt + 1
+            continue
+        tag = match.group(1)
+        close = lower.find("</" + tag, lt)
+        if close == -1:
+            # Закрытия нет ни здесь, ни дальше: тег выключаем, иначе поиск закрытия
+            # на каждой позиции снова даёт квадратичное время (2 МБ «<script>»).
+            disabled.add(tag)
+            # Незакрытый блок остаётся текстом: терять всю страницу нельзя.
+            out.append(raw[lt:gt + 1])
+            pos = gt + 1
+            continue
+        close_gt = lower.find(">", close)
+        pos = n if close_gt == -1 else close_gt + 1
     return "".join(out)
 
 

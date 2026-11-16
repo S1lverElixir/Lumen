@@ -638,10 +638,13 @@ def url_host_is_public(url: str) -> bool:
     источники, а наживка."""
     try:
         parts = urllib.parse.urlparse((url or "").strip())
+        # :99999 и :abc бросают ValueError из .port; раньше это глушило весь
+        # DDG-слой (второй проход аудита 16.11.2026).
+        port = parts.port
     except ValueError:
         return False
     host = (parts.hostname or "").strip(".").lower()
-    if not host or parts.username or parts.password or parts.port:
+    if not host or parts.username or parts.password or port:
         return False
     try:
         return ipaddress.ip_address(host).is_global
