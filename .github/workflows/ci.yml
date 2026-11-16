@@ -58,3 +58,15 @@ jobs:
       # requirements-dev.txt (pytest/pyflakes/pip-audit) не сканируем: это
       # dev-инструменты, не попадающие в рантайм-образ (см. Dockerfile/.dockerignore)
       - run: pip-audit -r requirements.txt
+
+  docker:
+    # Образ раньше проверялся только на Space после мержа: битый Dockerfile или
+    # .dockerignore, из-за которого рантайму не хватает файла, валил прод при
+    # зелёных тестах (аудит 16.11.2026). Сборка без запуска ловит этот класс.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build the production image
+        run: docker build -t lumen:ci .
