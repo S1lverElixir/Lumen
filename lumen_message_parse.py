@@ -316,15 +316,25 @@ def _strip_trigger_fillers(text_lower: str) -> tuple[str, int]:
 # (внешний аудит 16.11.2026). Слабый английский глагол без визуального объекта
 # в начале остатка уходит обычной модели; русские триггеры не ограничены.
 _WEAK_DRAW_PREFIXES = frozenset(("draw a", "draw an", "draw me", "paint", "paint me", "sketch"))
+# Любой триггер, кончающийся глаголом рисования, тоже слабый: "can you draw" и
+# "please draw" иначе проходили мимо проверки (проверка правок 16.11.2026).
+_WEAK_DRAW_LAST_WORDS = frozenset(("draw", "paint", "sketch"))
 _DRAW_TEXTUAL_TAIL_RE = re.compile(
-    r"^(?:a |an |the )?(?:table|list|comparison|conclusion|summary)\b", re.IGNORECASE)
+    r"^(?:a |an |the )?(?:table|list|comparison|conclusion|summary)\b"
+    r"(?!\s+(?:card|poster|infographic|chart|diagram|image|picture))", re.IGNORECASE)
+# "draw a table with a vase" — стол как мебель, картинка нужна.
+_DRAW_VISUAL_MODIFIER_RE = re.compile(r"\b(?:with|on|holding|and|с|со|на)\b", re.IGNORECASE)
 
 
 def _draw_trigger_is_visual(trigger: str, rest: str) -> bool:
-    """Слабый английский префикс рисует, только если дальше объект картинки."""
-    if trigger not in _WEAK_DRAW_PREFIXES:
+    """Слабый английский триггер рисует, только если дальше объект картинки."""
+    words = trigger.split()
+    if trigger not in _WEAK_DRAW_PREFIXES and not (words and words[-1] in _WEAK_DRAW_LAST_WORDS):
         return True
-    return not _DRAW_TEXTUAL_TAIL_RE.match(rest.lstrip(" ,:;\t"))
+    tail = rest.lstrip(" ,:;\t")
+    if _DRAW_VISUAL_MODIFIER_RE.search(tail):
+        return True
+    return not _DRAW_TEXTUAL_TAIL_RE.match(tail)
 
 
 # «прочти инструкцию и объясни, что делать» — просьба разобраться, а не озвучить

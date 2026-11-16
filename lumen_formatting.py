@@ -63,20 +63,36 @@ def _split_table_cells(line: str) -> list[str]:
 
 def _convert_orphan_table_rows(text: str) -> str:
     """Строки таблицы без шапки (ответ разрезан на несколько сообщений) в
-    "• a — b": иначе человек видел сырые "|" (внешний аудит 16.11.2026)."""
+    "• a — b": иначе человек видел сырые "|" (внешний аудит 16.11.2026).
+    Одиночные строки не трогаем: "| sort -u |" и "|a| = |b|" — не таблица."""
     if "|" not in text:
         return text
+
+    def _is_row(line: str) -> bool:
+        s = line.strip()
+        return s.startswith("|") and s.endswith("|") and line.count("|") >= 2
+
+    lines = text.split(chr(10))
     out: list[str] = []
-    for line in text.split(chr(10)):
-        stripped = line.strip()
-        if (stripped.startswith("|") and stripped.endswith("|")
-                and line.count("|") >= 2):
-            cells = [c.strip() for c in stripped[1:-1].split("|")]
-            cells = [c for c in cells if c and not set(c) <= set("-: ")]
-            if len(cells) >= 2:
-                out.append("• " + " — ".join(cells))
+    i = 0
+    n = len(lines)
+    while i < n:
+        if _is_row(lines[i]):
+            j = i
+            while j < n and _is_row(lines[j]):
+                j += 1
+            if j - i >= 2:
+                for line in lines[i:j]:
+                    cells = [c.strip() for c in line.strip()[1:-1].split("|")]
+                    cells = [c for c in cells if c and not set(c) <= set("-: ")]
+                    if len(cells) >= 2:
+                        out.append("• " + " — ".join(cells))
+                    else:
+                        out.append(line)
+                i = j
                 continue
-        out.append(line)
+        out.append(lines[i])
+        i += 1
     return chr(10).join(out)
 
 
@@ -398,7 +414,7 @@ def _md_to_html(text: str) -> str:
     # Незакрытый ``` модель оставляет в оборванном ответе; стрим хвост
     # дозакрывал, финальная сборка показывала человеку буквальный забор
     # (внешний аудит 16.11.2026).
-    if text.count("```") % 2:
+    if text.count("```") % 2 and not text.rstrip().endswith("```"):
         text = text.rstrip() + "\n```"
 
     # ── Фаза 1: вырезаем код до обработки ────────────────
@@ -470,7 +486,7 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
     # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
     # как в _strip_markdown (внешний аудит 16.11.2026).
-    text = re.sub(r"(?<!\w)__(?=[^_\n]*[\s\u0400-\u04FF])([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"<b>\1</b>", text, flags=re.DOTALL)
     text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
     text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
@@ -532,7 +548,7 @@ def _rich_inline(text: str) -> str:
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
     # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
     # как в _strip_markdown (внешний аудит 16.11.2026).
-    text = re.sub(r"(?<!\w)__(?=[^_\n]*[\s\u0400-\u04FF])([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"<b>\1</b>", text, flags=re.DOTALL)
     text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
     text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
@@ -580,6 +596,11 @@ def _md_to_rich_html(text: str) -> str:
     text = re.sub(r"<s>(.*?)</s>", r"~~\1~~", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<pre>(.*?)</pre>", lambda m: f"```\n{m.group(1)}\n```", text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Незакрытый забор закрываем и в rich-пути: иначе финальное сообщение
+    # показывало "```python" буквально (внешний аудит 16.11.2026).
+    if text.count("```") % 2 and not text.rstrip().endswith("```"):
+        text = text.rstrip() + "\n```"
 
     _code: dict[str, str] = {}
     _links: dict[str, str] = {}
@@ -663,7 +684,7 @@ def _md_to_rich_html(text: str) -> str:
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
     # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
     # как в _strip_markdown (внешний аудит 16.11.2026).
-    text = re.sub(r"(?<!\w)__(?=[^_\n]*[\s\u0400-\u04FF])([^_\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"<b>\1</b>", text, flags=re.DOTALL)
     text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
     text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)

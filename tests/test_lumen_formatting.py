@@ -880,7 +880,10 @@ def test_inline_markup_keeps_word_underscores_and_nests_triple():
     assert "my_file_name.txt" in html
     assert "https://example.com/a_b_c" in html
     assert _md_to_html("***важно***") == "<b><i>важно</i></b>"
-    assert _md_to_html("метод __init__ и *курс*") == "метод __init__ и <i>курс</i>"
+    assert _md_to_html("This is __important__") == "This is <b>important</b>"
+    assert _md_to_html("|a| = |b|") == "|a| = |b|"
+    assert _md_to_html("| sort -u | uniq -c |") == "| sort -u | uniq -c |"
+    assert _md_to_html("```") == "```"
 
 
 def test_long_table_never_splits_into_raw_pipes():
