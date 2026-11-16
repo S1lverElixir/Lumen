@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 import time
 from collections import deque
 from pathlib import Path
@@ -593,6 +594,9 @@ _state_load_failed = False
 _index_extra_ids: set[int] = set()
 _index_retry_last_ts = 0.0
 _INDEX_RETRY_SEC = 60.0
+# Параллельные чтения чатов на старте: Upstash/диск отвечает десятки миллисекунд,
+# и восемь потоков сжимают холодный старт в разы без давления на квоту.
+_PARALLEL_CHAT_READS = 8
 # Чаты, чей удалённый снимок НЕ восстановился: их ключи нельзя перезаписывать
 # однострочным снимком из памяти — удалённая копия полнее (аудит run-2, 08.11.2026).
 _chat_snapshot_unloaded: set[int] = set()
@@ -865,35 +869,49 @@ def load_state_from_disk() -> None:
             chat_ids = None
         if isinstance(chat_ids, list):
             loaded_count = 0
+            ids: list[int] = []
             for chat_id_raw in chat_ids:
                 try:
-                    cid = int(chat_id_raw)
+                    ids.append(int(chat_id_raw))
                 except Exception:
                     continue
+
+            def _read_one(cid: int) -> tuple[int, object]:
                 try:
-                    raw = bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
+                    return cid, bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
                 except Exception as exc:
-                    _chat_snapshot_unloaded.add(cid)
-                    log.warning('[state] Failed to read chat %s: %s', cid, exc)
-                    continue
-                if not raw:
-                    continue
-                try:
-                    s = json.loads(raw)
-                except Exception as exc:
-                    _chat_snapshot_unloaded.add(cid)
-                    log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
-                    continue
-                try:
-                    bot._restore_single_chat(cid, s)
-                except Exception as exc:
-                    # Одна битая запись не обрывает восстановление остальных чатов.
-                    _chat_snapshot_unloaded.add(cid)
-                    log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
-                    continue
-                if cid in chat_state:
-                    loaded_count += 1
-            log.info("[state] Restored states for %d chats (per-chat storage).", loaded_count)
+                    return cid, exc
+
+            # Чтения идут параллельно: последовательный обход 4500 чатов по одному
+            # HTTPS-запросу давал минуты холодного старта, и всё это время вебхук
+            # отвечал 503 (аудит 16.11.2026). Восстановление в память остаётся в
+            # этом потоке: общие словари не трогаем из пула.
+            workers = max(1, min(_PARALLEL_CHAT_READS, len(ids)))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for cid, raw in pool.map(_read_one, ids):
+                    if isinstance(raw, Exception):
+                        _chat_snapshot_unloaded.add(cid)
+                        log.warning('[state] Failed to read chat %s: %s', cid, raw)
+                        continue
+                    if not raw:
+                        continue
+                    try:
+                        parsed_chat = json.loads(raw)
+                    except Exception as exc:
+                        _chat_snapshot_unloaded.add(cid)
+                        log.warning('[state] Failed to parse chat state %s: %s', cid, exc)
+                        continue
+                    try:
+                        bot._restore_single_chat(cid, parsed_chat)
+                    except Exception as exc:
+                        # Одна битая запись не обрывает восстановление остальных чатов.
+                        _chat_snapshot_unloaded.add(cid)
+                        log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
+                        continue
+                    if cid in chat_state:
+                        loaded_count += 1
+            log.info("[state] Restored states for %d chats (per-chat storage, %d parallel reads).",
+                     loaded_count, workers)
             return
         # Индекс битый, но per-chat файлы могут быть целы — пробуем legacy-блоб:
         # лучше старые данные, чем пустые чаты (найдено внешним аудитом).

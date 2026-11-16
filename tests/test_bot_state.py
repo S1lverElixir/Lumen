@@ -617,6 +617,42 @@ def test_index_recovery_merges_remote_ids_instead_of_replacing(monkeypatch):
         bot.chat_state.pop(new_id, None)
 
 
+def test_startup_chat_reads_run_in_parallel(monkeypatch):
+    # Аудит 16.11.2026: последовательный обход тысяч чатов по одному HTTPS-запросу
+    # давал минуты холодного старта и 503 на вебхуке. Чтения идут пулом, сборка
+    # состояния — по-прежнему в одном потоке.
+    import threading
+    import time as _time
+    import lumen_chat_state as lcs
+
+    lock = threading.Lock()
+    active = {"now": 0, "max": 0}
+    ids = [100 + i for i in range(6)]
+    payload = json.dumps({"history": [], "lang": "ru"})
+
+    def fake_read(key, path):
+        if "index" in str(key).lower():
+            return json.dumps(ids)
+        with lock:
+            active["now"] += 1
+            active["max"] = max(active["max"], active["now"])
+        _time.sleep(0.05)
+        with lock:
+            active["now"] -= 1
+        return payload
+
+    orig_failed = lcs._state_load_failed
+    try:
+        with patch("bot._storage_read_text", side_effect=fake_read), patch("bot.load_global_quota"):
+            bot.load_state_from_disk()
+        assert active["max"] > 1
+    finally:
+        lcs._state_load_failed = orig_failed
+        for cid in ids:
+            bot.chat_state.pop(cid, None)
+            lcs._chat_snapshot_unloaded.discard(cid)
+
+
 def test_load_state_does_not_overwrite_chat_whose_snapshot_was_not_restored():    # Регрессия аудита run-2: транзиентный сбой чтения одного чата на старте оставлял
     # его вне памяти, а первый же флаш после нового сообщения затирал полную удалённую
     # историю однострочным снимком — потеря была необратимой и молчаливой.
