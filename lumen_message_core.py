@@ -254,6 +254,29 @@ async def _gather_web_evidence(
             if turn.has_evidence:
                 return turn.snippets, queries, True, stats
 
+    # Резерв Gemini: тот же цикл, если голова Munito недоступна (нет в маршруте,
+    # выключена или выбрала потолок) и цикл разрешён переменной Space.
+    from lumen_agent_gemini import gemini_agent_enabled, run_search_turn as _gemini_search_turn
+    _gemini_head = next((m for p, m in route if p == "gemini"), None)
+    if gemini_agent_enabled() and _gemini_head is not None and head is None and max_searches > 0:
+        try:
+            _gturn = await _gemini_search_turn(
+                chat_id=chat_id, user_prompt=user_prompt, clean_prompt=clean_prompt,
+                model_id=_gemini_head, effort=effort, max_searches=max_searches,
+                status=status, deadline=deadline, history_meta=history_meta,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("[agent-gemini] turn crashed, falling back to a plain fetch: %s", exc.__class__.__name__)
+            _gturn = None
+        if _gturn is not None:
+            _gstats = {"steps": _gturn.steps, "planning_ms": _gturn.planning_ms,
+                       "searches": _gturn.searches, "failed": _gturn.failed,
+                       "pages": [], "reads": 0}
+            if _gturn.has_evidence:
+                return _gturn.snippets, list(_gturn.queries), True, _gstats
+
     budget = _snippet_fetch_budget_sec(deadline)
     snippets: list[dict] = []
     if budget > 0 and allow_fallback_fetch:
