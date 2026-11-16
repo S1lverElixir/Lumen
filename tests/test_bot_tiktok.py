@@ -2372,3 +2372,27 @@ def test_itunes_transient_failure_is_not_cached(monkeypatch):
     finally:
         lumen_tiktok._DSP_TRACK_CACHE.clear()
         lumen_tiktok._DSP_TRACK_CACHE.update(original_cache)
+
+
+def test_itunes_server_error_is_transient(monkeypatch):
+    # Проверка правок 16.11.2026: 500/429 от iTunes кэшировали None навсегда.
+    import lumen_tiktok
+
+    class _Resp:
+        status = 500
+
+        async def text(self, errors=None):
+            return "oops"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _Session:
+        def get(self, *args, **kwargs):
+            return _Resp()
+
+    track, transient = asyncio.run(lumen_tiktok._itunes_track(_Session(), "1"))
+    assert track is None and transient is True

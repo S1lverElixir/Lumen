@@ -794,8 +794,12 @@ async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> tuple[d
             params={"id": song_id, "entity": "song"},
             timeout=aiohttp.ClientTimeout(total=6.0),
         ) as resp:
-            if resp.status != 200:
+            if resp.status == 404:
+                # Песня реально не найдена — это окончательный ответ.
                 return None, False
+            if resp.status != 200:
+                # 429/5xx — временный сбой: не кэшируем отрицательный итог.
+                return None, True
             payload = json.loads(await resp.text(errors="ignore"))
     except Exception as exc:
         log.info("[tiktok-music] iTunes lookup failed: %s", exc)

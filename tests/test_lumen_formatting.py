@@ -915,3 +915,11 @@ def test_bare_urls_are_not_touched_by_inline_markup():
     # Жирное двойным подчёркиванием по-прежнему работает, но не через перенос строки.
     assert _md_to_html("This is __important__") == "This is <b>important</b>"
     assert _md_to_html("Имя: __" + chr(10) + "Дата: __").count("<b>") == 0
+
+
+def test_emphasis_glued_to_a_bare_url_still_works():
+    # Проверка правок 16.11.2026: выемка ссылки забирала хвостовые ** и *.
+    from lumen_formatting import _md_to_html, _md_to_rich_html
+    assert _md_to_html("**см. https://x.com/a**") == "<b>см. https://x.com/a</b>"
+    assert _md_to_html("*https://x.com/a*") == "<i>https://x.com/a</i>"
+    assert "https://x.com/a" in _md_to_rich_html("**см. https://x.com/a**")

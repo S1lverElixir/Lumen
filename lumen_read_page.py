@@ -272,6 +272,9 @@ def url_is_readable(url: str) -> bool:
 
 # Знаки, которые продолжают адрес; точка — только если дальше идёт путь.
 _URL_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~:/?#[]@$&%+-=")
+# Чем ссылка может быть склеена с соседним текстом слева: скобки и дефис сюда
+# не входят, иначе "[https://x/a]" и "слово-https://x/a" не находились.
+_URL_GLUE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~:/?#@$&%+=")
 
 
 def _continues_url(text: str, pos: int) -> bool:
@@ -280,7 +283,7 @@ def _continues_url(text: str, pos: int) -> bool:
     if ch == ".":
         nxt = text[pos + 1] if pos + 1 < len(text) else ""
         return bool(nxt) and (nxt.isalnum() or nxt in "_-/~")
-    if ch in "?!,;:'\")[]":
+    if ch in "?!,;:'\")[]-*~":
         return False
     return ch.isalnum() or ch in _URL_CHARS
 
@@ -297,7 +300,8 @@ def _url_mentioned(url: str, text: str) -> bool:
         end = idx + len(url)
         continued_after = end < len(text) and _continues_url(text, end)
         before = text[idx - 1] if idx else ""
-        glued_before = bool(before) and before in _URL_CHARS
+        # Скобка или дефис слева — пунктуация фразы, а не продолжение адреса.
+        glued_before = bool(before) and before in _URL_GLUE_CHARS
         if not continued_after and not glued_before:
             return True
         start = idx + 1

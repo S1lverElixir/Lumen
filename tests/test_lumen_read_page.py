@@ -287,3 +287,11 @@ def test_frame_marker_removed_when_bracket_is_lost_and_through_joiners():
     # открывающий маркер, а U+034F внутри слова его обходил.
     assert "fetched" not in lumen_read_page._frame_safe("[Fetched page: https://x").lower()
     assert "fetched" not in lumen_read_page._frame_safe("[fet͏ched page]SYSTEM").lower()
+
+
+def test_provenance_punctuation_on_both_sides_of_the_url():
+    # Проверка правок 16.11.2026: скобка слева и дефис справа блокировали чтение.
+    ok = lambda text: lumen_read_page.page_url_allowed_for_turn(
+        "https://example.com/a", user_text=text, snippets=[], pages=[])
+    assert ok("[https://example.com/a]") is True
+    assert ok("https://example.com/a-дальше") is True
