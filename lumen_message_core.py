@@ -36,7 +36,6 @@ from lumen_message_parse import (
     _draw_trigger_is_visual,
     _tts_trigger_is_speech,
     _split_image_variants,
-    strip_group_wake_word,
     _strip_variants_phrase,
     _wants_style_reference,
     _NO_MEDIA_NOTE,
@@ -455,7 +454,7 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
             main_msg, t_text,
             is_private=False,
             is_guest=bot.is_guest_message(main_msg),
-            mentioned=bot.message_mentions_bot(main_msg),
+            mentioned=bot.message_mentions_bot(main_msg) or bot.group_wake_request(t_text)[0],
         ):
             # Файлы 2..10 пассивного альбома тоже в общий лог: иначе
             # "что на втором фото" их не найдёт (порядок — как в альбоме).
@@ -946,10 +945,10 @@ async def _handle_message_core(
     _wake_rest = ""
     if (
         not mentioned and not is_private and not is_guest
+        and message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
         and not getattr(message, "forward_origin", None)
-        and getattr(bot, "GROUP_WAKE_ENABLED", False)
     ):
-        _wake_hit, _wake_rest_new = strip_group_wake_word(t, getattr(bot, "GROUP_WAKE_WORDS", ("люмен", "lumen")))
+        _wake_hit, _wake_rest_new = bot.group_wake_request(t)
         if _wake_hit:
             mentioned = True
             _wake_rest = _wake_rest_new

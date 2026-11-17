@@ -149,26 +149,38 @@ def _strip_variants_phrase(text: str) -> str:
 
 
 # ── Wake-word в группах: «Люмен, ...» вместо @упоминания ──
-# Триггер только в начале сообщения (после частиц-обращений) и только с
-# разделителем: «люменальный», «я люблю люмен», обсуждения в третьем лице
-# («люмен — это бот») не срабатывают. Голое имя без просьбы — тоже нет.
+# Правила против ложных срабатываний (ревью 18.11.2026):
+#  - только начало сообщения (после коротких обращений «эй/слушай/окей»);
+#  - обычная форма — имя + пунктуация («,» «:» «—» «!» «?» «.» + пробел);
+#  - форма через пробел — эвристика: блокируем третье лицо («умеет», «хороший»);
+#  - точка — делимитер только перед пробелом/концом: «lumen.example.com» не имя;
+#  - имя внутри слова, в середине фразы, @упоминание и URL не трогаем.
 _WAKE_PARTICLE_RE = re.compile(
-    r"^(?:эй|слушай|окей|okay|hey|а|ну|ладно)\s*[,.!—–-]?\s+", re.IGNORECASE,
+    r"^(?:эй|слушай|окей|okay|hey)\s*[,.!—–-]?\s+", re.IGNORECASE,
+)
+_WAKE_WEAK_PARTICLE_RE = re.compile(
+    r"^(?:а|ну|ладно)\s*[,.!—–-]\s*", re.IGNORECASE,
 )
 _WAKE_COPULA_RE = re.compile(
     r"^(?:это|is|является|был|была|было|были)(?![А-Яа-яA-Za-z])", re.IGNORECASE,
 )
+# Третье лицо в форме через пробел: «люмен умеет…», «люмен хороший…».
+_WAKE_THIRD_PERSON_RE = re.compile(
+    r"^(?:умеет|может|хорош\w*|лучш\w*|работает|отвечает|жив[её]т|приш[её]л|"
+    r"упал\w*|стоит|любит|знает|понимает|принадлежит|не\s+бот|бот\b|"
+    r"is|was|can|works|helps)(?![А-Яа-яA-Za-z])",
+    re.IGNORECASE,
+)
 
 
 def strip_group_wake_word(text: str, words: tuple[str, ...] = ("люмен", "lumen")) -> tuple[bool, str]:
-    """(сработал ли wake-word, текст без него). Безопасен к обсуждениям:
-    имя в середине фразы, часть слова, URL или @упоминание не трогаем."""
+    """(сработал ли wake-word, текст без него)."""
     src = (text or "").strip()
     if not src or src.startswith("/"):
         return False, text
     rest = src
     for _ in range(2):
-        m = _WAKE_PARTICLE_RE.match(rest)
+        m = _WAKE_PARTICLE_RE.match(rest) or _WAKE_WEAK_PARTICLE_RE.match(rest)
         if not m:
             break
         rest = rest[m.end():]
@@ -182,14 +194,31 @@ def strip_group_wake_word(text: str, words: tuple[str, ...] = ("люмен", "lu
         if after[:1] and (after[0].isalnum() or after[0] in "_@"):
             continue
         after = after.lstrip().lstrip("\"'»”)")
+        punct_delim = False
         if after[:1] in ("—", "–", "-"):
+            # Тире — обращение, но «Люмен — это бот» остаётся болтовнёй: копулу проверяем.
             after = after[1:].lstrip()
-        elif after[:1] in (",", ":", ";", "!", "?", "."):
+        elif after[:1] in (",", ":", ";", "!", "?"):
             after = after[1:].lstrip()
+            punct_delim = True
+        elif after[:1] == ".":
+            # «lumen.example.com» — не обращение; «Люмен. Привет» — обращение.
+            nxt = after[1:2]
+            if nxt and not nxt.isspace():
+                continue
+            after = after[1:].lstrip()
+            punct_delim = True
+        elif after[:1].isspace():
+            after = after.lstrip()
         if not after:
             continue
-        if _WAKE_COPULA_RE.match(after):
-            return False, text
+        if not punct_delim:
+            # Форма через пробел: снимаем очевидное третье лицо и связку.
+            if _WAKE_COPULA_RE.match(after) or _WAKE_THIRD_PERSON_RE.match(after):
+                return False, text
+        after = re.sub(r"^[^\w/]+", "", after, flags=re.UNICODE)
+        if not after:
+            continue
         if not re.search(r"[0-9A-Za-zА-Яа-яЁё]", after):
             continue
         return True, after
