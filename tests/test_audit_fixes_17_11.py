@@ -1579,3 +1579,14 @@ def test_bare_url_tail_stays_outside_the_link():
     assert lf._split_bare_url("https://example.com.Далее") == ("https://example.com", ".Далее")
     assert lf._split_bare_url("https://example.com_") == ("https://example.com", "_")
     assert lf._split_bare_url("https://example.com)") == ("https://example.com", ")")
+
+
+def test_identity_questions_do_not_trigger_web_search():
+    # Прод 17.11.2026: «Кто ты?» после любой реплики считалось продолжением темы,
+    # и бот жёг Tavily на вопрос о себе. Повод для поиска — тема, а не «кто».
+    import lumen_message_core as core
+    prev = "Кто сейчас канцлер Германии?"
+    for q in ("Кто ты?", "кто ты и какое сегодня число?", "как тебя зовут",
+              "что ты умеешь", "Who are you?", "what can you do"):
+        assert core._wants_web_search(q, previous=prev) is False, q
+    assert core._wants_web_search("Кто сейчас канцлер Германии?", previous=prev) is True
