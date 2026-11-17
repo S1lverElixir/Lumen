@@ -149,3 +149,17 @@ def rate_guard_setup(monkeypatch):
             from_user=SimpleNamespace(id=456), reply=AsyncMock(), reply_to_message=None,
         )
     return _setup
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tiktok_semaphores():
+    """Модульные семафоры TikTok живут с первого event loop: второй asyncio.run
+    падал с «bound to a different event loop» (ревью 17.11.2026)."""
+    import asyncio as _asyncio
+    original_probe = bot._tiktok_probe_semaphore
+    original_download = bot._tiktok_slide_download_semaphore
+    bot._tiktok_probe_semaphore = _asyncio.Semaphore(bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
+    bot._tiktok_slide_download_semaphore = _asyncio.Semaphore(bot.TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
+    yield
+    bot._tiktok_probe_semaphore = original_probe
+    bot._tiktok_slide_download_semaphore = original_download

@@ -683,7 +683,6 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
     current_concurrent = 0
     max_concurrent_seen = 0
     lock = asyncio.Lock()
-    overlapped = asyncio.Event()
 
     async def fake_get_http_session():
         return _FakeTikTokSession(tikwm_json)
@@ -699,11 +698,9 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
         async with lock:
             current_concurrent += 1
             max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
-            if current_concurrent >= 2:
-                overlapped.set()
-        # Детерминированный барьер вместо sleep: дальше идёт только тот, кто
-        # реально пересёкся с соседом; последовательный регресс упрётся в таймаут.
-        await asyncio.wait_for(overlapped.wait(), timeout=2)
+        # Без барьера «уже двое»: он сам ограничивал наблюдение двойкой и кап
+        # оставался непроверенным (ревью 17.11.2026).
+        await asyncio.sleep(0.05)
         async with lock:
             current_concurrent -= 1
         return 0, 0, 0, None
@@ -721,10 +718,7 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
     bot.bot = fake_bot
     try:
         asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/456"))
-        assert max_concurrent_seen <= bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY
-        # Реально были параллельны хотя бы несколько — не выродилось в строго
-        # последовательный перебор без всякой пользы от asyncio.gather.
-        assert max_concurrent_seen > 1
+        assert max_concurrent_seen == bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY
     finally:
         bot._get_http_session = original_get_session
         bot._resolve_tiktok_short = original_resolve
@@ -757,7 +751,6 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
     current_concurrent = 0
     max_concurrent_seen = 0
     lock = asyncio.Lock()
-    overlapped = asyncio.Event()
 
     async def fake_get_http_session():
         return _FakeTikTokSession(tikwm_json)
@@ -770,10 +763,9 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
         async with lock:
             current_concurrent += 1
             max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
-            if current_concurrent >= 2:
-                overlapped.set()
-        # Детерминированный барьер вместо sleep (см. комментарий в probe-тесте выше).
-        await asyncio.wait_for(overlapped.wait(), timeout=2)
+        # Без барьера «уже двое»: он сам ограничивал наблюдение двойкой и кап
+        # оставался непроверенным (ревью 17.11.2026).
+        await asyncio.sleep(0.05)
         async with lock:
             current_concurrent -= 1
         return b"\xff\xd8\xff\xe0fake jpeg bytes"  # не ftyp -> обычное фото, не видео-слайд
@@ -782,22 +774,33 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
     original_resolve = bot._resolve_tiktok_short
     original_download = bot._download_url_bin
     original_bot = bot.bot
+    original_slot = bot._media_download_slot
+
+    class _NoSlot:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
 
     bot._get_http_session = fake_get_http_session
     bot._resolve_tiktok_short = fake_resolve
     bot._download_url_bin = fake_download_url_bin
     bot.bot = fake_bot
+    # Глобальный медиа-слот (2) ниже тиктоковского капа: без его снятия тест
+    # наблюдал бы двойку и кап TikTok оставался непроверенным (ревью 17.11.2026).
+    bot._media_download_slot = lambda: _NoSlot()
     try:
         asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/789"))
+        # Кап не превышен и параллельность реальная: без семафора наблюдалось бы 11.
         assert max_concurrent_seen <= bot.TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY
-        # Реально были параллельны хотя бы несколько — не выродилось в строго
-        # последовательный перебор без всякой пользы от asyncio.gather.
-        assert max_concurrent_seen > 1
+        assert max_concurrent_seen > 2
     finally:
         bot._get_http_session = original_get_session
         bot._resolve_tiktok_short = original_resolve
         bot._download_url_bin = original_download
         bot.bot = original_bot
+        bot._media_download_slot = original_slot
 
 
 def test_handle_tiktok_no_media_found_gives_user_facing_error():
