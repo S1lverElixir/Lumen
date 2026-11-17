@@ -341,9 +341,6 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
     # Альбомы и pick-кнопки приходят фоновой задачей/колбэком, минуя handle_message:
     # без области здесь /stop в фазе поиска на этих путях не работает (аудит 16.11.2026).
     _stop_scope = chat_id if message.chat is not None else None
-    if _stop_scope is not None:
-        bot._begin_stream_stop_scope(
-            _stop_scope, getattr(getattr(message, "from_user", None), "id", None))
     # Автор для карантина моделей: pick-кнопки приходят колбэком и раньше считались
     # чатом, а не человеком (аудит 16.11.2026).
     utoken = None
@@ -362,6 +359,11 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
             with contextlib.suppress(Exception):
                 await bot._tg_call(bot._answer_sender(message), bot._t_no_create(chat_id, "lock_busy"))
             return
+        # Область /stop открываем только принятому запросу: отшитый «занято»
+        # раньше оставался владельцем области (ревью 17.11.2026).
+        if _stop_scope is not None:
+            bot._begin_stream_stop_scope(
+                _stop_scope, getattr(getattr(message, "from_user", None), "id", None))
         # Ответ без создания чата: обычный _t через get_state завёл бы запись даже
         # тому, кого отшили «занято» (та же причина, что у лимита).
         bot._chat_lock_waiters[chat_id] = waiters + 1

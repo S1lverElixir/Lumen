@@ -703,6 +703,28 @@ def _clean_text(raw: str, cap: int) -> str:
     return _WS_RE.sub(" ", text).strip()[:cap]
 
 
+_SEARCH_BODY_MAX_BYTES = 2 * 1024 * 1024
+
+
+async def _read_search_text(resp, cap: int = _SEARCH_BODY_MAX_BYTES) -> str:
+    """Тело ответа поисковика с капом: 20 МБ в RAM и гигантский разбор держали
+    единственный процесс (ревью 17.11.2026). Усечённый ответ просто не распарсится
+    и источник вернёт пусто — это честнее, чем съесть память."""
+    content = getattr(resp, "content", None)
+    if content is None or not hasattr(content, "iter_chunked"):
+        # Тестовые двойники без потока: поведение прежнее.
+        return await resp.text()
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in content.iter_chunked(65536):
+        total += len(chunk)
+        if total > cap:
+            log.warning("[web-search] response exceeds %d bytes, truncated", cap)
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 def url_host_is_public(url: str) -> bool:
     """Можно ли показать и отдать модели этот адрес как источник. Ревью
     приватности 12.11.2026: цель редиректа DuckDuckGo и поле publisher приезжают
@@ -1023,7 +1045,7 @@ async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: in
     try:
         async with session.get(_WIKI_API.format(lang=lang), params=params, headers=_WIKI_HEADERS, timeout=budget) as resp:
             resp.raise_for_status()
-            data = json.loads(await resp.text())
+            data = json.loads(await _read_search_text(resp))
     except Exception as exc:
         log.info("[web-search] wikipedia failed: %s", type(exc).__name__)
         return []
@@ -1295,7 +1317,7 @@ async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, 
                     log.info("[web-search] wikidata rate limited")
                     return []
                 resp.raise_for_status()
-                found = (json.loads(await resp.text()) or {}).get("search") or []
+                found = (json.loads(await _read_search_text(resp)) or {}).get("search") or []
         except Exception as exc:
             log.info("[web-search] wikidata search failed: %s", type(exc).__name__)
             continue
@@ -1309,7 +1331,7 @@ async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, 
                 async with session.get(_WD_ENTITY_URL.format(qid=cand), headers=_WIKI_HEADERS,
                                        timeout=ent_budget) as resp:
                     resp.raise_for_status()
-                    data = json.loads(await resp.text())
+                    data = json.loads(await _read_search_text(resp))
             except Exception as exc:
                 log.info("[web-search] wikidata entity failed: %s", type(exc).__name__)
                 continue
@@ -1334,7 +1356,7 @@ async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, 
                 headers=_WIKI_HEADERS, timeout=label_budget,
             ) as resp:
                 resp.raise_for_status()
-                ents = (json.loads(await resp.text()) or {}).get("entities") or {}
+                ents = (json.loads(await _read_search_text(resp)) or {}).get("entities") or {}
             for key, ent_data in ents.items():
                 lab = (ent_data.get("labels") or {}).get(lang) or (ent_data.get("labels") or {}).get("en") or {}
                 labels[key] = (lab.get("value") or "").strip()
@@ -1367,7 +1389,7 @@ async def _crypto_snippets(session: aiohttp.ClientSession, text: str, deadline: 
     try:
         async with session.get(_COINGECKO_URL, params=params, headers=_SEARCH_HEADERS, timeout=budget) as resp:
             resp.raise_for_status()
-            data = json.loads(await resp.text())
+            data = json.loads(await _read_search_text(resp))
     except Exception as exc:
         log.info("[web-search] coingecko failed: %s", type(exc).__name__)
         return []
@@ -1407,7 +1429,7 @@ async def _fx_snippets(session: aiohttp.ClientSession, text: str, deadline: floa
         async with session.get(_FX_URL.format(base=base), headers=_SEARCH_HEADERS,
                                timeout=budget) as resp:
             resp.raise_for_status()
-            data = json.loads(await resp.text())
+            data = json.loads(await _read_search_text(resp))
     except Exception as exc:
         log.info("[web-search] fx failed: %s", type(exc).__name__)
         return []
@@ -1530,7 +1552,7 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
             async with session.get(_GEOCODE_URL, params={"name": city, "count": 1, "language": "ru"},
                                    headers=_SEARCH_HEADERS, timeout=_remaining_budget()) as resp:
                 resp.raise_for_status()
-                found = (json.loads(await resp.text()) or {}).get("results") or []
+                found = (json.loads(await _read_search_text(resp)) or {}).get("results") or []
             if not found:
                 continue
             place = found[0]
@@ -1543,7 +1565,7 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
                 "timezone": "auto", "forecast_days": 2,
             }, headers=_SEARCH_HEADERS, timeout=_remaining_budget()) as resp:
                 resp.raise_for_status()
-                wx = json.loads(await resp.text())
+                wx = json.loads(await _read_search_text(resp))
         except Exception as exc:
             log.info("[web-search] weather failed: %s", type(exc).__name__)
             continue
@@ -1617,7 +1639,7 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                                     json={"query": query, "max_results": limit, "search_depth": "basic"},
                                     timeout=budget) as resp:
                 resp.raise_for_status()
-                _payload = json.loads(await resp.text()) or {}
+                _payload = json.loads(await _read_search_text(resp)) or {}
                 results = _payload.get("results") or []
                 # Диагностика пустого ключевого слоя: статус и число результатов,
                 # без ключа и текста запроса (прод 16.11.2026: Tavily отвечал пусто).
@@ -1642,7 +1664,7 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                                             "Accept": "application/json"},
                                    timeout=budget) as resp:
                 resp.raise_for_status()
-                results = (((json.loads(await resp.text()) or {}).get("web") or {}).get("results")) or []
+                results = (((json.loads(await _read_search_text(resp)) or {}).get("web") or {}).get("results")) or []
             note_search_api_call()
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("description") or "", _SNIPPET_MAX_CHARS),
@@ -1655,7 +1677,7 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                                              "Content-Type": "application/json"},
                                     json={"query": query, "numResults": limit}, timeout=budget) as resp:
                 resp.raise_for_status()
-                results = (json.loads(await resp.text()) or {}).get("results") or []
+                results = (json.loads(await _read_search_text(resp)) or {}).get("results") or []
             note_search_api_call()
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("text") or "", _SNIPPET_MAX_CHARS),
@@ -1693,13 +1715,13 @@ async def _fetch_ddg_page(session: aiohttp.ClientSession, query: str, deadline: 
     page = ""
     async with session.post(_DDG_LITE_URL, data={"q": query}, headers=_SEARCH_HEADERS, timeout=post_timeout) as resp:
         if resp.status == 200:
-            page = await resp.text()
+            page = await _read_search_text(resp)
     if page and not _is_ddg_blocked(page):
         return page
     get_timeout = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
     async with session.get(_DDG_LITE_URL, params={"q": query}, headers=_SEARCH_HEADERS, timeout=get_timeout) as resp:
         resp.raise_for_status()
-        text = await resp.text()
+        text = await _read_search_text(resp)
     return "" if _is_ddg_blocked(text) else text
 
 
@@ -1714,7 +1736,7 @@ async def _google_news_snippets(session: aiohttp.ClientSession, query: str, time
         headers=_SEARCH_HEADERS, timeout=budget,
     ) as resp:
         resp.raise_for_status()
-        return parse_rss_snippets(await resp.text(), limit, kind="news")
+        return parse_rss_snippets(await _read_search_text(resp), limit, kind="news")
 
 
 async def _bing_news_snippets(session: aiohttp.ClientSession, query: str, timeout: float, limit: int) -> list[dict]:
@@ -1725,7 +1747,7 @@ async def _bing_news_snippets(session: aiohttp.ClientSession, query: str, timeou
     async with session.get(_BING_NEWS_URL, params={"q": query, "format": "rss", "cc": cc},
                            headers=_SEARCH_HEADERS, timeout=budget) as resp:
         resp.raise_for_status()
-        return parse_rss_snippets(await resp.text(), limit, kind="news")
+        return parse_rss_snippets(await _read_search_text(resp), limit, kind="news")
 
 
 async def _bing_web_snippets(session: aiohttp.ClientSession, query: str, timeout: float, limit: int) -> list[dict]:
@@ -1737,7 +1759,7 @@ async def _bing_web_snippets(session: aiohttp.ClientSession, query: str, timeout
     budget = aiohttp.ClientTimeout(total=max(1.0, timeout))
     async with session.get(_BING_SEARCH_URL, params=params, headers=_SEARCH_HEADERS, timeout=budget) as resp:
         resp.raise_for_status()
-        return parse_rss_snippets(await resp.text(), limit, kind="web")
+        return parse_rss_snippets(await _read_search_text(resp), limit, kind="web")
 
 
 # ───────────────────────── слияние и ранжирование ─────────────────────────
@@ -2038,7 +2060,7 @@ async def _ddg_html_page(session: aiohttp.ClientSession, query: str, deadline: f
     async with session.get(_DDG_HTML_URL, params={"q": query}, headers=_SEARCH_HEADERS, timeout=budget) as resp:
         if resp.status != 200:
             return ""
-        return await resp.text()
+        return await _read_search_text(resp)
 
 
 async def _ddg_source(session: aiohttp.ClientSession, query: str, deadline: float, limit: int) -> list[dict]:

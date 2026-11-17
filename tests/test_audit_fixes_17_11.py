@@ -1342,3 +1342,54 @@ def test_stream_history_answer_is_scrubbed():
     cleaned = ls._history_safe_answer("User Safety: safe\n\nОтвет")
     assert "User Safety" not in cleaned
     assert "Ответ" in cleaned
+
+
+# ── F-105: тело поискового ответа с капом ──
+
+
+def test_search_body_is_capped():
+    import lumen_search
+
+    class _Content:
+        async def iter_chunked(self, n):
+            yield b"a" * (n * 2)
+            yield b"b" * (n * 2)
+
+    class _Resp:
+        content = _Content()
+
+        async def text(self):
+            raise AssertionError("text() не должен читать без капа")
+
+    out = asyncio.run(lumen_search._read_search_text(_Resp(), cap=100))
+    assert len(out) <= 100
+
+
+def test_search_body_falls_back_for_test_doubles():
+    import lumen_search
+
+    class _Resp:
+        async def text(self):
+            return "ok"
+
+    assert asyncio.run(lumen_search._read_search_text(_Resp())) == "ok"
+
+
+# ── F-057: отшитый «занято» не становится владельцем stop-области ──
+
+
+def test_waiter_cap_does_not_claim_stop_scope(monkeypatch):
+    import lumen_message_core as mc
+    begun = []
+    monkeypatch.setattr(bot, "_begin_stream_stop_scope", lambda cid, uid: begun.append(cid))
+    monkeypatch.setattr(bot, "_msg_remaining_sec", lambda: None)
+    monkeypatch.setattr(bot, "_t_no_create", lambda cid, key: key)
+    monkeypatch.setattr(bot, "_answer_sender", lambda message: AsyncMock())
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+    bot._chat_lock_waiters[555] = bot._MAX_CHAT_LOCK_WAITERS
+    message = SimpleNamespace(chat=SimpleNamespace(id=555), from_user=SimpleNamespace(id=1))
+    try:
+        asyncio.run(mc._run_under_chat_lock(message, lambda: AsyncMock()()))
+    finally:
+        bot._chat_lock_waiters.pop(555, None)
+    assert begun == [], "отшитый запрос не должен открывать область стопа"
