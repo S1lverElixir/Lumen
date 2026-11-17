@@ -1483,3 +1483,33 @@ def test_channel_post_is_banned_by_sender_chat(monkeypatch):
     )
     asyncio.run(bot._handle_message(message))
     assert called == [], "забаненный канал не должен обрабатываться"
+
+
+# ── Low-партия 2: кап DSP-кэша, neurons fallback, DST-арифметика ──
+
+
+def test_dsp_cache_is_capped(monkeypatch):
+    import lumen_tiktok as lt
+    monkeypatch.setattr(lt, "_DSP_TRACK_CACHE_MAX", 2)
+    lt._DSP_TRACK_CACHE.clear()
+    for i in range(5):
+        lt._cache_dsp_track(f"s{i}", {"title": str(i)})
+    assert len(lt._DSP_TRACK_CACHE) <= 2
+    lt._DSP_TRACK_CACHE.clear()
+
+
+def test_corrupt_neurons_fall_back_to_used(monkeypatch):
+    import lumen_quotas as lq
+    bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER] = {"cf": {"used": 2, "neurons": "bad"}}
+    total = lq._image_neurons_total()
+    assert total == 2 * lq.IMAGE_UNIT_NEURONS
+    lq._note_image_success("cf", units=1.0)  # не должно упасть на битом neurons
+
+
+def test_la_midnight_difference_is_absolute_across_dst():
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    la = ZoneInfo("America/Los_Angeles")
+    now = datetime(2026, 3, 8, 23, 59, tzinfo=la)  # за час до перехода на летнее время
+    nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    assert 59 <= (nxt - now).total_seconds() <= 61

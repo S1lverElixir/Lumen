@@ -391,7 +391,8 @@ async def devtrace(request: Request, n: int = 200) -> Any:
         count = int(n)
     except (TypeError, ValueError):
         count = 200
-    entries = _devtrace.read_tail(count)
+    # Чтение хвоста 5 МБ в потоке: раньше блокировало петлю (ревью 17.11.2026).
+    entries = await asyncio.to_thread(_devtrace.read_tail, count)
     return {
         "enabled": _devtrace.enabled(),
         "path": str(_devtrace.trace_path()),

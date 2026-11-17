@@ -136,8 +136,18 @@ async def run_search_turn(
                     await status.set_action(preamble, timed=False)
         if not calls:
             break
-        planned = [(call, _call_query(call)) for call in calls][:searches_left]
-        planned = [(call, query) for call, query in planned if query]
+        # Фильтр пустых ДО среза: иначе пустой первый вызов съедал бюджет
+        # и валидный второй не пробовался (ревью 17.11.2026).
+        planned = [(call, _call_query(call)) for call in calls]
+        planned = [(call, query) for call, query in planned if query][:searches_left]
+        seen_queries: set[str] = set()
+        deduped: list = []
+        for call, query in planned:
+            if query in seen_queries:
+                continue
+            seen_queries.add(query)
+            deduped.append((call, query))
+        planned = deduped
         if not planned:
             result.failed = True
             break

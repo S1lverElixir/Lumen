@@ -713,6 +713,14 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
 # Это единственный доступный способ узнать трек для лицензированной музыки:
 # music_info у TikWM для таких звуков содержит только "original sound - хендл".
 _DSP_TRACK_CACHE: dict[str, dict[str, str] | None] = {}
+_DSP_TRACK_CACHE_MAX = 500
+
+
+def _cache_dsp_track(sound_id: str, value: dict[str, str] | None) -> None:
+    """Кэш с капом: без него словарь рос до рестарта (ревью 17.11.2026)."""
+    _DSP_TRACK_CACHE[sound_id] = value
+    while len(_DSP_TRACK_CACHE) > _DSP_TRACK_CACHE_MAX:
+        _DSP_TRACK_CACHE.pop(next(iter(_DSP_TRACK_CACHE)))
 _DSP_DISABLED_UNTIL = 0.0
 _DSP_PAGE_TIMEOUT_SEC = 6.0
 _DSP_PAGE_UAS = (
@@ -849,11 +857,11 @@ async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: 
     song_id = await _tiktok_dsp_song_id(session, video_id, unique_id)
     if not song_id:
         if sound_id and not was_paused and time.monotonic() >= _DSP_DISABLED_UNTIL:
-            _DSP_TRACK_CACHE[sound_id] = None
+            _cache_dsp_track(sound_id, None)
         return None
     track, transient = await _itunes_track(session, song_id)
     if sound_id and not transient:
-        _DSP_TRACK_CACHE[sound_id] = track
+        _cache_dsp_track(sound_id, track)
     if track:
         log.info(
             "[tiktok-music] DSP metadata: sound_id=%s song_id=%s title=%r artist=%r has_cover=%s",

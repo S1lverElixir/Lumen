@@ -404,10 +404,16 @@ async def _process_media_group_buffers(mgid: str) -> None:
         await asyncio.sleep(0.8)
     finally:
         # Отмена во сне — запись обязана уйти, иначе висит вечно. Чужую (новую)
-        # задачу под тем же mgid не трогаем — сверяемся, что это мы.
-        messages = bot._mg_buffers.pop(mgid, []) or []
-        if bot._mg_tasks.get(mgid) is asyncio.current_task():
-            bot._mg_tasks.pop(mgid, None)
+        # задачу под тем же mgid не трогаем — сверяемся, что это мы. Буферы
+        # тоже снимает только владелец: отменённая задача иначе уносила их
+        # у нового запуска (ревью 17.11.2026).
+        current_task = bot._mg_tasks.get(mgid)
+        if current_task is None or current_task is asyncio.current_task():
+            # Нет владельца (прямой вызов/старый путь) или владелец — мы: снимаем.
+            # Чужая живая задача под тем же mgid сохраняет свой буфер.
+            messages = bot._mg_buffers.pop(mgid, []) or []
+            if current_task is asyncio.current_task():
+                bot._mg_tasks.pop(mgid, None)
     if not messages:
          return
     # Альбом — под тем же per-chat lock и с теми же защитами, что у обычного

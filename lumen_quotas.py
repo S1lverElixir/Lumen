@@ -434,7 +434,12 @@ def _image_neurons_total() -> float:
             else:
                 total += max(0.0, float(neurons))
         except (TypeError, ValueError):
-            continue
+            # Битый neurons не должен скрывать расход: считаем по числу картинок
+            # (ревью 17.11.2026).
+            try:
+                total += max(0, int(entry.get("used") or 0)) * IMAGE_UNIT_NEURONS
+            except (TypeError, ValueError):
+                continue
     return total
 
 
@@ -470,8 +475,16 @@ def _note_image_success(provider: str, *, units: float = 1.0) -> None:
     Единица — генерация (104.2 Neuron); правка передаёт свой вес с мегапикселями."""
     import bot
     entry = bot._quota_entry(IMAGE_QUOTA_PROVIDER, provider)
-    entry["used"] = int(entry.get("used") or 0) + 1
-    entry["neurons"] = float(entry.get("neurons") or 0.0) + max(0.0, float(units)) * IMAGE_UNIT_NEURONS
+    try:
+        used = int(entry.get("used") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    try:
+        neurons = float(entry.get("neurons") or 0.0)
+    except (TypeError, ValueError):
+        neurons = 0.0
+    entry["used"] = used + 1
+    entry["neurons"] = neurons + max(0.0, float(units)) * IMAGE_UNIT_NEURONS
     entry["exhausted_at"] = None
     entry["cooldown_until"] = None
     bot.mark_quota_dirty()

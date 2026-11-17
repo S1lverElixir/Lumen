@@ -1688,7 +1688,7 @@ async def cmd_stats(message: Message) -> None:
 
     text = (
         f"<b>Статистика Lumen</b>\n"
-        f"Сборка: {_build_version()}\n"
+        f"Сборка: {await asyncio.to_thread(_build_version)}\n"
         f"Активных чатов (24ч): {active_chats} (всего: {total_chats})\n"
         f"Аптайм процесса: {uptime_str}\n"
         f"Счётчики квоты за сутки: {quota_day} (America/Los_Angeles, сбрасываются автоматически)\n"
