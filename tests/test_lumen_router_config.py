@@ -964,7 +964,8 @@ def test_agent_searches_table_names_searches_not_steps():
     # Револьвер ревью: лимит обязан считаться поисками. Если в таблице снова
     # окажутся шаги, одна строка с тремя tool_calls израсходует «один поиск».
     assert lumen_router_config._AGENT_SEARCHES_BY_EFFORT["medium"] == 2
-    assert "AGENT_MAX_SEARCHES" in lumen_router_config.agent_max_searches.__doc__
+    # Поведением, а не грепом по докстрингу (ревью 17.11.2026).
+    assert lumen_router_config.agent_max_searches("xhigh") == 3
 
 
 def test_unknown_effort_pin_is_warned_but_sent(monkeypatch, caplog):

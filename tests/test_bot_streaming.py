@@ -1124,7 +1124,10 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
     try:
         answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == long_text.strip()
-        tick_ceiling = max(1, int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / bot.STREAM_TYPING_TICK_SEC))
+        # Шаг — пауза плюс реальная правка, а не только пауза (ревью 17.11.2026).
+        tick_ceiling = max(1, int(
+            bot.STREAM_TYPING_MAX_CATCHUP_SEC
+            / (bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC)))
         assert len(sleep_calls) <= tick_ceiling
         # Длинный хвост идёт ровно, а не восьмью прыжками: тиков заметно больше.
         assert len(sleep_calls) > 8, sleep_calls

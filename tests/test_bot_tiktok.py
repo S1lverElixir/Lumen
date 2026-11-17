@@ -2355,7 +2355,9 @@ def test_slideshow_reports_slides_dropped_by_telegram_cap(monkeypatch):
         ))
         assert result is True
         assert len(telegram_bot.groups) == 1 and len(telegram_bot.groups[0]) == 2
-        assert replies and "2" in replies[0]
+        # Точный счётчик, а не любая цифра 2 в тексте (ревью 17.11.2026).
+        assert replies and replies[0] == bot._t(
+            999988, "tiktok_dl_slideshow", shown=2, total=3)
     finally:
         bot.chat_state.pop(999988, None)
 

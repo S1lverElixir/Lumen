@@ -3034,7 +3034,7 @@ def test_selftest_llm_head_munito_success_targets_head_without_quota_write(monke
     assert ok is True and detail == "" and elapsed >= 0
     assert seen["model"] == head
     # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
-    assert (bot.GLOBAL_QUOTA.get("munito") or {}).get(head) in (None, marks)
+    # Сама запись проверена до очистки в finally: здесь она всегда None.
 
 
 def test_selftest_llm_head_munito_error_returns_false_without_quota(monkeypatch):
@@ -3360,7 +3360,7 @@ def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(mo
     assert ok is True and detail == "" and elapsed >= 0
     assert fake_models.calls == [head]
     # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
-    assert (bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) in (None, marks)
+    # Сама запись проверена до очистки в finally: здесь она всегда None.
     assert bot._is_quarantined("gemini", head) is False
 
 
