@@ -130,7 +130,12 @@ def load_global_quota() -> None:
                 if provider in loaded:
                     # Чужой тип (список вместо dict) раньше ломал _quota_entry на каждом обращении.
                     if isinstance(loaded[provider], dict):
-                        GLOBAL_QUOTA[provider] = loaded[provider]
+                        clean_provider: dict[str, Any] = {}
+                        for model_id, entry in loaded[provider].items():
+                            sanitized = _sanitize_loaded_entry(entry)
+                            if sanitized is not None:
+                                clean_provider[model_id] = sanitized
+                        GLOBAL_QUOTA[provider] = clean_provider
                     else:
                         log.warning("[quota] Skip provider %s: expected dict, got %s", provider, type(loaded[provider]).__name__)
             # Пользовательские счётчики переживают рестарт тем же файлом/ключом.
@@ -190,46 +195,87 @@ _quota_retry_last_ts = 0.0
 _QUOTA_RETRY_SEC = 60.0
 
 
+def _sanitize_loaded_entry(entry: Any) -> dict[str, Any] | None:
+    """Снапшот мог хранить Infinity/мусор: нефинитная метка запирала провайдера
+    навсегда, потому что квота переживает рестарт (ревью 17.11.2026)."""
+    if not isinstance(entry, dict):
+        return None
+    clean = dict(entry)
+    for field in ("used", "neurons"):
+        if field not in clean:
+            continue
+        try:
+            value = float(clean.get(field) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if not math.isfinite(value) or value < 0:
+            value = 0.0
+        clean[field] = int(value) if field == "used" else value
+    for field in ("exhausted_at", "cooldown_until"):
+        if field not in clean:
+            continue
+        try:
+            value = float(clean.get(field) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        clean[field] = value if math.isfinite(value) and value > 0 else None
+    return clean
+
+
 def _merge_recovered_quota(local: dict[str, Any]) -> None:
     """Снапшот мог устареть, пока шёл сбой: баны объединяем, счётчики берём
     по максимуму, иначе поставленный во время сбоя бан терялся (ревью 17.11.2026)."""
     import lumen_chat_state as lcs
-    if local.get("quota_day") != GLOBAL_QUOTA.get("quota_day"):
-        return
+    # Баны не привязаны к суткам: объединяем их всегда, иначе бан, поставленный
+    # во время сбоя, исчезает при переходе через полночь (адверсариальный проход 17.11.2026).
     for uid, ts in (local.get(lcs.BANNED_KEY) or {}).items():
         if uid not in (GLOBAL_QUOTA.get(lcs.BANNED_KEY) or {}):
             GLOBAL_QUOTA.setdefault(lcs.BANNED_KEY, {})[uid] = ts
+    if local.get("quota_day") != GLOBAL_QUOTA.get("quota_day"):
+        return
     remote_daily = GLOBAL_QUOTA.setdefault(USER_DAILY_KEY, {})
     for uid, entry in (local.get(USER_DAILY_KEY) or {}).items():
         if not isinstance(entry, dict):
             continue
         cur = remote_daily.get(uid)
         if not isinstance(cur, dict):
-            remote_daily[uid] = entry
+            remote_daily[uid] = dict(entry)
             continue
         for field in ("total", "gemini", "tts", "draw", "bonus"):
             try:
-                cur[field] = max(int(cur.get(field) or 0), int(entry.get(field) or 0))
+                # Сумма, а не max: на время сбоя запись в хранилище выключена,
+                # и локальные счётчики — это расход, которого в снапшоте нет.
+                cur[field] = int(cur.get(field) or 0) + int(entry.get(field) or 0)
             except (TypeError, ValueError):
                 continue
-    remote_gemini = GLOBAL_QUOTA.setdefault("gemini", {})
-    for model, entry in (local.get("gemini") or {}).items():
-        if not isinstance(entry, dict):
+    for provider in _QUOTA_PROVIDERS:
+        local_models = local.get(provider) or {}
+        if not isinstance(local_models, dict):
             continue
-        cur = remote_gemini.get(model)
-        if not isinstance(cur, dict):
-            remote_gemini[model] = entry
-            continue
-        try:
-            cur["used"] = max(int(cur.get("used") or 0), int(entry.get("used") or 0))
-        except (TypeError, ValueError):
-            pass
-        for field in ("exhausted_at", "cooldown_until"):
-            try:
-                merged = max(float(cur.get(field) or 0.0), float(entry.get(field) or 0.0))
-                cur[field] = merged or None
-            except (TypeError, ValueError):
+        remote_models = GLOBAL_QUOTA.setdefault(provider, {})
+        for model, entry in local_models.items():
+            if not isinstance(entry, dict):
                 continue
+            cur = remote_models.get(model)
+            if not isinstance(cur, dict):
+                remote_models[model] = dict(entry)
+                continue
+            for field in ("used", "neurons"):
+                if field not in entry and field not in cur:
+                    continue
+                try:
+                    if field == "used":
+                        cur[field] = int(cur.get(field) or 0) + int(entry.get(field) or 0)
+                    else:
+                        cur[field] = float(cur.get(field) or 0.0) + float(entry.get(field) or 0.0)
+                except (TypeError, ValueError):
+                    continue
+            for field in ("exhausted_at", "cooldown_until"):
+                try:
+                    merged = max(float(cur.get(field) or 0.0), float(entry.get(field) or 0.0))
+                except (TypeError, ValueError):
+                    continue
+                cur[field] = merged if math.isfinite(merged) and merged > 0 else None
 
 
 def recover_global_quota() -> bool:

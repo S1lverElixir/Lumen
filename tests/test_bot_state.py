@@ -764,6 +764,7 @@ def test_startup_load_failure_blocks_quota_overwrite():
         bot._dirty_chat_ids.clear()
         bot._pending_chat_deletions.clear()
         lcs._index_dirty = False
+        lcs._state_load_failed = False  # тест про квоту, не про индекс
         with patch("bot._save_quota_payload") as mock_quota, \
                 patch("bot._save_chat_index_payload") as mock_index:
             asyncio.run(bot._flush_dirty_state_once())

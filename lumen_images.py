@@ -150,9 +150,12 @@ def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
     except ValueError:
         seconds = None
     if seconds is not None:
-        # inf/1e309 — мусорный заголовок: он замораживал провайдера навсегда
-        # в персистентной квоте (ревью 17.11.2026).
-        return max(0.0, seconds) if math.isfinite(seconds) else None
+        # inf/1e309 — мусорный заголовок: кап в сутки вместо вечной остывки.
+        # None здесь значил бы «заголовка нет», и 402 без FREE_LIMIT уходил бы
+        # в «бюджет исчерпан» (ревью 17.11.2026). nan сравнивается сам с собой.
+        if seconds != seconds:
+            return 0.0
+        return min(max(0.0, seconds), 86400.0)
     try:
         when = parsedate_to_datetime(raw)
     except (TypeError, ValueError):

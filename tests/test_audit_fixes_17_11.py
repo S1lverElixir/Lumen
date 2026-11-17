@@ -4,6 +4,7 @@
 Каждый тест падает на коде до соответствующего фикса и проходит после него.
 """
 import asyncio
+import copy
 import json
 import threading
 import time
@@ -25,6 +26,28 @@ import pytest
 from tests.bot_test_helpers import _FakeIncomingMessage
 
 
+@pytest.fixture(autouse=True)
+def _isolate_global_state():
+    """Каждый тест файла оставляет квоту, чаты и флаги как были: иначе соседний
+    файл сьюта видит обрезанную квоту и грязные очереди (адверсариальный проход)."""
+    saved_quota = copy.deepcopy(bot.GLOBAL_QUOTA)
+    saved_chats = dict(bot.chat_state)
+    yield
+    bot.GLOBAL_QUOTA.clear()
+    bot.GLOBAL_QUOTA.update(saved_quota)
+    bot.chat_state.clear()
+    bot.chat_state.update(saved_chats)
+    lcs._state_load_failed = False
+    lcs._quota_load_failed = False
+    lcs._dirty_chat_ids.clear()
+    lcs._index_dirty = False
+    lcs._quota_dirty = False
+    lcs._pending_chat_deletions.clear()
+    lcs._chat_snapshot_unloaded.clear()
+    lq._quota_retry_last_ts = 0.0
+    lumen_model_speed._latency_ema.clear()
+
+
 def _reset_state_flags():
     lcs._state_load_failed = False
     lcs._quota_load_failed = False
@@ -39,6 +62,7 @@ def _reset_state_flags():
 
 
 def test_chat_completion_chain_keeps_memory_in_system_message():
+    # Память обязана пережить КАЖДУЮ попытку: перезапись system шла на каждой модели.
     chat_id = 998301
     state = bot.get_state(chat_id)
     state["memory_summary"] = "MEMFACT-7731: любит чай"
@@ -46,18 +70,23 @@ def test_chat_completion_chain_keeps_memory_in_system_message():
 
     async def fake_request(payload, deadline):
         payloads.append(payload)
+        if payload["model"] == "probe/mem-first":
+            raise bot.MunitoAPIError("HTTP 503 no free capacity", status_code=503)
         return {"choices": [{"message": {"content": "ok"}}]}
 
     try:
         answer, _ = asyncio.run(lumen_routes._chat_completion_chain(
             [{"role": "system", "content": "base"}, {"role": "user", "content": "hi"}],
-            ["probe/mem-model"], "probe/mem-model",
+            ["probe/mem-first", "probe/mem-model"], "probe/mem-first",
             request_fn=fake_request, provider="munito", chat_id=chat_id,
         ))
     finally:
         bot.chat_state.pop(chat_id, None)
-    assert answer == "ok"
-    assert "MEMFACT-7731" in payloads[0]["messages"][0]["content"]
+    assert answer == "ok" and len(payloads) == 2
+    for payload in payloads:
+        system = payload["messages"][0]["content"]
+        assert "MEMFACT-7731" in system, "память теряется на одной из попыток"
+        assert len(system) > 500, "базовый промпт подменён пустотой"
 
 
 # ── F-032: перестановка по скорости не ломает голову search-цепочки ──
@@ -68,18 +97,26 @@ def test_search_chain_keeps_grounded_head_after_speed_reorder():
     try:
         lumen_model_speed.record_response(
             lumen_model_speed.speed_key("gemini", "gemini-2.5-flash"), total_sec=90.0)
-        for model in (
-            "gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
-            "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash",
-            "gemini-3-flash-preview",
-        ):
+        speeds = {
+            "gemini-3.8-flash": 10.0, "gemini-3.5-flash-lite": 2.0,
+            "gemini-3.1-flash-lite": 6.0, "gemini-3.7-flash": 8.0,
+            "gemini-3.6-flash": 9.0, "gemini-3.5-flash": 5.0,
+            "gemini-3-flash-preview": 7.0,
+        }
+        for model, speed in speeds.items():
             lumen_model_speed.record_response(
-                lumen_model_speed.speed_key("gemini", model), total_sec=3.0)
+                lumen_model_speed.speed_key("gemini", model), total_sec=speed)
         route = [("gemini", m) for m in lumen_router_config.GEMINI_SEARCH_CHAIN]
-        ordered = lumen_routes._reorder_route_by_speed(route)
+        ordered = lumen_routes._reorder_route_by_speed(route, preserve_grounded_head=True)
         head = ordered[0][1]
         assert lumen_router_config.GEMINI_MODELS.get(head, {}).get("search_grounding") is True, (
             f"голова search-цепочки {head} без search grounding")
+        # Сортировка по скорости не выключена: самый быстрый из негрупповых — первый.
+        non_grounded = [
+            m for _, m in ordered
+            if not lumen_router_config.GEMINI_MODELS.get(m, {}).get("search_grounding", True)
+        ]
+        assert non_grounded[0] == "gemini-3.5-flash-lite"
     finally:
         lumen_model_speed._latency_ema.clear()
 
@@ -211,10 +248,12 @@ def test_quota_recovery_first_retry_reads_immediately(monkeypatch):
 # ── F-075: нефинитный Retry-After не замораживает картинки навсегда ──
 
 
-@pytest.mark.parametrize("raw", ["inf", "1e309", "-inf"])
-def test_retry_after_rejects_non_finite(raw):
+@pytest.mark.parametrize(("raw", "expected"), [
+    ("inf", 86400.0), ("1e309", 86400.0), ("-inf", 0.0), ("nan", 0.0),
+])
+def test_retry_after_is_bounded(raw, expected):
     resp = SimpleNamespace(headers={"Retry-After": raw})
-    assert lumen_images._retry_after_sec(resp) is None
+    assert lumen_images._retry_after_sec(resp) == expected
 
 
 def test_image_rate_limit_cooldown_is_bounded():
@@ -225,7 +264,9 @@ def test_image_rate_limit_cooldown_is_bounded():
         entry = bot._quota_entry(lq.IMAGE_QUOTA_PROVIDER, provider)
         until = entry["cooldown_until"]
         assert until is not None and until < float("inf")
-        assert until <= time.time() + 86400 + 60  # не дальше суток (плюс запас на время теста)
+        # Нижняя граница — штатная пауза провайдера, верхняя — сутки.
+        assert until >= time.time() + bot.IMAGE_PROVIDER_COOLDOWN_SEC - 1
+        assert until <= time.time() + 86400 + 60
     finally:
         bot.GLOBAL_QUOTA.get(lq.IMAGE_QUOTA_PROVIDER, {}).pop(provider, None)
 
@@ -247,31 +288,49 @@ def test_quota_load_treats_non_dict_payload_as_failure(raw, monkeypatch):
 # ── F-087: recovery сливает живую память с удалённым снапшотом ──
 
 
-def test_quota_recovery_merges_live_bans_and_counters(monkeypatch):
+def test_quota_recovery_sums_live_counters_and_merges_all_providers(monkeypatch):
     today = bot._current_quota_day()
     remote = json.dumps({
-        "gemini": {"m1": {"used": 0, "exhausted_at": None, "cooldown_until": None}},
-        "user_daily": {}, "banned_users": {}, "quota_day": today,
+        "gemini": {"m1": {"used": 1, "exhausted_at": None, "cooldown_until": None}},
+        "image": {"cf": {"used": 3, "neurons": 300.0, "exhausted_at": None, "cooldown_until": None}},
+        "user_daily": {"777": {"total": 4, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0}},
+        "banned_users": {"888": 1}, "quota_day": today,
     })
     bot.GLOBAL_QUOTA.clear()
-    bot.GLOBAL_QUOTA.update({"gemini": {}, "quota_day": today})
+    bot.GLOBAL_QUOTA.update({"gemini": {}, "image": {}, "user_daily": {}, "quota_day": today})
     lcs._quota_load_failed = True
     bot._ban_user(998331)
     bot._record_user_daily(998332)
     bot._record_user_daily(998332)
+    bot._record_quota_usage("gemini", "m1")
+    bot.GLOBAL_QUOTA["image"]["cf"] = {
+        "used": 7, "neurons": 700.0, "exhausted_at": None, "cooldown_until": None,
+    }
     lq._quota_retry_last_ts = -1e9
     monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: remote)
-    try:
-        ok = lq.recover_global_quota()
-        assert ok is True
-        assert bot._is_banned(998331) is True, "бан, поставленный во время сбоя, не теряется"
-        entry = bot._user_daily_peek(998332)
-        assert entry is not None and entry["total"] >= 2, "счётчики сливаются по максимуму"
-    finally:
-        lcs._quota_load_failed = False
-        lq._quota_retry_last_ts = 0.0
-        bot.GLOBAL_QUOTA.get("banned_users", {}).pop("998331", None)
-        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("998332", None)
+    ok = lq.recover_global_quota()
+    assert ok is True
+    assert bot._is_banned(998331) is True, "бан, поставленный во время сбоя, не теряется"
+    assert bot._is_banned(888) is True, "удалённый бан остаётся"
+    assert bot._user_daily_peek(998332)["total"] == 2, "локальный расход не теряется"
+    assert bot.GLOBAL_QUOTA["user_daily"]["777"]["total"] == 4
+    assert bot.GLOBAL_QUOTA["gemini"]["m1"]["used"] == 2, "расход сбоя суммируется"
+    assert bot.GLOBAL_QUOTA["image"]["cf"]["used"] == 10
+    assert bot.GLOBAL_QUOTA["image"]["cf"]["neurons"] == 1000.0
+
+
+def test_quota_recovery_keeps_ban_across_midnight(monkeypatch):
+    # Сутки сменились за время сбоя: счётчики не воскрешаем, но бан обязан остаться.
+    remote = json.dumps({
+        "gemini": {}, "user_daily": {}, "banned_users": {}, "quota_day": "2000-01-01",
+    })
+    bot.GLOBAL_QUOTA.update({"quota_day": "2026-11-17"})
+    lcs._quota_load_failed = True
+    bot._ban_user(998333)
+    lq._quota_retry_last_ts = -1e9
+    monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: remote)
+    assert lq.recover_global_quota() is True
+    assert bot._is_banned(998333) is True
 
 
 # ── F-181: ответ шлюза без result — сбой чтения, а не «ключа нет» ──
@@ -297,14 +356,34 @@ def _tts_incoming(chat_id):
     return incoming
 
 
+def _spy_daily_reserve(monkeypatch, calls):
+    orig_reserve = bot._reserve_user_daily
+    orig_refund = bot._refund_user_daily
+
+    def reserve(*args, **kwargs):
+        calls.append(("res", kwargs.get("total"), kwargs.get("tts")))
+        return orig_reserve(*args, **kwargs)
+
+    def refund(*args, **kwargs):
+        calls.append(("ref", kwargs.get("total"), kwargs.get("tts")))
+        return orig_refund(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_reserve_user_daily", reserve)
+    monkeypatch.setattr(bot, "_refund_user_daily", refund)
+
+
 def test_inline_tts_cancel_during_synthesis_refunds_slots(monkeypatch):
     incoming = _tts_incoming(998341)
     uid = bot._user_key_for_message(incoming)
     bot.GLOBAL_QUOTA["user_daily"] = {}
     bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
     started = asyncio.Event()
+    calls = []
+    spent = {}
+    _spy_daily_reserve(monkeypatch, calls)
 
     async def hang(chunk):
+        spent.update(bot._user_daily_peek(uid) or {})
         started.set()
         await asyncio.Event().wait()
 
@@ -315,14 +394,13 @@ def test_inline_tts_cancel_during_synthesis_refunds_slots(monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await task
         entry = bot._user_daily_peek(uid)
-        assert entry is None or (entry["total"] == 0 and entry["tts"] == 0)
+        assert entry is not None and entry["total"] == 0 and entry["tts"] == 0
 
     monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", hang)
     monkeypatch.setattr(lumen_status.StatusMessage, "start_action", AsyncMock(return_value=None))
-    try:
-        asyncio.run(scenario())
-    finally:
-        bot.GLOBAL_QUOTA["user_daily"] = {}
+    asyncio.run(scenario())
+    assert spent.get("total") == 1, "резерв обязан реально списываться"
+    assert ("res", 1, 1) in calls and ("ref", 1, 1) in calls
 
 
 def test_inline_tts_cancel_during_status_refunds_slots(monkeypatch):
@@ -331,6 +409,8 @@ def test_inline_tts_cancel_during_status_refunds_slots(monkeypatch):
     bot.GLOBAL_QUOTA["user_daily"] = {}
     bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
     started = asyncio.Event()
+    calls = []
+    _spy_daily_reserve(monkeypatch, calls)
 
     async def hang_status(*a, **k):
         started.set()
@@ -343,13 +423,11 @@ def test_inline_tts_cancel_during_status_refunds_slots(monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await task
         entry = bot._user_daily_peek(uid)
-        assert entry is None or (entry["total"] == 0 and entry["tts"] == 0)
+        assert entry is not None and entry["total"] == 0 and entry["tts"] == 0
 
     monkeypatch.setattr(lumen_status.StatusMessage, "start_action", hang_status)
-    try:
-        asyncio.run(scenario())
-    finally:
-        bot.GLOBAL_QUOTA["user_daily"] = {}
+    asyncio.run(scenario())
+    assert ("res", 1, 1) in calls and ("ref", 1, 1) in calls
 
 
 # ── F-049: фото-пост без скачанных слайдов отказывает, а не шлёт аудио видео ──
@@ -456,3 +534,131 @@ def test_placeholders_are_still_empty_like(text):
 
 def test_402_billing_quota_is_paid_not_rate_limit():
     assert bot._classify_model_error(402, "billing quota exceeded") == "paid"
+
+
+# ── F-039 (адверсариальный проход): shutdown-флаш не удаляет замороженные чаты ──
+
+
+def test_shutdown_flush_skips_frozen_chat_deletes():
+    ok_chat, frozen_chat = 998371, 998372
+    _reset_state_flags()
+    lcs._pending_chat_deletions.update({ok_chat, frozen_chat})
+    lcs._chat_snapshot_unloaded.add(frozen_chat)
+    deleted = []
+
+    def fake_delete(cid):
+        deleted.append(cid)
+        return True
+
+    with patch("bot._delete_chat_storage", side_effect=fake_delete):
+        lcs._flush_state_now()
+    assert frozen_chat not in deleted
+    assert frozen_chat in lcs._pending_chat_deletions
+    assert ok_chat in deleted
+
+
+# ── F-181 (адверсариальный проход): сбой загрузки сам будит ретрай индекса ──
+
+
+def test_flush_retries_index_after_load_failure_without_dirty_flag():
+    _reset_state_flags()
+    lcs._state_load_failed = True
+    lcs._index_dirty = False
+    calls = []
+    with patch.object(lcs, "_recover_index_ids", side_effect=lambda: calls.append(1) or False):
+        asyncio.run(bot._flush_dirty_state_once())
+    assert calls, "без ретрая запись стоит до рестарта"
+
+
+# ── F-075 (адверсариальный проход): Infinity из старого снапшота снимается ──
+
+
+def test_loaded_non_finite_cooldown_is_cleared(monkeypatch):
+    raw = json.dumps({
+        "image": {"cf": {"used": 1, "neurons": 104.2, "exhausted_at": None,
+                          "cooldown_until": float("inf")}},
+        "quota_day": bot._current_quota_day(),
+    })
+    monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: raw)
+    lq.load_global_quota()
+    assert bot.GLOBAL_QUOTA["image"]["cf"]["cooldown_until"] is None
+    assert bot._image_provider_block_reason("cf") is None
+
+
+# ── F-033 (адверсариальный проход): 503 и invalid model по-прежнему остывают ──
+
+
+@pytest.mark.parametrize(("status", "text"), [
+    (503, "model is currently unavailable"),
+    (400, "invalid model id"),
+    (400, "gemini-9 is not a valid model ID"),
+    (400, "model_not_found"),
+])
+def test_unavailable_and_invalid_model_still_cool_down(status, text):
+    async def boom(payload, deadline):
+        raise bot.MunitoAPIError(f"HTTP {status} {text}", status_code=status)
+
+    model = f"probe/cool-{status}"
+    try:
+        with pytest.raises(bot.MunitoAPIError):
+            asyncio.run(lumen_routes._chat_completion_chain(
+                [{"role": "system", "content": ""}, {"role": "user", "content": "hi"}],
+                [model], model, request_fn=boom, provider="munito",
+            ))
+        assert bot.GLOBAL_QUOTA["munito"][model]["cooldown_until"] > time.time()
+    finally:
+        bot.GLOBAL_QUOTA.get("munito", {}).pop(model, None)
+
+
+# ── F-032 (адверсариальный проход): обычный маршрут по-прежнему снимает медленную голову ──
+
+
+def test_heavy_route_still_demotes_slow_grounded_head():
+    import lumen_model_speed
+    lumen_model_speed._latency_ema.clear()
+    try:
+        lumen_model_speed.record_response(
+            lumen_model_speed.speed_key("gemini", "gemini-2.5-flash"), total_sec=18.0)
+        lumen_model_speed.record_response(
+            lumen_model_speed.speed_key("gemini", "gemini-3.8-flash"), total_sec=2.0)
+        route = [("gemini", "gemini-2.5-flash"), ("gemini", "gemini-3.8-flash")]
+        ordered = lumen_routes._reorder_route_by_speed(route)  # без пина головы
+        assert ordered[0][1] == "gemini-3.8-flash", "медленная голова тяжёлой цепочки не снята"
+    finally:
+        lumen_model_speed._latency_ema.clear()
+
+
+# ── F-085 (адверсариальный проход): отмена в отправке возвращает неотданные чанки ──
+
+
+def test_inline_tts_cancel_during_send_refunds_remaining(monkeypatch):
+    incoming = _tts_incoming(998352)
+    uid = bot._user_key_for_message(incoming)
+    bot.GLOBAL_QUOTA["user_daily"] = {}
+    bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+    started = asyncio.Event()
+
+    async def synth(text):
+        return (b"fake-ogg", "speech.ogg", 1)
+
+    async def hang_send(func, **kwargs):
+        if "voice" in kwargs:
+            started.set()
+            await asyncio.Event().wait()
+        return None
+
+    async def scenario():
+        task = asyncio.create_task(bot.inline_tts(incoming, "hello world"))
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        entry = bot._user_daily_peek(uid)
+        assert entry is not None and entry["total"] == 0 and entry["tts"] == 0
+
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", synth)
+    monkeypatch.setattr(bot, "_tg_call", hang_send)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_voice=AsyncMock()))
+    monkeypatch.setattr(bot, "_delete_message_quietly", AsyncMock())
+    monkeypatch.setattr(lumen_status.StatusMessage, "start_action", AsyncMock(return_value=None))
+    asyncio.run(scenario())

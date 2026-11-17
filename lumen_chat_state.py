@@ -796,9 +796,12 @@ async def _flush_dirty_state_once() -> None:
                     '[state] %d chat(s) failed to save this cycle, will retry next: %s',
                     len(failed_ids), ", ".join(str(c) for c in sorted(failed_ids)),
                 )
-        if _index_dirty:
+        if _index_dirty or _state_load_failed:
             # Флаг сбрасываем только после подтверждённой записи — иначе упавший индекс
             # молча терялся бы до следующей мутации (найдено внешним аудитом).
+            # Сбой загрузки сам по себе повод на ретрай: иначе после битого ответа
+            # шлюза индекс не читался бы заново и запись стояла до рестарта
+            # (адверсариальный проход 17.11.2026).
             # Снапшот ключей — здесь (см. комментарий у _save_chat_to_storage_limited).
             if _state_load_failed:
                 # Удалённый индекс новее пустой памяти — не затираем, очередь живёт дальше.
@@ -849,6 +852,11 @@ def _flush_state_now() -> None:
     # Неуспех — обратно в очередь с громким логом, как в async-флаше: молча
     # чистить очереди на shutdown значило бы тихо терять записи (аудит A5-1).
     for cid in list(_pending_chat_deletions):
+        if _state_load_failed or cid in _chat_snapshot_unloaded:
+            # Shutdown не обходит защиту удаления: замороженный чат сохраняет
+            # удалённую копию до успешного чтения (адверсариальный проход 17.11.2026).
+            log.warning('[state] Shutdown: skip deleting chat %s, snapshot not restored.', cid)
+            continue
         try:
             deleted = bot._delete_chat_storage(cid)
         except Exception as exc:
