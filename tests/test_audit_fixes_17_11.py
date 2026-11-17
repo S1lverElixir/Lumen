@@ -1306,3 +1306,29 @@ def test_log_safe_url_hides_the_account():
     import lumen_tiktok
     assert "@private_person" not in lumen_tiktok._log_safe_url(
         "https://www.tiktok.com/@private_person/video/1")
+
+
+# ── F-112: алиасы по границам слов ──
+
+
+def test_aliases_respect_word_boundaries():
+    import lumen_search
+    assert lumen_search._cities_in("какие модели лучше") == []
+    assert lumen_search._alias_present("eth", "we are together") is False
+    assert lumen_search._alias_present("eth", "цена eth растёт") is True
+
+
+# ── F-095: неудачное чтение не списывает личный кап ──
+
+
+def test_failed_read_does_not_spend_user_quota(monkeypatch):
+    import lumen_read_page as rp
+    monkeypatch.setattr(rp, "_user_key", lambda: "u1")
+    rp.reset_read_page_counters_for_tests()
+    rp.note_read_page_call(count_user=False)
+    assert rp.read_page_calls_today() == 1
+    assert rp._USER_READS.get("u1", 0) == 0
+    rp.note_read_page_call(count_global=False)
+    assert rp._USER_READS["u1"] == 1
+    assert rp.read_page_calls_today() == 1
+    rp.reset_read_page_counters_for_tests()

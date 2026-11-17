@@ -584,7 +584,7 @@ _CITY_FORMS = {
     "Витебск": ("витебск", "витебске", "vitebsk"),
     "Могилёв": ("могилев", "могилёв", "mogilev"),
     "Москва": ("москва", "москве", "москвой", "moscow", "moskva"),
-    "Санкт-Петербург": ("санкт-петербург", "петербург", "спб", "питер", "питере", "saint petersburg", "st petersburg"),
+    "Санкт-Петербург": ("санкт-петербург", "санкт-петербурге", "санкт-петербурга", "петербург", "петербурге", "петербурга", "спб", "питер", "питере", "saint petersburg", "st petersburg"),
     "Киев": ("киев", "киеве", "киева", "kyiv", "kiev"),
     "Варшава": ("варшава", "варшаве", "warsaw", "warszawa"),
     "Вильнюс": ("вильнюс", "вильнюсе", "vilnius"),
@@ -621,13 +621,22 @@ _CITY_FORMS = {
 _CITY_TOKEN_RE = re.compile(r"(?:в|во|у|для|над)\s+([A-ZА-ЯЁ][\wА-ЯЁ-]{2,24})", re.UNICODE)
 
 
+def _alias_present(alias: str, text: str) -> bool:
+    """Алиас по границам слова: «together» больше не считается ethereum,
+    «модели» — Дели (ревью 17.11.2026)."""
+    if not alias:
+        return False
+    pattern = r"(?<![0-9a-zа-яё])" + re.escape(alias) + r"(?![0-9a-zа-яё])"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
 def _cities_in(text: str) -> list[str]:
     """Города запроса в именительном падеже: сначала известная таблица, потом — любое
     слово с большой буквы после предлога как попытка для неизвестного города."""
     low = (text or "").lower()
     found: list[str] = []
     for canonical, forms in _CITY_FORMS.items():
-        if any(form in low for form in forms) and canonical not in found:
+        if any(_alias_present(form, low) for form in forms) and canonical not in found:
             found.append(canonical)
     if found:
         return found[:2]
@@ -1349,7 +1358,7 @@ async def _crypto_snippets(session: aiohttp.ClientSession, text: str, deadline: 
     """CoinGecko: живая цена с меткой времени. Скрейпинг страниц цены давал статьи
     2022 года вместо числа (замер 11.11.2026 на вопросе «сколько стоит bitcoin»)."""
     low = text.lower()
-    ids = [coin for coin, aliases in _CRYPTO_ALIASES.items() if any(a in low for a in aliases)]
+    ids = [coin for coin, aliases in _CRYPTO_ALIASES.items() if any(_alias_present(a, low) for a in aliases)]
     if not ids:
         return []
     params = {"ids": ",".join(ids[:3]), "vs_currencies": "usd", "include_24hr_change": "true",
@@ -1384,7 +1393,7 @@ async def _fx_snippets(session: aiohttp.ClientSession, text: str, deadline: floa
     """Курс валют: exchangerate-api отдаёт всю корзину одним запросом с датой обновления."""
     low = (text or "").lower()
     base = "USD"
-    targets = [code for code, aliases in _CURRENCY_ALIASES.items() if any(a in low for a in aliases)]
+    targets = [code for code, aliases in _CURRENCY_ALIASES.items() if any(_alias_present(a, low) for a in aliases)]
     if re.search(r"рубл|ruble", low) and "RUB" not in targets:
         targets.append("RUB")
     if not [code for code in targets if code != base]:
