@@ -1567,3 +1567,15 @@ def test_five_snippets_fit_the_prompt_block():
     ]
     block = lumen_search.format_snippets_for_prompt(snippets)
     assert block.count("\n• ") >= 4
+
+
+# ── F-076: хвост голого URL не входит в ссылку ──
+
+
+def test_bare_url_tail_stays_outside_the_link():
+    import lumen_formatting as lf
+    assert lf._md_to_html("_https://example.com_") == "<i>https://example.com</i>"
+    assert lf._strip_markdown("(см. https://example.com)") == "(см. https://example.com)"
+    assert lf._split_bare_url("https://example.com.Далее") == ("https://example.com", ".Далее")
+    assert lf._split_bare_url("https://example.com_") == ("https://example.com", "_")
+    assert lf._split_bare_url("https://example.com)") == ("https://example.com", ")")
