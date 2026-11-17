@@ -1550,7 +1550,7 @@ def test_reference_cache_returns_a_copy():
 
 
 def test_sentry_scrub_handles_json_escaped_secret(monkeypatch):
-    secret = 'abc"def\ghi'
+    secret = r'abc"def"+chr(92)+"ghi'
     monkeypatch.setattr(bot, "_redactable_secrets", lambda: (secret,))
     event = {"message": f"token {secret} leaked"}
     out = bot._sentry_scrub_secrets(event, {})

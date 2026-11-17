@@ -2947,9 +2947,19 @@ def test_module_alias_for_prod_entry():
     # Прод-инцидент: прод запускается как `python bot.py` (__main__), а десятки
     # отложенных `import bot` внутри функций без алиаса выполняли весь bot.py
     # вторым модулем — пустое состояние и вечный bot=None (все апдейты в 503).
-    # Тест-канарейка: алиас обязан оставаться в голове bot.py, проверяется текстом.
-    src = pathlib.Path(bot.__file__).read_text(encoding="utf-8")
-    assert 'sys.modules.setdefault("bot"' in src or "sys.modules.setdefault('bot'" in src
+    # Проверяем AST, а не текст: закомментированный алиас проходил строковую
+    # проверку и канарейка молчала (F-148, 17.11.2026).
+    import ast
+    tree = ast.parse(pathlib.Path(bot.__file__).read_text(encoding="utf-8"))
+    alias = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute) and node.func.attr == "setdefault"
+        and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "modules"
+        and len(node.args) >= 2
+        and isinstance(node.args[0], ast.Constant) and node.args[0].value == "bot"
+    ]
+    assert alias, "алиас sys.modules.setdefault(\"bot\", ...) пропал из bot.py"
 
 
 def test_guest_update_holds_per_chat_lock(monkeypatch):

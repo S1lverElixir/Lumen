@@ -74,7 +74,7 @@ def _clock(ts: float | None, *, now: float | None = None) -> str:
         return ""
     try:
         moment = datetime.fromtimestamp(stamp, _MOSCOW_TZ)
-        now_moment = datetime.fromtimestamp(now or time.time(), _MOSCOW_TZ)
+        now_moment = datetime.fromtimestamp(now if now is not None else time.time(), _MOSCOW_TZ)
         if moment.date() == now_moment.date():
             return moment.strftime("%H:%M")
         return moment.strftime("%d.%m %H:%M")

@@ -127,6 +127,10 @@ NOT_DRAW_INTENTS = [
 
 
 def _intent(text):
+    """Ожидание матрицы: порядок двух матчеров, а не проводка ядра.
+
+    Матрица сторожит сами матчеры (F-170, 17.11.2026); сквозную проводку
+    через _handle_message_core проверяют тесты ниже в этом файле."""
     low = text.lower().strip()
     if _match_trigger_with_fillers(low, DRAW_TRIGGER_PREFIXES)[0]:
         return "draw"

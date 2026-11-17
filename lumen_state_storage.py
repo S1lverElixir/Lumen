@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import urllib.parse
 import urllib.request as _urllib_request
 from dataclasses import dataclass
@@ -86,6 +87,11 @@ def _storage_write_text(cfg: StorageConfig, key: str, path: Path, text: str) -> 
     temp_path = path.with_suffix(".tmp")
     with open(temp_path, "w", encoding="utf-8") as f:
         f.write(text)
+        # fsync до rename: иначе жёсткий kill терял последний снимок, хотя файл
+        # уже подменился (F-048, 17.11.2026). pids ОС без fsync — suppress.
+        with contextlib.suppress(Exception):
+            f.flush()
+            os.fsync(f.fileno())
     temp_path.replace(path)
 
 

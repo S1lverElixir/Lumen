@@ -2031,12 +2031,22 @@ def test_probe_thumbnail_from_bytes_writes_off_loop(monkeypatch):
 
 
 def test_write_and_tag_mp3_sync_roundtrip(tmp_path):
-    # A7-7: синхронный кусок MP3-пути вынесен в хелпер (мутаген битый вход терпит).
+    # F-160: только exists/size не ловило потерю ID3. Минимальный валидный кадр
+    # MPEG-1 Layer III обязателен: без него mutagen не синхронизируется и теги молча пропадают.
     from lumen_tiktok_flow import _write_and_tag_mp3_sync
-    path = str(tmp_path / "m.mp3")
-    _write_and_tag_mp3_sync(path, b"not a real mp3", "t", "a", None)
+    from mutagen.id3 import ID3
     import os
-    assert os.path.exists(path) and os.path.getsize(path) > 0
+    frame = bytes([0xff, 0xfb, 0x90, 0x64]) + bytes((i % 251) + 1 for i in range(413))
+    cover = bytes([0x89]) + b"PNG" + bytes([13, 10, 26, 10]) + b"cover"
+    path = str(tmp_path / "m.mp3")
+    _write_and_tag_mp3_sync(path, frame * 4, "Заголовок", "Артист", cover)
+    tags = ID3(path)
+    assert tags["TIT2"].text == ["Заголовок"]
+    assert tags["TPE1"].text == ["Артист"]
+    assert tags.getall("APIC")[0].mime == "image/png"
+    bad = str(tmp_path / "bad.mp3")
+    _write_and_tag_mp3_sync(bad, b"not a real mp3", "t", "a", None)
+    assert os.path.exists(bad) and os.path.getsize(bad) > 0
 
 
 def test_tiktok_video_candidates_protocol_relative_url():
