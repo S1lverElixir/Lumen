@@ -19,7 +19,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# ca-certificates нужен для TLS из Python (Gemini API, OpenRouter, Pollinations, TikWM,
+# ca-certificates нужен для TLS из Python (Gemini API, Munito, Pollinations, TikWM,
 # Deno-прокси и т.д.). apt-get install ffmpeg отсюда убран — см. ниже.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \

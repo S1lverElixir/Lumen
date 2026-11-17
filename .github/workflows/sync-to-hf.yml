@@ -46,13 +46,15 @@ jobs:
           HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
         run: |
           set -euo pipefail
-          git remote add hf "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
+          # Токен не в URL: иначе оседает в .git/config раннера (ревью 17.11.2026).
+          HF_AUTH="http.https://huggingface.co/.extraheader=AUTHORIZATION: Bearer ${HF_TOKEN}"
+          git remote add hf "https://huggingface.co/spaces/${HF_SPACE_REPO}"
           # Сетевой/авторизационный сбой чтения прод-ветки нельзя глотать `|| true`:
           # тогда уходила ветка else и коммит пушился БЕЗ lease, молча затирая
           # хотфикс на Space — ровно тот случай, от которого проверка ниже (аудит 16.11.2026).
-          if ! git fetch hf main; then
+          if ! git -c "${HF_AUTH}" fetch hf main; then
             set +e
-            git ls-remote --exit-code --heads hf main >/dev/null 2>&1
+            git -c "${HF_AUTH}" ls-remote --exit-code --heads hf main >/dev/null 2>&1
             rc=$?
             set -e
             # rc=2 — ветки main на Space ещё нет (первый деплой), только тогда пуш без lease.
@@ -70,7 +72,7 @@ jobs:
               echo "HF Space has commits not in this deploy branch (hotfix?) — refusing to overwrite." >&2
               exit 1
             fi
-            git push hf HEAD:main --force-with-lease=main:"$(git rev-parse hf/main)"
+            git -c "${HF_AUTH}" push hf HEAD:main --force-with-lease=main:"$(git rev-parse hf/main)"
           else
-            git push hf HEAD:main
+            git -c "${HF_AUTH}" push hf HEAD:main
           fi

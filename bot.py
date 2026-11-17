@@ -759,9 +759,9 @@ from lumen_limits import (
 )
 
 # ── Инициализация клиентов внутри цикла обработки событий (решает RuntimeError) ──
-bot: Bot = None
+bot: Bot | None = None
 dp = Dispatcher()
-client: genai.Client = None
+client: genai.Client | None = None
 
 _http_session: aiohttp.ClientSession | None = None
 _chat_locks: dict[int, asyncio.Lock] = {}

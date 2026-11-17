@@ -112,7 +112,9 @@ WEBHOOK_MAX_INFLIGHT_TASKS = 100
 # Отклонения по секрету/капу гроздьями логируем суммарно, а не по одному.
 _WEBHOOK_DENIED_LOG_INTERVAL_SEC = 60.0
 _webhook_denied_count = 0
-_webhook_denied_last_log = 0.0
+# -1e9, а не 0: на свежем хосте monotonic() < 60, и первое отклонение
+# ждало минуту до строки лога (ревью 17.11.2026).
+_webhook_denied_last_log = -1e9
 # Telegram может доставить один update_id повторно (retry после таймаута).
 # Помним последние N: дубль не должен дать второй ответ, скачивание и трату квоты.
 _SEEN_UPDATE_IDS_MAX = 2000
