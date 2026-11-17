@@ -1424,3 +1424,41 @@ def test_index_fetch_does_not_mutate_shared_sets():
     assert lcs._apply_recovered_ids(ids) is True
     assert 111 in lcs._index_extra_ids
     _reset_state_flags()
+
+
+# ── F-069: ротация не закрывает сессию под живыми запросами ──
+
+
+def test_proxy_rotation_defers_old_session_close(monkeypatch):
+    import contextlib
+    import lumen_transport_calls as tc
+    closed = []
+
+    class _OldSession:
+        async def close(self):
+            closed.append(1)
+
+    class _NewSession:
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(tc, "IPv4AiohttpSession", _NewSession)
+    monkeypatch.setattr(bot, "_TELEGRAM_PROXY_CANDIDATES", ["https://a", "https://b"])
+    monkeypatch.setattr(bot, "_telegram_proxy_idx", 0)
+    monkeypatch.setattr(bot, "TELEGRAM_API_BASE_URL", "https://a")
+    original_bot = bot.bot
+    bot.bot = SimpleNamespace(session=_OldSession())
+
+    async def scenario():
+        await tc._rotate_telegram_proxy()
+        assert closed == [], "сессию нельзя закрывать под живыми запросами"
+        for task in list(tc._deferred_session_closes):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        tc._deferred_session_closes.clear()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        bot.bot = original_bot

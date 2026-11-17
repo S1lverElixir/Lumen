@@ -33,6 +33,23 @@ from lumen_telegram_transport import (
 
 log = logging.getLogger("bot")
 
+# Отложенные закрытия старых aiogram-сессий: держим ссылки, чтобы GC не
+# убил задачу раньше срока.
+_deferred_session_closes: set[asyncio.Task] = set()
+
+
+async def _close_session_later(session) -> None:
+    """Дать живым запросам доиграть: закрытие сессии под ними давало
+    «Session is closed» и теряло правки чужих чатов (ревью 17.11.2026)."""
+    import bot
+    try:
+        await asyncio.sleep(max(5.0, float(bot.TELEGRAM_REQUEST_TIMEOUT) + 5.0))
+        with contextlib.suppress(Exception):
+            await session.close()
+    except asyncio.CancelledError:
+        raise
+
+
 async def _get_telegram_session() -> aiohttp.ClientSession:
     import bot
     return await _lumen_get_telegram_session(
@@ -58,8 +75,10 @@ async def _rotate_telegram_proxy() -> bool:
                 api=TelegramAPIServer.from_base(new_url),
                 proxy_secret=bot.LUMEN_PROXY_SECRET, proxy_base_urls=bot._TELEGRAM_PROXY_CANDIDATES,
             )
-            with contextlib.suppress(Exception):
-                await old_session.close()
+            # Не закрываем под живыми запросами: откладываем и держим ссылку.
+            task = asyncio.create_task(_close_session_later(old_session))
+            _deferred_session_closes.add(task)
+            task.add_done_callback(_deferred_session_closes.discard)
     log.warning('[telegram] Switching to fallback proxy: %s -> %s', old_url, new_url)
     return bot._telegram_proxy_idx != 0
 
