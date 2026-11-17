@@ -388,3 +388,50 @@ def test_slideshow_with_no_downloaded_slides_refuses_instead_of_sending_audio(mo
         asyncio.run(bot._try_send_tiktok_slideshow(None, media_data, incoming, None, "author", {}))
     assert sends == [], "аудио не должно уходить ни как видео, ни как фото"
     bot.chat_state.pop(998351, None)
+
+
+# ── F-050: отмена в finally музыкального шага не глотается ──
+
+
+def test_music_cancellation_in_finally_propagates(monkeypatch):
+    import lumen_tiktok_flow as ltf
+
+    holder = {}
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        holder["loop"].call_soon(holder["task"].cancel)
+        return None
+
+    async def hang(session, media_data):
+        await asyncio.Event().wait()
+
+    class _Slot:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "_media_download_slot", lambda: _Slot())
+    monkeypatch.setattr(ltf, "_fetch_dsp_track_metadata", hang)
+    incoming = _FakeIncomingMessage(998361)
+    media = {
+        "id": "1",
+        "music": "http://x/m.mp3",
+        "music_info": {"id": "s1", "title": "T", "author": "A"},
+        "author": {"nickname": "N", "unique_id": "u"},
+    }
+
+    async def scenario():
+        holder["loop"] = asyncio.get_running_loop()
+        task = asyncio.create_task(ltf._send_tiktok_music(None, media, incoming, "author", {}))
+        holder["task"] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            return True
+        return False
+
+    assert asyncio.run(scenario()) is True, "отмена снаружи обязана пройти дальше finally"
+    bot.chat_state.pop(998361, None)

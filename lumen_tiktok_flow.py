@@ -293,10 +293,16 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          log.warning("[tiktok] failed to send music: %s", e)
     finally:
          # Ранний выход/исключение не должны оставлять DSP-запрос в фоне.
-         with contextlib.suppress(asyncio.CancelledError, Exception):
+         with contextlib.suppress(Exception):
               if not dsp_task.done():
                    dsp_task.cancel()
+         try:
               await dsp_task
+         except asyncio.CancelledError:
+              # Своя отмена (дедлайн сообщения) обязана пройти дальше: suppress
+              # глушил её и обработчик дорабатывал сверх бюджета (ревью 17.11.2026).
+              if asyncio.current_task().cancelling():
+                   raise
 
 async def handle_tiktok_sound(message: Message, status: Message | None) -> None:
     """Ссылка на страницу звука TikTok (не видео) — см. комментарий выше по файлу:
