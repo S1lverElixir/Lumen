@@ -1270,3 +1270,39 @@ def test_weather_sequence_respects_the_deadline(monkeypatch):
     started = _time.monotonic()
     asyncio.run(lumen_search._weather_snippets(_SlowSession(), "погода в X", _time.monotonic() + 1.0))
     assert _time.monotonic() - started < 1.6, "последовательность вышла за дедлайн"
+
+
+# ── Medium-пакет 1: F-055, F-059, F-103, F-052 ──
+
+
+def test_draw_budget_treats_zero_as_exhausted():
+    import lumen_message_core as mc
+    assert mc._draw_budget_seconds(0.0) == 1.0
+    assert mc._draw_budget_seconds(None) == bot.DRAW_TOTAL_BUDGET_SEC
+
+
+def test_history_service_regex_requires_a_closed_marker():
+    import lumen_message_parse as mp
+    content = "[Web search results без скобки и мой текст"
+    entry = mp._clean_history_entry({"role": "user", "content": content})
+    assert entry is not None and entry["content"] == content
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.1/", "http://0177.0.0.1/", "http://foo.localhost/",
+    "http://127.0.0.1.nip.io/",
+])
+def test_private_host_forms_are_rejected(url):
+    import lumen_search
+    assert lumen_search.url_host_is_public(url) is False
+
+
+def test_normal_public_host_is_accepted():
+    import lumen_search
+    assert lumen_search.url_host_is_public("https://example.com/a") is True
+
+
+def test_log_safe_url_hides_the_account():
+    import lumen_tiktok
+    assert "@private_person" not in lumen_tiktok._log_safe_url(
+        "https://www.tiktok.com/@private_person/video/1")

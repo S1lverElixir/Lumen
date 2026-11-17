@@ -179,7 +179,11 @@ TIKWM_JSON_MAX_BYTES = 1 * 1024 * 1024
 def _log_safe_url(url: str) -> str:
     """URL без query/fragment: в ?url= лежит ссылка пользователя, её нельзя писать в общий лог."""
     parts = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    path = parts.path
+    if "@" in path:
+        # Ссылка пользователя: @аккаунт в пути — это его приватность, не диагностика.
+        path = "/<user>"
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 async def _read_capped_body(resp: aiohttp.ClientResponse, url: str, *, cap_bytes: int | None = None) -> bytes | None:
@@ -270,7 +274,7 @@ async def _fetch_tikwm_media_data(
     if any_attempt_made and all_attempts_403_empty:
         log.warning(
             "[tikwm][diag] ALL attempts (both mirrors, with throttling and a retry round) returned HTTP 403 with an EMPTY body — url=%s. The URL resolved correctly and requests were spaced out over time — this doesn't look like an ordinary transient error. Looks like this server's outbound IP is being blocked at a proxy/WAF level in front of TikWM (see README for a similar documented case with YouTube), which timing/URL tweaks on our side can't work around. To test the hypothesis: the same request to TikWM from a DIFFERENT IP (not HF Spaces).",
-            resolved_url,
+            _log_safe_url(resolved_url),
         )
     return None
 
@@ -655,7 +659,7 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
     }
     # Стартовый URL от пользователя: внутренний адрес режем до первого запроса.
     if not await asyncio.to_thread(_host_resolves_to_public, urllib.parse.urlsplit(url).hostname):
-        log.warning("[tiktok] Refusing to resolve non-public start URL %r.", url)
+        log.warning("[tiktok] Refusing to resolve non-public start URL %s.", _log_safe_url(url))
         return url
     # Редиректы разбираем вручную через _checked_redirect_url: aiohttp
     # с allow_redirects=True сходил бы на следующий хоп до проверки хоста.
@@ -694,7 +698,7 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
                 if not _looks_like_resolved_tiktok_url(resolved):
                     # Битый URL после GET тоже логируем — иначе остаётся только малопонятный 403 уже на стороне TikWM.
                     log.warning(
-                        "[tiktok] Resolving short link %s didn't yield anything that looks like a post URL via either HEAD or GET (result: %s) — passing it through as-is, TikWM may reject it.", url, resolved,
+                        "[tiktok] Resolving short link %s didn't yield anything that looks like a post URL via either HEAD or GET (result: %s) — passing it through as-is, TikWM may reject it.", _log_safe_url(url), _log_safe_url(resolved),
                     )
                 return resolved
     except Exception as e:

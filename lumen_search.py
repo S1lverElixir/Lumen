@@ -12,6 +12,7 @@ import ipaddress
 import json
 import logging
 import math
+import socket
 import os
 import re
 import time
@@ -715,9 +716,19 @@ def url_host_is_public(url: str) -> bool:
         return ipaddress.ip_address(host).is_global
     except ValueError:
         pass
-    # Домен: обязана быть точка (отсекает «internal», «localhost», «169» без
-    # точек) и не быть служебного суффикса.
-    return "." in host and not host.endswith((".local", ".internal", ".lan", ".home.arpa"))
+    # Сокращённый и восьмеричный IPv4 (127.1, 0177.0.0.1) ipaddress не понимает,
+    # но inet_aton понимает — и отсекает их как непубличные (ревью 17.11.2026).
+    if re.fullmatch(r"[0-9a-fx.]+", host):
+        try:
+            return ipaddress.ip_address(socket.inet_aton(host)).is_global
+        except (OSError, ValueError):
+            pass
+    # Домен: обязана быть точка и не быть служебного суффикса или rebinding-сервиса.
+    blocked_suffixes = (
+        ".local", ".internal", ".lan", ".home.arpa", ".localhost",
+        ".nip.io", ".sslip.io", ".xip.io", ".lvh.me", ".vcap.me",
+    )
+    return "." in host and not host.endswith(blocked_suffixes)
 
 
 def _unwrap_ddg_url(href: str) -> str:

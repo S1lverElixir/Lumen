@@ -887,6 +887,15 @@ def _direct_attachment_needs_gemini(message: Message) -> bool:
     return False
 
 
+def _draw_budget_seconds(remaining: float | None) -> float:
+    """Бюджет /draw: 0.0 — исчерпанный остаток, а не «значения нет». Раньше `or`
+    подменял ноль полным бюджетом и рисование шло сверх потолка (ревью 17.11.2026)."""
+    import bot
+    if remaining is None:
+        remaining = bot.DRAW_TOTAL_BUDGET_SEC
+    return max(1.0, min(bot.DRAW_TOTAL_BUDGET_SEC, remaining))
+
+
 async def _handle_message_core(
     message: Message, extra_media: list[tuple[bytes, str]] | None = None, *,
     skip_rate_limit: bool = False, extra_media_sources: list[Any] | None = None,
@@ -1125,9 +1134,7 @@ async def _handle_message_core(
             await bot.inline_draw(message, _prompt_text, reference=reference)
             return
 
-    _ctx_deadline = time.monotonic() + max(
-        1.0, min(bot.DRAW_TOTAL_BUDGET_SEC, bot._msg_remaining_sec() or bot.DRAW_TOTAL_BUDGET_SEC),
-    )
+    _ctx_deadline = time.monotonic() + _draw_budget_seconds(bot._msg_remaining_sec())
 
     if matched_draw_trigger:
         prompt_content = _strip_trigger_content(_prompt_text, matched_draw_trigger, message)
