@@ -1493,16 +1493,22 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
     cities = _cities_in(text)
     if not cities:
         return []
-    budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
+    def _remaining_budget() -> aiohttp.ClientTimeout:
+        # Остаток пересчитывается перед каждым запросом: фиксированный timeout
+        # на четыре последовательных запроса выходил за дедлайн (ревью 17.11.2026).
+        return aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
+
     need_moon = bool(_MOON_ASK_RE.search(text or ""))
     daily_fields = "temperature_2m_max,temperature_2m_min,precipitation_sum,sunrise,sunset"
     if need_moon:
         daily_fields += ",moonrise,moonset,moon_phase"
     out: list[dict] = []
     for city in cities[:2]:
+        if time.monotonic() >= deadline:
+            break
         try:
             async with session.get(_GEOCODE_URL, params={"name": city, "count": 1, "language": "ru"},
-                                   headers=_SEARCH_HEADERS, timeout=budget) as resp:
+                                   headers=_SEARCH_HEADERS, timeout=_remaining_budget()) as resp:
                 resp.raise_for_status()
                 found = (json.loads(await resp.text()) or {}).get("results") or []
             if not found:
@@ -1515,7 +1521,7 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
                 "current": "temperature_2m,precipitation,weather_code,wind_speed_10m",
                 "daily": daily_fields,
                 "timezone": "auto", "forecast_days": 2,
-            }, headers=_SEARCH_HEADERS, timeout=budget) as resp:
+            }, headers=_SEARCH_HEADERS, timeout=_remaining_budget()) as resp:
                 resp.raise_for_status()
                 wx = json.loads(await resp.text())
         except Exception as exc:

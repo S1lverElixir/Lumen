@@ -1227,3 +1227,46 @@ def test_lru_eviction_keeps_spent_and_bonus_entries(monkeypatch):
     assert "111" in bucket and "222" in bucket, "расход и bonus не вытесняются"
     assert not {"333", "444", "555"} & set(bucket)
     assert "999" in bucket
+
+
+# ── F-106: погода не выходит за общий дедлайн ──
+
+
+def test_weather_sequence_respects_the_deadline(monkeypatch):
+    import time as _time
+    import lumen_search
+
+    class _Resp:
+        status = 200
+
+        async def text(self):
+            return '{"results": [{"latitude": 1, "longitude": 2, "name": "X"}]}'
+
+        def raise_for_status(self):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _SlowSession:
+        def get(self, *args, **kwargs):
+            delay = kwargs.get("timeout")
+            total = getattr(delay, "total", 0.2) if delay is not None else 0.2
+
+            class _CM:
+                async def __aenter__(self_inner):
+                    await asyncio.sleep(min(0.6, max(0.05, total)))
+                    return _Resp()
+
+                async def __aexit__(self_inner, *exc):
+                    return False
+
+            return _CM()
+
+    monkeypatch.setattr(lumen_search, "_cities_in", lambda text: ["X"])
+    started = _time.monotonic()
+    asyncio.run(lumen_search._weather_snippets(_SlowSession(), "погода в X", _time.monotonic() + 1.0))
+    assert _time.monotonic() - started < 1.6, "последовательность вышла за дедлайн"
