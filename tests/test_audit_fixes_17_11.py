@@ -1014,7 +1014,7 @@ def test_tag_replacement_survives_case_folding_length_change():
 
 def test_rich_math_keeps_old_delimiter_semantics():
     import lumen_formatting as lf
-    # \(..\) без DOTALL и пустой \[..\] не превращаются в формулу.
+    # Скобочные формы без DOTALL и пустые остаются как были.
     sample = "\\(" + "a" + chr(10) + "b" + "\\)"
     assert lf._replace_delimited(sample, "\\(", "\\)", lambda s: "M",
                                  allow_newlines=False) == sample
