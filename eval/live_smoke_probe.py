@@ -1,11 +1,12 @@
-"""Живой прогон через @lumen_smoke_bot:меряем плавность стриминга и работу поиска.
+"""Живой прогон через тестового бота (TEST_BOT_TARGET): меряем плавность стриминга и поиск.
 
 Кадр правки ответа — это edited_message:число правок, паузы между ними и прирост
 символов показывают, идёт ли набор плавно или рывками. Вывод пишется в UTF-8 файл,
 а не в консоль: консоль Windows в cp1251 не выносит ✻ и кириллицу.
 
 Запуск:  python eval/live_smoke_probe.py
-Токен берётся из .env (TEST_BOT_TOKEN) и никогда не печатается.
+Токен берётся из .env (TEST_BOT_TOKEN) и никогда не печатается. Прод-бот @LumenAI_bot
+адресатом быть не может: проба писала бы живым людям (ревью 17.11.2026).
 """
 import json
 import os
@@ -32,7 +33,17 @@ def _token():
 
 TOKEN = _token()
 API = "https://api.telegram.org/bot{}/{}"
-TARGET = "@LumenAI_bot"
+def _test_target() -> str:
+    """Только тестовый бот: пустой или прод-адрес — остановка до любого запроса."""
+    target = os.environ.get("TEST_BOT_TARGET", "").strip()
+    if not target:
+        raise SystemExit("TEST_BOT_TARGET не задан: нужен @тестового бота, прод не адресат")
+    if target.lstrip("@").lower() == "lumenai_bot":
+        raise SystemExit("TEST_BOT_TARGET указывает на прод-бота @LumenAI_bot — прогон остановлен")
+    return target
+
+
+TARGET = _test_target()
 
 
 def call(method, **params):
