@@ -379,4 +379,6 @@ Both apps must end up with the same file; the token is the `DENO_DEPLOY_TOKEN` r
   действует кап на человека (`SEARCH_API_USER_DAILY_LIMIT`, дефолт 2). Владелец
   (`OWNER_ID`) не ограничен ни тем, ни другим, реальный предел — тариф провайдера.
   Кредит списывается только за успешный запрос; актор ставится в
-  `_run_under_chat_lock` через contextvar.
+  `_run_under_chat_lock` через contextvar. Исчерпал личный кап — keyed-слой
+  возвращает пусто, и тот же ход идёт в бесплатные DuckDuckGo/Bing: человек
+  получает поиск, а не тишину; общий кап слоя тоже ведёт к этому фолбэку.
