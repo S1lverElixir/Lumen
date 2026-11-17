@@ -1241,8 +1241,11 @@ async def _handle_message_core(
             # И здесь число вариантов — человеческое: модель могла написать
             # «A ginger cat, 3 variants» (ревью 10.11.2026).
             _r_count, _r_prompt = _split_image_variants(clean_prompt)
+            # Фраза количества из описания вырезается и здесь: «, 3 variants»
+            # уезжало в промпт через prepared (F-169, 17.11.2026).
+            _resolved_clean = _split_image_variants(_resolved)[1] or _resolved
             await bot.inline_draw_variants(
-                message, _resolved, variants=_r_count, prepared=_resolved,
+                message, _resolved_clean, variants=_r_count, prepared=_resolved_clean,
             )
             return
 
