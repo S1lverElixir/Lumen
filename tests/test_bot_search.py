@@ -520,15 +520,21 @@ def test_zone2_chatter_skips_agent_turn(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "спасибо"
 
-    async def fail_turn(**kwargs):
-        raise AssertionError("агент-цикл не должен зваться на болтовне")
+    # Рекордер, а не исключение в моке: вызов обёрнут в except Exception и глотался,
+    # поэтому «упавший» тест оставался зелёным (ревью 17.11.2026).
+    calls = []
+
+    async def record_turn(**kwargs):
+        calls.append(kwargs)
+        return ""
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         return "Всегда пожалуйста", False
 
-    monkeypatch.setattr("lumen_agent.run_search_turn", fail_turn)
+    monkeypatch.setattr("lumen_agent.run_search_turn", record_turn)
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
+    assert calls == [], "болтовня не должна звать планирующий агент-цикл"
     bot.chat_state.pop(123, None)
 
 
