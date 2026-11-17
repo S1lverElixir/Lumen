@@ -1544,3 +1544,26 @@ def test_reference_cache_returns_a_copy():
     again = lumen_search._cache_get("probe|copy")
     assert again[0]["title"] == "t"
     lumen_search._reference_cache.clear()
+
+
+# ── Low-партия 5: Sentry-эскейп, бюджет сниппетов ──
+
+
+def test_sentry_scrub_handles_json_escaped_secret(monkeypatch):
+    secret = 'abc"def\ghi'
+    monkeypatch.setattr(bot, "_redactable_secrets", lambda: (secret,))
+    event = {"message": f"token {secret} leaked"}
+    out = bot._sentry_scrub_secrets(event, {})
+    assert "<REDACTED>" in out["message"]
+    assert "abc" not in out["message"]
+
+
+def test_five_snippets_fit_the_prompt_block():
+    import lumen_search
+    snippets = [
+        {"title": f"T{i}", "url": f"https://example.com/{i}", "snippet": "s" * 300,
+         "publisher": "example.com", "date": "2026-11-17", "kind": "web"}
+        for i in range(5)
+    ]
+    block = lumen_search.format_snippets_for_prompt(snippets)
+    assert block.count("\n• ") >= 4

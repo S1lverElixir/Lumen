@@ -1243,6 +1243,7 @@ async def inline_tts(message: Message, text: str) -> None:
     # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
     deadline = time.monotonic() + bot.TTS_TOTAL_BUDGET_SEC
     shortened = False
+    voices: list = []
     try:
         # Весь синтез ДО отправки: упавший кусок — одна ошибка вместо рваного "пол-ответа + ошибка".
         voices = []
@@ -1267,7 +1268,11 @@ async def inline_tts(message: Message, text: str) -> None:
         raise
     except Exception as exc:
         # Возврат до любых await: отмена на правке статуса иначе съедала резерв.
-        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
+        # Возвращаем только несозданные чанки: уже синтезированные провайдер
+        # оплатил, их слот не откатываем (ревью 17.11.2026).
+        refund = max(0, len(chunks) - len(voices))
+        if refund:
+            bot._refund_user_daily(uid, total=refund, tts=refund)
         log.exception("TTS synthesis failed:")
         # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
         txt = bot._error_text(exc).strip() or exc.__class__.__name__

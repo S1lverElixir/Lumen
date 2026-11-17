@@ -411,6 +411,11 @@ def _sentry_scrub_secrets(event: dict, hint: dict) -> dict | None:
     payload = json.dumps(event, default=str, ensure_ascii=False)
     for secret in _redactable_secrets():
         payload = payload.replace(secret, "<REDACTED>")
+        # JSON экранирует кавычки/бэкслеши/управляющие: точная строка секрета
+        # тогда не находится, и он уезжает в Sentry (ревью 17.11.2026).
+        escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
+        if escaped != secret:
+            payload = payload.replace(escaped, "<REDACTED>")
     return json.loads(payload)
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()

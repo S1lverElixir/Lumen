@@ -2187,9 +2187,12 @@ def format_snippets_for_prompt(snippets: list[dict]) -> str:
             tail = f" ({url})"
         elif label:
             tail = f" [{label}]"
-        line = f"• {body[:_SNIPPET_MAX_CHARS + 120]}{tail}"
+        # Строка ровно в кап сниппета (300): пять результатов влезают в 2000,
+        # а не три; не влезшую строку пропускаем, а не обрываем остальные
+        # (ревью 17.11.2026).
+        line = f"• {body[:_SNIPPET_MAX_CHARS]}{tail}"
         if total + len(line) + 1 > _BLOCK_MAX_CHARS:
-            break
+            continue
         lines.append(line)
         total += len(line) + 1
     if len(lines) < 2:
