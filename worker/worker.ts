@@ -98,8 +98,8 @@ function isTelegramBotPath(path: string): boolean {
 }
 
 function isCloudflareAiPath(path: string): boolean {
-  // Только генерация: /ai/models и прочее поддерево не нужно боту (ревью 17.11.2026).
-  return /^\/client\/v4\/accounts\/[^/]+\/ai\/run\//.test(path);
+  // Генерация и каталог моделей (каталог зовёт /diag); остальное поддерево — нет.
+  return /^\/client\/v4\/accounts\/[^/]+\/ai\/(run|models)\//.test(path);
 }
 
 export function buildForwardHeaders(reqHeaders: Headers): Headers {
