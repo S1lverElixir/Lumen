@@ -1679,6 +1679,10 @@ def _dedupe(items: list[dict]) -> list[dict]:
     seen_pairs: set[tuple[str, str]] = set()
     for item in items:
         url = (item.get("url") or "").strip()
+        # RSS и keyed-провайдеры не проходили проверку хоста: служебный адрес из
+        # чужой выдачи доезжал до промпта и пузыря (ревью 17.11.2026).
+        if url.startswith("http") and not url_host_is_public(url):
+            continue
         title_key = re.sub(r"\W+", "", (item.get("title") or "").lower())[:60]
         # Пара «заголовок + текст»: у CoinGecko все монеты с одним заголовком, и
         # дедуп по одному title терял ethereum (ревью 17.11.2026), а у новостных
@@ -2005,6 +2009,9 @@ def format_snippets_for_prompt(snippets: list[dict]) -> str:
     lines = [header.rstrip("\n")]
     total = len(header)
     for item in snippets:
+        item_url = (item.get("url") or "").strip()
+        if item_url.startswith("http") and not url_host_is_public(item_url):
+            continue
         title = _one_line((item.get("title") or "").strip())
         snippet = _one_line((item.get("snippet") or "").strip())
         # Google News кладёт заголовок ещё и в description: дубль съедает место в промпте.

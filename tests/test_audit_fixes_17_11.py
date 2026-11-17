@@ -813,12 +813,12 @@ def test_request_specific_400_does_not_cool_the_model():
 def test_dedupe_keeps_same_title_with_different_bodies():
     import lumen_search
     items = [
-        {"title": "Курс", "url": "https://a/1", "snippet": "bitcoin: 1 USD"},
-        {"title": "Курс", "url": "https://a/2", "snippet": "ethereum: 3000 USD"},
-        {"title": "Курс", "url": "https://a/3", "snippet": "bitcoin: 1 USD"},
+        {"title": "Курс", "url": "https://example.com/1", "snippet": "bitcoin: 1 USD"},
+        {"title": "Курс", "url": "https://example.org/2", "snippet": "ethereum: 3000 USD"},
+        {"title": "Курс", "url": "https://example.net/3", "snippet": "bitcoin: 1 USD"},
     ]
     kept = lumen_search._dedupe(items)
-    assert [i["url"] for i in kept] == ["https://a/1", "https://a/2"]
+    assert [i["url"] for i in kept] == ["https://example.com/1", "https://example.org/2"]
 
 
 # ── F-113: невидимки и чужой маркер поиска не доходят до промпта ──
@@ -873,3 +873,19 @@ def test_quota_load_drops_infinite_last_write_ts(monkeypatch):
     lq.load_global_quota()
     ts = bot.GLOBAL_QUOTA.get("last_storage_write_ts")
     assert ts is None or math.isfinite(float(ts))
+
+
+# ── F-102: служебный адрес из RSS/keyed-выдачи не доходит ни до промпта, ни до пузыря ──
+
+
+def test_private_url_is_dropped_from_snippets_and_dedupe():
+    import lumen_search
+    items = [
+        {"title": "metadata", "url": "http://169.254.169.254/latest/meta-data", "snippet": "secret"},
+        {"title": "ok", "url": "https://example.com/a", "snippet": "public"},
+    ]
+    kept = lumen_search._dedupe(items)
+    assert [i["url"] for i in kept] == ["https://example.com/a"]
+    block = lumen_search.format_snippets_for_prompt(items)
+    assert "169.254.169.254" not in block
+    assert "example.com" in block
