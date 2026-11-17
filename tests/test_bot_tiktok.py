@@ -1434,7 +1434,11 @@ def test_slideshow_status_uses_localized_key():
         for code in ("ru", "en", "be", "kk"):
             localized = lang_t(code, "tiktok_dl_slideshow", shown=7, total=9)
             assert "7/9" in localized, code
-            assert localized != text or code == bot._chat_lang(chat_id)
+            # Те же числа, что у text: иначе строки отличаются только 35/40
+            # против 7/9 и «убитая локализация» проходила (ревью 17.11.2026).
+            same_args = lang_t(code, "tiktok_dl_slideshow", shown=35, total=40)
+            if code != bot._chat_lang(chat_id):
+                assert same_args != text, f"{code} повторяет язык чата"
     finally:
         bot.chat_state.pop(chat_id, None)
 

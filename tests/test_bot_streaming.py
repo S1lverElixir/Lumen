@@ -1550,7 +1550,7 @@ def test_group_catchup_uses_the_shorter_ceiling():
     bot._typing_sleep = counting_sleep
     bot.client = fake_client
     try:
-        asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
     finally:
         bot._typing_sleep, bot.client = original_sleep, original_client
         bot.chat_state.pop(chat_id, None)
@@ -1563,6 +1563,9 @@ def test_group_catchup_uses_the_shorter_ceiling():
     group_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_GROUP_SEC / step_sec)
     private_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / step_sec)
     assert len(sleep_calls) <= group_ceiling < private_ceiling
+    # Отключённый довывод (бюджет 0) раньше оставлял тест зелёным:
+    assert len(sleep_calls) > 0
+    assert (answer or "").strip() == ("Буква " * 500).strip()
 def test_catchup_tick_budget_arithmetic():
     import lumen_typing_pace
     # Ревью 11.11.2026: потолок тиков = секунды бюджета / реальный шаг (пауза
