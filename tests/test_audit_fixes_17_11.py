@@ -687,3 +687,22 @@ def test_jpeg_scan_stops_at_scan_start():
 ])
 def test_size_for_reference_keeps_supported_proportions(dims, expected):
     assert lumen_images.size_for_reference(dims) == expected
+
+
+# ── F-036: бюджет, истёкший до первой попытки, — RouteBudgetExceededError ──
+
+
+def test_run_route_budget_exhausted_before_first_attempt_raises_budget_error(monkeypatch):
+    import time as _time
+
+    async def fake_ask(*args, **kwargs):
+        raise AssertionError("модель не должна зваться при истёкшем бюджете")
+
+    monkeypatch.setattr(bot, "ask_munito_text", fake_ask)
+    incoming = _FakeIncomingMessage(998381)
+    with pytest.raises(bot.RouteBudgetExceededError):
+        asyncio.run(bot._run_route(
+            998381, "hi", [("munito", "probe/budget")], incoming,
+            deadline=_time.monotonic() - 1.0,
+        ))
+    bot.chat_state.pop(998381, None)

@@ -1152,4 +1152,8 @@ async def _run_route(
 
     # Суточный счётчик /stats: маршрут исчерпан, ответа не будет.
     bot._record_stats_event("all_failed")
+    if last_exc is None and time.monotonic() > deadline:
+        # Бюджет кончился до первой попытки: это RouteBudgetExceededError, а не
+        # невнятный RuntimeError — иначе неверный текст и статистика (ревью 17.11.2026).
+        raise RouteBudgetExceededError([])
     raise last_exc or RuntimeError("No route candidate returned an answer.")
