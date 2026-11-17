@@ -1814,6 +1814,11 @@ async def _handle_message_core(
             note_text = bot._t(message.chat.id, "fallback_no_live_search")
         if note_text:
             ans = note_text + "\n\n" + ans
+            if reply_already_sent and status is None:
+                # Стрим уже отдал ответ, а пузыря нет: пометка иначе терялась
+                # (ревью 17.11.2026).
+                with contextlib.suppress(Exception):
+                    await bot._safe_reply(message, note_text)
             if reply_already_sent and status is not None:
                 # Ответ уже в статус-пузыре (стрим или переиспользование) —
                 # пометку дописываем туда же вместе со свёрнутым блоком активности.

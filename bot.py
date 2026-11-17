@@ -29,7 +29,6 @@ import sys
 import threading
 import time
 from pathlib import Path
-from datetime import date
 from typing import Any
 import urllib.request as _urllib_request
 
@@ -362,7 +361,8 @@ def _cloudflare_proxy_candidates() -> list[str]:
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
 
-def _env_number(name: str, default: float | int, *, cast: type = float, min_value: float | None = None) -> float | int:
+def _env_number(name: str, default: float | int, *, cast: type = float,
+                min_value: float | None = None, max_value: float | None = None) -> float | int:
     """Число из переменной окружения с внятной диагностикой.
 
     Раньше все таймауты и лимиты читались голым int()/float(): опечатка в HF
@@ -381,6 +381,9 @@ def _env_number(name: str, default: float | int, *, cast: type = float, min_valu
         return cast(default)
     if min_value is not None and value < min_value:
         log.warning("[setup] %s=%s is below the allowed minimum %s — using default %s", name, value, min_value, default)
+        return cast(default)
+    if max_value is not None and value > max_value:
+        log.warning("[setup] %s=%s is above the allowed maximum %s — using default %s", name, value, max_value, default)
         return cast(default)
     return value
 
@@ -451,6 +454,10 @@ def _media_semaphore() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     sem = _media_semaphores.get(loop)
     if sem is None:
+        # Закрытые циклы держат ссылку и всё, что к ним привязано: снимаем
+        # старые записи при создании новой (ревью 17.11.2026).
+        for stale_loop in [lp for lp in _media_semaphores if lp.is_closed()]:
+            _media_semaphores.pop(stale_loop, None)
         sem = asyncio.Semaphore(MEDIA_GLOBAL_CONCURRENCY)
         _media_semaphores[loop] = sem
     return sem
@@ -507,7 +514,8 @@ FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
 # 5700-символьный ответ на 35-й секунде («Route time budget exhausted»), и
 # человек видел «Соединение прервалось». Потолок держим ниже 60 с — дольше релей
 # (proxy/proxy.ts) обрывает upstream сам.
-STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10)
+# Верхняя граница 59: дольше держать лок чата нельзя, дефолт 55 — запас.
+STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10, max_value=59)
 # Остановка ответа командой /stop: выключатель, как у остальных новых слоёв.
 STOP_COMMAND_ENABLED = (os.getenv("STOP_COMMAND_ENABLED", "1") or "").strip().lower() not in ("0", "false", "off")
 # Кнопка «Остановить» под ответом: по умолчанию выключена до живого смоука —
@@ -1865,7 +1873,9 @@ async def _webhook_startup() -> None:
     log.info("[webhook] Bot is running in webhook mode. Updates arrive via POST /webhook")
     # Суточные перепроверки моделей в часовом цикле: истёкшее промо иначе видно
     # только после рестарта.
-    _last_daily_check_date = date.today()
+    # Сутки — те же, что у квоты (America/Los_Angeles), а не UTC контейнера
+    # (ревью 17.11.2026).
+    _last_daily_check_date = _current_quota_day()
     while True:
         await asyncio.sleep(3600)
         try:
@@ -1877,7 +1887,7 @@ async def _webhook_startup() -> None:
             # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
             # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
             _reset_quota_if_new_day()
-            today = date.today()
+            today = _current_quota_day()
             if today != _last_daily_check_date:
                 _last_daily_check_date = today
                 _check_unconfirmed_model_quotas()
