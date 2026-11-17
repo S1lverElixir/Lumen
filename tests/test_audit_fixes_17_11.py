@@ -6,6 +6,7 @@
 import asyncio
 import copy
 import json
+import math
 import threading
 import time
 from types import SimpleNamespace
@@ -602,6 +603,8 @@ def test_loaded_non_finite_cooldown_is_cleared(monkeypatch):
     (400, "The model `x` has been deprecated"),
     (400, "model `x` is not found for API version v1beta"),
     (400, "unsupported model foo"),
+    (400, "model is no longer available"),
+    (400, "This model has been shut down"),
 ])
 def test_unavailable_and_invalid_model_still_cool_down(status, text):
     async def boom(payload, deadline):
@@ -828,3 +831,45 @@ def test_snippet_one_line_strips_tag_chars_and_foreign_search_marker():
     assert not any(0xE0000 <= ord(ch) <= 0xE007F for ch in clean)
     assert "\u2065" not in clean and "\ufff9" not in clean
     assert lumen_search.search_marker_requested(clean) is False
+
+
+# ── F-033 (проход №3): файл, в имени которого есть «model», не остывает ──
+
+
+@pytest.mark.parametrize("text", [
+    "File model.png does not exist",
+    "model output does not exist",
+    "model response invalid",
+])
+def test_file_and_output_errors_do_not_cool_the_model(text):
+    async def boom(payload, deadline):
+        raise bot.MunitoAPIError(f"HTTP 400 {text}", status_code=400)
+
+    model = "probe/no-cool"
+    with pytest.raises(bot.MunitoAPIError):
+        asyncio.run(lumen_routes._chat_completion_chain(
+            [{"role": "system", "content": ""}, {"role": "user", "content": "hi"}],
+            [model], model, request_fn=boom, provider="munito",
+        ))
+    entry = bot.GLOBAL_QUOTA.get("munito", {}).get(model) or {}
+    assert entry.get("cooldown_until") is None
+
+
+# ── F-182 (новая, проход №3): Infinity в timestamp не роняет /stats ──
+
+
+def test_stats_survives_infinite_last_write_ts(monkeypatch):
+    monkeypatch.setattr(bot, "_last_storage_write_ts", lambda: float("inf"))
+    text = lumen_commands._storage_backend_text()
+    assert "записей пока не было" in text
+
+
+def test_quota_load_drops_infinite_last_write_ts(monkeypatch):
+    raw = json.dumps({
+        "quota_day": bot._current_quota_day(),
+        "last_storage_write_ts": float("inf"),
+    })
+    monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: raw)
+    lq.load_global_quota()
+    ts = bot.GLOBAL_QUOTA.get("last_storage_write_ts")
+    assert ts is None or math.isfinite(float(ts))

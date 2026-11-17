@@ -180,8 +180,13 @@ def load_global_quota() -> None:
                         continue
                 GLOBAL_QUOTA[lcs.BANNED_KEY] = clean_banned
             raw_ts = loaded.get("last_storage_write_ts")
-            if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool) and raw_ts > 0:
-                GLOBAL_QUOTA["last_storage_write_ts"] = float(raw_ts)
+            try:
+                ts_value = float(raw_ts)
+            except (TypeError, ValueError):
+                ts_value = 0.0
+            # Infinity в timestamp ронял /stats через time.localtime (проход №3).
+            if (not isinstance(raw_ts, bool) and math.isfinite(ts_value) and ts_value > 0):
+                GLOBAL_QUOTA["last_storage_write_ts"] = ts_value
             # Чего в снапшоте нет, того не было и удалённо: живой локальный
             # остаток здесь — это расход сбоя, его добавит merge.
             # Без очистки merge складывал локальную копию сама с собой

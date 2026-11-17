@@ -152,7 +152,8 @@ def _is_gemini_daily_quota(text: str) -> bool:
 # «not found for API version», «deprecated», «unsupported model».
 _MODEL_MISSING_RE = re.compile(
     r"(?:invalid|unknown|no such|unsupported|deprecated|not a valid)\s+model"
-    r"|model(?:\.?[^\n.]{0,60})(?:not valid|invalid|does not exist|not found|deprecated|unsupported)"
+    r"|model(?!\s+(?:output|response|file|image|request))[^.\n]{0,60}"
+    r"(?:not valid|invalid|does not exist|not found|deprecated|unsupported|no longer available|shut down)"
     r"|model_not_found",
     re.IGNORECASE,
 )

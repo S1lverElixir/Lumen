@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import html
 import logging
+import math
 import os
 import re
 import secrets
@@ -1951,8 +1952,14 @@ def _storage_backend_text() -> str:
     import bot
     backend = "Upstash" if bot.USE_UPSTASH else "локальный диск"
     ts = bot._last_storage_write_ts()
-    if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
-        when = time.strftime("%d.%m %H:%M", time.localtime(ts))
+    try:
+        ts_value = float(ts)
+    except (TypeError, ValueError):
+        ts_value = 0.0
+    # time.localtime(inf) — OverflowError, и /stats умирал целиком.
+    if (isinstance(ts, (int, float)) and not isinstance(ts, bool)
+            and math.isfinite(ts_value) and ts_value > 0):
+        when = time.strftime("%d.%m %H:%M", time.localtime(ts_value))
         return f"{backend}, запись: {when}"
     return f"{backend}, записей пока не было"
 
