@@ -190,6 +190,8 @@ def test_read_page_returns_none_on_a_relay_error(monkeypatch):
         assert asyncio.run(lumen_read_page.read_page("https://example.com/a")) is None
     finally:
         lumen_read_page.reset_read_page_counters_for_tests()
+        # Гард релея живёт 30 минут: без сброса следующий тест получал None до сети (проход №5).
+        lumen_read_page.reset_relay_state_for_tests()
 
 
 def test_extract_text_keeps_content_around_lookalike_script_tags():

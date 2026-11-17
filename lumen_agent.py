@@ -163,7 +163,9 @@ def _strip_identity_names(text: str) -> str:
         line = re.sub(
             # Хвост версии начинается с разделителя: «grokking» и «graphite» больше
             # не режутся по подстроке имени (ревью 17.11.2026).
-            r"(?<![A-Za-z])" + re.escape(name) + r"(?:[./:+-][\w.:/+-]*)?" + r"(?:" + _NAME_VERSION_TAIL + r")?(?![A-Za-z])",
+            r"(?<![A-Za-z])(?:[\w.-]+/)*" + re.escape(name)
+            + r"(?:\d[\w.:/+-]*|[./:+-][\w.:/+-]*)?"
+            + r"(?:" + _NAME_VERSION_TAIL + r")?(?![A-Za-z])",
             "", line, flags=re.IGNORECASE,
         )
     # Порядок важен: висячий предлог открывает пустые скобки («( модель gpt-4o )»

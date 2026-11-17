@@ -125,6 +125,29 @@ def _split_image_variants(text: str) -> tuple[int, str]:
     return 1, text
 
 
+_VARIANTS_STRIP_RE = re.compile(
+    r"(?<!\d)(?:[2-4]\s*)?(?:вариант\w*|variants?)(?!\w)", re.IGNORECASE,
+)
+_VARIANTS_WORD_RE = re.compile(
+    r"(?<!\w)(?:два|две|три|четыре|two|three|four)\s+(?:вариант\w*|variants?)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _strip_variants_phrase(text: str) -> str:
+    """Убирает только фразу про варианты: «3 versions» и «3 изображения» в
+    описании резолвера — часть сюжета, их не трогаем (проход №5, 17.11.2026)."""
+    src = text or ""
+    cleaned = _VARIANTS_STRIP_RE.sub(" ", src)
+    cleaned = _VARIANTS_WORD_RE.sub(" ", cleaned)
+    if cleaned == src:
+        # Ничего не вырезали — возвращаем текст байт-в-байт, точка на конце цела.
+        return src
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return re.sub(r"(?:,\s*)+", ", ", cleaned).strip(" ,")
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
+
+
 def _detect_image_variants(text: str) -> int:
     """Сколько вариантов просили: 1 — обычная генерация, 2-4 — несколько."""
     return _split_image_variants(text)[0]

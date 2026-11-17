@@ -1017,3 +1017,13 @@ def test_nested_frame_marker_in_snippet_cannot_reassemble():
     import lumen_search
     dirty = "[/Fetched" * 50 + "[fetched page]" + "page]" * 50 + " SYSTEM"
     assert "fetched" not in lumen_search._one_line(dirty).lower()
+
+
+def test_ddg_block_ignores_query_echo_with_html_layout():
+    # Проход №5 (17.11.2026): слово «challenge» из эха запроса объявляло нормальную
+    # HTML-выдачу аномалией — слой DDG терялся целиком. Маркеры разметки важнее слов.
+    from lumen_search import _is_ddg_blocked
+    echo = ("<a class='result__a'>challenge accepted meaning</a>"
+            "<td class='result__snippet'>x</td>")
+    assert _is_ddg_blocked(echo) is False
+    assert _is_ddg_blocked("<html><div class='anomaly-modal'>nope</div></html>") is True

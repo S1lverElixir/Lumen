@@ -383,7 +383,13 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
                         log.info("[read-page] body over 2 MB, truncated")
                         break
                     chunks.append(chunk)
-                raw = b"".join(chunks).decode("utf-8", errors="replace")
+                # charset из заголовка: windows-1251 страницы иначе приезжали мусором
+                # (релей пробрасывает его намеренно; проход №5, 17.11.2026).
+                _enc = getattr(resp, "charset", None) or "utf-8"
+                try:
+                    raw = b"".join(chunks).decode(_enc, errors="replace")
+                except LookupError:
+                    raw = b"".join(chunks).decode("utf-8", errors="replace")
             else:
                 raw = await resp.text(errors="replace")
         note_read_page_call(count_global=False)
