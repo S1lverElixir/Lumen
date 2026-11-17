@@ -49,7 +49,7 @@ _FX_URL = "https://open.er-api.com/v6/latest/{base}"
 # Голое «blocked» убрано: честная пустая выдача с этим словом считалась аномалией
 # и запускала второй GET (ревью 17.11.2026).
 _DDG_BLOCKED_RE = re.compile(
-    r"anomaly|captcha|unusual traffic|verify you are human|challenge", re.IGNORECASE)
+    r"anomaly|captcha|unusual traffic|challenge-platform", re.IGNORECASE)
 
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _NEWS_QUERY_RE = re.compile(r"\bновост\w*|\bnews\b|headlines|главные\s+новости", re.IGNORECASE)
@@ -789,7 +789,10 @@ def _unwrap_ddg_url(href: str) -> str:
 
 def _is_ddg_blocked(page: str) -> bool:
     """Страница-аномалия DDG: HTML есть, выдачи нет. Отличаем от честного «ничего не нашлось»."""
-    return bool(page) and bool(_DDG_BLOCKED_RE.search(page[:6000])) and "result-snippet" not in page
+    # Разметка lite и HTML различаются: без обоих маркеров легитимная страница
+    # с эхом запроса «challenge» считалась аномалией (проход №5, 17.11.2026).
+    return (bool(page) and bool(_DDG_BLOCKED_RE.search(page[:6000]))
+            and "result-snippet" not in page and "result__a" not in page)
 
 
 def parse_ddg_lite_html(page: str, max_results: int = _DEFAULT_MAX_RESULTS) -> list[dict]:
@@ -1037,7 +1040,7 @@ async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: in
     вопросы «кто такой X / что такое X», когда новости молчат."""
     cached = _cache_get("wiki|" + query)
     if cached is not None:
-        return cached[:max(3, limit)]
+        return cached[:max(1, limit)]
     lang = _wiki_lang(query)
     params = {
         "action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": max(3, limit),
