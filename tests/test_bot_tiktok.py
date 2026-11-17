@@ -155,7 +155,9 @@ def test_looks_like_resolved_tiktok_url(url, expected):
     assert bot._looks_like_resolved_tiktok_url(url) is expected
 
 
-def test_resolve_tiktok_short_falls_through_to_get_when_head_gives_malformed_url():
+def test_resolve_tiktok_short_falls_through_to_get_when_head_gives_malformed_url(monkeypatch):
+    # Офлайн-детерминизм: реальный DNS в сьюте недопустим (ревью 17.11.2026).
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
     # РЕГРЕССИЯ на реальный инцидент: HEAD "успешно" довёл до URL с ПУСТЫМ
     # юзернеймом — раньше такой результат принимался сразу и уходил в TikWM,
     # который на него отвечал 403. Теперь должен быть отброшен, и функция
@@ -168,7 +170,9 @@ def test_resolve_tiktok_short_falls_through_to_get_when_head_gives_malformed_url
     assert session.get_called is True
 
 
-def test_resolve_tiktok_short_uses_head_result_directly_when_valid():
+def test_resolve_tiktok_short_uses_head_result_directly_when_valid(monkeypatch):
+    # Офлайн-детерминизм: реальный DNS в сьюте недопустим (ревью 17.11.2026).
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
     # Нормальный случай (без регрессии) — HEAD сразу довёл до валидного URL,
     # GET вообще не должен вызываться (незачем тратить лишний запрос).
     head_resp = _FakeResolveResponse(200, "https://www.tiktok.com/@realuser/video/1234567890")
@@ -179,7 +183,9 @@ def test_resolve_tiktok_short_uses_head_result_directly_when_valid():
     assert session.get_called is False
 
 
-def test_resolve_tiktok_short_returns_get_result_even_if_still_malformed():
+def test_resolve_tiktok_short_returns_get_result_even_if_still_malformed(monkeypatch):
+    # Офлайн-детерминизм: реальный DNS в сьюте недопустим (ревью 17.11.2026).
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
     # Если и GET не дал нормального URL — возвращаем то, что реально пришло
     # (лучше честная попытка, чем совсем ничего), диагностика в логах — отдельно.
     head_resp = _FakeResolveResponse(200, "https://www.tiktok.com/@/photo/999")
@@ -1774,7 +1780,9 @@ def test_resolve_tiktok_short_disables_auto_redirect(monkeypatch):
     assert all(call[2].get("allow_redirects") is False for call in session.calls)
 
 
-def test_resolve_tiktok_short_refuses_non_public_hop():
+def test_resolve_tiktok_short_refuses_non_public_hop(monkeypatch):
+    # Офлайн-детерминизм: реальный DNS в сьюте недопустим (ревью 17.11.2026).
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
     # A7-3: внутренний адрес в Location останавливает цепочку до запроса к нему.
     session = _FakeChainResolveSession({
         "https://vt.tiktok.com/x/": (
