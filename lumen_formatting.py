@@ -178,6 +178,79 @@ _LATEX_SYMBOL_MAP: dict[str, str] = {
     r"\phi": "φ", r"\omega": "ω", r"\Omega": "Ω",
 }
 
+
+def _replace_delimited(text: str, open_delim: str, close_delim: str, wrap) -> str:
+    """Парная замена разделителя за один проход: непарное открытие раньше заставляло
+    regex сканировать остаток строки от каждой позиции, O(n²) (ревью 17.11.2026)."""
+    out: list[str] = []
+    i = 0
+    while True:
+        start = text.find(open_delim, i)
+        if start == -1:
+            out.append(text[i:])
+            return "".join(out)
+        end = text.find(close_delim, start + len(open_delim))
+        if end == -1:
+            out.append(text[i:])
+            return "".join(out)
+        out.append(text[i:start])
+        out.append(wrap(text[start + len(open_delim):end]))
+        i = end + len(close_delim)
+
+
+def _replace_tag_pairs(text: str, opens: tuple[str, ...], closes: tuple[str, ...], wrap) -> str:
+    """Тот же проход для тегов: regex с DOTALL на непарном <b> даёт O(n²)."""
+    low = text.lower()
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i <= n:
+        best = None
+        best_tag = None
+        for tag in opens:
+            pos = low.find(tag, i)
+            if pos != -1 and (best is None or pos < best):
+                best, best_tag = pos, tag
+        if best is None:
+            out.append(text[i:])
+            break
+        inner_start = best + len(best_tag)
+        close_pos = None
+        close_tag = None
+        for tag in closes:
+            pos = low.find(tag, inner_start)
+            if pos != -1 and (close_pos is None or pos < close_pos):
+                close_pos, close_tag = pos, tag
+        if close_pos is None:
+            out.append(text[i:])
+            break
+        out.append(text[i:best])
+        out.append(wrap(text[inner_start:close_pos]))
+        i = close_pos + len(close_tag)
+    return "".join(out)
+
+
+_SPOILER_SPAN_OPEN_RE = re.compile(r'<span\s+class=["\']tg-spoiler["\']>', re.IGNORECASE)
+
+
+def _replace_spoiler_spans(text: str) -> str:
+    """Линейный проход для спана со спойлером: тот же класс отказа."""
+    out: list[str] = []
+    i = 0
+    low = text.lower()
+    while True:
+        m = _SPOILER_SPAN_OPEN_RE.search(text, i)
+        if m is None:
+            out.append(text[i:])
+            return "".join(out)
+        end = low.find("</span>", m.end())
+        if end == -1:
+            out.append(text[i:])
+            return "".join(out)
+        out.append(text[i:m.start()])
+        out.append(text[m.end():end])
+        i = end + len("</span>")
+
 def _latex_superscript(m: re.Match) -> str:
     return "".join(_LATEX_SUPERSCRIPT_MAP.get(ch, ch) for ch in m.group(1))
 
@@ -189,8 +262,8 @@ def _scrub_latex(text: str) -> str:
     if "\\" not in text and "$" not in text:
         return text
     # Снимаем только $$/\[..\]/\(..\): одиночный $ не трогаем, иначе сумма "$100" спарится с формулой и испортит оба.
-    text = re.sub(r"\\\[(.*?)\\\]", r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"\\\((.*?)\\\)", r"\1", text, flags=re.DOTALL)
+    text = _replace_delimited(text, "\\[", "\\]", lambda s: s)
+    text = _replace_delimited(text, "\\(", "\\)", lambda s: s)
     text = re.sub(r"\$\$(.*?)\$\$", r"\1", text, flags=re.DOTALL)
     # \frac{a}{b} -> a/b (одноуровневая вложенность, самый частый случай)
     text = re.sub(r"\\d?frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2", text)
@@ -398,18 +471,18 @@ def _md_to_html(text: str) -> str:
     # <br> в сентинел, <blockquote> не трогаем.
     text = re.sub(r"<br\s*/?>", "\x00BR\x00", text, flags=re.IGNORECASE)
     text = re.sub(r"</?(?:b|strong|i|em|u|s|code|pre)\s*/>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"**\1**", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"*\1*", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<u>(.*?)</u>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _replace_tag_pairs(text, ("<b>", "<strong>"), ("</b>", "</strong>"), lambda s: f"**{s}**")
+    text = _replace_tag_pairs(text, ("<i>", "<em>"), ("</i>", "</em>"), lambda s: f"*{s}*")
+    text = _replace_tag_pairs(text, ("<u>",), ("</u>",), lambda s: s)
     # spoiler — тот же трюк, что и <u> выше: system_prompt.py не просит модель их
     # использовать, поэтому это чисто защитная сетка на случай, если модель всё же
     # напишет буквальный тег. Раньше он не ловился здесь вообще и долетал до Phase 2
     # экранирования — показывался пользователю как видимый мусор "&lt;tg-spoiler&gt;".
-    text = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r'<span\s+class=["\']tg-spoiler["\']>(.*?)</span>', r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<s>(.*?)</s>", r"~~\1~~", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<pre>(.*?)</pre>", lambda m: f"```\n{m.group(1)}\n```", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _replace_tag_pairs(text, ("<tg-spoiler>",), ("</tg-spoiler>",), lambda s: s)
+    text = _replace_spoiler_spans(text)
+    text = _replace_tag_pairs(text, ("<s>",), ("</s>",), lambda s: f"~~{s}~~")
+    text = _replace_tag_pairs(text, ("<pre>",), ("</pre>",), lambda s: f"```\n{s}\n```")
+    text = _replace_tag_pairs(text, ("<code>",), ("</code>",), lambda s: f"`{s}`")
 
     # Незакрытый ``` модель оставляет в оборванном ответе; стрим хвост
     # дозакрывал, финальная сборка показывала человеку буквальный забор
@@ -594,14 +667,14 @@ def _md_to_rich_html(text: str) -> str:
     # (валидный рич-тег переноса, в т.ч. внутри ячеек <td>).
     text = re.sub(r"<br\s*/?>", "\x00BR\x00", text, flags=re.IGNORECASE)
     text = re.sub(r"</?(?:b|strong|i|em|u|s|code|pre)\s*/>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"**\1**", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"*\1*", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<u>(.*?)</u>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r'<span\s+class=["\']tg-spoiler["\']>(.*?)</span>', r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<s>(.*?)</s>", r"~~\1~~", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<pre>(.*?)</pre>", lambda m: f"```\n{m.group(1)}\n```", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _replace_tag_pairs(text, ("<b>", "<strong>"), ("</b>", "</strong>"), lambda s: f"**{s}**")
+    text = _replace_tag_pairs(text, ("<i>", "<em>"), ("</i>", "</em>"), lambda s: f"*{s}*")
+    text = _replace_tag_pairs(text, ("<u>",), ("</u>",), lambda s: s)
+    text = _replace_tag_pairs(text, ("<tg-spoiler>",), ("</tg-spoiler>",), lambda s: s)
+    text = _replace_spoiler_spans(text)
+    text = _replace_tag_pairs(text, ("<s>",), ("</s>",), lambda s: f"~~{s}~~")
+    text = _replace_tag_pairs(text, ("<pre>",), ("</pre>",), lambda s: f"```\n{s}\n```")
+    text = _replace_tag_pairs(text, ("<code>",), ("</code>",), lambda s: f"`{s}`")
 
     # Незакрытый забор закрываем и в rich-пути: иначе финальное сообщение
     # показывало "```python" буквально (внешний аудит 16.11.2026).
@@ -634,8 +707,8 @@ def _md_to_rich_html(text: str) -> str:
     text = re.sub(r"(?<!\$)\$(?!\$)([^\s$][^$\n]*?)(?<!\s)\$(?!\$)", lambda m: _take(_math, "MM", (m.group(1), False)), text)
     # Скобочные формы LaTeX (реальный кейс nemotron — \[ S = \pi r^{2} \]): тот же
     # смысл, что $/$$ выше, извлекаются раньше них, чтобы $ внутри не разобрали.
-    text = re.sub(r"\\\[([\s\S]+?)\\\]", lambda m: _take(_math, "MM", (m.group(1), True)), text)
-    text = re.sub(r"\\\((.+?)\\\)", lambda m: _take(_math, "MM", (m.group(1), False)), text)
+    text = _replace_delimited(text, "\\[", "\\]", lambda s: _take(_math, "MM", (s, True)))
+    text = _replace_delimited(text, "\\(", "\\)", lambda s: _take(_math, "MM", (s, False)))
 
     def _take_heading(m: re.Match) -> str:
         # Тот же допуск, что у легаси _HEADER_MARKER_RE (ведущие пробелы, до 6

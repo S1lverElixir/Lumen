@@ -895,3 +895,37 @@ def test_stats_survives_out_of_range_finite_timestamp(monkeypatch):
     monkeypatch.setattr(bot, "_last_storage_write_ts", lambda: 1e300)
     text = lumen_commands._storage_backend_text()
     assert "записей пока не было" in text
+
+
+# ── F-072/F-073/F-178: непарные теги и LaTeX больше не квадратичны ──
+
+
+def _finishes_within(fn, *args, seconds=2.0):
+    result = []
+
+    def run():
+        result.append(fn(*args))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    assert not thread.is_alive(), f"{getattr(fn, '__name__', fn)} не уложился в {seconds}s"
+    return result[0]
+
+
+def test_unpaired_html_tags_are_linear():
+    import lumen_formatting
+    assert _finishes_within(lumen_formatting._md_to_html, "<b>x" * 15000) is not None
+    assert _finishes_within(lumen_formatting._md_to_rich_html, "<b>x" * 15000) is not None
+
+
+def test_unpaired_latex_delimiters_are_linear():
+    import lumen_formatting
+    assert _finishes_within(lumen_formatting._md_to_html, "\\[x" * 15000) is not None
+    assert _finishes_within(lumen_formatting._md_to_rich_html, "\\[x" * 15000) is not None
+
+
+def test_guest_truncation_of_adversarial_text_is_bounded():
+    import lumen_formatting
+    out = _finishes_within(lumen_formatting._truncate_html_to_fit, "<b>x" * 15000, 4096)
+    assert isinstance(out, str)
