@@ -148,6 +148,54 @@ def _strip_variants_phrase(text: str) -> str:
     return re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
 
 
+# ── Wake-word в группах: «Люмен, ...» вместо @упоминания ──
+# Триггер только в начале сообщения (после частиц-обращений) и только с
+# разделителем: «люменальный», «я люблю люмен», обсуждения в третьем лице
+# («люмен — это бот») не срабатывают. Голое имя без просьбы — тоже нет.
+_WAKE_PARTICLE_RE = re.compile(
+    r"^(?:эй|слушай|окей|okay|hey|а|ну|ладно)\s*[,.!—–-]?\s+", re.IGNORECASE,
+)
+_WAKE_COPULA_RE = re.compile(
+    r"^(?:это|is|является|был|была|было|были)(?![А-Яа-яA-Za-z])", re.IGNORECASE,
+)
+
+
+def strip_group_wake_word(text: str, words: tuple[str, ...] = ("люмен", "lumen")) -> tuple[bool, str]:
+    """(сработал ли wake-word, текст без него). Безопасен к обсуждениям:
+    имя в середине фразы, часть слова, URL или @упоминание не трогаем."""
+    src = (text or "").strip()
+    if not src or src.startswith("/"):
+        return False, text
+    rest = src
+    for _ in range(2):
+        m = _WAKE_PARTICLE_RE.match(rest)
+        if not m:
+            break
+        rest = rest[m.end():]
+    rest = rest.lstrip("\"'«“(")
+    low = rest.lower()
+    for word in words:
+        w = (word or "").strip().lower()
+        if not w or not low.startswith(w):
+            continue
+        after = rest[len(w):]
+        if after[:1] and (after[0].isalnum() or after[0] in "_@"):
+            continue
+        after = after.lstrip().lstrip("\"'»”)")
+        if after[:1] in ("—", "–", "-"):
+            after = after[1:].lstrip()
+        elif after[:1] in (",", ":", ";", "!", "?", "."):
+            after = after[1:].lstrip()
+        if not after:
+            continue
+        if _WAKE_COPULA_RE.match(after):
+            return False, text
+        if not re.search(r"[0-9A-Za-zА-Яа-яЁё]", after):
+            continue
+        return True, after
+    return False, text
+
+
 def _detect_image_variants(text: str) -> int:
     """Сколько вариантов просили: 1 — обычная генерация, 2-4 — несколько."""
     return _split_image_variants(text)[0]

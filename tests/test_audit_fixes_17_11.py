@@ -1616,3 +1616,26 @@ def test_media_relay_prefers_big_and_skips_small_body_host():
     assert bot._pick_media_candidate(candidates, {small: True, big: False}, {"small.example"}) == small
     assert bot._pick_media_candidate(candidates, {small: False, big: False}, {"small.example"}) is None
     assert bot._proxy_host("https://lumen-vercel-relay.vercel.app/fetch/api.telegram.org") == "lumen-vercel-relay.vercel.app"
+
+
+def test_group_wake_word_matrix():
+    # Позитивы: имя в начале, делимитер, просьба после. Негативы: часть слова,
+    # середина фразы, третье лицо, голое имя, упоминание, URL.
+    from lumen_message_parse import strip_group_wake_word as wake
+    for q in (
+        "Люмен, сколько будет 2+2?",
+        "люмен: привет",
+        "ЛЮМЕН — что такое фотосинтез",
+        "эй, люмен, как дела",
+        "слушай люмен, расскажи",
+        "lumen, hi",
+        "люмен запрос погоды",
+        "«Люмен», привет",
+    ):
+        assert wake(q)[0] is True, q
+    for q in (
+        "Люмен!", "люмен,", "люмен:", "люмен это бот", "люмен — это бот",
+        "я люблю люмен", "в люмене баг", "люменальный", "люминесцентный",
+        "@LumenAI_bot привет", "https://lumen.example", "обычный разговор",
+    ):
+        assert wake(q)[0] is False, q

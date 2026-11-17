@@ -96,6 +96,8 @@ CLOUDFLARE_AI_BASE_URL=https://<proxy-domain>/fetch/api.cloudflare.com/client/v4
 LUMEN_PROXY_SECRET=<случайная строка от 32 символов: без неё прокси отвечает 503, а бот падает на старте>
 ```
 
+In groups the bot can be addressed not only by @mention but also by a wake word at the start of a message: “Lumen, …” or “Люмен, …” (list in `GROUP_WAKE_WORDS`, kill switch `GROUP_WAKE_ENABLED`). Forwards and third-person talk about the bot do not trigger.
+
 The proxy only forwards to an explicit host allowlist (`api.telegram.org`, `www.tikwm.com`, `tikwm.com`, and `api.cloudflare.com` — the latter restricted to `/client/v4/accounts/<id>/ai/...`, because the image API token rides along in `Authorization`). `api.cloudflare.com` is here for the same reason as TikWM: Hugging Face egress to it silently hangs (prod 09.11.2026). See `proxy/proxy.ts` for the implementation and `proxy/proxy_test.ts` for its tests; a green CI run on `main` ships it through `.github/workflows/deploy-proxy.yml`, and since 16.11.2026 that job deploys on every green run (the older diff-only rule missed a change once, prod 09.11.2026): after editing the allowlist, confirm both deploy steps finished as success, otherwise rerun the workflow or ship it by hand (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#deploy-paths)).
 
 ## Diagnostics

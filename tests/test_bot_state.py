@@ -2881,6 +2881,50 @@ def test_passive_group_message_does_not_consume_quota(rate_guard_setup, monkeypa
     bot._tg_call.assert_not_awaited()
 
 
+def test_group_wake_word_activates_like_a_mention(rate_guard_setup, monkeypatch):
+    # Просьба владельца 18.11.2026: в группах «Люмен, ...» работает как @упоминание,
+    # но только в начале фразы и с просьбой после имени.
+    message = rate_guard_setup()
+    message.chat.type = bot.ChatType.GROUP
+    message.text = "Люмен, сколько будет 2+2?"
+    record = AsyncMock()
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_record_passive_group_context", record)
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    record.assert_not_awaited()
+    assert run_route.await_count >= 1
+    prompt = run_route.await_args.args[1]
+    assert "Люмен," not in prompt and "2+2" in prompt
+
+
+def test_group_talking_about_lumen_stays_passive(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.chat.type = bot.ChatType.GROUP
+    message.text = "люмен это бот, он живёт в телеграме"
+    record = AsyncMock()
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_record_passive_group_context", record)
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    record.assert_awaited_once()
+    run_route.assert_not_awaited()
+
+
+def test_group_forwarded_wake_word_does_not_trigger(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.chat.type = bot.ChatType.GROUP
+    message.text = "Люмен, привет"
+    message.forward_origin = object()
+    record = AsyncMock()
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_record_passive_group_context", record)
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    record.assert_awaited_once()
+    run_route.assert_not_awaited()
+
+
 def test_log_queue_handler_masks_secrets_in_args_and_traceback(monkeypatch):
     monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "fake-proxy-secret-123", raising=False)
     try:

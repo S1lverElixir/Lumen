@@ -36,6 +36,7 @@ from lumen_message_parse import (
     _draw_trigger_is_visual,
     _tts_trigger_is_speech,
     _split_image_variants,
+    strip_group_wake_word,
     _strip_variants_phrase,
     _wants_style_reference,
     _NO_MEDIA_NOTE,
@@ -940,6 +941,18 @@ async def _handle_message_core(
     is_private = message.chat.type == ChatType.PRIVATE
     is_guest = bot.is_guest_message(message)
     mentioned = bot.message_mentions_bot(message)
+    # Wake-word («Люмен, ...») в группах: пересланное и обсуждения в третьем лице
+    # не считаем обращением (просьба владельца 18.11.2026).
+    _wake_rest = ""
+    if (
+        not mentioned and not is_private and not is_guest
+        and not getattr(message, "forward_origin", None)
+        and getattr(bot, "GROUP_WAKE_ENABLED", False)
+    ):
+        _wake_hit, _wake_rest_new = strip_group_wake_word(t, getattr(bot, "GROUP_WAKE_WORDS", ("люмен", "lumen")))
+        if _wake_hit:
+            mentioned = True
+            _wake_rest = _wake_rest_new
     # Старт для замера задержки ответа в след.
     _trace_start = time.monotonic()
 
@@ -998,7 +1011,7 @@ async def _handle_message_core(
              # (свои загрузки — только через _download_url_bin с гардом схемы).
              needs_website = True
 
-    clean_prompt = bot.clean_mention(t).strip()
+    clean_prompt = bot.clean_mention(_wake_rest or t).strip()
 
     if clean_prompt and _looks_like_injection_probe(clean_prompt):
         # Инъекция: отвечаем без LLM. Текст в лог не пишем, только длину (аудит M5, 10.2026).
