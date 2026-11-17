@@ -391,7 +391,10 @@ def _resolve_search_marker(target: Target, history: list[dict], user_text: str, 
 
 def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     text, ttft, tokens = call_model_once(target, history, user_text, system_text=system_text)
-    if text.strip().startswith(_SEARCH_MARKER):
+    # Прод-детектор терпим к регистру, обёрткам и филлеру; строгий startswith
+    # смещал баллы относительно прода (ревью 17.11.2026).
+    from lumen_search import search_marker_requested
+    if search_marker_requested(text):
         again, ttft2, tokens2 = _resolve_search_marker(target, history, user_text, system_text)
         return again, ttft + ttft2, tokens + tokens2
     return text, ttft, tokens
