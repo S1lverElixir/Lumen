@@ -1603,3 +1603,16 @@ def test_note_extra_thought_never_lowers_the_block():
     assert st._thought_seconds == 20
     st.note_extra_thought(5)
     assert st._thought_seconds == 20
+
+
+def test_media_relay_prefers_big_and_skips_small_body_host():
+    # Vercel держит тело только до 4,5 МБ: голова медиа обязана обходить его,
+    # пока жив хоть один «большой» релей (прод 17.11.2026).
+    import bot
+    small = "https://small.example/fetch/api.telegram.org"
+    big = "https://big.example/fetch/api.telegram.org"
+    candidates = [small, big]
+    assert bot._pick_media_candidate(candidates, {small: True, big: True}, {"small.example"}) == big
+    assert bot._pick_media_candidate(candidates, {small: True, big: False}, {"small.example"}) == small
+    assert bot._pick_media_candidate(candidates, {small: False, big: False}, {"small.example"}) is None
+    assert bot._proxy_host("https://lumen-vercel-relay.vercel.app/fetch/api.telegram.org") == "lumen-vercel-relay.vercel.app"
