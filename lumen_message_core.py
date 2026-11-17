@@ -142,6 +142,15 @@ def _previous_user_text(state: dict) -> str:
 _BARE_TIME_WORDS = {"вчера", "сегодня", "завтра", "now", "today", "tomorrow", "yesterday"}
 
 
+_SELF_QUESTION_RE = re.compile(
+    r"(?i)^\s*(?:кто|что)\s+(?:ты|вы)(?![А-Яа-яA-Za-z])"
+    r"|^\s*ты\s+кто(?![А-Яа-яA-Za-z])"
+    r"|как\s+(?:тебя|вас)\s+зовут"
+    r"|что\s+(?:ты|вы)\s+(?:умеешь|можешь|знаешь)"
+    r"|who\s+are\s+you|what\s+are\s+you(?![A-Za-z])|what\s+can\s+you\s+do"
+)
+
+
 def _wants_web_search(text: str, *, previous: str = "") -> bool:
     """Ищет ли бот так же, как искал бы Claude: нужны свежие данные либо явная
     просьба искать. Ссылка на прошлый разговор («помнишь, мы вчера обсуждали») —
@@ -152,6 +161,10 @@ def _wants_web_search(text: str, *, previous: str = "") -> bool:
     if not text:
         return False
     if _PAST_CHAT_RE.search(text):
+        return False
+    # Вопрос о самом боте поиска не требует: «Кто ты?» после любой реплики
+    # считался продолжением темы и жёг Tavily (прод 17.11.2026).
+    if _SELF_QUESTION_RE.search(text):
         return False
     # Голое слово времени — реплика-реакция («вчера», «сегодня» в ответ на «когда?»),
     # а не вопрос: регекс свежести ловит его в одиночку (корпус недели 15.11.2026).
