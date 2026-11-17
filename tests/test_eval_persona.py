@@ -12,7 +12,6 @@
 """
 
 import os
-import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -44,12 +43,13 @@ def test_multilingual_questions_cover_every_supported_language():
     for question in data["questions"]:
         assert question.get("expect"), f"вопрос {question['id']} без ожидания"
         assert question.get("turns"), f"вопрос {question['id']} без текста"
-def test_answer_script_check_follows_the_question_language():
+def test_answer_script_check_follows_the_question_language(monkeypatch):
     # Детерминированная сверка языка ответа (замер 12.11.2026 по всем
     # SUPPORTED_LANGS): ответ не на языке человека — это провал паритета,
     # и судья его ловит не всегда. Отдельная проверка имени бота: «Нет, я
     # Lumen.» — русский ответ, а не смешение алфавитов.
-    sys.path.insert(0, str(REPO / "eval"))
+    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    monkeypatch.syspath_prepend(str(REPO / "eval"))
     import persona_models
 
     assert persona_models.answer_script_ok("ru", "Нет, я Lumen.") is True
@@ -64,30 +64,26 @@ def test_answer_script_check_follows_the_question_language():
     assert persona_models.answer_script_ok("kk", "Австралияның астанасы — Канберра.") is True
     assert persona_models.answer_script_ok("en", "The capital of Australia is Canberra.") is True
     assert persona_models.answer_script_ok("ru", "") is False
-def test_sanitize_no_proxy_drops_bracketed_ipv6_only():
+def test_sanitize_no_proxy_drops_bracketed_ipv6_only(monkeypatch):
     # Глобальный NO_PROXY владельца с «[::1]» ломает любой httpx-вызов замера
     # (судья Gemini падал с InvalidURL: Invalid port, 12.11.2026). Чистка
     # обязана снять только скобочные записи и оставить обычные правила.
-    sys.path.insert(0, str(REPO / "eval"))
+    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    monkeypatch.syspath_prepend(str(REPO / "eval"))
     import persona_models
 
-    # На Windows имена переменных регистронезависимы: сначала чистим обе,
-    # иначе pop("no_proxy") снял бы только что заданный NO_PROXY.
-    os.environ.pop("no_proxy", None)
-    os.environ["NO_PROXY"] = "localhost,127.0.0.1,[::1],.example.com"
+    # monkeypatch сохраняет исходное значение и вернёт его на teardown (F-167).
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,[::1],.example.com")
     touched = persona_models.sanitize_no_proxy()
     assert touched == ["NO_PROXY"]
     assert os.environ["NO_PROXY"] == "localhost,127.0.0.1,.example.com"
     assert persona_models.sanitize_no_proxy() == []
-    # Убираем за собой: иначе NO_PROXY и sys.path протекают в соседние тесты (ревью 17.11.2026).
-    os.environ.pop("NO_PROXY", None)
-    if str(REPO / "eval") in sys.path:
-        sys.path.remove(str(REPO / "eval"))
-def test_style_flags_catches_the_real_manner_defects():
+def test_style_flags_catches_the_real_manner_defects(monkeypatch):
     # Дешёвая детерминированная сетка на ответ: маркер протокола в тексте,
     # гирлянда эмодзи вместо 1-2 по просьбе, список там, где просили прозу,
     # съеденный полировкой термин. Это ловит то, что судья пропускает.
-    sys.path.insert(0, str(REPO / "eval"))
+    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    monkeypatch.syspath_prepend(str(REPO / "eval"))
     import persona_models
 
     assert persona_models.style_flags({"id": 11, "style": {"keep_terms": ["for", "while"]}},
