@@ -1332,3 +1332,13 @@ def test_failed_read_does_not_spend_user_quota(monkeypatch):
     assert rp._USER_READS["u1"] == 1
     assert rp.read_page_calls_today() == 1
     rp.reset_read_page_counters_for_tests()
+
+
+# ── F-064: история на обрыве/стопе проходит тот же скраб ──
+
+
+def test_stream_history_answer_is_scrubbed():
+    import lumen_streaming as ls
+    cleaned = ls._history_safe_answer("User Safety: safe\n\nОтвет")
+    assert "User Safety" not in cleaned
+    assert "Ответ" in cleaned

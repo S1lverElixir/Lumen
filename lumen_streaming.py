@@ -312,6 +312,17 @@ async def _sse_pieces(
         with contextlib.suppress(Exception):
             await post_cm.__aexit__(None, None, None)
 
+def _history_safe_answer(text: str) -> str:
+    """Тот же скраб, что на успешном пути: обрыв и /stop раньше клали в
+    историю сырой текст с метками провайдера (ревью 17.11.2026)."""
+    if not text:
+        return text
+    try:
+        return _polish_answer(_strip_provider_artifacts(text), source="stream_history")
+    except Exception:
+        return _strip_provider_artifacts(text)
+
+
 async def _remember_turn(
     state: dict, history_text, user_text: str, answer: str, history_meta: dict | None,
 ) -> None:
@@ -550,18 +561,29 @@ async def _run_streaming_reply(
             if read_task is None:
                 read_task = asyncio.ensure_future(iterator.__anext__())
             if first_piece_ts is None:
-                wait_left = None
+                # Просыпаемся раз в полсекунды: иначе /stop до первого куска
+                # ждёт first-chunk таймаута и оформляется как сбой модели
+                # (ревью 17.11.2026).
+                wait_left = 0.5
+                if deadline is not None:
+                    wait_left = min(wait_left, max(0.0, deadline - time.monotonic()))
             else:
                 wait_left = max(0.0, next_paint_ts - time.monotonic())
             done, _pending = await asyncio.wait({read_task}, timeout=wait_left)
             if read_task not in done:
                 if bot._stream_stop_requested(chat_id):
                     raise _StoppedByUser()
+                if first_piece_ts is None:
+                    # Ждём первую букву: дедлайн маршрута её не рубит (это делает
+                    # first-chunk таймаут), а стоп уже проверен выше.
+                    continue
                 now_tick = time.monotonic()
                 if deadline is not None and now_tick > deadline:
                     raise bot.RouteBudgetExceededError([f"{provider}:{model_id}"])
-                _schedule_paint()
-                next_paint_ts = now_tick + paint_interval
+                if first_piece_ts is not None:
+                    # До первой буквы кадры рисует тикер; второй маляр не нужен.
+                    _schedule_paint()
+                    next_paint_ts = now_tick + paint_interval
                 continue
             try:
                 piece = read_task.result()
@@ -671,7 +693,7 @@ async def _run_streaming_reply(
                     with contextlib.suppress(Exception):
                         # Пометка важнее хвоста куска (см. _append_note_fit).
                         await bot._tg_call(sent_messages[idx].edit_text, _append_note_fit(chunk_text, note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0)
-                    final_answer = full_text.strip()
+                    final_answer = _history_safe_answer(full_text.strip())
                     await _remember_turn(state, history_text, user_text, final_answer, history_meta)
                     bot._record_quota_usage(provider, model_id)
                     return final_answer, None
@@ -798,6 +820,12 @@ async def _run_streaming_reply(
             for step_len in _typing_catchup_steps(remaining_len, typing_speed, bot.STREAM_TYPING_TICK_SEC, max_ticks):
                 if deadline is not None and time.monotonic() >= deadline:
                     break
+                if bot._stream_stop_requested(chat_id):
+                    # /stop во время довывода: дальше не дописываем и флаг
+                    # потребляем, иначе он протечёт на следующий апдейт
+                    # (ревью 17.11.2026).
+                    bot._consume_stream_stop(chat_id)
+                    raise _StoppedByUser()
                 await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
                 # Довывод идёт тем же маляром: тот же coalescing, partial-safe
                 # разметка и общий бюджет правок на чат (пункты 1 и 12).
@@ -954,6 +982,7 @@ async def _run_streaming_reply(
     final_answer = full_text
     bot._record_model_outcome(provider, model_id,
                               bad=_detect_garbled_mix(full_text.strip()) and not _is_garbled_echo(full_text.strip(), user_text))
+    final_answer = _history_safe_answer(final_answer)
     await _remember_turn(state, history_text, user_text, final_answer, history_meta)
     bot._record_quota_usage(provider, model_id)
     # Плавность судим по окну набора, а не по всему ответу: первый кусок мог

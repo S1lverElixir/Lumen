@@ -208,7 +208,10 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
             raise
         except asyncio.TimeoutError as exc:
             # Таймаут — исход неизвестен (запрос мог дойти): повтор отправки
-            # дал бы дубль. Не ретраим, как клиентские ошибки.
+            # дал бы дубль. Не ретраим, как клиентские ошибки. Но для breaker
+            # это отказ: молчащий прокси иначе никогда не триггерил резерв
+            # (ревью 17.11.2026).
+            bot._tg_proxy_breaker.note_failure()
             last_exc = exc
             break
         except Exception as exc:
@@ -221,6 +224,7 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
                 break
             if isinstance(exc, TelegramNetworkError) and "timeout" in str(exc).lower():
                 # Таймаут aiogram-сессии той же природы, что выше: мог дойти.
+                bot._tg_proxy_breaker.note_failure()
                 break
             if attempt < retries:
                 # Флуд-контроль ждём по retry_after, остальное — коротким бэкоффом.
