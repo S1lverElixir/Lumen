@@ -101,7 +101,7 @@ def image_filename(data: bytes) -> str | None:
     return None
 
 
-def _error_strings(payload: Any) -> str:
+def _error_strings(payload: Any, cap: int | None = 400) -> str:
     """Сообщения об ошибке из JSON-ответа одним текстом: у Cloudflare это
     errors:[{code,message}], у Pollinations — одиночный error:{code,message}
     (в нём и живёт код FREE_LIMIT), у обёртки Workers AI текст несёт messages[]
@@ -136,7 +136,14 @@ def _error_strings(payload: Any) -> str:
         else:
             values = []
         out.extend(v for v in values if isinstance(v, str) and len(v) < 120)
-    return " ".join(out)[:400]
+    joined = " ".join(out)
+    return joined if cap is None else joined[:cap]
+
+
+def _error_strings_full(data: Any) -> str:
+    """Тот же текст без капа 400: маркер модерации мог уехать за обрезку,
+    и 403/500 уходили в резерв (ревью 17.11.2026)."""
+    return _error_strings(data, cap=None)
 
 
 def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
@@ -431,7 +438,8 @@ def _is_moderation_detail(detail: str) -> bool:
 
 def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) -> bytes:
     """Общая расшифровка ответа flux-2-klein: успех, бюджет, темп, модерация."""
-    detail = _error_strings(data)
+    full_detail = _error_strings_full(data)
+    detail = full_detail[:400]
     if status == 200 and not isinstance(data, dict):
         raise ImageProviderError("Cloudflare вернул JSON не-объектом")
     if status == 402:
@@ -446,10 +454,10 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
     # честнее «ошибка генерации, переформулируй». Тот же флаг приходит и телом
     # (обёртка Workers AI) при любом статусе, поэтому проверка до ветки статусов:
     # иначе sana дорисовывала отклонённое содержимое (ревью 10.11.2026).
-    if _is_moderation_detail(detail) and (
-        status == 400 or (isinstance(data, dict) and not data.get("success", True))
-    ):
-        raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
+    if (status != 200 or (isinstance(data, dict) and not data.get("success", True)))             and _is_moderation_detail(full_detail):
+        # Полный текст, не обрезанный: «flagged» за капом 400 иначе не виден,
+        # и 403/500 уходили в резерв (ревью 17.11.2026).
+        raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {full_detail[:200]}")
     if status != 200:
         raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
     if not data.get("success", True):

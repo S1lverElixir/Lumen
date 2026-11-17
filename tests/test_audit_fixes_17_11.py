@@ -949,3 +949,22 @@ def test_failed_keyed_request_does_not_spend_api_call(monkeypatch):
         _BrokenSession(), "q", 3, deadline=time.monotonic() + 5))
     assert out == []
     assert spent == [], "упавший запрос не должен списывать кредит"
+
+
+# ── F-074: модерация распознаётся при 403/500 и за капом detail ──
+
+
+@pytest.mark.parametrize("status", [403, 500])
+def test_moderation_marker_behind_long_detail_is_terminal(status):
+    import lumen_images
+    long_detail = "x" * 500 + " Your output has been flagged by moderation"
+    data = {"messages": [{"message": long_detail}], "success": False}
+    with pytest.raises(lumen_images.ImageModerationError):
+        lumen_images._cloudflare_image_result(status, None, data)
+
+
+def test_generic_500_without_marker_is_provider_error():
+    import lumen_images
+    with pytest.raises(lumen_images.ImageProviderError) as exc:
+        lumen_images._cloudflare_image_result(500, None, {"messages": [{"message": "x" * 500}]})
+    assert not isinstance(exc.value, lumen_images.ImageModerationError)
