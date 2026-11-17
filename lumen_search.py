@@ -1676,17 +1676,23 @@ def _dedupe(items: list[dict]) -> list[dict]:
     сюжет, а title у него дублируется в description."""
     out: list[dict] = []
     seen_urls: set[str] = set()
-    seen_titles: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
     for item in items:
         url = (item.get("url") or "").strip()
         title_key = re.sub(r"\W+", "", (item.get("title") or "").lower())[:60]
+        # Пара «заголовок + текст»: у CoinGecko все монеты с одним заголовком, и
+        # дедуп по одному title терял ethereum (ревью 17.11.2026), а у новостных
+        # дублей совпадает и описание.
+        body = item.get("snippet") or item.get("description") or item.get("content") or ""
+        body_key = re.sub(r"\W+", "", str(body).lower())[:160]
+        pair = (title_key, body_key)
         if url.startswith("http") and url in seen_urls:
             continue
-        if title_key and title_key in seen_titles:
+        if title_key and pair in seen_pairs:
             continue
         seen_urls.add(url)
         if title_key:
-            seen_titles.add(title_key)
+            seen_pairs.add(pair)
         out.append(item)
     return out
 

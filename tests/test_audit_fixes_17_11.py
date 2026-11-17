@@ -802,3 +802,17 @@ def test_request_specific_400_does_not_cool_the_model():
         ))
     entry = bot.GLOBAL_QUOTA.get("munito", {}).get(model) or {}
     assert entry.get("cooldown_until") is None
+
+
+# ── F-110: дедуп по паре «заголовок + текст», а не по одному заголовку ──
+
+
+def test_dedupe_keeps_same_title_with_different_bodies():
+    import lumen_search
+    items = [
+        {"title": "Курс", "url": "https://a/1", "snippet": "bitcoin: 1 USD"},
+        {"title": "Курс", "url": "https://a/2", "snippet": "ethereum: 3000 USD"},
+        {"title": "Курс", "url": "https://a/3", "snippet": "bitcoin: 1 USD"},
+    ]
+    kept = lumen_search._dedupe(items)
+    assert [i["url"] for i in kept] == ["https://a/1", "https://a/2"]
