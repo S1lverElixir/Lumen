@@ -314,6 +314,13 @@ _TELEGRAM_PROXY_FALLBACKS = [
     _normalize_telegram_base_url(u) for u in os.getenv("TELEGRAM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
 ]
 _TELEGRAM_PROXY_CANDIDATES: list[str] = [TELEGRAM_API_BASE_URL] + [u for u in _TELEGRAM_PROXY_FALLBACKS if u != TELEGRAM_API_BASE_URL]
+# Wake-word в группах: «Люмен, ...» работает как упоминание. Выключение одной
+# переменной, слова-синонимы — списком (прод 18.11.2026 по просьбе владельца).
+GROUP_WAKE_ENABLED = os.getenv("GROUP_WAKE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+GROUP_WAKE_WORDS = tuple(
+    w.strip() for w in os.getenv("GROUP_WAKE_WORDS", "люмен,lumen").split(",") if w.strip()
+) or ("люмен", "lumen")
+
 _telegram_proxy_idx = 0  # индекс текущего активного прокси в _TELEGRAM_PROXY_CANDIDATES
 # Ротация мутирует два глобала сразу — под локом, иначе два concurrent-сбоя
 # уводят индекс на два шага и пропускают кандидата (AUD-E-004).
