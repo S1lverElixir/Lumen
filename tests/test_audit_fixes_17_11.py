@@ -1157,3 +1157,42 @@ def test_rss_guard_sees_doctype_after_long_prefix():
         "<link>https://example.com/1</link><description>&a;</description></item></channel></rss>"
     )
     assert lumen_search.parse_rss_snippets(xml) == []
+
+
+# ── F-108/F-109: ранг до капа издателя, authority по границам домена ──
+
+
+def test_publisher_cap_is_applied_after_ranking():
+    import lumen_search
+    stale = [{"title": f"Old {i}", "url": f"https://reuters.com/o{i}",
+              "publisher": "reuters.com", "date": "2020-01-01", "kind": "web"} for i in range(3)]
+    fresh = [{"title": f"New {i}", "url": f"https://reuters.com/n{i}",
+              "publisher": "reuters.com", "date": "2026-11-17", "kind": "web"} for i in range(2)]
+    merged = lumen_search._merge_web_groups(
+        [stale + fresh], wants_fresh=True, wants_entity=False, wants_game_wiki=False)
+    assert {item["title"] for item in merged} == {"New 0", "New 1"}
+
+
+def test_authority_uses_domain_boundaries():
+    import lumen_search
+    assert lumen_search._authority({"publisher": "reuters.com"}) == 2
+    assert lumen_search._authority({"publisher": "news.reuters.com"}) == 2
+    assert lumen_search._authority({"publisher": "reuters.com.evil.tld"}) == 0
+
+
+# ── F-089: нулевая метка не блокирует первый сброс суток ──
+
+
+def test_first_quota_day_reset_is_not_throttled_on_fresh_runner(monkeypatch):
+    import lumen_quotas as lq
+    original = lq._last_quota_check_monotonic
+    try:
+        lq._last_quota_check_monotonic = 0.0
+        bot.GLOBAL_QUOTA["quota_day"] = "2000-01-01"
+        bot.GLOBAL_QUOTA.setdefault("gemini", {})["m1"] = {
+            "used": 50, "exhausted_at": 1.0, "cooldown_until": None}
+        monkeypatch.setattr(lq.time, "monotonic", lambda: 5.0)
+        lq._reset_quota_if_new_day()
+        assert bot.GLOBAL_QUOTA["gemini"]["m1"]["used"] == 0
+    finally:
+        lq._last_quota_check_monotonic = original

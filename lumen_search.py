@@ -1741,8 +1741,12 @@ def _wants_game_wiki(text: str) -> bool:
 
 
 def _authority(item: dict) -> int:
-    host = (item.get("publisher") or "").lower()
-    return 2 if any(host.endswith(a) or a in host for a in _AUTHORITY_HOSTS) else 0
+    host = (item.get("publisher") or "").lower().strip().rstrip(".")
+    if not host:
+        return 0
+    # По границам домена: «reuters.com.evil.tld» — чужой домен и не получает +2
+    # (ревью 17.11.2026; _game_wiki_bonus уже сделан так).
+    return 2 if any(host == a or host.endswith("." + a) for a in _AUTHORITY_HOSTS) else 0
 
 
 def _dedupe(items: list[dict]) -> list[dict]:
@@ -1773,6 +1777,18 @@ def _dedupe(items: list[dict]) -> list[dict]:
             seen_pairs.add(pair)
         out.append(item)
     return out
+
+
+def _merge_web_groups(groups: list[list[dict]], *, wants_fresh: bool,
+                      wants_entity: bool, wants_game_wiki: bool) -> list[dict]:
+    """Слияние выдачи: сначала ранг, потом кап издателя. Обратный порядок оставлял
+    двух СТАРЫХ Reuters и выбрасывал свежие (ревью 17.11.2026)."""
+    ranked = _rank(
+        _dedupe([item for group in groups for item in group]),
+        wants_fresh=wants_fresh, wants_entity=wants_entity,
+        wants_game_wiki=wants_game_wiki,
+    )
+    return _limit_per_publisher(ranked)
 
 
 def _limit_per_publisher(items: list[dict], cap: int = 2) -> list[dict]:
@@ -1925,9 +1941,9 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
                 continue
             groups.append(list(res[1]))
 
-        merged = _rank(_limit_per_publisher(_dedupe([item for group in groups for item in group])),
-                       wants_fresh=wants_fresh, wants_entity=intents["entity"],
-                       wants_game_wiki=_wants_game_wiki(text))
+        merged = _merge_web_groups(
+            groups, wants_fresh=wants_fresh, wants_entity=intents["entity"],
+            wants_game_wiki=_wants_game_wiki(text))
         if intents["weather"]:
             merged = _filter_other_city(merged, text)
         if merged:

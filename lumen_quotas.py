@@ -43,7 +43,9 @@ async def _maybe_alert_gemini_exhausted() -> None:
     _last_gemini_exhausted_alert_monotonic = now
     await bot._notify_owner(bot._t(bot.OWNER_ID, "owner_quota_notice"))
 
-_last_quota_check_monotonic: float = 0.0
+# -1e9, а не 0: на свежем раннере monotonic() < 60, и первый сброс суток
+# пропускался, вчерашние used/exhausted жили до минуты (ревью 17.11.2026).
+_last_quota_check_monotonic: float = -1e9
 
 
 def _reset_quota_if_new_day() -> None:
@@ -56,7 +58,7 @@ def _reset_quota_if_new_day() -> None:
     import bot
     global _last_quota_check_monotonic
     now_mono = time.monotonic()
-    if now_mono - _last_quota_check_monotonic < _QUOTA_CHECK_THROTTLE_SEC:
+    if _last_quota_check_monotonic and now_mono - _last_quota_check_monotonic < _QUOTA_CHECK_THROTTLE_SEC:
         return
     _last_quota_check_monotonic = now_mono
     today = bot._current_quota_day()
