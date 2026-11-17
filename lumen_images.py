@@ -146,9 +146,13 @@ def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
     if not raw:
         return None
     try:
-        return max(0.0, float(raw))
+        seconds = float(raw)
     except ValueError:
-        pass
+        seconds = None
+    if seconds is not None:
+        # inf/1e309 — мусорный заголовок: он замораживал провайдера навсегда
+        # в персистентной квоте (ревью 17.11.2026).
+        return max(0.0, seconds) if math.isfinite(seconds) else None
     try:
         when = parsedate_to_datetime(raw)
     except (TypeError, ValueError):
