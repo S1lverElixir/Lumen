@@ -62,7 +62,11 @@ def _upstash_set(url: str, token: str, key: str, value: str) -> None:
 
 def _upstash_get(url: str, token: str, key: str) -> str | None:
     result = _upstash_request(url, token, f"get/{urllib.parse.quote(key, safe='')}", method="GET")
-    return result.get("result") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or "result" not in result:
+        # Ответ без поля result — сбой шлюза, а не «ключа нет»: молчаливый None
+        # на старте разрешал первому флашу затёрнуть удалённый индекс (ревью 17.11.2026).
+        raise RuntimeError("upstash response has no result field")
+    return result.get("result")
 
 
 def _upstash_delete(url: str, token: str, key: str) -> None:
