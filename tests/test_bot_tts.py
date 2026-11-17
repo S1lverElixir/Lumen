@@ -8,6 +8,8 @@ import asyncio
 from types import SimpleNamespace
 import bot
 import pytest
+from lumen_router_config import GEMINI_TTS_MODELS as _TTS_MODELS
+TTS_HEAD, TTS_FALLBACK = _TTS_MODELS[0], _TTS_MODELS[1]
 from tests.bot_test_helpers import (
     _FakeIncomingMessage,
     _FakeVoiceBot,
@@ -39,16 +41,16 @@ def test_inline_tts_records_quota_usage_on_success():
     original_bot = bot.bot
     bot.client = fake_client
     bot.bot = _FakeVoiceBot()
-    bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
+    bot.GLOBAL_QUOTA["gemini"].pop(TTS_HEAD, None)
     try:
         asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
-        entry = bot.GLOBAL_QUOTA["gemini"].get("gemini-3.1-flash-tts-preview")
+        entry = bot.GLOBAL_QUOTA["gemini"].get(TTS_HEAD)
         assert entry is not None
         assert entry["used"] >= 1
     finally:
         bot.client = original_client
         bot.bot = original_bot
-        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
+        bot.GLOBAL_QUOTA["gemini"].pop(TTS_HEAD, None)
 
 
 def test_inline_tts_marks_quota_exhausted_on_daily_quota():
@@ -62,7 +64,7 @@ def test_inline_tts_marks_quota_exhausted_on_daily_quota():
 
     def fake_generate_content(*, model, contents, config=None):
         calls.append(model)
-        if model == "gemini-3.1-flash-tts-preview":
+        if model == TTS_HEAD:
             raise _RateLimitExc("Quota exceeded for quota metric 'GenerateRequestsPerDayPerProjectPerModel'")
         return _fake_tts_response(fake_wav_bytes)
 
@@ -76,20 +78,20 @@ def test_inline_tts_marks_quota_exhausted_on_daily_quota():
     original_bot = bot.bot
     bot.client = fake_client
     bot.bot = _FakeVoiceBot()
-    bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
-    bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash-preview-tts", None)
+    bot.GLOBAL_QUOTA["gemini"].pop(TTS_HEAD, None)
+    bot.GLOBAL_QUOTA["gemini"].pop(TTS_FALLBACK, None)
     try:
         asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
-        assert calls == ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
-        exhausted = bot.GLOBAL_QUOTA["gemini"].get("gemini-3.1-flash-tts-preview")
+        assert calls == [TTS_HEAD, TTS_FALLBACK]
+        exhausted = bot.GLOBAL_QUOTA["gemini"].get(TTS_HEAD)
         assert exhausted is not None and exhausted.get("exhausted_at") is not None
-        succeeded = bot.GLOBAL_QUOTA["gemini"].get("gemini-2.5-flash-preview-tts")
+        succeeded = bot.GLOBAL_QUOTA["gemini"].get(TTS_FALLBACK)
         assert succeeded is not None and succeeded["used"] >= 1
     finally:
         bot.client = original_client
         bot.bot = original_bot
-        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
-        bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash-preview-tts", None)
+        bot.GLOBAL_QUOTA["gemini"].pop(TTS_HEAD, None)
+        bot.GLOBAL_QUOTA["gemini"].pop(TTS_FALLBACK, None)
 
 
 def test_inline_tts_burst_rate_limit_only_cools_down():
@@ -106,7 +108,7 @@ def test_inline_tts_burst_rate_limit_only_cools_down():
 
     def fake_generate_content(*, model, contents, config=None):
         calls.append(model)
-        if model == "gemini-3.1-flash-tts-preview":
+        if model == TTS_HEAD:
             raise _RateLimitExc("rate limit exceeded")
         return _fake_tts_response(fake_wav_bytes)
 
@@ -120,19 +122,19 @@ def test_inline_tts_burst_rate_limit_only_cools_down():
     original_bot = bot.bot
     bot.client = fake_client
     bot.bot = _FakeVoiceBot()
-    bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
-    bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash-preview-tts", None)
+    bot.GLOBAL_QUOTA["gemini"].pop(TTS_HEAD, None)
+    bot.GLOBAL_QUOTA["gemini"].pop(TTS_FALLBACK, None)
     try:
         asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
-        assert calls == ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
-        entry = bot.GLOBAL_QUOTA["gemini"].get("gemini-3.1-flash-tts-preview")
+        assert calls == [TTS_HEAD, TTS_FALLBACK]
+        entry = bot.GLOBAL_QUOTA["gemini"].get(TTS_HEAD)
         assert entry is not None and entry.get("exhausted_at") is None
         assert entry.get("cooldown_until", 0) > _time.time()
     finally:
         bot.client = original_client
         bot.bot = original_bot
-        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
-        bot.GLOBAL_QUOTA["gemini"].pop("gemini-2.5-flash-preview-tts", None)
+        bot.GLOBAL_QUOTA["gemini"].pop(TTS_HEAD, None)
+        bot.GLOBAL_QUOTA["gemini"].pop(TTS_FALLBACK, None)
 
 
 def test_gemini_tts_synthesis_has_timeout_and_does_not_use_threads():
@@ -453,7 +455,7 @@ def test_inline_tts_records_user_daily_on_success(monkeypatch):
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777014", None)
         bot.chat_state.pop(999989, None)
-        bot.GLOBAL_QUOTA["gemini"].pop("gemini-3.1-flash-tts-preview", None)
+        bot.GLOBAL_QUOTA["gemini"].pop(TTS_HEAD, None)
 
 
 def test_inline_tts_charges_each_synthesized_chunk():
