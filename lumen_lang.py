@@ -2546,7 +2546,7 @@ PACK_BN: dict[str, str] = {
     "progress_search_query": "ইন্টারনেটে খুঁজছি: {query}",
     "progress_search_done": "ওয়েব অনুসন্ধান · {count}টি পাওয়া গেছে",
     "progress_thought_for": "{sec} সেকেন্ড ভেবেছি",
-    "progress_seconds": "{sec} সেকен্ড",
+    "progress_seconds": "{sec} সেকেন্ড",
     "progress_search_empty": "অনুসন্ধানে কিছু পাওয়া যায়নি",
     "progress_thinking": "ভাবছি… {sec} সেকেন্ড",
     "progress_reading_link": "লিংক পড়ছি",

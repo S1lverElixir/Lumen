@@ -2359,6 +2359,11 @@ def test_lang_table_covers_all_keys_in_all_languages():
             # Фолбэк на английский скрывал пропуски в переводе; теперь каждый
             # ключ обязан иметь явный перевод во всех 25 языках (аудит 28.10.2026).
             assert explicit, f"missing translation {key}[{lang}]"
+            assert explicit != key, f"value equals key {key}[{lang}]"
+            assert "\u00ad" not in explicit, f"soft hyphen {key}[{lang}]"
+            if lang not in ("ru", "uk", "be", "kk"):
+                assert not re.search(r"[\u0400-\u04FF]", explicit), f"Cyrillic in {key}[{lang}]"
+            assert not re.search(r"[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]", explicit), f"CJK in {key}[{lang}]"
             if lang != "en" and explicit == table.get("en"):
                 allowed = (key, lang) in allowed_en_duplicates or key in allowed_en_duplicate_keys
                 assert allowed, (
@@ -3218,6 +3223,8 @@ def test_answer_sender_skips_reply_quote_in_private(monkeypatch):
     group = _FakeIncomingMessage(999808)
     group.chat.type = bot.ChatType.GROUP
     assert bot._answer_sender(group) == group.reply
+    # Реальная сессия aiogram: закрываем, иначе «Unclosed client session» (ревью 17.11.2026).
+    asyncio.run(real_bot.session.close())
 
 
 def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
@@ -3324,6 +3331,7 @@ def test_help_command_opens_the_start_screen(rate_guard_setup):
         # фикстура ставит свой AsyncMock на каждый вызов — смотрим его аргументы
         sent.append(bot._tg_call.await_args.args[1])
     assert sent[0] == sent[1] == bot._t(123, "start_text")
+    asyncio.run(real_bot.session.close())
 
 
 

@@ -545,7 +545,8 @@ def test_streaming_respects_route_deadline(monkeypatch):
         ))
         elapsed = time.monotonic() - started
         # Бюджет уже прошёл: либо плейсхолдер дальше, либо финал с пометкой — но не вечное ожидание.
-        assert placeholder is not None or answer is not None
+        # Частичный ответ обязан вернуться, а не пустышка (ревью 17.11.2026).
+        assert answer is not None and answer.startswith("начало")
         # Висящий второй кусок (3600с) обязан оборваться бюджетом, а не зависнуть.
         assert elapsed < 30, f"стрим ждал висящий кусок мимо дедлайна: {elapsed:.1f}с"
     finally:
