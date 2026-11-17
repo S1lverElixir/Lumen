@@ -1036,3 +1036,23 @@ def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():
     err = asyncio.run(bot.probe_url(_BoomSession(), "http://x", redact="abc123"))
     assert err["ok"] is False
     assert "abc123" not in err["error"] and "<TOKEN>" in err["error"]
+
+
+@pytest.mark.parametrize("flag", ["_state_load_failed", "_quota_load_failed"])
+def test_export_state_refuses_after_failed_startup_load(flag):
+    # Ревью 17.11.2026: 200 с пустым снимком после сбоя загрузки — бэкап затрёт хороший.
+    import lumen_chat_state as lcs
+    original_key = bot.ADMIN_PANEL_KEY
+    original_state = lcs._state_load_failed
+    original_quota = lcs._quota_load_failed
+    bot.ADMIN_PANEL_KEY = "real-admin-key"
+    try:
+        lcs._state_load_failed = flag == "_state_load_failed"
+        lcs._quota_load_failed = flag == "_quota_load_failed"
+        result = asyncio.run(bot.export_state(
+            _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+        assert getattr(result, "status_code", None) == 503
+    finally:
+        bot.ADMIN_PANEL_KEY = original_key
+        lcs._state_load_failed = original_state
+        lcs._quota_load_failed = original_quota

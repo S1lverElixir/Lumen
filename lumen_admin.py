@@ -360,6 +360,12 @@ async def export_state(request: Request) -> Any:
         # закоммитил бы его как дневной (аудит 16.11.2026). Пусть cron повторит.
         log.info("[admin] /export_state requested while state is still loading, asking to retry")
         return JSONResponse(status_code=503, content={"ok": False, "retry": True})
+    import lumen_chat_state as lcs
+    if lcs._state_load_failed or lcs._quota_load_failed:
+        # Сбой загрузки: снимок будет пустым, а state-backup.yml закоммитит его
+        # как дневной бэкап (ревью 17.11.2026). Честный 503 — cron повторит.
+        log.warning("[admin] /export_state requested after a failed startup load, asking to retry")
+        return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     # Снимок живых структур: экспорт отдавал ссылки на мутабельные объекты —
     # запись между возвратом и сериализацией ответа давала несогласованный бэкап.
     chats = {str(cid): _serialize_chat_state(state) for cid, state in list(bot.chat_state.items())}
