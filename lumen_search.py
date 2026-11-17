@@ -46,7 +46,10 @@ _FX_URL = "https://open.er-api.com/v6/latest/{base}"
 
 # DDG lite с 11.11.2026 отдаёт страницу-аномалию почти на каждый запрос (замер 8/8
 # пустых ответов), поэтому статус 202 и этот маркер — немедленный провал, а не данные.
-_DDG_BLOCKED_RE = re.compile(r"anomaly|captcha|unusual traffic|blocked", re.IGNORECASE)
+# Голое «blocked» убрано: честная пустая выдача с этим словом считалась аномалией
+# и запускала второй GET (ревью 17.11.2026).
+_DDG_BLOCKED_RE = re.compile(
+    r"anomaly|captcha|unusual traffic|verify you are human|challenge", re.IGNORECASE)
 
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _NEWS_QUERY_RE = re.compile(r"\bновост\w*|\bnews\b|headlines|главные\s+новости", re.IGNORECASE)

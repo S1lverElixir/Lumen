@@ -93,8 +93,8 @@ REVERT_TRIGGER_PREFIXES = [
     # раньше «верни предыдущий» и «верни картинку» молча уходили текстовой модели.
     "верни предыдущий", "верни прошлый", "верни картинку", "верни фото",
     "верни изображение", "верни как было", "верни то", "previous version",
-    "прошлый вариант", "верни как было", "отмени правку", "отмени последнее изменение",
-    "верни назад", "previous version", "back to the previous version", "undo",
+    "прошлый вариант", "отмени правку", "отмени последнее изменение",
+    "верни назад", "back to the previous version", "undo",
 ]
 REDO_TRIGGER_PREFIXES = [
     "верни обратно", "верни последнюю версию", "верни как стало", "повтори правку",
@@ -568,7 +568,7 @@ def _mime_matches_media_category(mime: str, category: str) -> bool:
         # PDF/текстовые/офисные файлы + octet-stream (неопознанный бинарник —
         # честная ошибка пользователю всё равно придёт позже из ask_gemini через
         # _is_gemini_supported_mime, а не молчаливое "не нашёл файл").
-        return low.startswith(("application/", "text/")) or low == "application/octet-stream"
+        return low.startswith(("application/", "text/"))
     return False
 
 # ── Кнопки-уточнения (pick-сценарии) ──

@@ -2007,7 +2007,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
     token в callback_data короткий (лимит Telegram — 64 байта на всю строку)."""
     import bot
     _purge_expired_picks()
-    _enforce_pending_picks_cap()
+    _enforce_pending_picks_cap(pending_add=1)
     token = secrets.token_hex(8)
     lang = bot._chat_lang(message.chat.id)
     bot._pending_picks[token] = {
@@ -2086,7 +2086,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
             # Один ресенд: второй тап упрётся в rec None и честно покажет expired.
             bot._pending_picks.pop(token, None)
             _purge_expired_picks()
-            _enforce_pending_picks_cap()
+            _enforce_pending_picks_cap(pending_add=1)
             fresh = secrets.token_hex(8)
             bot._pending_picks[fresh] = {
                 "chat_id": rec.get("chat_id"),

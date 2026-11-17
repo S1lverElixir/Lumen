@@ -80,6 +80,7 @@ session» от aiohttp и «--- Logging error ---» от логгера, кот�
 
 - `tests/test_bot_commands.py`: юнит-тесты дёргали настоящую `aiohttp.ClientSession`
   бота. Добавлена автофикстура, подменяющая `_get_http_session` заглушкой.
+- (историческая запись; `_fish_audio_tts_bytes`, `FISH_AUDIO_ENABLED` и OpenRouter удалены 05.11.2026)
 - `lumen_commands._fish_audio_tts_bytes`: сессия открывалась до проверки ключа
   OpenRouter. Теперь при пустом ключе возвращается None сразу, без сессии (в
   продукте ветка и так выключена флагом FISH_AUDIO_ENABLED, правка убирает мусор из
