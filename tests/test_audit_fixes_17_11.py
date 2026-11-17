@@ -889,3 +889,9 @@ def test_private_url_is_dropped_from_snippets_and_dedupe():
     block = lumen_search.format_snippets_for_prompt(items)
     assert "169.254.169.254" not in block
     assert "example.com" in block
+
+
+def test_stats_survives_out_of_range_finite_timestamp(monkeypatch):
+    monkeypatch.setattr(bot, "_last_storage_write_ts", lambda: 1e300)
+    text = lumen_commands._storage_backend_text()
+    assert "записей пока не было" in text

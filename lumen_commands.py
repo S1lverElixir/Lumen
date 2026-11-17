@@ -1957,9 +1957,14 @@ def _storage_backend_text() -> str:
     except (TypeError, ValueError):
         ts_value = 0.0
     # time.localtime(inf) — OverflowError, и /stats умирал целиком.
+    # Конечный, но нереальный timestamp (1e300) тоже роняет localtime:
+    # OverflowError/OSError/ValueError не должны убивать /stats (проход №4).
     if (isinstance(ts, (int, float)) and not isinstance(ts, bool)
-            and math.isfinite(ts_value) and ts_value > 0):
-        when = time.strftime("%d.%m %H:%M", time.localtime(ts_value))
+            and math.isfinite(ts_value) and 0 < ts_value < 4102444800.0):
+        try:
+            when = time.strftime("%d.%m %H:%M", time.localtime(ts_value))
+        except (OverflowError, OSError, ValueError):
+            return f"{backend}, записей пока не было"
         return f"{backend}, запись: {when}"
     return f"{backend}, записей пока не было"
 
