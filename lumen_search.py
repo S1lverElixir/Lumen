@@ -1512,7 +1512,6 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
     budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
     try:
         if provider == "tavily" and os.getenv("TAVILY_API_KEY"):
-            note_search_api_call()
             async with session.post("https://api.tavily.com/search",
                                     headers={"Authorization": f"Bearer {os.environ['TAVILY_API_KEY']}",
                                              "Content-Type": "application/json"},
@@ -1525,6 +1524,8 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                 # без ключа и текста запроса (прод 16.11.2026: Tavily отвечал пусто).
                 log.info("[web-search] tavily status=%s results=%d keys=%s",
                          resp.status, len(results), sorted(_payload)[:6])
+            # Кредит списывается только за дошедший запрос: упавший не тратит
+            note_search_api_call()
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("content") or "", _SNIPPET_MAX_CHARS),
                      "publisher": urllib.parse.urlparse(r.get("url") or "").netloc.removeprefix("www."),
@@ -1536,7 +1537,6 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
             log.info("[web-search] tavily key missing in env")
             return []
         if provider == "brave" and os.getenv("BRAVE_API_KEY"):
-            note_search_api_call()
             async with session.get("https://api.search.brave.com/res/v1/web/search",
                                    params={"q": query, "count": limit},
                                    headers={"X-Subscription-Token": os.environ["BRAVE_API_KEY"],
@@ -1544,19 +1544,20 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
                                    timeout=budget) as resp:
                 resp.raise_for_status()
                 results = (((json.loads(await resp.text()) or {}).get("web") or {}).get("results")) or []
+            note_search_api_call()
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("description") or "", _SNIPPET_MAX_CHARS),
                      "publisher": urllib.parse.urlparse(r.get("url") or "").netloc.removeprefix("www."),
                      "date": (r.get("page_age") or "")[:10], "kind": "web"}
                     for r in results if r.get("url")]
         if provider == "exa" and os.getenv("EXA_API_KEY"):
-            note_search_api_call()
             async with session.post("https://api.exa.ai/search",
                                     headers={"x-api-key": os.environ["EXA_API_KEY"],
                                              "Content-Type": "application/json"},
                                     json={"query": query, "numResults": limit}, timeout=budget) as resp:
                 resp.raise_for_status()
                 results = (json.loads(await resp.text()) or {}).get("results") or []
+            note_search_api_call()
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("text") or "", _SNIPPET_MAX_CHARS),
                      "publisher": urllib.parse.urlparse(r.get("url") or "").netloc.removeprefix("www."),

@@ -929,3 +929,23 @@ def test_guest_truncation_of_adversarial_text_is_bounded():
     import lumen_formatting
     out = _finishes_within(lumen_formatting._truncate_html_to_fit, "<b>x" * 15000, 4096)
     assert isinstance(out, str)
+
+
+# ── F-114 (часть): неудачный keyed-запрос не тратит кредит ──
+
+
+def test_failed_keyed_request_does_not_spend_api_call(monkeypatch):
+    import lumen_search
+    monkeypatch.setenv("TAVILY_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("SEARCH_API_PROVIDER", "tavily")
+    spent = []
+    monkeypatch.setattr(lumen_search, "note_search_api_call", lambda: spent.append(1))
+
+    class _BrokenSession:
+        def post(self, *args, **kwargs):
+            raise RuntimeError("network down")
+
+    out = asyncio.run(lumen_search._api_provider_snippets(
+        _BrokenSession(), "q", 3, deadline=time.monotonic() + 5))
+    assert out == []
+    assert spent == [], "упавший запрос не должен списывать кредит"
