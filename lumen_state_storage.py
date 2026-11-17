@@ -88,7 +88,7 @@ def _storage_write_text(cfg: StorageConfig, key: str, path: Path, text: str) -> 
     with open(temp_path, "w", encoding="utf-8") as f:
         f.write(text)
         # fsync до rename: иначе жёсткий kill терял последний снимок, хотя файл
-        # уже подменился (F-048, 17.11.2026). pids ОС без fsync — suppress.
+        # уже подменился (F-048, 17.11.2026). ФС без fsync — suppress.
         with contextlib.suppress(Exception):
             f.flush()
             os.fsync(f.fileno())
