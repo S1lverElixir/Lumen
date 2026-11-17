@@ -1345,6 +1345,8 @@ async def handle_stop_callback(query: CallbackQuery) -> None:
     import bot
     with contextlib.suppress(Exception):
         await query.answer()
+    if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
+        return
     if not bot.STOP_BUTTON_ENABLED:
         return
     chat_id = query.message.chat.id if getattr(query, "message", None) is not None and query.message.chat else 0
@@ -1358,6 +1360,8 @@ async def cmd_stop(message: Message) -> None:
     контроль, а не витрина. Молчаливо игнорирует чужого человека в группе и
     вызов, когда стрима нет — лишнее сообщение в чат не пишем (аудит 16.11.2026)."""
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     if not bot.STOP_COMMAND_ENABLED:
         return
     sender = message.from_user.id if getattr(message, "from_user", None) is not None else None
@@ -1472,6 +1476,12 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
         return
     chat = question_msg.chat
     requester_id = query.from_user.id if query.from_user else None
+    # Каждый тап — правка Telegram плюс запись чата: без окна спамер гонял бы
+    # edit_text на каждое нажатие (ревью 17.11.2026, тот же гейт, что у draw:more).
+    if bot._check_and_register_rate_limit(requester_id if requester_id is not None else chat.id):
+        with contextlib.suppress(Exception):
+            await query.answer(bot._t(chat.id, "rate_limited"), show_alert=False)
+        return
     if not await bot._is_privileged_in_chat(chat.type, chat.id, requester_id):
         with contextlib.suppress(Exception):
             await query.answer(bot._t(chat.id, "lang_deny"), show_alert=True)

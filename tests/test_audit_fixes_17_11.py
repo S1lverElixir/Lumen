@@ -1065,3 +1065,45 @@ def test_logs_preparation_runs_off_event_loop(monkeypatch):
     )
     asyncio.run(lumen_commands.cmd_logs(message))
     assert seen["thread"] is not threading.main_thread(), "чтение лога не должно идти в петле"
+
+
+# ── F-082: забаненный не останавливает ответ ни командой, ни кнопкой ──
+
+
+def test_stop_command_and_callback_ignore_banned_user(monkeypatch):
+    import lumen_commands
+    calls = []
+    monkeypatch.setattr(bot, "_is_banned", lambda uid: True)
+    monkeypatch.setattr(bot, "_request_stream_stop", lambda cid, sender: calls.append((cid, sender)))
+    monkeypatch.setattr(bot, "STOP_COMMAND_ENABLED", True)
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    message = SimpleNamespace(chat=SimpleNamespace(id=1), from_user=SimpleNamespace(id=77))
+    query = SimpleNamespace(
+        from_user=SimpleNamespace(id=77),
+        message=SimpleNamespace(chat=SimpleNamespace(id=1)),
+        answer=AsyncMock(),
+    )
+    asyncio.run(lumen_commands.cmd_stop(message))
+    asyncio.run(lumen_commands.handle_stop_callback(query))
+    assert calls == [], "забаненный не должен управлять остановкой"
+
+
+# ── F-080: смена языка под общим окном 5/30с ──
+
+
+def test_lang_callback_is_rate_limited(monkeypatch):
+    import lumen_commands
+    answers = []
+    writes = []
+    monkeypatch.setattr(bot, "_is_banned", lambda uid: False)
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda key: True)
+    monkeypatch.setattr(bot, "mark_state_dirty", lambda *a, **k: writes.append(1))
+    query = SimpleNamespace(
+        data="lang:en",
+        from_user=SimpleNamespace(id=77),
+        message=SimpleNamespace(chat=SimpleNamespace(id=1, type="private")),
+        answer=AsyncMock(side_effect=lambda text=None, **kw: answers.append(text)),
+    )
+    asyncio.run(lumen_commands.handle_lang_callback(query))
+    assert answers and answers[0] == bot._t(1, "rate_limited")
+    assert writes == [], "язык не должен меняться при отказе по окну"
