@@ -1965,7 +1965,12 @@ async def main() -> None:
             proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
         )
     bot = Bot(token=BOT_TOKEN, session=sess)
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    # v1beta: system_instruction («Developer instruction») и response_modalities
+    # на v1 отвечают «not enabled for api version v1» (прод 17.11.2026).
+    client = genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=types.HttpOptions(api_version="v1beta"),
+    )
 
     _state_ready = False
     startup_task = asyncio.create_task(_webhook_startup(), name="webhook_startup")
