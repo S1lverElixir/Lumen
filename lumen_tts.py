@@ -51,7 +51,8 @@ async def _gemini_tts_bytes(
                 return await interactions.create(
                     model=model_name,
                     input=text,
-                    response_modalities=["AUDIO"],
+                    # Строчными: API отвечает «'AUDIO' is not supported», ждёт 'audio'.
+                    response_modalities=["audio"],
                     # v1 отвечает «response_modalities is only available in v1beta»
                     # (прод 17.11.2026): звук живёт только на бете.
                     api_version="v1beta",
