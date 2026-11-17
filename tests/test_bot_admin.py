@@ -144,8 +144,13 @@ def test_webhook_handler_tracks_dispatched_task_for_shutdown():
     bot.bot = object()
     bot._inflight_tasks.clear()
 
+    release = asyncio.Event()
+
     async def fake_process(raw_update):
-        await asyncio.sleep(0)
+        # Живая задача обязана быть в наборе при старте: no-op регистрация
+        # раньше проходила тест (ревью 17.11.2026).
+        assert bot._inflight_tasks, "живая задача не зарегистрирована"
+        await release.wait()
 
     bot._process_raw_update = fake_process
     try:
@@ -153,11 +158,16 @@ def test_webhook_handler_tracks_dispatched_task_for_shutdown():
             headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
             body={"update_id": 1},
         )
-        asyncio.run(_run_webhook_handler(req))
-        # _run_webhook_handler уже дожидается одного тика планировщика — к этому
-        # моменту короткая fake_process должна была завершиться и самоудалиться
-        # из набора (см. test_track_inflight_task_registers_and_self_removes_on_completion).
-        assert not bot._inflight_tasks
+
+        async def _scenario():
+            await _run_webhook_handler(req)
+            assert bot._inflight_tasks, "висящая задача должна быть видна shutdown-drain"
+            release.set()
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert not bot._inflight_tasks
+
+        asyncio.run(_scenario())
     finally:
         bot.WEBHOOK_SECRET = original_secret
         bot.bot = original_bot_obj

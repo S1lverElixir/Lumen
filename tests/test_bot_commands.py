@@ -2364,6 +2364,19 @@ def test_lang_table_covers_all_keys_in_all_languages():
                 assert allowed, (
                     f"untranslated duplicate {key}[{lang}]: delete it, English fallback covers display"
                 )
+    # Плейсхолдеры обязаны совпадать во всех паках: опечатка {current_x}
+    # уезжала в прод видимым литералом (ревью 17.11.2026).
+    import re as _re_ph
+
+    def _placeholders(value):
+        return set(_re_ph.findall(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", value or ""))
+
+    for key in lumen_lang.STRINGS:
+        expected_ph = _placeholders(lumen_lang.t("en", key))
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            explicit = (lumen_lang.LANG_PACKS.get(lang, {}).get(key)
+                        or lumen_lang.STRINGS[key].get(lang) or "")
+            assert _placeholders(explicit) == expected_ph, f"placeholder mismatch {key}[{lang}]"
     for lang in lumen_lang.SUPPORTED_LANGS:
         for scenario in ("film", "series", "music", "books", "games"):
             q, opts, tpl = lumen_lang.pick_texts(lang, scenario)
@@ -2376,6 +2389,8 @@ _OWNER_ONLY_KEYS = ("owner_quota_notice", "selftest_", "stats_", "logs_")
 # Стоп-слова проверены на всех 25 паках: ложных вхождений нет.
 _PROVIDER_STOPWORDS = [
     "gemini", "gemma", "munito", "groq", "whisper", "tikwm", "openai",
+    "claude", "chatgpt", "chat gpt", "google", "deepseek", "glm", "qwen",
+    "llama", "mistral", "nemotron", "hugging face", "huggingface",
     "anthropic", "deepmind", "cloudflare", "pollinations", "openrouter",
     "bot api", r"\bapi\b",
     "провайдер", "provider", "пастаўшчык", "penyedia model", "fournisseur",
@@ -2608,7 +2623,7 @@ def test_profile_strings_fit_telegram_limits():
             assert text and text != key, f"missing {key}[{lang}]"
             assert len(text) <= cap, f"{key}[{lang}] = {len(text)} > {cap}"
             assert not _has_emoji(text), f"{key}[{lang}]: {text}"
-            assert "!" not in text and "!" not in text, f"{key}[{lang}]: {text}"
+            assert "!" not in text and "！" not in text, f"{key}[{lang}]: {text}"
 
 
 def test_profile_texts_never_name_a_provider_or_model():

@@ -275,6 +275,8 @@ def test_daily_limit_still_gets_external_search_snippets(rate_guard_setup, monke
     assert captured["allow_stream"] is True
     sent_text = bot._safe_reply.await_args[0][1]
     assert "without web search" not in sent_text
+    # Соседняя пометка «без живого поиска» — отдельный ключ (ревью 17.11.2026).
+    assert bot._t(123, "fallback_no_live_search") not in sent_text
     bot.chat_state.pop(123, None)
 
 
