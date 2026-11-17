@@ -1097,6 +1097,9 @@ def _t_no_create(chat_id: int | None, key: str, **kwargs: Any) -> str:
     """Та же локализация, что _t, но без побочных эффектов для хранилища."""
     return _lang_t(_peek_chat_lang(chat_id), key, **kwargs)
 
+_DELETED_CHAT_IDS_CAP = 5000
+
+
 def _prune_old_chats() -> None:
     import bot
     global _index_dirty, _index_generation
@@ -1128,6 +1131,11 @@ def _prune_old_chats() -> None:
     # ключи/файлы бесхозно копятся вечно) — ставим в очередь на удаление,
     # обрабатывается в _flush_dirty_state вместе с обычным сбросом.
     _deleted_chat_ids.update(removed_ids)
+    # Кап: без него множество растёт до конца жизни процесса. Старые id уже
+    # удалены из хранилища, свежие важнее (ревью 17.11.2026).
+    if len(_deleted_chat_ids) > _DELETED_CHAT_IDS_CAP:
+        for extra_id in list(_deleted_chat_ids)[:len(_deleted_chat_ids) - _DELETED_CHAT_IDS_CAP]:
+            _deleted_chat_ids.discard(extra_id)
     _pending_chat_deletions.update(removed_ids)
     _dirty_chat_ids.difference_update(removed_ids)
     if removed_ids:

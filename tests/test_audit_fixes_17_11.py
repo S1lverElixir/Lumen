@@ -1128,3 +1128,18 @@ def test_chat_locked_runs_handler_under_the_lock(monkeypatch):
     message = SimpleNamespace(chat=SimpleNamespace(id=1))
     asyncio.run(chat_locked(handler)(message))
     assert locked == [message] and done == [message]
+
+
+# ── F-046: _deleted_chat_ids не растёт без капа ──
+
+
+def test_deleted_chat_ids_are_capped(monkeypatch):
+    _reset_state_flags()
+    lcs.chat_state.clear()
+    monkeypatch.setattr(lcs, "PRUNED_CHAT_TARGET", 1)
+    monkeypatch.setattr(lcs, "_DELETED_CHAT_IDS_CAP", 3)
+    for wave in range(10):
+        lcs.chat_state[900000 + wave] = {"last_activity": 0}
+        lcs.chat_state[800000 + wave] = {"last_activity": 0}
+        lcs._prune_old_chats()
+    assert len(lcs._deleted_chat_ids) <= 3
