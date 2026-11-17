@@ -52,6 +52,9 @@ async def _gemini_tts_bytes(
                     model=model_name,
                     input=text,
                     response_modalities=["AUDIO"],
+                    # v1 отвечает «response_modalities is only available in v1beta»
+                    # (прод 17.11.2026): звук живёт только на бете.
+                    api_version="v1beta",
                 )
             except (AttributeError, TypeError):
                 # Двойник без настоящего create: ниже старый путь generate_content.
