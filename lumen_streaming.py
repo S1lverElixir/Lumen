@@ -872,8 +872,19 @@ async def _run_streaming_reply(
                     sent_messages[-1].edit_text, html_text,
                     parse_mode=ParseMode.HTML, call_timeout=15.0,
                 )
+                if edited is None and not edits_dead:
+                    # Один повтор HTML после паузы: разовый 429 не должен стоить
+                    # разметки всему ответу (прод 17.11.2026: ** оставались сырыми).
+                    await asyncio.sleep(0.7)
+                    edited = await bot._tg_call(
+                        sent_messages[-1].edit_text, html_text,
+                        parse_mode=ParseMode.HTML, call_timeout=15.0,
+                    )
                 if edited is None:
-                    await bot._tg_call(sent_messages[-1].edit_text, plain_text, parse_mode=None, call_timeout=15.0)
+                    # Последний рубеж — голый текст без markdown-синтаксиса.
+                    from lumen_rich import _strip_markdown
+                    await bot._tg_call(sent_messages[-1].edit_text, _strip_markdown(plain_text),
+                                       parse_mode=None, call_timeout=15.0)
         else:
             if not tail_already_final:
                 # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
