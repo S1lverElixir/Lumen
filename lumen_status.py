@@ -156,8 +156,11 @@ class StatusMessage:
         self._literal = text
         self._literal_timed = timed
         take_edit_slot(self._chat_id(), force=True)
-        with contextlib.suppress(Exception):
-            await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+        # Под тем же замком, что тик и set_phase: поздний кадр не должен
+        # вернуть старую фразу после этой правки (F-070, проход №5).
+        async with self._edit_lock:
+            with contextlib.suppress(Exception):
+                await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
 
     async def set_action_key(self, key: str) -> None:
         await self.set_action(_lang_t(self.lang, key), timed=self._literal_timed)

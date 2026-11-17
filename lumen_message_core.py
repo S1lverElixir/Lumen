@@ -36,6 +36,7 @@ from lumen_message_parse import (
     _draw_trigger_is_visual,
     _tts_trigger_is_speech,
     _split_image_variants,
+    _strip_variants_phrase,
     _wants_style_reference,
     _NO_MEDIA_NOTE,
     _find_recent_media_by_category,
@@ -353,9 +354,6 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
     try:
         remaining = bot._msg_remaining_sec()
         lock_timeout = bot.CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(bot.CHAT_LOCK_TIMEOUT_SEC, remaining))
-        # На попытку — доля бюджета: acquire делает до трёх кругов, и полный
-        # таймаут на каждый растягивал ожидание втрое (ревью 17.11.2026).
-        lock_timeout = max(0.5, lock_timeout / 3.0)
         waiters = bot._chat_lock_waiters.get(chat_id, 0)
         if waiters >= bot._MAX_CHAT_LOCK_WAITERS:
             log.warning("[lock] Too many waiters for chat %s", chat_id)
@@ -1205,7 +1203,7 @@ async def _handle_message_core(
                 _draw_variants = _split_image_variants(_prompt_text)[0]
                 # Фразу количества вырезаем и из описания резолвера: «3 variants»
                 # в чужом тексте уезжало модели и в промпт (ревью 17.11.2026).
-                _clean_resolved = _split_image_variants(prompt_content)[1]
+                _clean_resolved = _strip_variants_phrase(prompt_content)
                 _draw_kwargs = {"prepared": _clean_resolved or prompt_content}
                 _draw_prompt = _clean_resolved
             else:
@@ -1243,7 +1241,7 @@ async def _handle_message_core(
             _r_count, _r_prompt = _split_image_variants(clean_prompt)
             # Фраза количества из описания вырезается и здесь: «, 3 variants»
             # уезжало в промпт через prepared (F-169, 17.11.2026).
-            _resolved_clean = _split_image_variants(_resolved)[1] or _resolved
+            _resolved_clean = _strip_variants_phrase(_resolved) or _resolved
             await bot.inline_draw_variants(
                 message, _resolved_clean, variants=_r_count, prepared=_resolved_clean,
             )

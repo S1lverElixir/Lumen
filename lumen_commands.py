@@ -1268,9 +1268,10 @@ async def inline_tts(message: Message, text: str) -> None:
         raise
     except Exception as exc:
         # Возврат до любых await: отмена на правке статуса иначе съедала резерв.
-        # Возвращаем только несозданные чанки: уже синтезированные провайдер
-        # оплатил, их слот не откатываем (ревью 17.11.2026).
-        refund = max(0, len(chunks) - len(voices))
+        # Сбой синтеза случается до цикла отправки: человек не получил ни одного
+        # файла, поэтому возвращаем все слоты. Провайдерский расход — не слот
+        # человека (проход №5, 17.11.2026).
+        refund = len(chunks)
         if refund:
             bot._refund_user_daily(uid, total=refund, tts=refund)
         log.exception("TTS synthesis failed:")
