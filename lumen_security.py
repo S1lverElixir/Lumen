@@ -598,11 +598,13 @@ def _scrub_contaminated_sentences(text: str, *, kind: str) -> str | None:
             lo, hi = bounds[idx], bounds[idx + 1]
             if lo <= start < hi or lo < end <= hi:
                 drop.add(idx)
-    kept = "".join(text[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1) if i not in drop)
-    kept = kept.strip()
+    kept_raw = "".join(text[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1) if i not in drop)
+    kept = kept_raw.strip()
     if not kept:
         return None
-    if len(kept) < len(text) * _SCRUB_MAX_CONTAMINATED_RATIO:
+    # Долю считаем по необстриженному остатку: ведущий пробел съедал границу
+    # и честный ответ падал в fallback (ревью 17.11.2026).
+    if len(kept_raw) < len(text) * _SCRUB_MAX_CONTAMINATED_RATIO:
         return None
     log.warning('[%s] Scrubbed only the offending sentence(s), kept %d of %d chars', kind, len(kept), len(text))
     return kept

@@ -195,7 +195,8 @@ function isTelegramBotPath(path: string): boolean {
 // до ветки ai: иначе у любого, кто завладел секретом прокси, появился бы весь API
 // аккаунта (DNS, Workers, R2), а не только генерация картинок.
 function isCloudflareAiPath(path: string): boolean {
-  return /^\/client\/v4\/accounts\/[^/]+\/ai(\/|$)/.test(path);
+  // Только генерация: /ai/models и прочее поддерево не нужно боту (ревью 17.11.2026).
+  return /^\/client\/v4\/accounts\/[^/]+\/ai\/run\//.test(path);
 }
 
 export function buildForwardHeaders(reqHeaders: Headers): Headers {

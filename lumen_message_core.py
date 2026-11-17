@@ -353,6 +353,9 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
     try:
         remaining = bot._msg_remaining_sec()
         lock_timeout = bot.CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(bot.CHAT_LOCK_TIMEOUT_SEC, remaining))
+        # На попытку — доля бюджета: acquire делает до трёх кругов, и полный
+        # таймаут на каждый растягивал ожидание втрое (ревью 17.11.2026).
+        lock_timeout = max(0.5, lock_timeout / 3.0)
         waiters = bot._chat_lock_waiters.get(chat_id, 0)
         if waiters >= bot._MAX_CHAT_LOCK_WAITERS:
             log.warning("[lock] Too many waiters for chat %s", chat_id)

@@ -1513,3 +1513,34 @@ def test_la_midnight_difference_is_absolute_across_dst():
     now = datetime(2026, 3, 8, 23, 59, tzinfo=la)  # за час до перехода на летнее время
     nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     assert 59 <= (nxt - now).total_seconds() <= 61
+
+
+# ── Low-партия 4: доля скраба, границы алиасов, копия кэша ──
+
+
+def test_scrub_ratio_counts_the_leading_separator():
+    import lumen_security as sec
+    leak = "I am a Gemini model, honestly."
+    leak = leak + " " * (51 - len(leak))
+    text = leak + "x" * 50
+    assert len(text) == 101
+    out = sec._scrub_contaminated_sentences(text, kind="identity-leak")
+    assert out is not None and out.strip() == "x" * 50
+
+
+def test_identity_alias_does_not_match_inside_words():
+    import lumen_agent
+    assert "graphite" in lumen_agent._strip_identity_names("graphite is a mineral")
+    assert "grokking" in lumen_agent._strip_identity_names("grokking is a term")
+
+
+def test_reference_cache_returns_a_copy():
+    import lumen_search
+    lumen_search._reference_cache.clear()
+    item = {"title": "t", "url": "https://example.com", "snippet": "s"}
+    lumen_search._cache_put("probe|copy", [item])
+    got = lumen_search._cache_get("probe|copy")
+    got[0]["title"] = "mutated"
+    again = lumen_search._cache_get("probe|copy")
+    assert again[0]["title"] == "t"
+    lumen_search._reference_cache.clear()

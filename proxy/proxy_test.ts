@@ -102,6 +102,9 @@ Deno.test("resolveTarget пропускает Workers AI и только его"
   }
   assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/zones", "").ok, false);
   assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/abc123/workers/scripts", "").ok, false);
+  // /ai/models и прочее поддерево боту не нужны: только путь генерации (ревью 17.11.2026).
+  assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/abc123/ai/models", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/abc123/ai", "").ok, false);
   assertEquals(resolveTarget("/fetch/api.cloudflare.com/", "").ok, false);
 });
 

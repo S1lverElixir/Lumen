@@ -1034,7 +1034,7 @@ async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: in
     вопросы «кто такой X / что такое X», когда новости молчат."""
     cached = _cache_get("wiki|" + query)
     if cached is not None:
-        return cached
+        return cached[:max(3, limit)]
     lang = _wiki_lang(query)
     params = {
         "action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": max(3, limit),
@@ -1109,7 +1109,8 @@ def _cache_get(key: str) -> list[dict] | None:
     if time.monotonic() - stamp > _REFERENCE_CACHE_TTL_SEC:
         _reference_cache.pop(key, None)
         return None
-    return items
+    # Копия: вызывающий не должен мутировать общий кэш (ревью 17.11.2026).
+    return [dict(item) for item in items]
 
 
 def _cache_put(key: str, items: list[dict]) -> None:

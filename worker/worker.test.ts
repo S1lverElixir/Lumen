@@ -23,7 +23,8 @@ test("target resolution keeps the allowlist and path rules", () => {
   assert.equal(resolveTarget("/fetch/evil.example/x", "").ok, false);
   assert.equal(resolveTarget("/fetch/api.telegram.org/notbot", "").ok, false);
   assert.equal(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/1/r2", "").ok, false);
-  assert.equal(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/1/ai/run", "").ok, true);
+  assert.equal(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/1/ai/run/@cf/x/y", "").ok, true);
+  assert.equal(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/1/ai/models", "").ok, false);
 });
 
 test("private addresses cover the usual ranges", () => {

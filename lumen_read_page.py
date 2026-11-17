@@ -345,6 +345,10 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
         return None
     # Глобальный счётчик — на попытку (защита релея), личный — только за удачное
     # чтение: упавшие URL больше не выжигают дневной лимит человека (ревью 17.11.2026).
+    if not _relay_readable():
+        # Релей на старой ревизии: пауза должна действовать уже на этом ходе,
+        # а не со следующего (ревью 17.11.2026).
+        return None
     note_read_page_call(count_user=False)
     session = await bot._get_http_session()
     try:
