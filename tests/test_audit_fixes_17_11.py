@@ -1646,3 +1646,11 @@ def test_group_wake_word_matrix():
         "а люмен уже ответил на это",
     ):
         assert wake(q)[0] is False, q
+
+
+def test_greetings_do_not_trigger_web_search():
+    # Прод 18.11.2026: «люмен привет» в группе ушёл в Tavily (нашёл «люмен» в викисловаре).
+    import lumen_message_core as core
+    for q in ("привет", "Люмен, привет", "спасибо!", "hello"):
+        assert core._wants_web_search(q, previous="нет") is False, q
+    assert core._wants_web_search("Кто сейчас канцлер Германии?", previous="привет") is True

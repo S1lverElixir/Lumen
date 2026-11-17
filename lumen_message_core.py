@@ -156,6 +156,9 @@ _SELF_QUESTION_RE = re.compile(
 )
 
 
+_SOCIAL_WORDS = frozenset({"привет", "здравствуй", "здравствуйте", "добрый", "доброе", "хай", "hello", "hi", "hey", "спасибо", "thanks"})
+
+
 def _wants_web_search(text: str, *, previous: str = "") -> bool:
     """Ищет ли бот так же, как искал бы Claude: нужны свежие данные либо явная
     просьба искать. Ссылка на прошлый разговор («помнишь, мы вчера обсуждали») —
@@ -166,6 +169,11 @@ def _wants_web_search(text: str, *, previous: str = "") -> bool:
     if not text:
         return False
     if _PAST_CHAT_RE.search(text):
+        return False
+    # Приветствие/благодарность не повод искать: «люмен привет» после короткой
+    # прошлой реплики уходил в Tavily (прод 18.11.2026).
+    _first = text.strip().split()[0].strip(",.!?—–-").lower() if text.strip() else ""
+    if _first in _SOCIAL_WORDS:
         return False
     # Вопрос о самом боте поиска не требует: «Кто ты?» после любой реплики
     # считался продолжением темы и жёг Tavily (прод 17.11.2026).
