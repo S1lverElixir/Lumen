@@ -59,6 +59,14 @@ jobs:
           # PAT не в URL клона, а в extraheader: иначе светится в remote -v и логах.
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${STATE_BACKUP_TOKEN}" | base64 -w0)" \
             clone "https://github.com/${STATE_BACKUP_REPO}.git" backup-repo
+          # Пустой снимок не коммитим: сбой загрузки на Space давал 0 чатов, и
+          # дневной бэкап затирал хороший (ревью 17.11.2026). Шаг падает — ниже
+          # сработает алерт в Telegram.
+          chats="$(jq '.chats | length' export_state.json)"
+          if [ "${chats}" -eq 0 ]; then
+            echo "Refusing to commit an empty state snapshot (0 chats)" >&2
+            exit 1
+          fi
           cp export_state.json backup-repo/export_state.json
           cd backup-repo
           git add export_state.json
