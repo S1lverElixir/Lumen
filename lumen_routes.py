@@ -398,10 +398,10 @@ def _selftest_short_error(exc: BaseException) -> str:
 async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool, str, float]:
     """Одна крошечная проба в голову маршрута (munito/gemini) для /selftest.
 
-    Успех честно пишется в квоту тем же _record_quota_usage, что у настоящих
-    ответов; неуспех квоту не трогает (как в ask_*). Историю чата не трогаем —
-    проба не должна оседать в контексте владельца. Никогда не кидает: неуспех
-    возвращается кортежем (False, причина, секунды)."""
+    Проба сервисная (service=True): квоту НЕ пишет ни при успехе, ни при неуспехе —
+    она не ответ человеку. Историю чата не трогаем — проба не должна оседать в
+    контексте владельца. Никогда не кидает: неуспех возвращается кортежем
+    (False, причина, секунды)."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_payload_extras
     start = time.monotonic()
@@ -917,7 +917,7 @@ def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_a
     if isinstance(exc, bot.RouteBudgetExceededError):
         return bot._lang_t(lang, "err_budget")
     if isinstance(exc, bot.MunitoAPIError):
-        return bot._or_error_msg(exc, "munito", lang)
+        return bot._or_error_msg(exc, lang)
     return bot._gemini_error_msg(exc, head_model, lang)
 
 

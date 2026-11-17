@@ -129,14 +129,14 @@ def test_or_error_msg_rate_limit():
     # а формулировка "резервного провайдера" тоже убрана — с автоматическим
     # роутером OpenRouter часто оказывается ПЕРВЫМ, а не резервным кандидатом.
     exc = _FakeStatusExc("rate limit exceeded", status_code=429)
-    msg = bot._or_error_msg(exc, "text")
+    msg = bot._or_error_msg(exc)
     assert "/provider" not in msg and "резервн" not in msg.lower()
     assert msg == bot._model_error_text("rate_limit")
 
 
 def test_or_error_msg_unavailable():
     exc = _FakeStatusExc("model not found", status_code=404)
-    msg = bot._or_error_msg(exc, "text")
+    msg = bot._or_error_msg(exc)
     assert "/provider" not in msg and "резервн" not in msg.lower()
     assert msg == bot._model_error_text("unavailable")
 

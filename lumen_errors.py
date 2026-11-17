@@ -85,7 +85,7 @@ def _model_error_text(kind: str, lang: str = DEFAULT_LANG) -> str:
     }.get(kind, "model_err_fallback")
     return _lang_t(lang, key)
 
-def _or_error_msg(e: Exception, kind: str, lang: str = DEFAULT_LANG) -> str:
+def _or_error_msg(e: Exception, lang: str = DEFAULT_LANG) -> str:
     # Без сырого текста API: там HTML/JSON и внутренности (то же в _gemini_error_msg).
     txt = _error_text(e).strip() or e.__class__.__name__
     status = _error_status(e, txt)
