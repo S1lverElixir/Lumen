@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import bot
 import lumen_chat_state as lcs
 import lumen_commands
+import lumen_errors
 import lumen_images
 import lumen_model_speed
 import lumen_quotas as lq
@@ -435,3 +436,23 @@ def test_music_cancellation_in_finally_propagates(monkeypatch):
 
     assert asyncio.run(scenario()) is True, "отмена снаружи обязана пройти дальше finally"
     bot.chat_state.pop(998361, None)
+
+
+# ── F-034: законный короткий ответ «None» не считается плейсхолдером ──
+
+
+@pytest.mark.parametrize("text", ["None", "none", "N/A", "n/a"])
+def test_honest_short_answer_is_not_empty_like(text):
+    assert lumen_errors._is_empty_like(text) is False
+
+
+@pytest.mark.parametrize("text", ["Empty response", "no response", "No answer", "   "])
+def test_placeholders_are_still_empty_like(text):
+    assert lumen_errors._is_empty_like(text) is True
+
+
+# ── F-037: 402 важнее слова «quota» в тексте ──
+
+
+def test_402_billing_quota_is_paid_not_rate_limit():
+    assert bot._classify_model_error(402, "billing quota exceeded") == "paid"
