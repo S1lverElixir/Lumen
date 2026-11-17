@@ -1955,13 +1955,24 @@ def parse_ddg_html(page: str, max_results: int = _DEFAULT_MAX_RESULTS) -> list[d
     seen: set[str] = set()
     if not page or _is_ddg_blocked(page):
         return out
+    links = list(_DDG_HTML_LINK_RE.finditer(page))
     snippets = list(_DDG_HTML_SNIPPET_RE.finditer(page))
-    for idx, match in enumerate(list(_DDG_HTML_LINK_RE.finditer(page))[:max_results * 2]):
+    snippet_cursor = 0
+    for idx, match in enumerate(links[:max_results * 2]):
+        # Подпись — ближайший сниппет ПОСЛЕ ссылки и до следующей ссылки. Индекс
+        # ссылок не совпадает с индексом сниппетов, когда у результата подписи
+        # нет: заголовок A получал текст B (ревью 17.11.2026).
+        next_link_start = links[idx + 1].start() if idx + 1 < len(links) else len(page)
+        while snippet_cursor < len(snippets) and snippets[snippet_cursor].start() < match.end():
+            snippet_cursor += 1
+        snippet = ""
+        if snippet_cursor < len(snippets) and snippets[snippet_cursor].start() < next_link_start:
+            snippet = _clean_text(snippets[snippet_cursor].group(1), _SNIPPET_MAX_CHARS)
+            snippet_cursor += 1
         url = _unwrap_ddg_url(match.group(1))
         if not url or url in seen:
             continue
         title = _clean_text(match.group(2), _SNIPPET_MAX_CHARS)
-        snippet = _clean_text(snippets[idx].group(1), _SNIPPET_MAX_CHARS) if idx < len(snippets) else ""
         if not title and not snippet:
             continue
         seen.add(url)

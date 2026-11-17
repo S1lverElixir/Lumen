@@ -1024,3 +1024,18 @@ def test_summary_consumes_from_the_start_and_keeps_leftover(monkeypatch):
     assert "MSG0 " in captured["digest"], "самые старые факты должны попасть в сводку"
     assert state["memory_pending"], "непросуммированный остаток обязан ждать следующего круга"
     assert state["memory_summary"] == "ok-summary"
+
+
+# ── F-111: подпись DDG принадлежит своей ссылке, а не соседней ──
+
+
+def test_ddg_snippet_is_paired_with_its_own_link():
+    import lumen_search
+    page = (
+        '<div><a class="result__a" href="https://a.com/1">Title A</a></div>'
+        '<div><a class="result__a" href="https://b.com/2">Title B</a>'
+        '<a class="result__snippet">Snippet belonging to B</a></div>'
+    )
+    out = lumen_search.parse_ddg_html(page)
+    assert out[0]["snippet"] == "", "у ссылки A подписи нет"
+    assert out[1]["snippet"] == "Snippet belonging to B"
