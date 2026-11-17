@@ -1109,7 +1109,12 @@ def _prune_old_chats() -> None:
         lock = bot._chat_locks.get(cid)
         return lock is not None and lock.locked()
 
-    removable = [cid for cid in sorted_ids if not _is_busy(cid)]
+    # Замороженный чат не вытесняем: его id выпал бы из индекса, а ключ
+    # остался бы сиротой навсегда (адверсариальный проход №2).
+    removable = [cid for cid in sorted_ids
+                 if not _is_busy(cid)
+                 and cid not in _chat_snapshot_unloaded
+                 and not _state_load_failed]
     # Потолок считаем от всего состояния, а не от выборки removable: иначе при
     # плотной загрузке вытеснять было нечего и чаты копились без ограничения
     # (враждебное ревью 27.09.2026). Занятые пропускаем до следующих прогонов.

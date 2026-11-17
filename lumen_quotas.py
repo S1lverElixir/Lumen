@@ -147,13 +147,14 @@ def load_global_quota() -> None:
                         continue
                     try:
                         clean[str(uid)] = {
+                            # OverflowError от Infinity не ловился прежним (TypeError, ValueError).
                             "total": max(0, int(entry.get("total") or 0)),
                             "gemini": max(0, int(entry.get("gemini") or 0)),
                             "tts": max(0, int(entry.get("tts") or 0)),
                             "draw": max(0, int(entry.get("draw") or 0)),
                             "bonus": max(0, int(entry.get("bonus") or 0)),
                         }
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         continue
                 GLOBAL_QUOTA[USER_DAILY_KEY] = clean
             if "quota_day" in loaded:
@@ -165,7 +166,7 @@ def load_global_quota() -> None:
                 for field in _STATS_FIELDS:
                     try:
                         clean_stats[field] = max(0, int(raw_stats.get(field) or 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         clean_stats[field] = 0
                 GLOBAL_QUOTA[STATS_KEY] = clean_stats
             # Владельческая блокировка переживает рестарт тем же файлом/ключом.
@@ -175,12 +176,23 @@ def load_global_quota() -> None:
                 for uid, ts in raw_banned.items():
                     try:
                         clean_banned[str(int(uid))] = max(0, int(ts or 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         continue
                 GLOBAL_QUOTA[lcs.BANNED_KEY] = clean_banned
             raw_ts = loaded.get("last_storage_write_ts")
             if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool) and raw_ts > 0:
                 GLOBAL_QUOTA["last_storage_write_ts"] = float(raw_ts)
+            # Чего в снапшоте нет, того не было и удалённо: живой локальный
+            # остаток здесь — это расход сбоя, его добавит merge.
+            # Без очистки merge складывал локальную копию сама с собой
+            # (адверсариальный проход №2).
+            for provider in _QUOTA_PROVIDERS:
+                if provider not in loaded:
+                    GLOBAL_QUOTA[provider] = {}
+            if USER_DAILY_KEY not in loaded:
+                GLOBAL_QUOTA[USER_DAILY_KEY] = {}
+            if STATS_KEY not in loaded:
+                GLOBAL_QUOTA[STATS_KEY] = {field: 0 for field in _STATS_FIELDS}
         lcs._quota_load_failed = False
     except Exception as exc:
         # Чтение/разбор упали — память недостоверна, перезапись запрещена (см. флаг).
@@ -241,13 +253,26 @@ def _merge_recovered_quota(local: dict[str, Any]) -> None:
         if not isinstance(cur, dict):
             remote_daily[uid] = dict(entry)
             continue
-        for field in ("total", "gemini", "tts", "draw", "bonus"):
+        for field in ("total", "gemini", "tts", "draw"):
             try:
                 # Сумма, а не max: на время сбоя запись в хранилище выключена,
                 # и локальные счётчики — это расход, которого в снапшоте нет.
                 cur[field] = int(cur.get(field) or 0) + int(entry.get(field) or 0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
+        # bonus — дневная доттация, а не расход: складывать её с удалённой
+        # значило бы выдавать лимит дважды (адверсариальный проход №2).
+        try:
+            cur["bonus"] = max(int(cur.get("bonus") or 0), int(entry.get("bonus") or 0))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    remote_stats = GLOBAL_QUOTA.setdefault(STATS_KEY, {field: 0 for field in _STATS_FIELDS})
+    local_stats = local.get(STATS_KEY) or {}
+    for field in _STATS_FIELDS:
+        try:
+            remote_stats[field] = int(remote_stats.get(field) or 0) + int(local_stats.get(field) or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
     for provider in _QUOTA_PROVIDERS:
         local_models = local.get(provider) or {}
         if not isinstance(local_models, dict):
@@ -268,7 +293,7 @@ def _merge_recovered_quota(local: dict[str, Any]) -> None:
                         cur[field] = int(cur.get(field) or 0) + int(entry.get(field) or 0)
                     else:
                         cur[field] = float(cur.get(field) or 0.0) + float(entry.get(field) or 0.0)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     continue
             for field in ("exhausted_at", "cooldown_until"):
                 try:

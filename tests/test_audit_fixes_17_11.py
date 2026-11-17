@@ -44,6 +44,9 @@ def _isolate_global_state():
     lcs._quota_dirty = False
     lcs._pending_chat_deletions.clear()
     lcs._chat_snapshot_unloaded.clear()
+    lcs._index_retry_last_ts = 0.0
+    lcs._index_extra_ids.clear()
+    lcs._deleted_chat_ids.clear()
     lq._quota_retry_last_ts = 0.0
     lumen_model_speed._latency_ema.clear()
 
@@ -293,7 +296,10 @@ def test_quota_recovery_sums_live_counters_and_merges_all_providers(monkeypatch)
     remote = json.dumps({
         "gemini": {"m1": {"used": 1, "exhausted_at": None, "cooldown_until": None}},
         "image": {"cf": {"used": 3, "neurons": 300.0, "exhausted_at": None, "cooldown_until": None}},
-        "user_daily": {"777": {"total": 4, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0}},
+        "user_daily": {
+            "777": {"total": 4, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0},
+            "998332": {"total": 1, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0},
+        },
         "banned_users": {"888": 1}, "quota_day": today,
     })
     bot.GLOBAL_QUOTA.clear()
@@ -312,7 +318,7 @@ def test_quota_recovery_sums_live_counters_and_merges_all_providers(monkeypatch)
     assert ok is True
     assert bot._is_banned(998331) is True, "бан, поставленный во время сбоя, не теряется"
     assert bot._is_banned(888) is True, "удалённый бан остаётся"
-    assert bot._user_daily_peek(998332)["total"] == 2, "локальный расход не теряется"
+    assert bot._user_daily_peek(998332)["total"] == 3, "удалённая единица + две локальные"
     assert bot.GLOBAL_QUOTA["user_daily"]["777"]["total"] == 4
     assert bot.GLOBAL_QUOTA["gemini"]["m1"]["used"] == 2, "расход сбоя суммируется"
     assert bot.GLOBAL_QUOTA["image"]["cf"]["used"] == 10
@@ -593,6 +599,9 @@ def test_loaded_non_finite_cooldown_is_cleared(monkeypatch):
     (400, "invalid model id"),
     (400, "gemini-9 is not a valid model ID"),
     (400, "model_not_found"),
+    (400, "The model `x` has been deprecated"),
+    (400, "model `x` is not found for API version v1beta"),
+    (400, "unsupported model foo"),
 ])
 def test_unavailable_and_invalid_model_still_cool_down(status, text):
     async def boom(payload, deadline):
@@ -706,3 +715,90 @@ def test_run_route_budget_exhausted_before_first_attempt_raises_budget_error(mon
             deadline=_time.monotonic() - 1.0,
         ))
     bot.chat_state.pop(998381, None)
+
+
+# ── F-039/F-181 (проход №2): замороженный чат не вытесняется, ключ не сиротеет ──
+
+
+def test_prune_keeps_frozen_chat_and_does_not_queue_deletion(monkeypatch):
+    _reset_state_flags()
+    lcs.chat_state.clear()
+    lcs.chat_state[998391] = {"last_activity": 0}
+    lcs.chat_state[998392] = {"last_activity": 0}
+    lcs._chat_snapshot_unloaded.add(998391)
+    monkeypatch.setattr(lcs, "PRUNED_CHAT_TARGET", 1)
+    lcs._prune_old_chats()
+    assert 998391 in lcs.chat_state, "замороженный чат вытеснен — id выпадет из индекса"
+    assert 998392 not in lcs.chat_state
+    assert 998391 not in lcs._pending_chat_deletions
+
+
+def test_shutdown_flush_skips_all_deletes_on_load_failure():
+    _reset_state_flags()
+    lcs._state_load_failed = True
+    lcs._pending_chat_deletions.update({998393, 998394})
+    deleted = []
+
+    def fake_delete(cid):
+        deleted.append(cid)
+        return True
+
+    with patch("bot._delete_chat_storage", side_effect=fake_delete):
+        lcs._flush_state_now()
+    assert deleted == []
+    assert {998393, 998394} <= lcs._pending_chat_deletions
+
+
+# ── F-087 (проход №2): отсутствующий в снапшоте ключ не складывается сам с собой ──
+
+
+def test_quota_recovery_does_not_double_count_absent_remote_keys(monkeypatch):
+    today = bot._current_quota_day()
+    remote = json.dumps({
+        "gemini": {}, "user_daily": {}, "banned_users": {},
+        "stats": {"answers_sent": 500}, "quota_day": today,
+    })
+    bot.GLOBAL_QUOTA.clear()
+    bot.GLOBAL_QUOTA.update({
+        "image": {"cf": {"used": 7, "neurons": 700.0, "exhausted_at": None, "cooldown_until": None}},
+        "stats": {"answers_sent": 3},
+        "quota_day": today,
+    })
+    lcs._quota_load_failed = True
+    lq._quota_retry_last_ts = -1e9
+    monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: remote)
+    assert lq.recover_global_quota() is True
+    assert bot.GLOBAL_QUOTA["image"]["cf"]["used"] == 7, "локальная копия сложилась сама с собой"
+    assert bot.GLOBAL_QUOTA["image"]["cf"]["neurons"] == 700.0
+    assert bot.GLOBAL_QUOTA["stats"]["answers_sent"] == 503
+
+
+def test_quota_load_survives_infinity_in_user_stats_and_bans(monkeypatch):
+    raw = json.dumps({
+        "user_daily": {"1": {"total": float("inf")}},
+        "stats": {"answers_sent": float("inf"), "model_attempts": 5},
+        "banned_users": {"2": float("inf")},
+        "quota_day": bot._current_quota_day(),
+    })
+    lcs._quota_load_failed = True
+    monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: raw)
+    lq.load_global_quota()
+    assert lcs._quota_load_failed is False, "OverflowError не должен ронять всю загрузку"
+    assert bot.GLOBAL_QUOTA["stats"]["model_attempts"] == 5
+
+
+# ── F-033 (проход №2): ошибка запроса на 400 не остывает ──
+
+
+def test_request_specific_400_does_not_cool_the_model():
+    async def boom(payload, deadline):
+        raise bot.MunitoAPIError("HTTP 400 File abc does not exist", status_code=400)
+
+    model = "probe/file-missing"
+    with pytest.raises(bot.MunitoAPIError):
+        asyncio.run(lumen_routes._chat_completion_chain(
+            [{"role": "system", "content": ""}, {"role": "user", "content": "hi"}],
+            [model], model, request_fn=boom, provider="munito",
+        ))
+    entry = bot.GLOBAL_QUOTA.get("munito", {}).get(model) or {}
+    assert entry.get("cooldown_until") is None

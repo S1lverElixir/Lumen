@@ -148,6 +148,16 @@ def _is_gemini_daily_quota(text: str) -> bool:
         "per day", "per_day", "perday", "daily limit", "daily quota", "quota exceeded for the day",
     ))
 
+# Отказ имени/версии модели в тексте 400: «invalid model», «does not exist»,
+# «not found for API version», «deprecated», «unsupported model».
+_MODEL_MISSING_RE = re.compile(
+    r"(?:invalid|unknown|no such|unsupported|deprecated|not a valid)\s+model"
+    r"|model(?:\.?[^\n.]{0,60})(?:not valid|invalid|does not exist|not found|deprecated|unsupported)"
+    r"|model_not_found",
+    re.IGNORECASE,
+)
+
+
 def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> bool:
     """Отказ "модель недоступна" (503/404/invalid model) → короткая остывка, как на 429.
 
@@ -166,11 +176,12 @@ def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> boo
             return False
         # 400 — детерминированная ошибка одного запроса (слишком большая картинка),
         # а не недоступность модели: остывка выключала голову для всех (ревью 17.11.2026).
-        if status == 400 and not any(tok in txt.lower() for tok in (
-            "invalid model", "not a valid model", "does not exist",
-            "model_not_found", "unknown model", "no such model", "model not found",
-        )):
-            return False
+        if status == 400:
+            # Только отказ про МОДЕЛЬ: «File ... does not exist» и «Requested
+            # entity does not exist» — ошибка запроса и остывки не заслуживают
+            # (адверсариальный проход №2).
+            if not _MODEL_MISSING_RE.search(txt):
+                return False
         bot._mark_rate_limited(provider, model_id)
         return True
     except Exception:
