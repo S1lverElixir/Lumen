@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 from typing import Any
 import urllib.request as _urllib_request
+from urllib.parse import urlsplit
 
 import aiohttp
 import sentry_sdk
@@ -327,6 +328,92 @@ TIKWM_API_BASE_URL = os.getenv("TIKWM_API_BASE_URL", "").strip().rstrip("/")
 _TIKWM_API_BASE_URL_FALLBACKS = [
     u.strip().rstrip("/") for u in os.getenv("TIKWM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
 ]
+
+# Релеи с жёстким лимитом тела (Vercel Hobby — 4,5 МБ) не годятся для отправки
+# медиа. Список хостов задаётся в env; голова aiogram-сессии выбирается только
+# из «больших» релеев, иначе видео/аудио гарантированно падают (прод 17.11.2026).
+_SMALL_BODY_PROXY_HOSTS = {
+    h.strip().lower() for h in os.getenv("TELEGRAM_API_SMALL_BODY_HOSTS", "").split(",") if h.strip()
+}
+
+
+def _proxy_host(base_url: str) -> str:
+    try:
+        return (urlsplit(base_url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _pick_media_candidate(
+    candidates: list[str], healthy: dict[str, bool], small_hosts: set[str] | None = None,
+) -> str | None:
+    """Первая здоровая база, не помеченная «маленькой»; если таких нет — первая
+    здоровая. Чистая функция: выбор проверяется тестами без сети."""
+    small = _SMALL_BODY_PROXY_HOSTS if small_hosts is None else small_hosts
+    for base in candidates:
+        if healthy.get(base) and _proxy_host(base) not in small:
+            return base
+    for base in candidates:
+        if healthy.get(base):
+            return base
+    return None
+
+
+async def _probe_telegram_base(base_url: str, timeout_sec: float = 5.0) -> bool:
+    """getMe через релей: 200=живой, всё остальное — нет. Секрет в заголовке,
+    токен не логируется (в URL он есть, поэтому в логах только хост)."""
+    if not base_url or base_url == "https://api.telegram.org":
+        return True
+    url = f"{base_url}/bot{BOT_TOKEN}/getMe"
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=timeout_sec),
+        ) as probe:
+            async with probe.get(url, headers={PROXY_AUTH_HEADER: LUMEN_PROXY_SECRET}) as resp:
+                return resp.status == 200
+    except Exception:
+        return False
+
+
+async def _choose_telegram_media_base() -> str | None:
+    """Проверяет релеи параллельно и возвращает голову для aiogram-сессии."""
+    candidates = list(_TELEGRAM_PROXY_CANDIDATES)
+    checks = await asyncio.gather(*(_probe_telegram_base(u) for u in candidates))
+    healthy = dict(zip(candidates, checks))
+    for base, ok in healthy.items():
+        log.info("[telegram] Relay probe %s: %s", _proxy_host(base) or base, "ok" if ok else "down")
+    return _pick_media_candidate(candidates, healthy)
+
+
+_media_base_url = TELEGRAM_API_BASE_URL
+_media_probe_failures = 0
+
+
+async def _telegram_media_relay_watchdog() -> None:
+    """Раз в минуту проверяет текущую базу медиа и переключает aiogram-сессию на
+    здоровый «большой» релей. Прямой api.telegram.org не трогаем."""
+    global _media_base_url, _media_probe_failures
+    while True:
+        await asyncio.sleep(60)
+        if _media_base_url in ("", "https://api.telegram.org"):
+            return
+        if await _probe_telegram_base(_media_base_url):
+            _media_probe_failures = 0
+            continue
+        _media_probe_failures += 1
+        if _media_probe_failures < 2:
+            continue
+        chosen = await _choose_telegram_media_base()
+        _media_probe_failures = 0
+        if chosen and chosen != _media_base_url:
+            _media_base_url = chosen
+            if bot is not None and getattr(bot, "session", None) is not None:
+                with contextlib.suppress(Exception):
+                    bot.session.api = TelegramAPIServer.from_base(chosen)
+            log.warning("[telegram] Media relay switched to %s", _proxy_host(chosen) or "direct")
+        elif not chosen:
+            log.error("[telegram] No healthy media relay found; keeping %s", _proxy_host(_media_base_url))
+
 
 def _tikwm_proxy_candidates() -> list[str]:
     """Список прокси-адресов для TikWM в порядке попытки: основной + резервные
@@ -781,6 +868,7 @@ _chat_locks: dict[int, asyncio.Lock] = {}
 
 # Транспорт — в lumen_transport_calls.py.
 from lumen_telegram_transport import (
+    PROXY_AUTH_HEADER,
     _TelegramProxyCircuitBreaker,
     IPv4AiohttpSession,
 )
@@ -1949,13 +2037,17 @@ def _capture_signals_gracefully(server: Any):
 
 
 async def main() -> None:
-    global bot, client, _state_ready
+    global bot, client, _state_ready, _media_base_url
 
     _require_bot_token()
 
-    # Сессия с принудительным IPv4 и таймаутами под HF Space.
-    if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
-        api_server = TelegramAPIServer.from_base(TELEGRAM_API_BASE_URL)
+    global _media_base_url
+    # Сессия с принудительным IPv4 и таймаутами под HF Space. Голова aiogram —
+    # только здоровый релей без лимита тела (иначе видео падает на 4,5 МБ).
+    _media_base_url = await _choose_telegram_media_base() or TELEGRAM_API_BASE_URL
+    log.info("[telegram] Media relay in use: %s", _proxy_host(_media_base_url) or "direct")
+    if _media_base_url != "https://api.telegram.org":
+        api_server = TelegramAPIServer.from_base(_media_base_url)
         sess = IPv4AiohttpSession(
             api=api_server,
             proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
@@ -1975,6 +2067,7 @@ async def main() -> None:
     _state_ready = False
     startup_task = asyncio.create_task(_webhook_startup(), name="webhook_startup")
     flush_task = asyncio.create_task(_flush_dirty_state(), name="state_flush")
+    media_watchdog = asyncio.create_task(_telegram_media_relay_watchdog(), name="media_relay_watchdog")
     srv_config = uvicorn.Config(
         # log_level=None: uvicorn с любым уровнем сам выставляет uvicorn.access
         # обратно в INFO и перебивает глушение в _setup_logging — health-check
@@ -2016,10 +2109,13 @@ async def main() -> None:
     finally:
         startup_task.cancel()
         flush_task.cancel()
+        media_watchdog.cancel()
         with contextlib.suppress(asyncio.CancelledError):
              await startup_task
         with contextlib.suppress(asyncio.CancelledError):
              await flush_task
+        with contextlib.suppress(asyncio.CancelledError):
+             await media_watchdog
         # Незавершённым апдейтам — шанс закончиться ДО сброса состояния/закрытия сессий (иначе правки chat_state терялись, сеть рвалась — LUMEN-2).
         await _drain_inflight_tasks()
         # Финальный синхронный сброс — не ждём следующего тика периодического
