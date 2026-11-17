@@ -166,7 +166,10 @@ def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> boo
             return False
         # 400 — детерминированная ошибка одного запроса (слишком большая картинка),
         # а не недоступность модели: остывка выключала голову для всех (ревью 17.11.2026).
-        if status == 400 and "invalid model" not in txt.lower():
+        if status == 400 and not any(tok in txt.lower() for tok in (
+            "invalid model", "not a valid model", "does not exist",
+            "model_not_found", "unknown model", "no such model", "model not found",
+        )):
             return False
         bot._mark_rate_limited(provider, model_id)
         return True
@@ -913,14 +916,22 @@ class RouteBudgetExceededError(RuntimeError):
         super().__init__(f"Route time budget exhausted. Tried: {', '.join(tried) or 'none'}")
 
 
-def _reorder_route_by_speed(route: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Порядок по замеренной скорости внутри одинаковых возможностей модели:
-    перестановка через границу search grounding ставила в голову свежего маршрута
-    модель без живого поиска (ревью 17.11.2026)."""
+def _reorder_route_by_speed(
+    route: list[tuple[str, str]], *, preserve_grounded_head: bool = False,
+) -> list[tuple[str, str]]:
+    """Порядок по замеренной скорости. На свежем маршруте границу search grounding
+    не переступаем: иначе в голове модель без живого поиска (ревью 17.11.2026).
+    На обычном маршруте пин головы не нужен — там сортировка и создана, чтобы
+    убрать медленную модель (прод 17.09.2026), и адверсариальный проход показал,
+    что общий пин замораживал медленную голову тяжёлой цепочки."""
+    if not preserve_grounded_head:
+        return _speed_reorder_route(route)
+
     def _capability(item: tuple[str, str]) -> bool:
         provider, model_id = item
         if provider == "gemini":
-            return bool(GEMINI_MODELS.get(model_id, {}).get("search_grounding", True))
+            # Неизвестная конфигурация — не повод ставить её вперёд головы.
+            return bool(GEMINI_MODELS.get(model_id, {}).get("search_grounding", False))
         return True
     return _speed_reorder_route(route, group_key=_capability)
 
@@ -934,6 +945,7 @@ async def _run_route(
     deadline: float | None = None, provenance: dict | None = None,
     status: Any | None = None, history_text: str | None = None,
     history_meta: dict[str, Any] | None = None, effort: str | None = None,
+    preserve_grounded_head: bool = False,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
@@ -946,7 +958,7 @@ async def _run_route(
     if history_text is None:
         history_text = ai_prompt
     # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
-    route = _reorder_route_by_speed(route)
+    route = _reorder_route_by_speed(route, preserve_grounded_head=preserve_grounded_head)
     if deadline is None:
         # Снаружи дедлайн приходит с транскрибацией: она уже потратила часть бюджета.
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC

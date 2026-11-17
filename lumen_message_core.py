@@ -1605,6 +1605,7 @@ async def _handle_message_core(
                 youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
                 deadline=route_deadline, provenance=provenance, status=status,
                 history_text=history_text, history_meta=history_meta, effort=effort,
+                preserve_grounded_head=needs_freshness,
             )
             answered_grounded = answered_with_live_search(provenance)
         except _SearchRequested as req:
@@ -1691,6 +1692,7 @@ async def _handle_message_core(
                     youtube_url=youtube_url_to_analyze, allow_stream=not is_guest,
                     deadline=route_deadline, provenance=provenance, status=status,
                     history_text=history_text, history_meta=history_meta, effort=effort,
+                    preserve_grounded_head=needs_freshness,
                 )
                 answered_grounded = answered_with_live_search(provenance)
             except _SearchRequested:
@@ -1734,6 +1736,7 @@ async def _handle_message_core(
                         youtube_url=youtube_url_to_analyze, allow_stream=False,
                         deadline=route_deadline, provenance=provenance,
                         history_text=history_text, history_meta=history_meta, effort=effort,
+                        preserve_grounded_head=needs_freshness,
                     )
                     # Ретрай уже с найденными сниппетами: пометка «без поиска»
                     # была бы ложью (аудит 28.10.2026).
@@ -1768,6 +1771,7 @@ async def _handle_message_core(
                         allow_stream=True, deadline=route_deadline,
                         provenance=provenance, history_text=continued_prompt,
                         history_meta=history_meta, effort=effort,
+                        preserve_grounded_head=needs_freshness,
                     )
                     web_search_failed = False
                 except Exception as exc:

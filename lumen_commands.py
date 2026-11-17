@@ -1265,6 +1265,8 @@ async def inline_tts(message: Message, text: str) -> None:
             await status_obj.stop()
         raise
     except Exception as exc:
+        # Возврат до любых await: отмена на правке статуса иначе съедала резерв.
+        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         log.exception("TTS synthesis failed:")
         # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
@@ -1279,29 +1281,37 @@ async def inline_tts(message: Message, text: str) -> None:
             await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
-        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         return
-    if status_obj is not None:
-        await status_obj.delete()
-    else:
-        await bot._delete_message_quietly(status)
-    for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
-        # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
-        # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.
-        sent = await bot._tg_call(
-            bot.bot.send_voice,
-            chat_id=message.chat.id,
-            voice=BufferedInputFile(final_audio, filename=final_filename),
-            duration=voice_duration if voice_duration > 0 else None,
-            reply_to_message_id=message.message_id if i == 0 else None,
-            call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
-        )
-        if sent is None:
-            # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
-            bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
-            # Не оставляем пользователя без сообщения: статус уже удалён.
-            await bot._safe_reply(message, bot._t(message.chat.id, "tts_err_generic"))
-            return
+    sent_count = 0
+    try:
+        if status_obj is not None:
+            await status_obj.delete()
+        else:
+            await bot._delete_message_quietly(status)
+        for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
+            # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
+            # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.
+            sent = await bot._tg_call(
+                bot.bot.send_voice,
+                chat_id=message.chat.id,
+                voice=BufferedInputFile(final_audio, filename=final_filename),
+                duration=voice_duration if voice_duration > 0 else None,
+                reply_to_message_id=message.message_id if i == 0 else None,
+                call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+            )
+            sent_count += 1
+            if sent is None:
+                # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
+                bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
+                # Не оставляем пользователя без сообщения: статус уже удалён.
+                await bot._safe_reply(message, bot._t(message.chat.id, "tts_err_generic"))
+                return
+    except asyncio.CancelledError:
+        # Отмена в цикле отправки: уже отданные чанки списаны, остальные — нет.
+        remaining = len(voices) - sent_count
+        if remaining > 0:
+            bot._refund_user_daily(uid, total=remaining, tts=remaining)
+        raise
     unsent = len(chunks) - len(voices)
     if unsent > 0:
         # Обрезка по общему дедлайну: за несозданные чанки не списываем.

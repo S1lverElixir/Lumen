@@ -469,7 +469,9 @@ async def _try_send_tiktok_slideshow(
               # Слайды-видео честно отдаёт обычная видео-ветка, но только если play
               # действительно видео: у фото-поста play — аудио, и по live_images.mp4
               # оно уезжало как видео (регрессия 16.11.2026, ревью 17.11.2026).
-              play_url = str(media_data.get("play") or media_data.get("hdplay") or "")
+              play_url = str(
+                   media_data.get("play") or media_data.get("hdplay")
+                   or media_data.get("wmplay") or "")
               if play_url.lower().split("?")[0].endswith((".mp4", ".m4v", ".webm")):
                    return False
               raise TikTokUserFacingError(bot._t(message.chat.id, "tiktok_generic_fail"))
