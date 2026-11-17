@@ -67,19 +67,37 @@ def first_chunk_limit_sec(key: str, floor_sec: float) -> float:
     return max(floor_sec, expected_ttf_sec(key) * _TTF_ABANDON_MULT)
 
 
-def reorder_route(route: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def reorder_route(
+    route: list[tuple[str, str]], group_key=None,
+) -> list[tuple[str, str]]:
     """Переставить модели по задержкам внутри подряд идущего блока одного провайдера.
 
     Склейка блоков по провайдеру уводила резервную Gemini-цепочку вперёд Groq
     (аудит 27.10.2026); порядок блоков — часть защиты квот, поэтому не трогаем его.
-    """
+    group_key задаёт границу возможностей: сортировка не переставляет модель
+    через неё (без search grounding голова свежего маршрута не отвечает поиском,
+    ревью 17.11.2026)."""
+    def _sort_key(item: tuple[str, str]) -> float:
+        return expected_total_sec(speed_key(item[0], item[1]))
+
     ordered: list[tuple[str, str]] = []
     run: list[tuple[str, str]] = []
+
+    def _emit(items: list[tuple[str, str]]) -> None:
+        segment: list[tuple[str, str]] = []
+        for item in items:
+            if group_key is not None and segment and group_key(item) != group_key(segment[-1]):
+                ordered.extend(sorted(segment, key=_sort_key))
+                segment = []
+            segment.append(item)
+        if segment:
+            ordered.extend(sorted(segment, key=_sort_key))
+
     for item in route:
         if run and item[0] != run[-1][0]:
-            ordered.extend(sorted(run, key=lambda i: expected_total_sec(speed_key(i[0], i[1]))))
+            _emit(run)
             run = []
         run.append(item)
     if run:
-        ordered.extend(sorted(run, key=lambda i: expected_total_sec(speed_key(i[0], i[1]))))
+        _emit(run)
     return ordered

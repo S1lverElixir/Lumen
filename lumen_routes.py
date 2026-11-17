@@ -27,7 +27,7 @@ import lumen_memory
 from lumen_model_speed import (
     speed_key as _model_speed_key,
     record_response as _record_model_latency,
-    reorder_route as _reorder_route_by_speed,
+    reorder_route as _speed_reorder_route,
 )
 from lumen_router_config import (
     GEMINI_MODELS,
@@ -161,7 +161,12 @@ def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> boo
     import bot
     try:
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
-        if bot._classify_model_error(bot._error_status(exc, txt), txt) != "unavailable":
+        status = bot._error_status(exc, txt)
+        if bot._classify_model_error(status, txt) != "unavailable":
+            return False
+        # 400 — детерминированная ошибка одного запроса (слишком большая картинка),
+        # а не недоступность модели: остывка выключала голову для всех (ревью 17.11.2026).
+        if status == 400 and "invalid model" not in txt.lower():
             return False
         bot._mark_rate_limited(provider, model_id)
         return True
@@ -215,7 +220,13 @@ async def _chat_completion_chain(
             raise bot.RouteBudgetExceededError(tried)
         tried.append(model_trial)
         bot._record_stats_event("model_attempts")
-        messages[0]["content"] = bot.get_system_prompt(model_trial)
+        system_text = bot.get_system_prompt(model_trial)
+        if chat_id is not None:
+            # Билдер уже вкладывает память; перезапись голым промптом теряла её
+            # на каждой попытке нестримового Munito (ревью 17.11.2026).
+            system_text = lumen_memory.system_prompt_with_memory(
+                system_text, bot.get_state(chat_id))
+        messages[0]["content"] = system_text
         attempt_start = time.monotonic()
         try:
             extras = extra_payload_fn(model_trial) if extra_payload_fn else (extra_payload or {})
@@ -900,6 +911,18 @@ class RouteBudgetExceededError(RuntimeError):
     def __init__(self, tried: list[str]) -> None:
         self.tried = tried
         super().__init__(f"Route time budget exhausted. Tried: {', '.join(tried) or 'none'}")
+
+
+def _reorder_route_by_speed(route: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Порядок по замеренной скорости внутри одинаковых возможностей модели:
+    перестановка через границу search grounding ставила в голову свежего маршрута
+    модель без живого поиска (ревью 17.11.2026)."""
+    def _capability(item: tuple[str, str]) -> bool:
+        provider, model_id = item
+        if provider == "gemini":
+            return bool(GEMINI_MODELS.get(model_id, {}).get("search_grounding", True))
+        return True
+    return _speed_reorder_route(route, group_key=_capability)
 
 
 # Маршрутизация вынесена в lumen_router_config.py — порядок имён для остального кода не менялся.
