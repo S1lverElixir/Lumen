@@ -676,7 +676,8 @@ async def ask_gemini(
              if _is_gemini_supported_mime(mime):
                  extra_parts.append(types.Part.from_bytes(data=b, mime_type=mime))
              else:
-                 raise bot.UserFacingInputError(f"Тип вложения '{_user_mime_label(mime)}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
+                 raise bot.UserFacingInputError(bot._t(
+                     chat_id, "err_unsupported_attachment", mime=_user_mime_label(mime)))
     if youtube_url:
           # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))

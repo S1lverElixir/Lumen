@@ -477,6 +477,7 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     skipped = 0
     too_big = 0
     extra_bytes = 0
+    kept_sources: list = []
     for (fid, mime, src), fetched in zip(targets, fetched_list):
         if isinstance(fetched, bot._MediaTooLargeError):
             too_big += 1
@@ -489,6 +490,7 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
             continue
         extra_bytes += len(fetched[0])
         extra_media.append(fetched)
+        kept_sources.append(src)
         # Файлы альбома — в recent_media_ids, иначе последующие вопросы их не найдут.
         bot._save_media_to_history(src, album_state, album_user_id)
     if skipped:
@@ -497,11 +499,17 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     if too_big:
         # Большие отклонены капом: честный отказ пользователю — из _handle_message_core.
         log.warning("[album] Skipped %d of %d files: over the download size cap.", too_big, len(targets))
+    if skipped or too_big:
+        # Честная пометка: анализ идёт по части альбома (ревью 17.11.2026).
+        with contextlib.suppress(Exception):
+            await bot._safe_reply(main_msg, bot._t(main_msg.chat.id, "album_partial"))
     # Рейт-лимит уже списан в _process_media_group_buffers_locked: второй раз
     # альбом не должен занимать слот (аудит 28.10.2026).
     await bot._handle_message_core(
         main_msg, extra_media=extra_media or None, skip_rate_limit=True,
-        extra_media_sources=[src for _, _, src in targets],
+        # Только скачанные слайды: история не должна ссылаться на медиа,
+        # которого модель не видела (ревью 17.11.2026).
+        extra_media_sources=kept_sources or None,
     )
 
 
