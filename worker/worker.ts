@@ -330,7 +330,9 @@ export async function handleRequest(
   const respHeaders = buildResponseHeaders(upstreamResp.headers);
   const cappedBody = req.method === "HEAD"
     ? null
-    : warnOnTruncation(upstreamResp.body, maxBodyBytes, new URL(target.url).host);
+    // close — как у Deno-релея: ответ сверх капа обрезается, а не рвётся
+    // ошибкой (ревью 17.11.2026, паритет контрактов).
+    : warnOnTruncation(upstreamResp.body, maxBodyBytes, new URL(target.url).host, "close");
   return new Response(cappedBody, { status: upstreamResp.status, headers: respHeaders });
 }
 

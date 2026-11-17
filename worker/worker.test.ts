@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildForwardHeaders,
+  buildResponseHeaders,
   handleRequest,
   isPrivateAddress,
   PROXY_AUTH_HEADER,
@@ -75,4 +76,149 @@ test("truncation closes the stream in close mode without an error", async () => 
   const capped = warnOnTruncation(stream, 6, "example.com", "close");
   const text = await new Response(capped).text();
   assert.equal(text, "abcdef");
+});
+
+// ── Паритет с Deno-релеем (ревью 17.11.2026): контракт один и тот же. ──
+
+test("buildResponseHeaders drops content-encoding and length, keeps the rest", () => {
+  const headers = buildResponseHeaders(new Headers({
+    "content-encoding": "gzip", "content-length": "5", "x-keep": "1",
+  }));
+  assert.equal(headers.has("content-encoding"), false);
+  assert.equal(headers.has("content-length"), false);
+  assert.equal(headers.get("x-keep"), "1");
+});
+
+test("secret is checked before routing: 401 wins over 403 and 404", async () => {
+  let called = 0;
+  const fakeFetch = (async () => {
+    called += 1;
+    return new Response("ok");
+  }) as typeof fetch;
+  const forbidden = await handleRequest(new Request("https://proxy/fetch/evil.example/x"), fakeFetch, SECRET);
+  assert.equal(forbidden.status, 401);
+  const missingRoute = await handleRequest(new Request("https://proxy/nope"), fakeFetch, SECRET);
+  assert.equal(missingRoute.status, 401);
+  assert.equal(called, 0);
+});
+
+test("upstream 3xx is refused as 502 instead of followed", async () => {
+  const fakeFetch = (async () => new Response("", { status: 302, headers: { location: "https://evil.example/" } })) as typeof fetch;
+  const resp = await handleRequest(
+    new Request("https://proxy/fetch/api.telegram.org/bot1/getMe", { headers: { [PROXY_AUTH_HEADER]: SECRET } }),
+    fakeFetch, SECRET,
+  );
+  assert.equal(resp.status, 502);
+});
+
+test("HEAD returns an empty body and keeps the upstream status", async () => {
+  const fakeFetch = (async () => new Response("payload", { status: 200 })) as typeof fetch;
+  const resp = await handleRequest(
+    new Request("https://proxy/fetch/api.telegram.org/bot1/getMe", { method: "HEAD", headers: { [PROXY_AUTH_HEADER]: SECRET } }),
+    fakeFetch, SECRET,
+  );
+  assert.equal(resp.status, 200);
+  assert.equal(await resp.text(), "");
+});
+
+test("declared oversized body is 413 before any fetch", async () => {
+  let called = 0;
+  const fakeFetch = (async () => {
+    called += 1;
+    return new Response("ok");
+  }) as typeof fetch;
+  const resp = await handleRequest(
+    new Request("https://proxy/fetch/api.telegram.org/bot1/sendMessage", {
+      method: "POST", headers: { [PROXY_AUTH_HEADER]: SECRET, "content-length": "100" }, body: "x",
+    }),
+    fakeFetch, SECRET, 10,
+  );
+  assert.equal(resp.status, 413);
+  assert.equal(called, 0);
+});
+
+test("chunked oversized request body is 413", async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("1234567890"));
+      controller.close();
+    },
+  });
+  const fakeFetch = (async (_url: string, init: RequestInit) => {
+    const reader = (init.body as ReadableStream<Uint8Array>).getReader();
+    while (true) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+    return new Response("ok");
+  }) as typeof fetch;
+  const req = new Request("https://proxy/fetch/api.telegram.org/bot1/sendMessage", {
+    method: "POST", headers: { [PROXY_AUTH_HEADER]: SECRET }, body: stream, duplex: "half",
+  } as RequestInit);
+  const resp = await handleRequest(req, fakeFetch, SECRET, 4);
+  assert.equal(resp.status, 413);
+});
+
+test("upstream timeout is 504", async () => {
+  const fakeFetch = (async () => {
+    throw new DOMException("timed out", "TimeoutError");
+  }) as unknown as typeof fetch;
+  const resp = await handleRequest(
+    new Request("https://proxy/fetch/api.telegram.org/bot1/getMe", { headers: { [PROXY_AUTH_HEADER]: SECRET } }),
+    fakeFetch, SECRET,
+  );
+  assert.equal(resp.status, 504);
+});
+
+test("response body over the cap is truncated in close mode", async () => {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      // Кап режет по границам чанков, как Deno-релей: первый чанк ровно 4.
+      controller.enqueue(new TextEncoder().encode("abcd"));
+      controller.enqueue(new TextEncoder().encode("efgh"));
+      controller.close();
+    },
+  });
+  const fakeFetch = (async () => new Response(stream, { status: 200 })) as typeof fetch;
+  const resp = await handleRequest(
+    new Request("https://proxy/fetch/api.telegram.org/bot1/getMe", { headers: { [PROXY_AUTH_HEADER]: SECRET } }),
+    fakeFetch, SECRET, 4,
+  );
+  assert.equal(await resp.text(), "abcd");
+});
+
+test("read route: method, content type, status and redirect are enforced", async () => {
+  const publicDns = async () => ["93.184.216.34"];
+  const makeReq = (method = "GET") => new Request("https://proxy/read?url=https://example.com/", {
+    method, headers: { [PROXY_AUTH_HEADER]: SECRET },
+  });
+  const html = (async () => new Response("<html>ok</html>", { status: 200, headers: { "content-type": "text/html" } })) as typeof fetch;
+  assert.equal((await handleRequest(makeReq("POST"), html, SECRET, undefined, publicDns)).status, 405);
+
+  const pdf = (async () => new Response("%PDF", { status: 200, headers: { "content-type": "application/pdf" } })) as typeof fetch;
+  assert.equal((await handleRequest(makeReq(), pdf, SECRET, undefined, publicDns)).status, 415);
+
+  const boom = (async () => new Response("err", { status: 500, headers: { "content-type": "text/html" } })) as typeof fetch;
+  assert.equal((await handleRequest(makeReq(), boom, SECRET, undefined, publicDns)).status, 502);
+
+  const redirect = (async () => new Response("", { status: 302, headers: { "content-type": "text/html", location: "https://evil.example/" } })) as typeof fetch;
+  assert.equal((await handleRequest(makeReq(), redirect, SECRET, undefined, publicDns)).status, 502);
+
+  const ok = await handleRequest(makeReq(), html, SECRET, undefined, publicDns);
+  assert.equal(ok.status, 200);
+  assert.equal(await ok.text(), "<html>ok</html>");
+});
+
+test("full and mapped IPv6 forms are private", () => {
+  for (const ip of [
+    "0000:0000:0000:0000:0000:0000:0000:0001",
+    "0000:0000:0000:0000:0000:ffff:7f00:0001",
+    "feff::1",
+    "fed0::1",
+    "2001::1",
+    "2606:4700:4700::1111",
+  ]) {
+    const expected = ip !== "2606:4700:4700::1111";
+    assert.equal(isPrivateAddress(ip), expected, ip);
+  }
 });
