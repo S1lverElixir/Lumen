@@ -1229,9 +1229,15 @@ async def inline_tts(message: Message, text: str) -> None:
             return
         return
     from lumen_status import StatusMessage
-    status_obj = await StatusMessage.start_action(
-        message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_voicing"),
-    )
+    try:
+        status_obj = await StatusMessage.start_action(
+            message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_voicing"),
+        )
+    except asyncio.CancelledError:
+        # Резерв уже списан: отмена на пузыре статуса не должна стоить слотов
+        # до полуночи за неполученную озвучку (ревью 17.11.2026).
+        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
+        raise
     status = status_obj.message if status_obj is not None else None
     # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
     deadline = time.monotonic() + bot.TTS_TOTAL_BUDGET_SEC
@@ -1253,6 +1259,8 @@ async def inline_tts(message: Message, text: str) -> None:
             # Даже первый кусок не уложился — честная ошибка, а не пустота.
             raise RuntimeError("TTS total budget exceeded before the first chunk")
     except asyncio.CancelledError:
+        # Возврат до stop(): отменённая задача не доходит до следующего await.
+        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         if status_obj is not None:
             await status_obj.stop()
         raise
