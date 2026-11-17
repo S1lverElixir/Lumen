@@ -293,10 +293,16 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          log.warning("[tiktok] failed to send music: %s", e)
     finally:
          # Ранний выход/исключение не должны оставлять DSP-запрос в фоне.
-         with contextlib.suppress(asyncio.CancelledError, Exception):
+         with contextlib.suppress(Exception):
               if not dsp_task.done():
                    dsp_task.cancel()
+         try:
               await dsp_task
+         except asyncio.CancelledError:
+              # Своя отмена (дедлайн сообщения) обязана пройти дальше: suppress
+              # глушил её и обработчик дорабатывал сверх бюджета (ревью 17.11.2026).
+              if asyncio.current_task().cancelling():
+                   raise
 
 async def handle_tiktok_sound(message: Message, status: Message | None) -> None:
     """Ссылка на страницу звука TikTok (не видео) — см. комментарий выше по файлу:
@@ -460,10 +466,13 @@ async def _try_send_tiktok_slideshow(
               else:
                    media_items.append(InputMediaPhoto(media=BufferedInputFile(item_bytes, filename=f"photo_{idx}.jpg")))
          if not media_items:
-              # У фото-поста play — аудиодорожка: ветка видео скачала бы её как
-              # mp4 и выдала за видео (внешний аудит 16.11.2026). Но если слайды
-              # сами видеофайлы, честнее упасть в обычную видео-ветку.
-              if any(str(u).lower().split("?")[0].endswith((".mp4", ".m4v", ".webm")) for u in fetch_urls):
+              # Слайды-видео честно отдаёт обычная видео-ветка, но только если play
+              # действительно видео: у фото-поста play — аудио, и по live_images.mp4
+              # оно уезжало как видео (регрессия 16.11.2026, ревью 17.11.2026).
+              play_url = str(
+                   media_data.get("play") or media_data.get("hdplay")
+                   or media_data.get("wmplay") or "")
+              if play_url.lower().split("?")[0].endswith((".mp4", ".m4v", ".webm")):
                    return False
               raise TikTokUserFacingError(bot._t(message.chat.id, "tiktok_generic_fail"))
          if media_items:

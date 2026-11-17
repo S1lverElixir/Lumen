@@ -230,12 +230,14 @@ async def get_telegram_session(
     через env конфигурации bot.py, а не константа этого модуля."""
     global _telegram_session, _telegram_session_auth
     auth = (proxy_secret, tuple(proxy_base_urls))
-    middlewares = proxy_auth_middlewares(
-        proxy_secret=proxy_secret, proxy_base_urls=auth[1],
-    )
     if _telegram_session is not None and not _telegram_session.closed and _telegram_session_auth != auth:
         await _telegram_session.close()
     if _telegram_session is None or _telegram_session.closed:
+        # Собираем только при создании: при переиспользовании кэша это была
+        # лишняя работа на каждый вызов (ревью 17.11.2026).
+        middlewares = proxy_auth_middlewares(
+            proxy_secret=proxy_secret, proxy_base_urls=auth[1],
+        )
         _telegram_session = aiohttp.ClientSession(
             connector=_build_telegram_connector(limit=10),
             timeout=aiohttp.ClientTimeout(total=request_timeout + 10.0, connect=10.0),

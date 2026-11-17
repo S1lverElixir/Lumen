@@ -109,10 +109,13 @@ def read_page_calls_today() -> int:
     return _READ_CALLS
 
 
-def note_read_page_call() -> None:
+def note_read_page_call(*, count_user: bool = True, count_global: bool = True) -> None:
     _roll_day()
     global _READ_CALLS
-    _READ_CALLS += 1
+    if count_global:
+        _READ_CALLS += 1
+    if not count_user:
+        return
     key = _user_key()
     if key:
         _USER_READS[key] = _USER_READS.get(key, 0) + 1
@@ -340,7 +343,13 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
     if not origin or not secret:
         # Прокси не настроен (локальный запуск): чтение недоступно, сниппеты работают.
         return None
-    note_read_page_call()
+    # Глобальный счётчик — на попытку (защита релея), личный — только за удачное
+    # чтение: упавшие URL больше не выжигают дневной лимит человека (ревью 17.11.2026).
+    if not _relay_readable():
+        # Релей на старой ревизии: пауза должна действовать уже на этом ходе,
+        # а не со следующего (ревью 17.11.2026).
+        return None
+    note_read_page_call(count_user=False)
     session = await bot._get_http_session()
     try:
         async with session.get(
@@ -362,7 +371,28 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
             if ctype not in _ALLOWED_TYPES:
                 log.info("[read-page] unsupported content type %s", ctype or "-")
                 return None
-            raw = await resp.text(errors="replace")
+            # Тело с капом: релей уже режет на 2 МБ, Python не должен верить
+            # на слово (ревью 17.11.2026). Двойники без content — прежний путь.
+            content = getattr(resp, "content", None)
+            if content is not None and hasattr(content, "iter_chunked"):
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in content.iter_chunked(65536):
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024:
+                        log.info("[read-page] body over 2 MB, truncated")
+                        break
+                    chunks.append(chunk)
+                # charset из заголовка: windows-1251 страницы иначе приезжали мусором
+                # (релей пробрасывает его намеренно; проход №5, 17.11.2026).
+                _enc = getattr(resp, "charset", None) or "utf-8"
+                try:
+                    raw = b"".join(chunks).decode(_enc, errors="replace")
+                except LookupError:
+                    raw = b"".join(chunks).decode("utf-8", errors="replace")
+            else:
+                raw = await resp.text(errors="replace")
+        note_read_page_call(count_global=False)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

@@ -368,6 +368,12 @@ class _FakeTikTokBot:
     async def send_audio(self, **kwargs):
         return SimpleNamespace()
 
+    async def send_photo(self, **kwargs):
+        return SimpleNamespace()
+
+    async def send_media_group(self, **kwargs):
+        return [SimpleNamespace() for _ in kwargs.get("media") or []]
+
 
 class _FakeTikTokResponse:
     def __init__(self, status=200, json_body=None):

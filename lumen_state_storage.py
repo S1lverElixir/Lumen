@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import urllib.parse
 import urllib.request as _urllib_request
 from dataclasses import dataclass
@@ -62,7 +63,11 @@ def _upstash_set(url: str, token: str, key: str, value: str) -> None:
 
 def _upstash_get(url: str, token: str, key: str) -> str | None:
     result = _upstash_request(url, token, f"get/{urllib.parse.quote(key, safe='')}", method="GET")
-    return result.get("result") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or "result" not in result:
+        # Ответ без поля result — сбой шлюза, а не «ключа нет»: молчаливый None
+        # на старте разрешал первому флашу затёрнуть удалённый индекс (ревью 17.11.2026).
+        raise RuntimeError("upstash response has no result field")
+    return result.get("result")
 
 
 def _upstash_delete(url: str, token: str, key: str) -> None:
@@ -82,6 +87,11 @@ def _storage_write_text(cfg: StorageConfig, key: str, path: Path, text: str) -> 
     temp_path = path.with_suffix(".tmp")
     with open(temp_path, "w", encoding="utf-8") as f:
         f.write(text)
+        # fsync до rename: иначе жёсткий kill терял последний снимок, хотя файл
+        # уже подменился (F-048, 17.11.2026). ФС без fsync — suppress.
+        with contextlib.suppress(Exception):
+            f.flush()
+            os.fsync(f.fileno())
     temp_path.replace(path)
 
 

@@ -259,22 +259,6 @@ def call_gemini(target: Target, history: list[dict], user_text: str, *, system_t
     return _gemini_stream(client, target.model_id, contents, config)
 
 
-def _openai_chat(url: str, headers: dict, payload: dict) -> str:
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers}, method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read().decode("utf-8", errors="replace"))
-    choices = data.get("choices") or []
-    if not choices:
-        return ""
-    content = (choices[0].get("message") or {}).get("content")
-    if isinstance(content, list):
-        return "".join(str(part.get("text") or "") for part in content if isinstance(part, dict)).strip()
-    return str(content or "").strip()
-
-
 def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, float, int]:
     """Стриминг chat/completions: (текст, время до первого токена, токенов по usage)."""
     body = {**payload, "stream": True}
@@ -367,11 +351,14 @@ def call_model_once(target: Target, history: list[dict], user_text: str, *, syst
 # его так же, как боевой маршрут, иначе служебная строка из 10 знаков уходит судье
 # и вопрос получает ноль (замер 11.11.2026: 43/50, вопросы 22-24).
 _SEARCH_MARKER = "[[SEARCH]]"
+# Копия должна совпадать с продом (`lumen_message_core._SEARCH_UNAVAILABLE_NOTE`),
+# иначе замер персоны судит не то поведение (ревью 17.11.2026).
 _NO_SEARCH_NOTE = (
     "\n\n[No web search is available for this turn. Answer from what you already know, "
     "in the user's language, and say in one plain line what you could not verify. "
-    "Do not ask for a search and do not refuse to answer. This bracket is an instruction "
-    "to you, not text to show: never quote, translate or reproduce it.]"
+    "Do not ask for a search and do not refuse to answer. "
+    "This bracket is an instruction to you, not text to show: never quote, translate or "
+    "reproduce it, and never mix its language into the reply.]"
 )
 
 
@@ -391,7 +378,10 @@ def _resolve_search_marker(target: Target, history: list[dict], user_text: str, 
 
 def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     text, ttft, tokens = call_model_once(target, history, user_text, system_text=system_text)
-    if text.strip().startswith(_SEARCH_MARKER):
+    # Прод-детектор терпим к регистру, обёрткам и филлеру; строгий startswith
+    # смещал баллы относительно прода (ревью 17.11.2026).
+    from lumen_search import search_marker_requested
+    if search_marker_requested(text):
         again, ttft2, tokens2 = _resolve_search_marker(target, history, user_text, system_text)
         return again, ttft + ttft2, tokens + tokens2
     return text, ttft, tokens

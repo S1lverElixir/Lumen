@@ -27,7 +27,7 @@ import lumen_memory
 from lumen_model_speed import (
     speed_key as _model_speed_key,
     record_response as _record_model_latency,
-    reorder_route as _reorder_route_by_speed,
+    reorder_route as _speed_reorder_route,
 )
 from lumen_router_config import (
     GEMINI_MODELS,
@@ -148,6 +148,17 @@ def _is_gemini_daily_quota(text: str) -> bool:
         "per day", "per_day", "perday", "daily limit", "daily quota", "quota exceeded for the day",
     ))
 
+# Отказ имени/версии модели в тексте 400: «invalid model», «does not exist»,
+# «not found for API version», «deprecated», «unsupported model».
+_MODEL_MISSING_RE = re.compile(
+    r"(?:invalid|unknown|no such|unsupported|deprecated|not a valid)\s+model"
+    r"|model(?!\s+(?:output|response|file|image|request))[^.\n]{0,60}"
+    r"(?:not valid|invalid|does not exist|not found|deprecated|unsupported|no longer available|shut down)"
+    r"|model_not_found",
+    re.IGNORECASE,
+)
+
+
 def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> bool:
     """Отказ "модель недоступна" (503/404/invalid model) → короткая остывка, как на 429.
 
@@ -161,8 +172,17 @@ def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> boo
     import bot
     try:
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
-        if bot._classify_model_error(bot._error_status(exc, txt), txt) != "unavailable":
+        status = bot._error_status(exc, txt)
+        if bot._classify_model_error(status, txt) != "unavailable":
             return False
+        # 400 — детерминированная ошибка одного запроса (слишком большая картинка),
+        # а не недоступность модели: остывка выключала голову для всех (ревью 17.11.2026).
+        if status == 400:
+            # Только отказ про МОДЕЛЬ: «File ... does not exist» и «Requested
+            # entity does not exist» — ошибка запроса и остывки не заслуживают
+            # (адверсариальный проход №2).
+            if not _MODEL_MISSING_RE.search(txt):
+                return False
         bot._mark_rate_limited(provider, model_id)
         return True
     except Exception:
@@ -215,7 +235,13 @@ async def _chat_completion_chain(
             raise bot.RouteBudgetExceededError(tried)
         tried.append(model_trial)
         bot._record_stats_event("model_attempts")
-        messages[0]["content"] = bot.get_system_prompt(model_trial)
+        system_text = bot.get_system_prompt(model_trial)
+        if chat_id is not None:
+            # Билдер уже вкладывает память; перезапись голым промптом теряла её
+            # на каждой попытке нестримового Munito (ревью 17.11.2026).
+            system_text = lumen_memory.system_prompt_with_memory(
+                system_text, bot.get_state(chat_id))
+        messages[0]["content"] = system_text
         attempt_start = time.monotonic()
         try:
             extras = extra_payload_fn(model_trial) if extra_payload_fn else (extra_payload or {})
@@ -372,10 +398,10 @@ def _selftest_short_error(exc: BaseException) -> str:
 async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool, str, float]:
     """Одна крошечная проба в голову маршрута (munito/gemini) для /selftest.
 
-    Успех честно пишется в квоту тем же _record_quota_usage, что у настоящих
-    ответов; неуспех квоту не трогает (как в ask_*). Историю чата не трогаем —
-    проба не должна оседать в контексте владельца. Никогда не кидает: неуспех
-    возвращается кортежем (False, причина, секунды)."""
+    Проба сервисная (service=True): квоту НЕ пишет ни при успехе, ни при неуспехе —
+    она не ответ человеку. Историю чата не трогаем — проба не должна оседать в
+    контексте владельца. Никогда не кидает: неуспех возвращается кортежем
+    (False, причина, секунды)."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_payload_extras
     start = time.monotonic()
@@ -650,7 +676,8 @@ async def ask_gemini(
              if _is_gemini_supported_mime(mime):
                  extra_parts.append(types.Part.from_bytes(data=b, mime_type=mime))
              else:
-                 raise bot.UserFacingInputError(f"Тип вложения '{_user_mime_label(mime)}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
+                 raise bot.UserFacingInputError(bot._t(
+                     chat_id, "err_unsupported_attachment", mime=_user_mime_label(mime)))
     if youtube_url:
           # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))
@@ -891,7 +918,7 @@ def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_a
     if isinstance(exc, bot.RouteBudgetExceededError):
         return bot._lang_t(lang, "err_budget")
     if isinstance(exc, bot.MunitoAPIError):
-        return bot._or_error_msg(exc, "munito", lang)
+        return bot._or_error_msg(exc, lang)
     return bot._gemini_error_msg(exc, head_model, lang)
 
 
@@ -900,6 +927,26 @@ class RouteBudgetExceededError(RuntimeError):
     def __init__(self, tried: list[str]) -> None:
         self.tried = tried
         super().__init__(f"Route time budget exhausted. Tried: {', '.join(tried) or 'none'}")
+
+
+def _reorder_route_by_speed(
+    route: list[tuple[str, str]], *, preserve_grounded_head: bool = False,
+) -> list[tuple[str, str]]:
+    """Порядок по замеренной скорости. На свежем маршруте границу search grounding
+    не переступаем: иначе в голове модель без живого поиска (ревью 17.11.2026).
+    На обычном маршруте пин головы не нужен — там сортировка и создана, чтобы
+    убрать медленную модель (прод 17.09.2026), и адверсариальный проход показал,
+    что общий пин замораживал медленную голову тяжёлой цепочки."""
+    if not preserve_grounded_head:
+        return _speed_reorder_route(route)
+
+    def _capability(item: tuple[str, str]) -> bool:
+        provider, model_id = item
+        if provider == "gemini":
+            # Неизвестная конфигурация — не повод ставить её вперёд головы.
+            return bool(GEMINI_MODELS.get(model_id, {}).get("search_grounding", False))
+        return True
+    return _speed_reorder_route(route, group_key=_capability)
 
 
 # Маршрутизация вынесена в lumen_router_config.py — порядок имён для остального кода не менялся.
@@ -911,6 +958,7 @@ async def _run_route(
     deadline: float | None = None, provenance: dict | None = None,
     status: Any | None = None, history_text: str | None = None,
     history_meta: dict[str, Any] | None = None, effort: str | None = None,
+    preserve_grounded_head: bool = False,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
@@ -923,7 +971,7 @@ async def _run_route(
     if history_text is None:
         history_text = ai_prompt
     # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
-    route = _reorder_route_by_speed(route)
+    route = _reorder_route_by_speed(route, preserve_grounded_head=preserve_grounded_head)
     if deadline is None:
         # Снаружи дедлайн приходит с транскрибацией: она уже потратила часть бюджета.
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
@@ -1117,4 +1165,8 @@ async def _run_route(
 
     # Суточный счётчик /stats: маршрут исчерпан, ответа не будет.
     bot._record_stats_event("all_failed")
+    if last_exc is None and time.monotonic() > deadline:
+        # Бюджет кончился до первой попытки: это RouteBudgetExceededError, а не
+        # невнятный RuntimeError — иначе неверный текст и статистика (ревью 17.11.2026).
+        raise RouteBudgetExceededError([])
     raise last_exc or RuntimeError("No route candidate returned an answer.")

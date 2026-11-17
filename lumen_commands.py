@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import html
 import logging
+import math
 import os
 import re
 import secrets
@@ -1229,13 +1230,20 @@ async def inline_tts(message: Message, text: str) -> None:
             return
         return
     from lumen_status import StatusMessage
-    status_obj = await StatusMessage.start_action(
-        message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_voicing"),
-    )
+    try:
+        status_obj = await StatusMessage.start_action(
+            message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_voicing"),
+        )
+    except asyncio.CancelledError:
+        # Резерв уже списан: отмена на пузыре статуса не должна стоить слотов
+        # до полуночи за неполученную озвучку (ревью 17.11.2026).
+        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
+        raise
     status = status_obj.message if status_obj is not None else None
     # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
     deadline = time.monotonic() + bot.TTS_TOTAL_BUDGET_SEC
     shortened = False
+    voices: list = []
     try:
         # Весь синтез ДО отправки: упавший кусок — одна ошибка вместо рваного "пол-ответа + ошибка".
         voices = []
@@ -1253,10 +1261,19 @@ async def inline_tts(message: Message, text: str) -> None:
             # Даже первый кусок не уложился — честная ошибка, а не пустота.
             raise RuntimeError("TTS total budget exceeded before the first chunk")
     except asyncio.CancelledError:
+        # Возврат до stop(): отменённая задача не доходит до следующего await.
+        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         if status_obj is not None:
             await status_obj.stop()
         raise
     except Exception as exc:
+        # Возврат до любых await: отмена на правке статуса иначе съедала резерв.
+        # Сбой синтеза случается до цикла отправки: человек не получил ни одного
+        # файла, поэтому возвращаем все слоты. Провайдерский расход — не слот
+        # человека (проход №5, 17.11.2026).
+        refund = len(chunks)
+        if refund:
+            bot._refund_user_daily(uid, total=refund, tts=refund)
         log.exception("TTS synthesis failed:")
         # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
@@ -1271,29 +1288,38 @@ async def inline_tts(message: Message, text: str) -> None:
             await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
-        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         return
-    if status_obj is not None:
-        await status_obj.delete()
-    else:
-        await bot._delete_message_quietly(status)
-    for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
-        # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
-        # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.
-        sent = await bot._tg_call(
-            bot.bot.send_voice,
-            chat_id=message.chat.id,
-            voice=BufferedInputFile(final_audio, filename=final_filename),
-            duration=voice_duration if voice_duration > 0 else None,
-            reply_to_message_id=message.message_id if i == 0 else None,
-            call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
-        )
-        if sent is None:
-            # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
-            bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
-            # Не оставляем пользователя без сообщения: статус уже удалён.
-            await bot._safe_reply(message, bot._t(message.chat.id, "tts_err_generic"))
-            return
+    sent_count = 0
+    try:
+        if status_obj is not None:
+            await status_obj.delete()
+        else:
+            await bot._delete_message_quietly(status)
+        for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
+            # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
+            # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.
+            sent = await bot._tg_call(
+                bot.bot.send_voice,
+                chat_id=message.chat.id,
+                voice=BufferedInputFile(final_audio, filename=final_filename),
+                duration=voice_duration if voice_duration > 0 else None,
+                reply_to_message_id=message.message_id if i == 0 else None,
+                call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+            )
+            sent_count += 1
+            if sent is None:
+                # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
+                bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
+                # Не оставляем пользователя без сообщения: статус уже удалён.
+                await bot._safe_reply(message, bot._t(message.chat.id, "tts_err_generic"))
+                return
+    except asyncio.CancelledError:
+        # Отмена в цикле отправки: уже отданные чанки списаны, остальные — нет.
+        # Резерв покрывает все чанки, а синтезировано могло быть меньше (обрезка).
+        remaining = len(chunks) - sent_count
+        if remaining > 0:
+            bot._refund_user_daily(uid, total=remaining, tts=remaining)
+        raise
     unsent = len(chunks) - len(voices)
     if unsent > 0:
         # Обрезка по общему дедлайну: за несозданные чанки не списываем.
@@ -1325,6 +1351,8 @@ async def handle_stop_callback(query: CallbackQuery) -> None:
     import bot
     with contextlib.suppress(Exception):
         await query.answer()
+    if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
+        return
     if not bot.STOP_BUTTON_ENABLED:
         return
     chat_id = query.message.chat.id if getattr(query, "message", None) is not None and query.message.chat else 0
@@ -1338,6 +1366,8 @@ async def cmd_stop(message: Message) -> None:
     контроль, а не витрина. Молчаливо игнорирует чужого человека в группе и
     вызов, когда стрима нет — лишнее сообщение в чат не пишем (аудит 16.11.2026)."""
     import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
     if not bot.STOP_COMMAND_ENABLED:
         return
     sender = message.from_user.id if getattr(message, "from_user", None) is not None else None
@@ -1452,6 +1482,12 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
         return
     chat = question_msg.chat
     requester_id = query.from_user.id if query.from_user else None
+    # Каждый тап — правка Telegram плюс запись чата: без окна спамер гонял бы
+    # edit_text на каждое нажатие (ревью 17.11.2026, тот же гейт, что у draw:more).
+    if bot._check_and_register_rate_limit(requester_id if requester_id is not None else chat.id):
+        with contextlib.suppress(Exception):
+            await query.answer(bot._t(chat.id, "rate_limited"), show_alert=False)
+        return
     if not await bot._is_privileged_in_chat(chat.type, chat.id, requester_id):
         with contextlib.suppress(Exception):
             await query.answer(bot._t(chat.id, "lang_deny"), show_alert=True)
@@ -1469,7 +1505,41 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
         )
 
+def chat_locked(handler):
+    """Слэш-команда, трогающая чат, идёт через тот же лок: кап ожидающих,
+    честное «занято» и дедлайн сообщения (ревью 17.11.2026)."""
+    async def _run(message):
+        import bot
+        await bot._run_under_chat_lock(message, lambda: handler(message))
+    _run.__name__ = getattr(handler, "__name__", "locked_handler")
+    return _run
+
+
 # выгрузка логов (только для владельца)
+
+def _build_logs_attachment() -> str | None:
+    """Блокирующая часть /logs: прочитать, вычистить токены, отдать путь файла."""
+    import bot
+    if not bot.LOG_FILE_PATH.exists():
+        return None
+    with open(bot.LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+        log_content = f.read()
+    if not log_content.strip():
+        return None
+    for secret in bot._redactable_secrets():
+        log_content = log_content.replace(secret, "<REDACTED>")
+    fd, temp_log_path = tempfile.mkstemp(prefix="logs_", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
+            f.write(log_content)
+    except Exception:
+        try:
+            os.unlink(temp_log_path)
+        except Exception:
+            pass
+        raise
+    return temp_log_path
+
 
 async def cmd_logs(message: Message) -> None:
     import bot
@@ -1492,35 +1562,24 @@ async def cmd_logs(message: Message) -> None:
     except Exception:
         pass
 
+    temp_log_path = None
     try:
-        log_content = ""
-        if bot.LOG_FILE_PATH.exists():
-            with open(bot.LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
-                log_content = f.read()
-
-        if not log_content or len(log_content.strip()) == 0:
+        # Чтение, скраб и запись файла — блокирующая часть: лог растёт сутками,
+        # и весь этот объём раньше стопорил event loop (ревью 17.11.2026).
+        temp_log_path = await asyncio.to_thread(_build_logs_attachment)
+        if temp_log_path is None:
             await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_empty"))
             return
-
-        # вычищаем токены из логов перед отправкой — единый список, см. _redactable_secrets
-        for secret in bot._redactable_secrets():
-            log_content = log_content.replace(secret, "<REDACTED>")
-
-        # пишем во временный файл, чтобы не ловить блокировку на живом логе
-        fd, temp_log_path = tempfile.mkstemp(prefix="logs_", suffix=".txt")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
-                f.write(log_content)
-
-            await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
-        finally:
+        await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
+    except Exception as exc:
+        log.exception("Error extracting or sending logs:")
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
+    finally:
+        if temp_log_path:
             try:
                 os.unlink(temp_log_path)
             except Exception:
                 pass
-    except Exception as exc:
-        log.exception("Error extracting or sending logs:")
-        await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
 
 async def cmd_stats(message: Message) -> None:
     """Статистика (скрыта, только владелец — данные по всем чатам)."""
@@ -1635,7 +1694,7 @@ async def cmd_stats(message: Message) -> None:
 
     text = (
         f"<b>Статистика Lumen</b>\n"
-        f"Сборка: {_build_version()}\n"
+        f"Сборка: {await asyncio.to_thread(_build_version)}\n"
         f"Активных чатов (24ч): {active_chats} (всего: {total_chats})\n"
         f"Аптайм процесса: {uptime_str}\n"
         f"Счётчики квоты за сутки: {quota_day} (America/Los_Angeles, сбрасываются автоматически)\n"
@@ -1932,8 +1991,19 @@ def _storage_backend_text() -> str:
     import bot
     backend = "Upstash" if bot.USE_UPSTASH else "локальный диск"
     ts = bot._last_storage_write_ts()
-    if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
-        when = time.strftime("%d.%m %H:%M", time.localtime(ts))
+    try:
+        ts_value = float(ts)
+    except (TypeError, ValueError):
+        ts_value = 0.0
+    # time.localtime(inf) — OverflowError, и /stats умирал целиком.
+    # Конечный, но нереальный timestamp (1e300) тоже роняет localtime:
+    # OverflowError/OSError/ValueError не должны убивать /stats (проход №4).
+    if (isinstance(ts, (int, float)) and not isinstance(ts, bool)
+            and math.isfinite(ts_value) and 0 < ts_value < 4102444800.0):
+        try:
+            when = time.strftime("%d.%m %H:%M", time.localtime(ts_value))
+        except (OverflowError, OSError, ValueError):
+            return f"{backend}, записей пока не было"
         return f"{backend}, запись: {when}"
     return f"{backend}, записей пока не было"
 
@@ -1943,7 +2013,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
     token в callback_data короткий (лимит Telegram — 64 байта на всю строку)."""
     import bot
     _purge_expired_picks()
-    _enforce_pending_picks_cap()
+    _enforce_pending_picks_cap(pending_add=1)
     token = secrets.token_hex(8)
     lang = bot._chat_lang(message.chat.id)
     bot._pending_picks[token] = {
@@ -2022,7 +2092,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
             # Один ресенд: второй тап упрётся в rec None и честно покажет expired.
             bot._pending_picks.pop(token, None)
             _purge_expired_picks()
-            _enforce_pending_picks_cap()
+            _enforce_pending_picks_cap(pending_add=1)
             fresh = secrets.token_hex(8)
             bot._pending_picks[fresh] = {
                 "chat_id": rec.get("chat_id"),

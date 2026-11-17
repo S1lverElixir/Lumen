@@ -556,11 +556,24 @@ def _leak_spans(text: str) -> list[tuple[int, int]]:
     """Диапазоны символов, где нашлась утечка или эхо инструкции."""
     spans: list[tuple[int, int]] = []
     for pattern in (_LEAK_LITERAL_RE, _IDENTITY_LEAK_RE, _INJECTED_PAYLOAD_ECHO_RE,
-                    _IDENTITY_BASED_ON_RE, _PROMPT_REVEAL_RE):
+                    _PROMPT_REVEAL_RE):
         if pattern is None:
             continue
         for m in pattern.finditer(text):
             spans.append((m.start(), m.end()))
+    # _IDENTITY_BASED_ON_RE — только в предложении с первым лицом, как в
+    # _detect_identity_leak: иначе честное «основана на исследованиях Google»
+    # вырезалось вместе с настоящей утечкой (ревью 17.11.2026).
+    if _IDENTITY_BASED_ON_RE is not None:
+        pos = 0
+        for sentence in _SENTENCE_SPLIT_RE.split(text):
+            start = text.find(sentence, pos)
+            if start < 0:
+                start = pos
+            if _FIRST_PERSON_RE.search(sentence):
+                for m in _IDENTITY_BASED_ON_RE.finditer(sentence):
+                    spans.append((start + m.start(), start + m.end()))
+            pos = start + len(sentence)
     return spans
 
 
@@ -585,11 +598,13 @@ def _scrub_contaminated_sentences(text: str, *, kind: str) -> str | None:
             lo, hi = bounds[idx], bounds[idx + 1]
             if lo <= start < hi or lo < end <= hi:
                 drop.add(idx)
-    kept = "".join(text[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1) if i not in drop)
-    kept = kept.strip()
+    kept_raw = "".join(text[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1) if i not in drop)
+    kept = kept_raw.strip()
     if not kept:
         return None
-    if len(kept) < len(text) * _SCRUB_MAX_CONTAMINATED_RATIO:
+    # Долю считаем по необстриженному остатку: ведущий пробел съедал границу
+    # и честный ответ падал в fallback (ревью 17.11.2026).
+    if len(kept_raw) < len(text) * _SCRUB_MAX_CONTAMINATED_RATIO:
         return None
     log.warning('[%s] Scrubbed only the offending sentence(s), kept %d of %d chars', kind, len(kept), len(text))
     return kept

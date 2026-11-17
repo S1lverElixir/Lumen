@@ -63,6 +63,7 @@ def _bot_global_state_guard():
     накоплением сложности "на будущее", а не решением подтверждённой проблемы."""
     import bot as _bot_module
     import lumen_commands as _commands_module
+    import lumen_typing_pace as _pace_module
     chat_state_snapshot = copy.deepcopy(_bot_module.chat_state)
     quota_snapshot = copy.deepcopy(_bot_module.GLOBAL_QUOTA)
     quarantine_snapshot = copy.deepcopy(lumen_router_config._QUARANTINE)
@@ -72,6 +73,7 @@ def _bot_global_state_guard():
     # блокировал следующий тест на «already in flight», а tripped down_until
     # превращал отправку фото в None (мутант-прогон ревью 10.11.2026).
     inflight_snapshot = set(_commands_module._draw_inflight)
+    speed_ema_snapshot = dict(_pace_module._speed_ema)
     breaker_snapshot = dict(_bot_module._tg_proxy_breaker.__dict__)
     yield
     _bot_module.chat_state.clear()
@@ -84,6 +86,8 @@ def _bot_global_state_guard():
     _bot_module.bot = bot_snapshot
     _commands_module._draw_inflight.clear()
     _commands_module._draw_inflight.update(inflight_snapshot)
+    _pace_module._speed_ema.clear()
+    _pace_module._speed_ema.update(speed_ema_snapshot)
     _bot_module._tg_proxy_breaker.__dict__.clear()
     _bot_module._tg_proxy_breaker.__dict__.update(breaker_snapshot)
 
@@ -149,3 +153,17 @@ def rate_guard_setup(monkeypatch):
             from_user=SimpleNamespace(id=456), reply=AsyncMock(), reply_to_message=None,
         )
     return _setup
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tiktok_semaphores():
+    """Модульные семафоры TikTok живут с первого event loop: второй asyncio.run
+    падал с «bound to a different event loop» (ревью 17.11.2026)."""
+    import asyncio as _asyncio
+    original_probe = bot._tiktok_probe_semaphore
+    original_download = bot._tiktok_slide_download_semaphore
+    bot._tiktok_probe_semaphore = _asyncio.Semaphore(bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
+    bot._tiktok_slide_download_semaphore = _asyncio.Semaphore(bot.TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
+    yield
+    bot._tiktok_probe_semaphore = original_probe
+    bot._tiktok_slide_download_semaphore = original_download

@@ -157,7 +157,9 @@ def test_gemini_tts_synthesis_has_timeout_and_does_not_use_threads():
 
     client.models = SimpleNamespace(generate_content=never)
 
-    with pytest.raises(Exception):
+    # Именно таймаут, не любое исключение: RuntimeError от зависшего мока
+    # проходил прежний pytest.raises(Exception) (ревью 17.11.2026).
+    with pytest.raises(_asyncio.TimeoutError):
         _asyncio.run(synth(
             client, "текст", tts_models=["m1"],
             is_rate_limit_error=lambda e: False,

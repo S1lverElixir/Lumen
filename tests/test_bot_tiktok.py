@@ -155,7 +155,9 @@ def test_looks_like_resolved_tiktok_url(url, expected):
     assert bot._looks_like_resolved_tiktok_url(url) is expected
 
 
-def test_resolve_tiktok_short_falls_through_to_get_when_head_gives_malformed_url():
+def test_resolve_tiktok_short_falls_through_to_get_when_head_gives_malformed_url(monkeypatch):
+    # Офлайн-детерминизм: реальный DNS в сьюте недопустим (ревью 17.11.2026).
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
     # РЕГРЕССИЯ на реальный инцидент: HEAD "успешно" довёл до URL с ПУСТЫМ
     # юзернеймом — раньше такой результат принимался сразу и уходил в TikWM,
     # который на него отвечал 403. Теперь должен быть отброшен, и функция
@@ -168,7 +170,9 @@ def test_resolve_tiktok_short_falls_through_to_get_when_head_gives_malformed_url
     assert session.get_called is True
 
 
-def test_resolve_tiktok_short_uses_head_result_directly_when_valid():
+def test_resolve_tiktok_short_uses_head_result_directly_when_valid(monkeypatch):
+    # Офлайн-детерминизм: реальный DNS в сьюте недопустим (ревью 17.11.2026).
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
     # Нормальный случай (без регрессии) — HEAD сразу довёл до валидного URL,
     # GET вообще не должен вызываться (незачем тратить лишний запрос).
     head_resp = _FakeResolveResponse(200, "https://www.tiktok.com/@realuser/video/1234567890")
@@ -179,7 +183,9 @@ def test_resolve_tiktok_short_uses_head_result_directly_when_valid():
     assert session.get_called is False
 
 
-def test_resolve_tiktok_short_returns_get_result_even_if_still_malformed():
+def test_resolve_tiktok_short_returns_get_result_even_if_still_malformed(monkeypatch):
+    # Офлайн-детерминизм: реальный DNS в сьюте недопустим (ревью 17.11.2026).
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
     # Если и GET не дал нормального URL — возвращаем то, что реально пришло
     # (лучше честная попытка, чем совсем ничего), диагностика в логах — отдельно.
     head_resp = _FakeResolveResponse(200, "https://www.tiktok.com/@/photo/999")
@@ -395,6 +401,16 @@ def test_fetch_dsp_track_metadata_resolves_real_title_artist_cover():
         def __init__(self, status, body):
             self.status = status
             self._body = body
+            self.headers = {}
+            body_bytes = body.encode("utf-8")
+
+            class _Content:
+                async def iter_chunked(self, n):
+                    yield body_bytes
+
+            # _read_capped_body читает через content.iter_chunked; фейк обязан
+            # отдавать тот же поток, что aiohttp (ревью 17.11.2026).
+            self.content = _Content()
 
         async def __aenter__(self):
             return self
@@ -497,6 +513,14 @@ def test_tiktok_dsp_no_song_id_does_not_disable_future_lookups():
 
         def __init__(self, body):
             self._body = body
+            self.headers = {}
+            body_bytes = body.encode("utf-8")
+
+            class _Content:
+                async def iter_chunked(self, n):
+                    yield body_bytes
+
+            self.content = _Content()
 
         async def __aenter__(self):
             return self
@@ -677,7 +701,6 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
     current_concurrent = 0
     max_concurrent_seen = 0
     lock = asyncio.Lock()
-    overlapped = asyncio.Event()
 
     async def fake_get_http_session():
         return _FakeTikTokSession(tikwm_json)
@@ -693,11 +716,9 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
         async with lock:
             current_concurrent += 1
             max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
-            if current_concurrent >= 2:
-                overlapped.set()
-        # Детерминированный барьер вместо sleep: дальше идёт только тот, кто
-        # реально пересёкся с соседом; последовательный регресс упрётся в таймаут.
-        await asyncio.wait_for(overlapped.wait(), timeout=2)
+        # Без барьера «уже двое»: он сам ограничивал наблюдение двойкой и кап
+        # оставался непроверенным (ревью 17.11.2026).
+        await asyncio.sleep(0.05)
         async with lock:
             current_concurrent -= 1
         return 0, 0, 0, None
@@ -715,10 +736,7 @@ def test_handle_tiktok_slideshow_video_probing_respects_concurrency_cap():
     bot.bot = fake_bot
     try:
         asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/456"))
-        assert max_concurrent_seen <= bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY
-        # Реально были параллельны хотя бы несколько — не выродилось в строго
-        # последовательный перебор без всякой пользы от asyncio.gather.
-        assert max_concurrent_seen > 1
+        assert max_concurrent_seen == bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY
     finally:
         bot._get_http_session = original_get_session
         bot._resolve_tiktok_short = original_resolve
@@ -751,7 +769,6 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
     current_concurrent = 0
     max_concurrent_seen = 0
     lock = asyncio.Lock()
-    overlapped = asyncio.Event()
 
     async def fake_get_http_session():
         return _FakeTikTokSession(tikwm_json)
@@ -764,10 +781,9 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
         async with lock:
             current_concurrent += 1
             max_concurrent_seen = max(max_concurrent_seen, current_concurrent)
-            if current_concurrent >= 2:
-                overlapped.set()
-        # Детерминированный барьер вместо sleep (см. комментарий в probe-тесте выше).
-        await asyncio.wait_for(overlapped.wait(), timeout=2)
+        # Без барьера «уже двое»: он сам ограничивал наблюдение двойкой и кап
+        # оставался непроверенным (ревью 17.11.2026).
+        await asyncio.sleep(0.05)
         async with lock:
             current_concurrent -= 1
         return b"\xff\xd8\xff\xe0fake jpeg bytes"  # не ftyp -> обычное фото, не видео-слайд
@@ -776,22 +792,33 @@ def test_handle_tiktok_slideshow_download_respects_concurrency_cap():
     original_resolve = bot._resolve_tiktok_short
     original_download = bot._download_url_bin
     original_bot = bot.bot
+    original_slot = bot._media_download_slot
+
+    class _NoSlot:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
 
     bot._get_http_session = fake_get_http_session
     bot._resolve_tiktok_short = fake_resolve
     bot._download_url_bin = fake_download_url_bin
     bot.bot = fake_bot
+    # Глобальный медиа-слот (2) ниже тиктоковского капа: без его снятия тест
+    # наблюдал бы двойку и кап TikTok оставался непроверенным (ревью 17.11.2026).
+    bot._media_download_slot = lambda: _NoSlot()
     try:
         asyncio.run(bot.handle_tiktok(incoming, "https://www.tiktok.com/@test/video/789"))
+        # Кап не превышен и параллельность реальная: без семафора наблюдалось бы 11.
         assert max_concurrent_seen <= bot.TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY
-        # Реально были параллельны хотя бы несколько — не выродилось в строго
-        # последовательный перебор без всякой пользы от asyncio.gather.
-        assert max_concurrent_seen > 1
+        assert max_concurrent_seen > 2
     finally:
         bot._get_http_session = original_get_session
         bot._resolve_tiktok_short = original_resolve
         bot._download_url_bin = original_download
         bot.bot = original_bot
+        bot._media_download_slot = original_slot
 
 
 def test_handle_tiktok_no_media_found_gives_user_facing_error():
@@ -1407,7 +1434,11 @@ def test_slideshow_status_uses_localized_key():
         for code in ("ru", "en", "be", "kk"):
             localized = lang_t(code, "tiktok_dl_slideshow", shown=7, total=9)
             assert "7/9" in localized, code
-            assert localized != text or code == bot._chat_lang(chat_id)
+            # Те же числа, что у text: иначе строки отличаются только 35/40
+            # против 7/9 и «убитая локализация» проходила (ревью 17.11.2026).
+            same_args = lang_t(code, "tiktok_dl_slideshow", shown=35, total=40)
+            if code != bot._chat_lang(chat_id):
+                assert same_args != text, f"{code} повторяет язык чата"
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1774,7 +1805,9 @@ def test_resolve_tiktok_short_disables_auto_redirect(monkeypatch):
     assert all(call[2].get("allow_redirects") is False for call in session.calls)
 
 
-def test_resolve_tiktok_short_refuses_non_public_hop():
+def test_resolve_tiktok_short_refuses_non_public_hop(monkeypatch):
+    # Офлайн-детерминизм: реальный DNS в сьюте недопустим (ревью 17.11.2026).
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
     # A7-3: внутренний адрес в Location останавливает цепочку до запроса к нему.
     session = _FakeChainResolveSession({
         "https://vt.tiktok.com/x/": (
@@ -1998,12 +2031,22 @@ def test_probe_thumbnail_from_bytes_writes_off_loop(monkeypatch):
 
 
 def test_write_and_tag_mp3_sync_roundtrip(tmp_path):
-    # A7-7: синхронный кусок MP3-пути вынесен в хелпер (мутаген битый вход терпит).
+    # F-160: только exists/size не ловило потерю ID3. Минимальный валидный кадр
+    # MPEG-1 Layer III обязателен: без него mutagen не синхронизируется и теги молча пропадают.
     from lumen_tiktok_flow import _write_and_tag_mp3_sync
-    path = str(tmp_path / "m.mp3")
-    _write_and_tag_mp3_sync(path, b"not a real mp3", "t", "a", None)
+    from mutagen.id3 import ID3
     import os
-    assert os.path.exists(path) and os.path.getsize(path) > 0
+    frame = bytes([0xff, 0xfb, 0x90, 0x64]) + bytes((i % 251) + 1 for i in range(413))
+    cover = bytes([0x89]) + b"PNG" + bytes([13, 10, 26, 10]) + b"cover"
+    path = str(tmp_path / "m.mp3")
+    _write_and_tag_mp3_sync(path, frame * 4, "Заголовок", "Артист", cover)
+    tags = ID3(path)
+    assert tags["TIT2"].text == ["Заголовок"]
+    assert tags["TPE1"].text == ["Артист"]
+    assert tags.getall("APIC")[0].mime == "image/png"
+    bad = str(tmp_path / "bad.mp3")
+    _write_and_tag_mp3_sync(bad, b"not a real mp3", "t", "a", None)
+    assert os.path.exists(bad) and os.path.getsize(bad) > 0
 
 
 def test_tiktok_video_candidates_protocol_relative_url():
@@ -2322,7 +2365,9 @@ def test_slideshow_reports_slides_dropped_by_telegram_cap(monkeypatch):
         ))
         assert result is True
         assert len(telegram_bot.groups) == 1 and len(telegram_bot.groups[0]) == 2
-        assert replies and "2" in replies[0]
+        # Точный счётчик, а не любая цифра 2 в тексте (ревью 17.11.2026).
+        assert replies and replies[0] == bot._t(
+            999988, "tiktok_dl_slideshow", shown=2, total=3)
     finally:
         bot.chat_state.pop(999988, None)
 
@@ -2396,3 +2441,10 @@ def test_itunes_server_error_is_transient(monkeypatch):
 
     track, transient = asyncio.run(lumen_tiktok._itunes_track(_Session(), "1"))
     assert track is None and transient is True
+
+
+@pytest.fixture(autouse=True)
+def _dns_public_by_default(monkeypatch):
+    """Сьют TikTok офлайн: проверка «хост публичный» иначе ходит в реальный DNS
+    (ревью 17.11.2026, F-177). Тесты, которым нужен приватный ответ, патчат своё."""
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)

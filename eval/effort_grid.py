@@ -111,9 +111,10 @@ def main() -> int:
     print(f"промахов «думает меньше, чем надо»: {len(under)}")
     for text in under:
         print(f"  недо-усилие: {text!r}")
-    print("порог: >=80 % и ноль недо-усилия ->",
-          "ХОРОШО" if (total - len(bad)) / total >= 0.8 and not under else "ПЛОХО")
-    return 0
+    ok = (total - len(bad)) / total >= 0.8 and not under
+    print("порог: >=80 % и ноль недо-усилия ->", "ХОРОШО" if ok else "ПЛОХО")
+    # Ненулевой код: иначе CI/обёртка не видят «ПЛОХО» (ревью 17.11.2026).
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

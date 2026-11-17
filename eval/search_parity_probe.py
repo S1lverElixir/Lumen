@@ -50,14 +50,16 @@ async def _one(question: str, tokens: list[str], expect_results: bool) -> tuple[
     return True, f"{len(items)} источников, блок {len(block)} символов, {elapsed:.1f}с"
 
 
-async def main() -> None:
+async def main() -> int:
     passed = 0
     for question, tokens, expect_results in CASES:
         ok, detail = await _one(question, tokens, expect_results)
         passed += int(ok)
         print(f"{'OK  ' if ok else 'MISS'} {question[:58]!r} — {detail}")
     print(f"\nИтого: {passed}/{len(CASES)}")
+    # Ненулевой код при MISS: иначе провал пробы невиден (ревью 17.11.2026).
+    return 0 if passed == len(CASES) else 1
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

@@ -638,9 +638,11 @@ def test_all_gemini_models_declare_url_context_explicitly():
 
 
 def test_freshness_year_window_tracks_current_year():
-    # Аудит A2-13: зашитый 202[6-9] протухал в 2030 — окно строится от текущей даты.
-    assert str(date.today().year) in lumen_router_config._FRESHNESS_QUERY_RE.pattern
-    assert lumen_router_config._looks_like_freshness_query("вспомним 2039 год") is False
+    # Аудит A2-13: окно строится от текущей даты. Проверяем поведением, а не
+    # грепом по .pattern: мутант с зашитым годом проходил греп (ревью 17.11.2026).
+    year = date.today().year
+    assert lumen_router_config._looks_like_freshness_query(f"события {year + 1}") is True
+    assert lumen_router_config._looks_like_freshness_query(f"события {year + 4}") is False
 
 
 def test_quota_exhausted_logs_broken_state_loudly(monkeypatch, caplog):
@@ -962,7 +964,8 @@ def test_agent_searches_table_names_searches_not_steps():
     # Револьвер ревью: лимит обязан считаться поисками. Если в таблице снова
     # окажутся шаги, одна строка с тремя tool_calls израсходует «один поиск».
     assert lumen_router_config._AGENT_SEARCHES_BY_EFFORT["medium"] == 2
-    assert "AGENT_MAX_SEARCHES" in lumen_router_config.agent_max_searches.__doc__
+    # Поведением, а не грепом по докстрингу (ревью 17.11.2026).
+    assert lumen_router_config.agent_max_searches("xhigh") == 3
 
 
 def test_unknown_effort_pin_is_warned_but_sent(monkeypatch, caplog):
@@ -1048,7 +1051,9 @@ def test_build_route_classifies_pdf_and_sticker(monkeypatch):
     # стикер — image/webp, то есть обычная картинка Munito с резервом Gemini.
     _munito_mode(monkeypatch)
     pdf = _route_for(media_mime="application/pdf")
-    assert pdf == lumen_router_config._gemini_route(lumen_router_config.GEMINI_HEAVY_CHAIN)
+    # Явный ожидаемый список, а не вызов той же функции: тавтология скрывала
+    # потерю резерва (ревью 17.11.2026).
+    assert pdf == [("gemini", model) for model in lumen_router_config.GEMINI_HEAVY_CHAIN]
     sticker = _route_for(media_mime="image/webp")
     assert sticker[0][0] == "munito"
     assert any(provider == "gemini" for provider, _ in sticker)

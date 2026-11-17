@@ -47,7 +47,7 @@ Lumen — единый сервис FastAPI + aiogram. Telegram присылае
 
 ## Деплой на Hugging Face Spaces
 
-1. Запушь репозиторий в Space (`sdk: docker` уже указан во фронтматтере выше).
+1. Запушь репозиторий в Space (`sdk: docker` уже указан во фронтматтере `README.md`; у этого файла фронтматтера нет).
 2. Задай обязательные секреты: `BOT_TOKEN`, `GEMINI_API_KEY` и `ADMIN_SECRET_SEED`. В проде бот не стартует без сида: админ-ключи не должны выводиться из токена бота.
 3. Hugging Face соберёт образ из `Dockerfile` и запустит `python -u bot.py`.
 4. При старте бот сам регистрирует вебхук. Если не вышло, в логах будет `[webhook] setWebhook failed`; зарегистрируй вручную:
@@ -125,7 +125,7 @@ pytest -v
 
 Тесты лежат в `tests/` и повторяют разбиение на модули: `test_lumen_formatting.py`, `test_lumen_security.py`, `test_lumen_router_config.py`, `test_lumen_typing_pace.py`, `test_lumen_images.py`, `test_lumen_media.py`, `test_lumen_model_speed.py`, `test_lumen_search.py`, `test_lumen_status.py`, `test_lumen_memory.py` и `test_lumen_devtrace.py` тестируют соответствующие модули напрямую, а `test_bot_admin.py`, `test_bot_commands.py`, `test_bot_routes.py`, `test_bot_search.py`, `test_bot_state.py`, `test_bot_streaming.py`, `test_bot_tiktok.py`, `test_bot_transport.py` и `test_bot_tts.py` покрывают `bot.py` по доменам (общие фейки — в `bot_test_helpers.py`). `test_eval_persona.py` покрывает фикстуры оценки персоны, а `test_lumen_read_page.py` и `test_lumen_agent_gemini.py` — чтение страниц и цикл на резерве. `conftest.py` подставляет заглушки `BOT_TOKEN`/`GEMINI_API_KEY`/`BOT_LOG_PATH`, поэтому реальные секреты для тестов не нужны.
 
-CI (`.github/workflows/ci.yml`) на каждый push и pull request, а также по недельному расписанию запускает `pyflakes` + `pytest` + `pip-audit` и проверки прокси `deno test` / `deno check` / `deno lint`; успешный push запускает `sync-to-hf.yml`, который переносит коммит в Hugging Face Space (и отказывается перезаписывать прямой хотфикс на Space), и `deploy-proxy.yml`, который выносит `proxy/` в Deno Deploy, если в проверенном коммите менялся прокси.
+CI (`.github/workflows/ci.yml`) на каждый push и pull request, а также по недельному расписанию запускает `pyflakes` + `pytest` + `pip-audit` и проверки прокси `deno test` / `deno check` / `deno lint`; успешный push запускает `sync-to-hf.yml`, который переносит коммит в Hugging Face Space (и отказывается перезаписывать прямой хотфикс на Space), и `deploy-proxy.yml`, который выносит `proxy/` в Deno Deploy на каждом зелёном прогоне CI в `main` (деплой неизменного кода идемпотентен).
 
 ## Известные ограничения
 

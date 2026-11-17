@@ -36,6 +36,7 @@ from lumen_message_parse import (
     _draw_trigger_is_visual,
     _tts_trigger_is_speech,
     _split_image_variants,
+    _strip_variants_phrase,
     _wants_style_reference,
     _NO_MEDIA_NOTE,
     _find_recent_media_by_category,
@@ -341,15 +342,15 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
     # Альбомы и pick-кнопки приходят фоновой задачей/колбэком, минуя handle_message:
     # без области здесь /stop в фазе поиска на этих путях не работает (аудит 16.11.2026).
     _stop_scope = chat_id if message.chat is not None else None
-    if _stop_scope is not None:
-        bot._begin_stream_stop_scope(
-            _stop_scope, getattr(getattr(message, "from_user", None), "id", None))
     # Автор для карантина моделей: pick-кнопки приходят колбэком и раньше считались
     # чатом, а не человеком (аудит 16.11.2026).
     utoken = None
     _sender = getattr(message, "from_user", None)
     if not bot._LOG_USER.get() and _sender is not None:
         utoken = bot._LOG_USER.set(f"user={getattr(_sender, 'id', 0)}")
+    # Актор для per-user лимитов поиска: контекст задачи наследуют фоновые вызовы.
+    import lumen_search as _lumen_search
+    _actor_token = _lumen_search.set_search_actor(getattr(_sender, "id", None))
     try:
         remaining = bot._msg_remaining_sec()
         lock_timeout = bot.CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(bot.CHAT_LOCK_TIMEOUT_SEC, remaining))
@@ -359,6 +360,11 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
             with contextlib.suppress(Exception):
                 await bot._tg_call(bot._answer_sender(message), bot._t_no_create(chat_id, "lock_busy"))
             return
+        # Область /stop открываем только принятому запросу: отшитый «занято»
+        # раньше оставался владельцем области (ревью 17.11.2026).
+        if _stop_scope is not None:
+            bot._begin_stream_stop_scope(
+                _stop_scope, getattr(getattr(message, "from_user", None), "id", None))
         # Ответ без создания чата: обычный _t через get_state завёл бы запись даже
         # тому, кого отшили «занято» (та же причина, что у лимита).
         bot._chat_lock_waiters[chat_id] = waiters + 1
@@ -387,6 +393,7 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
             bot._LOG_CHAT.reset(ltoken)
         if utoken is not None:
             bot._LOG_USER.reset(utoken)
+        _lumen_search.reset_search_actor(_actor_token)
         if _stop_scope is not None:
             bot._end_stream_stop_scope(_stop_scope)
 
@@ -398,10 +405,16 @@ async def _process_media_group_buffers(mgid: str) -> None:
         await asyncio.sleep(0.8)
     finally:
         # Отмена во сне — запись обязана уйти, иначе висит вечно. Чужую (новую)
-        # задачу под тем же mgid не трогаем — сверяемся, что это мы.
-        messages = bot._mg_buffers.pop(mgid, []) or []
-        if bot._mg_tasks.get(mgid) is asyncio.current_task():
-            bot._mg_tasks.pop(mgid, None)
+        # задачу под тем же mgid не трогаем — сверяемся, что это мы. Буферы
+        # тоже снимает только владелец: отменённая задача иначе уносила их
+        # у нового запуска (ревью 17.11.2026).
+        current_task = bot._mg_tasks.get(mgid)
+        if current_task is None or current_task is asyncio.current_task():
+            # Нет владельца (прямой вызов/старый путь) или владелец — мы: снимаем.
+            # Чужая живая задача под тем же mgid сохраняет свой буфер.
+            messages = bot._mg_buffers.pop(mgid, []) or []
+            if current_task is asyncio.current_task():
+                bot._mg_tasks.pop(mgid, None)
     if not messages:
          return
     # Альбом — под тем же per-chat lock и с теми же защитами, что у обычного
@@ -471,6 +484,7 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     skipped = 0
     too_big = 0
     extra_bytes = 0
+    kept_sources: list = []
     for (fid, mime, src), fetched in zip(targets, fetched_list):
         if isinstance(fetched, bot._MediaTooLargeError):
             too_big += 1
@@ -483,6 +497,7 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
             continue
         extra_bytes += len(fetched[0])
         extra_media.append(fetched)
+        kept_sources.append(src)
         # Файлы альбома — в recent_media_ids, иначе последующие вопросы их не найдут.
         bot._save_media_to_history(src, album_state, album_user_id)
     if skipped:
@@ -491,11 +506,17 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     if too_big:
         # Большие отклонены капом: честный отказ пользователю — из _handle_message_core.
         log.warning("[album] Skipped %d of %d files: over the download size cap.", too_big, len(targets))
+    if skipped or too_big:
+        # Честная пометка: анализ идёт по части альбома (ревью 17.11.2026).
+        with contextlib.suppress(Exception):
+            await bot._safe_reply(main_msg, bot._t(main_msg.chat.id, "album_partial"))
     # Рейт-лимит уже списан в _process_media_group_buffers_locked: второй раз
     # альбом не должен занимать слот (аудит 28.10.2026).
     await bot._handle_message_core(
         main_msg, extra_media=extra_media or None, skip_rate_limit=True,
-        extra_media_sources=[src for _, _, src in targets],
+        # Только скачанные слайды: история не должна ссылаться на медиа,
+        # которого модель не видела (ревью 17.11.2026).
+        extra_media_sources=kept_sources or None,
     )
 
 
@@ -883,6 +904,15 @@ def _direct_attachment_needs_gemini(message: Message) -> bool:
     return False
 
 
+def _draw_budget_seconds(remaining: float | None) -> float:
+    """Бюджет /draw: 0.0 — исчерпанный остаток, а не «значения нет». Раньше `or`
+    подменял ноль полным бюджетом и рисование шло сверх потолка (ревью 17.11.2026)."""
+    import bot
+    if remaining is None:
+        remaining = bot.DRAW_TOTAL_BUDGET_SEC
+    return max(1.0, min(bot.DRAW_TOTAL_BUDGET_SEC, remaining))
+
+
 async def _handle_message_core(
     message: Message, extra_media: list[tuple[bytes, str]] | None = None, *,
     skip_rate_limit: bool = False, extra_media_sources: list[Any] | None = None,
@@ -1121,9 +1151,7 @@ async def _handle_message_core(
             await bot.inline_draw(message, _prompt_text, reference=reference)
             return
 
-    _ctx_deadline = time.monotonic() + max(
-        1.0, min(bot.DRAW_TOTAL_BUDGET_SEC, bot._msg_remaining_sec() or bot.DRAW_TOTAL_BUDGET_SEC),
-    )
+    _ctx_deadline = time.monotonic() + _draw_budget_seconds(bot._msg_remaining_sec())
 
     if matched_draw_trigger:
         prompt_content = _strip_trigger_content(_prompt_text, matched_draw_trigger, message)
@@ -1173,8 +1201,11 @@ async def _handle_message_core(
                 # вариант» должен находить сюжет, а не слово «это», и писать его
                 # заново не нужно.
                 _draw_variants = _split_image_variants(_prompt_text)[0]
-                _draw_kwargs = {"prepared": prompt_content}
-                _draw_prompt = ""
+                # Фразу количества вырезаем и из описания резолвера: «3 variants»
+                # в чужом тексте уезжало модели и в промпт (ревью 17.11.2026).
+                _clean_resolved = _strip_variants_phrase(prompt_content)
+                _draw_kwargs = {"prepared": _clean_resolved or prompt_content}
+                _draw_prompt = _clean_resolved
             else:
                 _draw_variants, _draw_prompt = _split_image_variants(prompt_content)
                 _draw_kwargs = {}
@@ -1208,8 +1239,11 @@ async def _handle_message_core(
             # И здесь число вариантов — человеческое: модель могла написать
             # «A ginger cat, 3 variants» (ревью 10.11.2026).
             _r_count, _r_prompt = _split_image_variants(clean_prompt)
+            # Фраза количества из описания вырезается и здесь: «, 3 variants»
+            # уезжало в промпт через prepared (F-169, 17.11.2026).
+            _resolved_clean = _strip_variants_phrase(_resolved) or _resolved
             await bot.inline_draw_variants(
-                message, _resolved, variants=_r_count, prepared=_resolved,
+                message, _resolved_clean, variants=_r_count, prepared=_resolved_clean,
             )
             return
 
@@ -1605,6 +1639,7 @@ async def _handle_message_core(
                 youtube_url=youtube_url_to_analyze, allow_stream=allow_stream,
                 deadline=route_deadline, provenance=provenance, status=status,
                 history_text=history_text, history_meta=history_meta, effort=effort,
+                preserve_grounded_head=needs_freshness,
             )
             answered_grounded = answered_with_live_search(provenance)
         except _SearchRequested as req:
@@ -1691,6 +1726,7 @@ async def _handle_message_core(
                     youtube_url=youtube_url_to_analyze, allow_stream=not is_guest,
                     deadline=route_deadline, provenance=provenance, status=status,
                     history_text=history_text, history_meta=history_meta, effort=effort,
+                    preserve_grounded_head=needs_freshness,
                 )
                 answered_grounded = answered_with_live_search(provenance)
             except _SearchRequested:
@@ -1734,6 +1770,7 @@ async def _handle_message_core(
                         youtube_url=youtube_url_to_analyze, allow_stream=False,
                         deadline=route_deadline, provenance=provenance,
                         history_text=history_text, history_meta=history_meta, effort=effort,
+                        preserve_grounded_head=needs_freshness,
                     )
                     # Ретрай уже с найденными сниппетами: пометка «без поиска»
                     # была бы ложью (аудит 28.10.2026).
@@ -1768,6 +1805,7 @@ async def _handle_message_core(
                         allow_stream=True, deadline=route_deadline,
                         provenance=provenance, history_text=continued_prompt,
                         history_meta=history_meta, effort=effort,
+                        preserve_grounded_head=needs_freshness,
                     )
                     web_search_failed = False
                 except Exception as exc:
@@ -1783,6 +1821,11 @@ async def _handle_message_core(
             note_text = bot._t(message.chat.id, "fallback_no_live_search")
         if note_text:
             ans = note_text + "\n\n" + ans
+            if reply_already_sent and status is None:
+                # Стрим уже отдал ответ, а пузыря нет: пометка иначе терялась
+                # (ревью 17.11.2026).
+                with contextlib.suppress(Exception):
+                    await bot._safe_reply(message, note_text)
             if reply_already_sent and status is not None:
                 # Ответ уже в статус-пузыре (стрим или переиспользование) —
                 # пометку дописываем туда же вместе со свёрнутым блоком активности.

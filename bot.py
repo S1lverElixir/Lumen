@@ -29,7 +29,6 @@ import sys
 import threading
 import time
 from pathlib import Path
-from datetime import date
 from typing import Any
 import urllib.request as _urllib_request
 
@@ -362,7 +361,8 @@ def _cloudflare_proxy_candidates() -> list[str]:
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
 
-def _env_number(name: str, default: float | int, *, cast: type = float, min_value: float | None = None) -> float | int:
+def _env_number(name: str, default: float | int, *, cast: type = float,
+                min_value: float | None = None, max_value: float | None = None) -> float | int:
     """Число из переменной окружения с внятной диагностикой.
 
     Раньше все таймауты и лимиты читались голым int()/float(): опечатка в HF
@@ -381,6 +381,9 @@ def _env_number(name: str, default: float | int, *, cast: type = float, min_valu
         return cast(default)
     if min_value is not None and value < min_value:
         log.warning("[setup] %s=%s is below the allowed minimum %s — using default %s", name, value, min_value, default)
+        return cast(default)
+    if max_value is not None and value > max_value:
+        log.warning("[setup] %s=%s is above the allowed maximum %s — using default %s", name, value, max_value, default)
         return cast(default)
     return value
 
@@ -408,6 +411,11 @@ def _sentry_scrub_secrets(event: dict, hint: dict) -> dict | None:
     payload = json.dumps(event, default=str, ensure_ascii=False)
     for secret in _redactable_secrets():
         payload = payload.replace(secret, "<REDACTED>")
+        # JSON экранирует кавычки/бэкслеши/управляющие: точная строка секрета
+        # тогда не находится, и он уезжает в Sentry (ревью 17.11.2026).
+        escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
+        if escaped != secret:
+            payload = payload.replace(escaped, "<REDACTED>")
     return json.loads(payload)
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
@@ -451,6 +459,10 @@ def _media_semaphore() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     sem = _media_semaphores.get(loop)
     if sem is None:
+        # Закрытые циклы держат ссылку и всё, что к ним привязано: снимаем
+        # старые записи при создании новой (ревью 17.11.2026).
+        for stale_loop in [lp for lp in _media_semaphores if lp.is_closed()]:
+            _media_semaphores.pop(stale_loop, None)
         sem = asyncio.Semaphore(MEDIA_GLOBAL_CONCURRENCY)
         _media_semaphores[loop] = sem
     return sem
@@ -507,7 +519,8 @@ FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
 # 5700-символьный ответ на 35-й секунде («Route time budget exhausted»), и
 # человек видел «Соединение прервалось». Потолок держим ниже 60 с — дольше релей
 # (proxy/proxy.ts) обрывает upstream сам.
-STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10)
+# Верхняя граница 59: дольше держать лок чата нельзя, дефолт 55 — запас.
+STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10, max_value=59)
 # Остановка ответа командой /stop: выключатель, как у остальных новых слоёв.
 STOP_COMMAND_ENABLED = (os.getenv("STOP_COMMAND_ENABLED", "1") or "").strip().lower() not in ("0", "false", "off")
 # Кнопка «Остановить» под ответом: по умолчанию выключена до живого смоука —
@@ -759,9 +772,9 @@ from lumen_limits import (
 )
 
 # ── Инициализация клиентов внутри цикла обработки событий (решает RuntimeError) ──
-bot: Bot = None
+bot: Bot | None = None
 dp = Dispatcher()
-client: genai.Client = None
+client: genai.Client | None = None
 
 _http_session: aiohttp.ClientSession | None = None
 _chat_locks: dict[int, asyncio.Lock] = {}
@@ -1438,6 +1451,7 @@ from lumen_commands import (
     cmd_ban,
     cmd_unban,
     cmd_banlist,
+    chat_locked,
     _send_pick_question,
     handle_pick_callback,
 )
@@ -1446,8 +1460,8 @@ from lumen_commands import (
 dp.message.register(cmd_start, Command("start", "help"))
 dp.message.register(cmd_draw, Command("draw"))
 dp.callback_query.register(handle_draw_more_callback, F.data == "draw:more")
-dp.message.register(cmd_tts, Command("tts"))
-dp.message.register(cmd_reset, Command("reset"))
+dp.message.register(chat_locked(cmd_tts), Command("tts"))
+dp.message.register(chat_locked(cmd_reset), Command("reset"))
 dp.message.register(cmd_stop, Command("stop"))
 dp.callback_query.register(handle_stop_callback, F.data.startswith("stop:"))
 dp.message.register(cmd_lang, Command("lang"))
@@ -1515,8 +1529,11 @@ async def handle_message(message: Message) -> None:
 
 async def _handle_message(message: Message) -> None:
     # Владельческая блокировка: ни ответа, ни контекста группы, ни счётчиков —
-    # отсекаем раньше всего, включая медиагруппы и пассивный фон.
-    if message.from_user is not None and _is_banned(message.from_user.id):
+    # отсекаем раньше всего, включая медиагруппы и пассивный фон. Пост канала
+    # (sender_chat без from_user) тоже автор: иначе бан обходится каналом
+    # (ревью 17.11.2026).
+    _author = message.from_user if message.from_user is not None else getattr(message, "sender_chat", None)
+    if _author is not None and getattr(_author, "id", None) is not None and _is_banned(_author.id):
         return
 
     if message.media_group_id:
@@ -1540,9 +1557,10 @@ async def _handle_message(message: Message) -> None:
             chat_id, type(_in_src).__name__, bool(message.text or message.caption),
         )
 
-    # Если бот не упомянут в группе, это просто контекст — обрабатываем без локов и ожидания
+    # Неупомянутая группа — тоже путь, трогающий чат: тот же лок, кап ожидающих
+    # и дедлайн, иначе фон писал историю параллельно с ответом (ревью 17.11.2026).
     if not is_private and not is_guest and not mentioned:
-        await _handle_message_core(message)
+        await _run_under_chat_lock(message, lambda: _handle_message_core(message))
         return
 
     # Лок, кап ожидающих и потолок сообщения — в общем помощнике, чтобы этот путь,
@@ -1860,7 +1878,9 @@ async def _webhook_startup() -> None:
     log.info("[webhook] Bot is running in webhook mode. Updates arrive via POST /webhook")
     # Суточные перепроверки моделей в часовом цикле: истёкшее промо иначе видно
     # только после рестарта.
-    _last_daily_check_date = date.today()
+    # Сутки — те же, что у квоты (America/Los_Angeles), а не UTC контейнера
+    # (ревью 17.11.2026).
+    _last_daily_check_date = _current_quota_day()
     while True:
         await asyncio.sleep(3600)
         try:
@@ -1872,7 +1892,7 @@ async def _webhook_startup() -> None:
             # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
             # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
             _reset_quota_if_new_day()
-            today = date.today()
+            today = _current_quota_day()
             if today != _last_daily_check_date:
                 _last_daily_check_date = today
                 _check_unconfirmed_model_quotas()

@@ -98,7 +98,8 @@ function isTelegramBotPath(path: string): boolean {
 }
 
 function isCloudflareAiPath(path: string): boolean {
-  return /^\/client\/v4\/accounts\/[^/]+\/ai(\/|$)/.test(path);
+  // Генерация и каталог моделей (каталог зовёт /diag); остальное поддерево — нет.
+  return /^\/client\/v4\/accounts\/[^/]+\/ai\/(run|models)\//.test(path);
 }
 
 export function buildForwardHeaders(reqHeaders: Headers): Headers {
@@ -115,30 +116,72 @@ export function buildResponseHeaders(upstreamHeaders: Headers): Headers {
   return headers;
 }
 
+function isPrivateV4(a: number, b: number): boolean {
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a === 192 && b === 0) return true;
+  if (a === 198 && b === 51) return true;
+  if (a === 203 && b === 0) return true;
+  return a >= 224;
+}
+
+function ipv6ToBigInt(ip: string): bigint | null {
+  let s = ip.split("%")[0].toLowerCase();
+  // Встроенный IPv4-хвост: ::ffff:1.2.3.4 и 2002::1.2.3.4.
+  const v4tail = s.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4tail) {
+    const a = Number(v4tail[2]), b = Number(v4tail[3]), c = Number(v4tail[4]), d = Number(v4tail[5]);
+    if ([a, b, c, d].some((n) => n > 255)) return null;
+    s = v4tail[1] + ((a << 8) | b).toString(16) + ":" + ((c << 8) | d).toString(16);
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  if (halves.length === 1 && head.length !== 8) return null;
+  if (halves.length === 2 && head.length + tail.length > 8) return null;
+  const fill = 8 - head.length - tail.length;
+  const all = [...head, ...Array(halves.length === 2 ? fill : 0).fill("0"), ...tail];
+  if (all.length !== 8) return null;
+  let n = 0n;
+  for (const h of all) {
+    if (!/^[0-9a-f]{1,4}$/.test(h)) return null;
+    n = (n << 16n) | BigInt(parseInt(h, 16));
+  }
+  return n;
+}
+
 export function isPrivateAddress(ip: string): boolean {
   const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
-    const a = Number(v4[1]), b = Number(v4[2]);
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    if (a === 198 && (b === 18 || b === 19)) return true;
-    if (a === 192 && b === 0) return true;
-    if (a === 198 && b === 51) return true;
-    if (a === 203 && b === 0) return true;
-    return a >= 224;
+    const parts = [v4[1], v4[2], v4[3], v4[4]].map(Number);
+    if (parts.some((n) => n > 255)) return true;
+    return isPrivateV4(parts[0], parts[1]);
   }
-  const low = ip.toLowerCase();
-  if (low.startsWith("::")) return true;
-  if (low.startsWith("64:ff9b")) return true;
-  if (low.startsWith("ff")) return true;
-  if (low.startsWith("0:")) return true;
-  if (low.startsWith("2002:")) return true;
-  if (low.startsWith("fec")) return true;
-  if (low.startsWith("fc") || low.startsWith("fd")) return true;
-  if (low.startsWith("fe8") || low.startsWith("fe9") || low.startsWith("fea") || low.startsWith("feb")) return true;
+  // Числовые диапазоны, а не строковые префиксы: полная форма с ведущими
+  // нулями, IPv4-mapped в полной форме, Teredo и site-local проходили как
+  // публичные (ревью 17.11.2026).
+  const n = ipv6ToBigInt(ip);
+  if (n === null) return false;
+  if (n === 0n || n === 1n) return true; // :: и ::1
+  const top96 = n >> 32n;
+  const lowV4 = Number(n & 0xffffffffn);
+  if (top96 === 0xffffn || top96 === 0n) {
+    // IPv4-mapped ::ffff:a.b.c.d и compatible ::a.b.c.d
+    return isPrivateV4(lowV4 >>> 24, (lowV4 >>> 16) & 255);
+  }
+  if (top96 === 0x64ff9b0000000000000000n) return true; // 64:ff9b::/96 NAT64
+  if ((n >> 96n) === 0x20010000n) return true; // Teredo 2001::/32
+  if ((n >> 112n) === 0x2002n) return true; // 6to4 2002::/16
+  if ((n >> 121n) === 0x7en) return true; // fc00::/7 unique local
+  const site = n >> 118n;
+  if (site === 0x3fan || site === 0x3fbn) return true; // fe80::/10 и fec0::/10
+  if ((n >> 120n) === 0xffn) return true; // ff00::/8 multicast
+  if ((n >> 64n) === 0x100n) return true; // 100::/64 discard
   return false;
 }
 
@@ -288,7 +331,9 @@ export async function handleRequest(
   const respHeaders = buildResponseHeaders(upstreamResp.headers);
   const cappedBody = req.method === "HEAD"
     ? null
-    : warnOnTruncation(upstreamResp.body, maxBodyBytes, new URL(target.url).host);
+    // close — как у Deno-релея: ответ сверх капа обрезается, а не рвётся
+    // ошибкой (ревью 17.11.2026, паритет контрактов).
+    : warnOnTruncation(upstreamResp.body, maxBodyBytes, new URL(target.url).host, "close");
   return new Response(cappedBody, { status: upstreamResp.status, headers: respHeaders });
 }
 

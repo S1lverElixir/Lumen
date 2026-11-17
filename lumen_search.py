@@ -5,12 +5,14 @@ lumen_search.py — внешний веб-поиск: подготовка за�
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import contextlib
 import html
 import ipaddress
 import json
 import logging
 import math
+import socket
 import os
 import re
 import time
@@ -44,7 +46,10 @@ _FX_URL = "https://open.er-api.com/v6/latest/{base}"
 
 # DDG lite с 11.11.2026 отдаёт страницу-аномалию почти на каждый запрос (замер 8/8
 # пустых ответов), поэтому статус 202 и этот маркер — немедленный провал, а не данные.
-_DDG_BLOCKED_RE = re.compile(r"anomaly|captcha|unusual traffic|blocked", re.IGNORECASE)
+# Голое «blocked» убрано: честная пустая выдача с этим словом считалась аномалией
+# и запускала второй GET (ревью 17.11.2026).
+_DDG_BLOCKED_RE = re.compile(
+    r"anomaly|captcha|unusual traffic|challenge-platform", re.IGNORECASE)
 
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 _NEWS_QUERY_RE = re.compile(r"\bновост\w*|\bnews\b|headlines|главные\s+новости", re.IGNORECASE)
@@ -122,8 +127,10 @@ def reset_search_counters_for_tests() -> None:
     """Счётчик глобальный и дневной: тесту нужен явный сброс, иначе порядок файлов
     решает, кто упрётся в потолок."""
     global _search_day, _search_calls, _search_api_day, _search_api_calls
+    global _search_api_user_day, _search_api_user_calls
     _search_day, _search_calls = "", 0
     _search_api_day, _search_api_calls = "", 0
+    _search_api_user_day, _search_api_user_calls = "", {}
 
 
 # Потолок обращений к провайдеру ПО КЛЮЧУ, отдельно от WEB_SEARCH_DAILY_LIMIT:
@@ -156,8 +163,65 @@ def _roll_search_api_day() -> None:
         _search_api_day, _search_api_calls = today, 0
 
 
+# Кто сейчас ищет: ставится на входе сообщения (_run_under_chat_lock), живёт
+# в контексте задачи. Без актора лимит на человека не применяется (тесты, CLI).
+_SEARCH_ACTOR: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "search_actor", default=None)
+
+
+def set_search_actor(user_id: int | None):
+    return _SEARCH_ACTOR.set(user_id)
+
+
+def reset_search_actor(token) -> None:
+    _SEARCH_ACTOR.reset(token)
+
+
+def _actor_is_owner() -> bool:
+    import bot
+    user_id = _SEARCH_ACTOR.get()
+    return bot.OWNER_ID is not None and user_id is not None and user_id == bot.OWNER_ID
+
+
+def _search_api_user_limit() -> int:
+    """Сколько keyed-запросов в сутки одному человеку. Дефолт 2: при 12/сутки
+    у Tavily это шесть человек до общего потолка, владелец не ограничен."""
+    raw = (os.getenv("SEARCH_API_USER_DAILY_LIMIT", "") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return 2
+
+
+_search_api_user_day = ""
+_search_api_user_calls: dict[int, int] = {}
+
+
+def _roll_search_api_user_day() -> None:
+    import bot
+    global _search_api_user_day, _search_api_user_calls
+    today = bot._current_quota_day()
+    if today != _search_api_user_day:
+        _search_api_user_day, _search_api_user_calls = today, {}
+
+
+def search_api_user_budget_left() -> bool:
+    if _actor_is_owner():
+        return True
+    user_id = _SEARCH_ACTOR.get()
+    if user_id is None:
+        return True
+    _roll_search_api_user_day()
+    return _search_api_user_calls.get(user_id, 0) < _search_api_user_limit()
+
+
 def search_api_budget_left() -> bool:
     _roll_search_api_day()
+    if _actor_is_owner():
+        # Владельцу общий keyed-потолок не указ; реальный предел — тариф провайдера.
+        return True
     return _search_api_calls < _search_api_limit()
 
 
@@ -170,6 +234,11 @@ def note_search_api_call() -> None:
     _roll_search_api_day()
     global _search_api_calls
     _search_api_calls += 1
+    # Счётчик владельца тоже растёт — /stats честен, — но гейт его не смотрит.
+    user_id = _SEARCH_ACTOR.get()
+    if user_id is not None and not _actor_is_owner():
+        _roll_search_api_user_day()
+        _search_api_user_calls[user_id] = _search_api_user_calls.get(user_id, 0) + 1
 
 
 def web_search_max_results() -> int:
@@ -518,7 +587,7 @@ _CITY_FORMS = {
     "Витебск": ("витебск", "витебске", "vitebsk"),
     "Могилёв": ("могилев", "могилёв", "mogilev"),
     "Москва": ("москва", "москве", "москвой", "moscow", "moskva"),
-    "Санкт-Петербург": ("санкт-петербург", "петербург", "спб", "питер", "питере", "saint petersburg", "st petersburg"),
+    "Санкт-Петербург": ("санкт-петербург", "санкт-петербурге", "санкт-петербурга", "петербург", "петербурге", "петербурга", "спб", "питер", "питере", "saint petersburg", "st petersburg"),
     "Киев": ("киев", "киеве", "киева", "kyiv", "kiev"),
     "Варшава": ("варшава", "варшаве", "warsaw", "warszawa"),
     "Вильнюс": ("вильнюс", "вильнюсе", "vilnius"),
@@ -555,13 +624,22 @@ _CITY_FORMS = {
 _CITY_TOKEN_RE = re.compile(r"(?:в|во|у|для|над)\s+([A-ZА-ЯЁ][\wА-ЯЁ-]{2,24})", re.UNICODE)
 
 
+def _alias_present(alias: str, text: str) -> bool:
+    """Алиас по границам слова: «together» больше не считается ethereum,
+    «модели» — Дели (ревью 17.11.2026)."""
+    if not alias:
+        return False
+    pattern = r"(?<![0-9a-zа-яё])" + re.escape(alias) + r"(?![0-9a-zа-яё])"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
 def _cities_in(text: str) -> list[str]:
     """Города запроса в именительном падеже: сначала известная таблица, потом — любое
     слово с большой буквы после предлога как попытка для неизвестного города."""
     low = (text or "").lower()
     found: list[str] = []
     for canonical, forms in _CITY_FORMS.items():
-        if any(form in low for form in forms) and canonical not in found:
+        if any(_alias_present(form, low) for form in forms) and canonical not in found:
             found.append(canonical)
     if found:
         return found[:2]
@@ -628,6 +706,28 @@ def _clean_text(raw: str, cap: int) -> str:
     return _WS_RE.sub(" ", text).strip()[:cap]
 
 
+_SEARCH_BODY_MAX_BYTES = 2 * 1024 * 1024
+
+
+async def _read_search_text(resp, cap: int = _SEARCH_BODY_MAX_BYTES) -> str:
+    """Тело ответа поисковика с капом: 20 МБ в RAM и гигантский разбор держали
+    единственный процесс (ревью 17.11.2026). Усечённый ответ просто не распарсится
+    и источник вернёт пусто — это честнее, чем съесть память."""
+    content = getattr(resp, "content", None)
+    if content is None or not hasattr(content, "iter_chunked"):
+        # Тестовые двойники без потока: поведение прежнее.
+        return await resp.text()
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in content.iter_chunked(65536):
+        total += len(chunk)
+        if total > cap:
+            log.warning("[web-search] response exceeds %d bytes, truncated", cap)
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 def url_host_is_public(url: str) -> bool:
     """Можно ли показать и отдать модели этот адрес как источник. Ревью
     приватности 12.11.2026: цель редиректа DuckDuckGo и поле publisher приезжают
@@ -650,9 +750,19 @@ def url_host_is_public(url: str) -> bool:
         return ipaddress.ip_address(host).is_global
     except ValueError:
         pass
-    # Домен: обязана быть точка (отсекает «internal», «localhost», «169» без
-    # точек) и не быть служебного суффикса.
-    return "." in host and not host.endswith((".local", ".internal", ".lan", ".home.arpa"))
+    # Сокращённый и восьмеричный IPv4 (127.1, 0177.0.0.1) ipaddress не понимает,
+    # но inet_aton понимает — и отсекает их как непубличные (ревью 17.11.2026).
+    if re.fullmatch(r"[0-9a-fx.]+", host):
+        try:
+            return ipaddress.ip_address(socket.inet_aton(host)).is_global
+        except (OSError, ValueError):
+            pass
+    # Домен: обязана быть точка и не быть служебного суффикса или rebinding-сервиса.
+    blocked_suffixes = (
+        ".local", ".internal", ".lan", ".home.arpa", ".localhost",
+        ".nip.io", ".sslip.io", ".xip.io", ".lvh.me", ".vcap.me",
+    )
+    return "." in host and not host.endswith(blocked_suffixes)
 
 
 def _unwrap_ddg_url(href: str) -> str:
@@ -679,7 +789,10 @@ def _unwrap_ddg_url(href: str) -> str:
 
 def _is_ddg_blocked(page: str) -> bool:
     """Страница-аномалия DDG: HTML есть, выдачи нет. Отличаем от честного «ничего не нашлось»."""
-    return bool(page) and bool(_DDG_BLOCKED_RE.search(page[:6000])) and "result-snippet" not in page
+    # Разметка lite и HTML различаются: без обоих маркеров легитимная страница
+    # с эхом запроса «challenge» считалась аномалией (проход №5, 17.11.2026).
+    return (bool(page) and bool(_DDG_BLOCKED_RE.search(page[:6000]))
+            and "result-snippet" not in page and "result__a" not in page)
 
 
 def parse_ddg_lite_html(page: str, max_results: int = _DEFAULT_MAX_RESULTS) -> list[dict]:
@@ -749,7 +862,10 @@ def parse_rss_snippets(xml_page: str, max_results: int = _DEFAULT_MAX_RESULTS,
         return out
     # Выдача чужая: DTD и внешние сущности в RSS не читаем вовсе (Eta-атака на
     # стандартном парсере, defusedxml в зависимости не заводим).
-    if "<!DOCTYPE" in xml_page[:2000] or "<!ENTITY" in xml_page[:2000]:
+    # По всему телу, а не первым 2000 символов: отступ в 2100 обходил guard
+    # (ревью 17.11.2026). Проверка O(n) и дешёвая.
+    upper_page = xml_page.upper()
+    if "<!DOCTYPE" in upper_page or "<!ENTITY" in upper_page:
         return out
     try:
         root = ET.fromstring(xml_page)
@@ -924,7 +1040,7 @@ async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: in
     вопросы «кто такой X / что такое X», когда новости молчат."""
     cached = _cache_get("wiki|" + query)
     if cached is not None:
-        return cached
+        return cached[:max(1, limit)]
     lang = _wiki_lang(query)
     params = {
         "action": "query", "generator": "search", "gsrsearch": query, "gsrlimit": max(3, limit),
@@ -935,7 +1051,7 @@ async def _wikipedia_pages(session: aiohttp.ClientSession, query: str, limit: in
     try:
         async with session.get(_WIKI_API.format(lang=lang), params=params, headers=_WIKI_HEADERS, timeout=budget) as resp:
             resp.raise_for_status()
-            data = json.loads(await resp.text())
+            data = json.loads(await _read_search_text(resp))
     except Exception as exc:
         log.info("[web-search] wikipedia failed: %s", type(exc).__name__)
         return []
@@ -999,7 +1115,8 @@ def _cache_get(key: str) -> list[dict] | None:
     if time.monotonic() - stamp > _REFERENCE_CACHE_TTL_SEC:
         _reference_cache.pop(key, None)
         return None
-    return items
+    # Копия: вызывающий не должен мутировать общий кэш (ревью 17.11.2026).
+    return [dict(item) for item in items]
 
 
 def _cache_put(key: str, items: list[dict]) -> None:
@@ -1207,7 +1324,7 @@ async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, 
                     log.info("[web-search] wikidata rate limited")
                     return []
                 resp.raise_for_status()
-                found = (json.loads(await resp.text()) or {}).get("search") or []
+                found = (json.loads(await _read_search_text(resp)) or {}).get("search") or []
         except Exception as exc:
             log.info("[web-search] wikidata search failed: %s", type(exc).__name__)
             continue
@@ -1221,7 +1338,7 @@ async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, 
                 async with session.get(_WD_ENTITY_URL.format(qid=cand), headers=_WIKI_HEADERS,
                                        timeout=ent_budget) as resp:
                     resp.raise_for_status()
-                    data = json.loads(await resp.text())
+                    data = json.loads(await _read_search_text(resp))
             except Exception as exc:
                 log.info("[web-search] wikidata entity failed: %s", type(exc).__name__)
                 continue
@@ -1246,7 +1363,7 @@ async def _wikidata_leader_snippets(session: aiohttp.ClientSession, query: str, 
                 headers=_WIKI_HEADERS, timeout=label_budget,
             ) as resp:
                 resp.raise_for_status()
-                ents = (json.loads(await resp.text()) or {}).get("entities") or {}
+                ents = (json.loads(await _read_search_text(resp)) or {}).get("entities") or {}
             for key, ent_data in ents.items():
                 lab = (ent_data.get("labels") or {}).get(lang) or (ent_data.get("labels") or {}).get("en") or {}
                 labels[key] = (lab.get("value") or "").strip()
@@ -1270,7 +1387,7 @@ async def _crypto_snippets(session: aiohttp.ClientSession, text: str, deadline: 
     """CoinGecko: живая цена с меткой времени. Скрейпинг страниц цены давал статьи
     2022 года вместо числа (замер 11.11.2026 на вопросе «сколько стоит bitcoin»)."""
     low = text.lower()
-    ids = [coin for coin, aliases in _CRYPTO_ALIASES.items() if any(a in low for a in aliases)]
+    ids = [coin for coin, aliases in _CRYPTO_ALIASES.items() if any(_alias_present(a, low) for a in aliases)]
     if not ids:
         return []
     params = {"ids": ",".join(ids[:3]), "vs_currencies": "usd", "include_24hr_change": "true",
@@ -1279,7 +1396,7 @@ async def _crypto_snippets(session: aiohttp.ClientSession, text: str, deadline: 
     try:
         async with session.get(_COINGECKO_URL, params=params, headers=_SEARCH_HEADERS, timeout=budget) as resp:
             resp.raise_for_status()
-            data = json.loads(await resp.text())
+            data = json.loads(await _read_search_text(resp))
     except Exception as exc:
         log.info("[web-search] coingecko failed: %s", type(exc).__name__)
         return []
@@ -1305,7 +1422,7 @@ async def _fx_snippets(session: aiohttp.ClientSession, text: str, deadline: floa
     """Курс валют: exchangerate-api отдаёт всю корзину одним запросом с датой обновления."""
     low = (text or "").lower()
     base = "USD"
-    targets = [code for code, aliases in _CURRENCY_ALIASES.items() if any(a in low for a in aliases)]
+    targets = [code for code, aliases in _CURRENCY_ALIASES.items() if any(_alias_present(a, low) for a in aliases)]
     if re.search(r"рубл|ruble", low) and "RUB" not in targets:
         targets.append("RUB")
     if not [code for code in targets if code != base]:
@@ -1319,7 +1436,7 @@ async def _fx_snippets(session: aiohttp.ClientSession, text: str, deadline: floa
         async with session.get(_FX_URL.format(base=base), headers=_SEARCH_HEADERS,
                                timeout=budget) as resp:
             resp.raise_for_status()
-            data = json.loads(await resp.text())
+            data = json.loads(await _read_search_text(resp))
     except Exception as exc:
         log.info("[web-search] fx failed: %s", type(exc).__name__)
         return []
@@ -1425,18 +1542,24 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
     cities = _cities_in(text)
     if not cities:
         return []
-    budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
+    def _remaining_budget() -> aiohttp.ClientTimeout:
+        # Остаток пересчитывается перед каждым запросом: фиксированный timeout
+        # на четыре последовательных запроса выходил за дедлайн (ревью 17.11.2026).
+        return aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
+
     need_moon = bool(_MOON_ASK_RE.search(text or ""))
     daily_fields = "temperature_2m_max,temperature_2m_min,precipitation_sum,sunrise,sunset"
     if need_moon:
         daily_fields += ",moonrise,moonset,moon_phase"
     out: list[dict] = []
     for city in cities[:2]:
+        if time.monotonic() >= deadline:
+            break
         try:
             async with session.get(_GEOCODE_URL, params={"name": city, "count": 1, "language": "ru"},
-                                   headers=_SEARCH_HEADERS, timeout=budget) as resp:
+                                   headers=_SEARCH_HEADERS, timeout=_remaining_budget()) as resp:
                 resp.raise_for_status()
-                found = (json.loads(await resp.text()) or {}).get("results") or []
+                found = (json.loads(await _read_search_text(resp)) or {}).get("results") or []
             if not found:
                 continue
             place = found[0]
@@ -1447,9 +1570,9 @@ async def _weather_snippets(session: aiohttp.ClientSession, text: str, deadline:
                 "current": "temperature_2m,precipitation,weather_code,wind_speed_10m",
                 "daily": daily_fields,
                 "timezone": "auto", "forecast_days": 2,
-            }, headers=_SEARCH_HEADERS, timeout=budget) as resp:
+            }, headers=_SEARCH_HEADERS, timeout=_remaining_budget()) as resp:
                 resp.raise_for_status()
-                wx = json.loads(await resp.text())
+                wx = json.loads(await _read_search_text(resp))
         except Exception as exc:
             log.info("[web-search] weather failed: %s", type(exc).__name__)
             continue
@@ -1509,22 +1632,28 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
         # как при отсутствии ключа (аудит 16.11.2026).
         log.info("[web-search] keyed provider daily ceiling reached (%s)", provider)
         return []
+    if not search_api_user_budget_left():
+        # Один человек не должен сжигать общий кредит: остальным слой остаётся
+        # (ревью 17.11.2026). Владелец не ограничен.
+        log.info("[web-search] keyed provider per-user ceiling reached (%s)", provider)
+        return []
     budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
     try:
         if provider == "tavily" and os.getenv("TAVILY_API_KEY"):
-            note_search_api_call()
             async with session.post("https://api.tavily.com/search",
                                     headers={"Authorization": f"Bearer {os.environ['TAVILY_API_KEY']}",
                                              "Content-Type": "application/json"},
                                     json={"query": query, "max_results": limit, "search_depth": "basic"},
                                     timeout=budget) as resp:
                 resp.raise_for_status()
-                _payload = json.loads(await resp.text()) or {}
+                _payload = json.loads(await _read_search_text(resp)) or {}
                 results = _payload.get("results") or []
                 # Диагностика пустого ключевого слоя: статус и число результатов,
                 # без ключа и текста запроса (прод 16.11.2026: Tavily отвечал пусто).
                 log.info("[web-search] tavily status=%s results=%d keys=%s",
                          resp.status, len(results), sorted(_payload)[:6])
+            # Кредит списывается только за дошедший запрос: упавший не тратит
+            note_search_api_call()
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("content") or "", _SNIPPET_MAX_CHARS),
                      "publisher": urllib.parse.urlparse(r.get("url") or "").netloc.removeprefix("www."),
@@ -1536,27 +1665,27 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
             log.info("[web-search] tavily key missing in env")
             return []
         if provider == "brave" and os.getenv("BRAVE_API_KEY"):
-            note_search_api_call()
             async with session.get("https://api.search.brave.com/res/v1/web/search",
                                    params={"q": query, "count": limit},
                                    headers={"X-Subscription-Token": os.environ["BRAVE_API_KEY"],
                                             "Accept": "application/json"},
                                    timeout=budget) as resp:
                 resp.raise_for_status()
-                results = (((json.loads(await resp.text()) or {}).get("web") or {}).get("results")) or []
+                results = (((json.loads(await _read_search_text(resp)) or {}).get("web") or {}).get("results")) or []
+            note_search_api_call()
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("description") or "", _SNIPPET_MAX_CHARS),
                      "publisher": urllib.parse.urlparse(r.get("url") or "").netloc.removeprefix("www."),
                      "date": (r.get("page_age") or "")[:10], "kind": "web"}
                     for r in results if r.get("url")]
         if provider == "exa" and os.getenv("EXA_API_KEY"):
-            note_search_api_call()
             async with session.post("https://api.exa.ai/search",
                                     headers={"x-api-key": os.environ["EXA_API_KEY"],
                                              "Content-Type": "application/json"},
                                     json={"query": query, "numResults": limit}, timeout=budget) as resp:
                 resp.raise_for_status()
-                results = (json.loads(await resp.text()) or {}).get("results") or []
+                results = (json.loads(await _read_search_text(resp)) or {}).get("results") or []
+            note_search_api_call()
             return [{"title": r.get("title") or "", "url": r.get("url") or "",
                      "snippet": _clean_text(r.get("text") or "", _SNIPPET_MAX_CHARS),
                      "publisher": urllib.parse.urlparse(r.get("url") or "").netloc.removeprefix("www."),
@@ -1593,13 +1722,13 @@ async def _fetch_ddg_page(session: aiohttp.ClientSession, query: str, deadline: 
     page = ""
     async with session.post(_DDG_LITE_URL, data={"q": query}, headers=_SEARCH_HEADERS, timeout=post_timeout) as resp:
         if resp.status == 200:
-            page = await resp.text()
+            page = await _read_search_text(resp)
     if page and not _is_ddg_blocked(page):
         return page
     get_timeout = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
     async with session.get(_DDG_LITE_URL, params={"q": query}, headers=_SEARCH_HEADERS, timeout=get_timeout) as resp:
         resp.raise_for_status()
-        text = await resp.text()
+        text = await _read_search_text(resp)
     return "" if _is_ddg_blocked(text) else text
 
 
@@ -1614,7 +1743,7 @@ async def _google_news_snippets(session: aiohttp.ClientSession, query: str, time
         headers=_SEARCH_HEADERS, timeout=budget,
     ) as resp:
         resp.raise_for_status()
-        return parse_rss_snippets(await resp.text(), limit, kind="news")
+        return parse_rss_snippets(await _read_search_text(resp), limit, kind="news")
 
 
 async def _bing_news_snippets(session: aiohttp.ClientSession, query: str, timeout: float, limit: int) -> list[dict]:
@@ -1625,7 +1754,7 @@ async def _bing_news_snippets(session: aiohttp.ClientSession, query: str, timeou
     async with session.get(_BING_NEWS_URL, params={"q": query, "format": "rss", "cc": cc},
                            headers=_SEARCH_HEADERS, timeout=budget) as resp:
         resp.raise_for_status()
-        return parse_rss_snippets(await resp.text(), limit, kind="news")
+        return parse_rss_snippets(await _read_search_text(resp), limit, kind="news")
 
 
 async def _bing_web_snippets(session: aiohttp.ClientSession, query: str, timeout: float, limit: int) -> list[dict]:
@@ -1637,7 +1766,7 @@ async def _bing_web_snippets(session: aiohttp.ClientSession, query: str, timeout
     budget = aiohttp.ClientTimeout(total=max(1.0, timeout))
     async with session.get(_BING_SEARCH_URL, params=params, headers=_SEARCH_HEADERS, timeout=budget) as resp:
         resp.raise_for_status()
-        return parse_rss_snippets(await resp.text(), limit, kind="web")
+        return parse_rss_snippets(await _read_search_text(resp), limit, kind="web")
 
 
 # ───────────────────────── слияние и ранжирование ─────────────────────────
@@ -1667,8 +1796,12 @@ def _wants_game_wiki(text: str) -> bool:
 
 
 def _authority(item: dict) -> int:
-    host = (item.get("publisher") or "").lower()
-    return 2 if any(host.endswith(a) or a in host for a in _AUTHORITY_HOSTS) else 0
+    host = (item.get("publisher") or "").lower().strip().rstrip(".")
+    if not host:
+        return 0
+    # По границам домена: «reuters.com.evil.tld» — чужой домен и не получает +2
+    # (ревью 17.11.2026; _game_wiki_bonus уже сделан так).
+    return 2 if any(host == a or host.endswith("." + a) for a in _AUTHORITY_HOSTS) else 0
 
 
 def _dedupe(items: list[dict]) -> list[dict]:
@@ -1676,19 +1809,41 @@ def _dedupe(items: list[dict]) -> list[dict]:
     сюжет, а title у него дублируется в description."""
     out: list[dict] = []
     seen_urls: set[str] = set()
-    seen_titles: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
     for item in items:
         url = (item.get("url") or "").strip()
+        # RSS и keyed-провайдеры не проходили проверку хоста: служебный адрес из
+        # чужой выдачи доезжал до промпта и пузыря (ревью 17.11.2026).
+        if url.startswith("http") and not url_host_is_public(url):
+            continue
         title_key = re.sub(r"\W+", "", (item.get("title") or "").lower())[:60]
+        # Пара «заголовок + текст»: у CoinGecko все монеты с одним заголовком, и
+        # дедуп по одному title терял ethereum (ревью 17.11.2026), а у новостных
+        # дублей совпадает и описание.
+        body = item.get("snippet") or item.get("description") or item.get("content") or ""
+        body_key = re.sub(r"\W+", "", str(body).lower())[:160]
+        pair = (title_key, body_key)
         if url.startswith("http") and url in seen_urls:
             continue
-        if title_key and title_key in seen_titles:
+        if title_key and pair in seen_pairs:
             continue
         seen_urls.add(url)
         if title_key:
-            seen_titles.add(title_key)
+            seen_pairs.add(pair)
         out.append(item)
     return out
+
+
+def _merge_web_groups(groups: list[list[dict]], *, wants_fresh: bool,
+                      wants_entity: bool, wants_game_wiki: bool) -> list[dict]:
+    """Слияние выдачи: сначала ранг, потом кап издателя. Обратный порядок оставлял
+    двух СТАРЫХ Reuters и выбрасывал свежие (ревью 17.11.2026)."""
+    ranked = _rank(
+        _dedupe([item for group in groups for item in group]),
+        wants_fresh=wants_fresh, wants_entity=wants_entity,
+        wants_game_wiki=wants_game_wiki,
+    )
+    return _limit_per_publisher(ranked)
 
 
 def _limit_per_publisher(items: list[dict], cap: int = 2) -> list[dict]:
@@ -1733,7 +1888,9 @@ def _rank(items: list[dict], *, wants_fresh: bool, wants_entity: bool,
         authority = _authority(item) + (_game_wiki_bonus(item) if wants_game_wiki and wiki_ok else 0)
         return (kind_rank, -authority, recency, -(len(item.get("snippet") or "")))
 
-    return sorted(filtered or items, key=sort_key)
+    # Не подменяем отфильтрованное протухшим: пусто честнее, чем старая статья
+    # как ответ на вопрос о свежести (ревью 17.11.2026).
+    return sorted(filtered, key=sort_key)
 
 
 async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
@@ -1841,9 +1998,9 @@ async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
                 continue
             groups.append(list(res[1]))
 
-        merged = _rank(_limit_per_publisher(_dedupe([item for group in groups for item in group])),
-                       wants_fresh=wants_fresh, wants_entity=intents["entity"],
-                       wants_game_wiki=_wants_game_wiki(text))
+        merged = _merge_web_groups(
+            groups, wants_fresh=wants_fresh, wants_entity=intents["entity"],
+            wants_game_wiki=_wants_game_wiki(text))
         if intents["weather"]:
             merged = _filter_other_city(merged, text)
         if merged:
@@ -1874,13 +2031,24 @@ def parse_ddg_html(page: str, max_results: int = _DEFAULT_MAX_RESULTS) -> list[d
     seen: set[str] = set()
     if not page or _is_ddg_blocked(page):
         return out
+    links = list(_DDG_HTML_LINK_RE.finditer(page))
     snippets = list(_DDG_HTML_SNIPPET_RE.finditer(page))
-    for idx, match in enumerate(list(_DDG_HTML_LINK_RE.finditer(page))[:max_results * 2]):
+    snippet_cursor = 0
+    for idx, match in enumerate(links[:max_results * 2]):
+        # Подпись — ближайший сниппет ПОСЛЕ ссылки и до следующей ссылки. Индекс
+        # ссылок не совпадает с индексом сниппетов, когда у результата подписи
+        # нет: заголовок A получал текст B (ревью 17.11.2026).
+        next_link_start = links[idx + 1].start() if idx + 1 < len(links) else len(page)
+        while snippet_cursor < len(snippets) and snippets[snippet_cursor].start() < match.end():
+            snippet_cursor += 1
+        snippet = ""
+        if snippet_cursor < len(snippets) and snippets[snippet_cursor].start() < next_link_start:
+            snippet = _clean_text(snippets[snippet_cursor].group(1), _SNIPPET_MAX_CHARS)
+            snippet_cursor += 1
         url = _unwrap_ddg_url(match.group(1))
         if not url or url in seen:
             continue
         title = _clean_text(match.group(2), _SNIPPET_MAX_CHARS)
-        snippet = _clean_text(snippets[idx].group(1), _SNIPPET_MAX_CHARS) if idx < len(snippets) else ""
         if not title and not snippet:
             continue
         seen.add(url)
@@ -1899,7 +2067,7 @@ async def _ddg_html_page(session: aiohttp.ClientSession, query: str, deadline: f
     async with session.get(_DDG_HTML_URL, params={"q": query}, headers=_SEARCH_HEADERS, timeout=budget) as resp:
         if resp.status != 200:
             return ""
-        return await resp.text()
+        return await _read_search_text(resp)
 
 
 async def _ddg_source(session: aiohttp.ClientSession, query: str, deadline: float, limit: int) -> list[dict]:
@@ -1965,7 +2133,10 @@ def _source_label(item: dict) -> str:
     return host or ""
 
 
-_SNIPPET_INVIS_RE = re.compile("[\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufe0f\u3164\ufeff]")
+# Tag-символы, U+2065, FFF9-FFFB и корейские заполнители — невидимая инструкция
+# из чужой выдачи; U+E0000-E007F вообще вне BMP (ревью 17.11.2026).
+_SNIPPET_INVIS_RE = re.compile("[\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2065\u2066-\u206f\ufff9-\ufffb\ufe0f\u115f\u1160\u3164\uffa0\ufeff\U000e0000-\U000e007f]")
+_SNIPPET_MARKER_RE = re.compile(r"(?i)\[\s*search\s*\]")
 _SNIPPET_FRAME_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]\n]{0,200}\]?")
 _SNIPPET_FRAME_WORDS_RE = re.compile(r"(?i)fetched")
 
@@ -1975,6 +2146,8 @@ def _one_line(text: str) -> str:
     заголовок с переводом строки открывал блок страницы от лица промпта
     (аудит 16.11.2026)."""
     clean = _SNIPPET_INVIS_RE.sub("", text or "")
+    # Чужой [[SEARCH]] не должен выглядеть как просьба модели о поиске.
+    clean = _SNIPPET_MARKER_RE.sub("(search)", clean)
     clean = " ".join(clean.splitlines())
     # Сначала скобочная форма, затем само слово: вложенность любой глубины не
     # собирает маркер заново (финальная проверка 16.11.2026).
@@ -1994,6 +2167,9 @@ def format_snippets_for_prompt(snippets: list[dict]) -> str:
     lines = [header.rstrip("\n")]
     total = len(header)
     for item in snippets:
+        item_url = (item.get("url") or "").strip()
+        if item_url.startswith("http") and not url_host_is_public(item_url):
+            continue
         title = _one_line((item.get("title") or "").strip())
         snippet = _one_line((item.get("snippet") or "").strip())
         # Google News кладёт заголовок ещё и в description: дубль съедает место в промпте.
@@ -2014,9 +2190,12 @@ def format_snippets_for_prompt(snippets: list[dict]) -> str:
             tail = f" ({url})"
         elif label:
             tail = f" [{label}]"
-        line = f"• {body[:_SNIPPET_MAX_CHARS + 120]}{tail}"
+        # Строка ровно в кап сниппета (300): пять результатов влезают в 2000,
+        # а не три; не влезшую строку пропускаем, а не обрываем остальные
+        # (ревью 17.11.2026).
+        line = f"• {body[:_SNIPPET_MAX_CHARS]}{tail}"
         if total + len(line) + 1 > _BLOCK_MAX_CHARS:
-            break
+            continue
         lines.append(line)
         total += len(line) + 1
     if len(lines) < 2:

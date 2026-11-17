@@ -23,7 +23,7 @@ from lumen_memory import (
     MAX_MEMORY_MESSAGES,
     MEMORY_KEEP_MESSAGES,
     MAX_MEMORY_PENDING,
-    summary_input,
+    summary_batch,
 )
 from lumen_state_storage import (
     StorageConfig,
@@ -512,33 +512,39 @@ def _index_ids() -> list[int]:
     return sorted(set(chat_state.keys()) | _index_extra_ids)
 
 
-def _recover_index_ids() -> bool:
-    """Повторное чтение индекса после стартового сбоя: удалённые id надо слить,
-    а не заменить своими. Не чаще раза в минуту, чтобы лежащий Upstash не получал
-    запрос на каждый флаш."""
+def _fetch_index_ids() -> set[int] | None:
+    """Троттлинг и чтение удалённого индекса БЕЗ мутаций общих множеств.
+
+    Вызывается из to_thread: прежняя версия меняла _index_extra_ids и
+    _chat_snapshot_unloaded прямо в рабочем потоке, а окно между update и clear
+    теряло защиту у чата, созданного в этот миг (ревью 17.11.2026)."""
     global _state_load_failed, _index_retry_last_ts
     if not _state_load_failed:
-        return True
+        return set()
     now = time.monotonic()
-    # Ноль — «ещё не пробовали»: на свежем раннере monotonic() меньше минуты,
-    # и без этой проверки первый же ретрай считался бы слишком частым (CI 16.11).
+    # Ноль — «ещё не пробовали»: на свежем раннере monotonic() меньше минуты.
     if _index_retry_last_ts and now - _index_retry_last_ts < _INDEX_RETRY_SEC:
-        return False
+        return None
     _index_retry_last_ts = now
     import bot
     try:
         raw = bot._storage_read_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE)
     except Exception as exc:
         log.warning('[state] Chat index retry failed: %s', exc)
-        return False
+        return None
+    if raw is None:
+        # None — это и «ключа нет», и «шлюз ответил без result». Пустым индексом
+        # такое считать нельзя (аудит 16.11.2026).
+        log.warning('[state] Chat index retry returned no body — keeping the write guard.')
+        return None
     ids: set[int] = set()
     if raw:
         try:
             parsed = json.loads(raw)
         except Exception:
-            return False
+            return None
         if not isinstance(parsed, list):
-            return False
+            return None
         valid = 0
         for cid in parsed:
             try:
@@ -547,22 +553,20 @@ def _recover_index_ids() -> bool:
             except Exception:
                 continue
         if parsed and valid == 0:
-            # Список без единого числа — битый индекс, а не пустой: перезапись
-            # осиротила бы все пер-чат ключи (второй проход аудита 16.11.2026).
+            # Список без единого числа — битый индекс, а не пустой.
             _state_load_failed = True
             log.warning('[state] Chat index holds no numeric ids — keeping the write guard.')
-            return False
-    if raw is None:
-        # None — это и «ключа нет», и «шлюз ответил без result». Пустым индексом
-        # такое считать нельзя: снятие защиты потеряло бы чужие id (аудит 16.11.2026).
-        log.warning('[state] Chat index retry returned no body — keeping the write guard.')
-        return False
-    # Вытесненные и удалённые id не воскрешаем: старый удалённый индекс ещё
-    # содержит их (второй проход аудита 16.11.2026).
+            return None
+    return ids
+
+
+def _apply_recovered_ids(ids: set[int]) -> bool:
+    """Слияние прочитанного индекса с памятью — только из loop-потока."""
+    global _state_load_failed
+    # Вытесненные и удалённые id не воскрешаем (второй проход аудита 16.11.2026).
     ids = {cid for cid in ids if cid not in _pending_chat_deletions and cid not in _deleted_chat_ids}
     _index_extra_ids.update(ids)
-    # Замораживаем только те, чей снимок не прочитан (нет в памяти): живые чаты
-    # обязаны сохраняться дальше (второй проход аудита 16.11.2026).
+    # Замораживаем только те, чей снимок не прочитан (нет в памяти).
     _chat_snapshot_unloaded.update(cid for cid in ids if cid not in chat_state)
     # Созданные во время сбоя чаты тоже не имеют права затирать удалённую копию.
     _chat_snapshot_unloaded.update(_created_during_outage)
@@ -570,6 +574,16 @@ def _recover_index_ids() -> bool:
     _state_load_failed = False
     log.info('[state] Chat index recovered after the startup failure: %d remote id(s) merged.', len(ids))
     return True
+
+
+def _recover_index_ids() -> bool:
+    """Синхронный путь (shutdown): чтение + слияние в одном потоке."""
+    if not _state_load_failed:
+        return True
+    ids = _fetch_index_ids()
+    if ids is None:
+        return False
+    return _apply_recovered_ids(ids)
 
 
 def _save_chat_index() -> bool:
@@ -739,6 +753,16 @@ async def _flush_dirty_state_once() -> None:
         if _pending_chat_deletions:
             to_delete = list(_pending_chat_deletions)
             _pending_chat_deletions.clear()
+            # Удаление — тоже запись в хранилище: замороженный чат и чат при сбое
+            # загрузки сохраняют удалённую копию до успешного чтения. Раньше защита
+            # стояла только на записи (ревью 17.11.2026).
+            guarded = {cid for cid in to_delete
+                       if _state_load_failed or cid in _chat_snapshot_unloaded}
+            if guarded:
+                _pending_chat_deletions.update(guarded)
+                to_delete = [cid for cid in to_delete if cid not in guarded]
+                log.warning('[state] Skip %d chat deletion(s): remote snapshot not restored yet.',
+                            len(guarded))
             try:
                 del_results = await asyncio.gather(
                     *(bot._delete_chat_storage_limited(cid) for cid in to_delete),
@@ -786,16 +810,21 @@ async def _flush_dirty_state_once() -> None:
                     '[state] %d chat(s) failed to save this cycle, will retry next: %s',
                     len(failed_ids), ", ".join(str(c) for c in sorted(failed_ids)),
                 )
-        if _index_dirty:
+        if _index_dirty or _state_load_failed:
             # Флаг сбрасываем только после подтверждённой записи — иначе упавший индекс
             # молча терялся бы до следующей мутации (найдено внешним аудитом).
+            # Сбой загрузки сам по себе повод на ретрай: иначе после битого ответа
+            # шлюза индекс не читался бы заново и запись стояла до рестарта
+            # (адверсариальный проход 17.11.2026).
             # Снапшот ключей — здесь (см. комментарий у _save_chat_to_storage_limited).
             if _state_load_failed:
                 # Удалённый индекс новее пустой памяти — не затираем, очередь живёт дальше.
                 # Один повтор чтения в минуту: удалённые id сливаем, а не заменяем.
-                if not await asyncio.to_thread(_recover_index_ids):
+                fetched_ids = await asyncio.to_thread(_fetch_index_ids)
+                if fetched_ids is None:
                     log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
                 else:
+                    _apply_recovered_ids(fetched_ids)
                     index_payload = json.dumps(_index_ids())
                     started_index_generation = _index_generation
                     if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
@@ -810,7 +839,7 @@ async def _flush_dirty_state_once() -> None:
                     if _index_generation == started_index_generation:
                         _index_dirty = False
         if _quota_dirty:
-            if _quota_load_failed and not bot.recover_global_quota():
+            if _quota_load_failed and not await asyncio.to_thread(bot.recover_global_quota):
                 # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
                 log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
             else:
@@ -839,6 +868,11 @@ def _flush_state_now() -> None:
     # Неуспех — обратно в очередь с громким логом, как в async-флаше: молча
     # чистить очереди на shutdown значило бы тихо терять записи (аудит A5-1).
     for cid in list(_pending_chat_deletions):
+        if _state_load_failed or cid in _chat_snapshot_unloaded:
+            # Shutdown не обходит защиту удаления: замороженный чат сохраняет
+            # удалённую копию до успешного чтения (адверсариальный проход 17.11.2026).
+            log.warning('[state] Shutdown: skip deleting chat %s, snapshot not restored.', cid)
+            continue
         try:
             deleted = bot._delete_chat_storage(cid)
         except Exception as exc:
@@ -1079,6 +1113,9 @@ def _t_no_create(chat_id: int | None, key: str, **kwargs: Any) -> str:
     """Та же локализация, что _t, но без побочных эффектов для хранилища."""
     return _lang_t(_peek_chat_lang(chat_id), key, **kwargs)
 
+_DELETED_CHAT_IDS_CAP = 5000
+
+
 def _prune_old_chats() -> None:
     import bot
     global _index_dirty, _index_generation
@@ -1091,7 +1128,12 @@ def _prune_old_chats() -> None:
         lock = bot._chat_locks.get(cid)
         return lock is not None and lock.locked()
 
-    removable = [cid for cid in sorted_ids if not _is_busy(cid)]
+    # Замороженный чат не вытесняем: его id выпал бы из индекса, а ключ
+    # остался бы сиротой навсегда (адверсариальный проход №2).
+    removable = [cid for cid in sorted_ids
+                 if not _is_busy(cid)
+                 and cid not in _chat_snapshot_unloaded
+                 and not _state_load_failed]
     # Потолок считаем от всего состояния, а не от выборки removable: иначе при
     # плотной загрузке вытеснять было нечего и чаты копились без ограничения
     # (враждебное ревью 27.09.2026). Занятые пропускаем до следующих прогонов.
@@ -1105,6 +1147,11 @@ def _prune_old_chats() -> None:
     # ключи/файлы бесхозно копятся вечно) — ставим в очередь на удаление,
     # обрабатывается в _flush_dirty_state вместе с обычным сбросом.
     _deleted_chat_ids.update(removed_ids)
+    # Кап: без него множество растёт до конца жизни процесса. Старые id уже
+    # удалены из хранилища, свежие важнее (ревью 17.11.2026).
+    if len(_deleted_chat_ids) > _DELETED_CHAT_IDS_CAP:
+        for extra_id in list(_deleted_chat_ids)[:len(_deleted_chat_ids) - _DELETED_CHAT_IDS_CAP]:
+            _deleted_chat_ids.discard(extra_id)
     _pending_chat_deletions.update(removed_ids)
     _dirty_chat_ids.difference_update(removed_ids)
     if removed_ids:
@@ -1134,9 +1181,9 @@ async def acquire_chat_lock(chat_id: int, timeout: float) -> asyncio.Lock:
         if bot._chat_locks.get(chat_id) is lock:
             return lock
         lock.release()
-    lock = get_chat_lock(chat_id)
-    await asyncio.wait_for(lock.acquire(), timeout=timeout)
-    return lock
+    # Четвёртая попытка без сверки поколения отдавала чужой лок: два сообщения
+    # одного чата отвечали параллельно (ревью 17.11.2026, дыра в фиксе A5-10).
+    raise TimeoutError("chat lock kept changing during acquisition")
 
 def _evict_orphan_chat_locks() -> int:
     """Сносит локи чатов, которых уже нет в chat_state и которые никто не
@@ -1278,7 +1325,7 @@ async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | N
     # В очередь ДО сетевого вызова: рестарт посреди сводки не должен терять факты.
     state["memory_pending"] = old[-MAX_MEMORY_PENDING:]
     epoch = state.get("memory_epoch")
-    digest = summary_input(state.get("memory_summary") or "", old)
+    digest, consumed = summary_batch(state.get("memory_summary") or "", old)
     # Сводка идёт под локом чата: она не должна выходить за потолок сообщения.
     budget = bot.HISTORY_SUMMARY_BUDGET_SEC
     remaining = bot._msg_remaining_sec()
@@ -1297,7 +1344,10 @@ async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | N
         return
     if summary:
         state["memory_summary"] = summary
-        state["memory_pending"] = []
+        # Съедено только начало: остаток остаётся в pending и уходит в следующую
+        # сводку, а не пропадает вместе с очисткой (ревью 17.11.2026).
+        leftover = old[consumed:]
+        state["memory_pending"] = leftover[-MAX_MEMORY_PENDING:] if leftover else []
         state.pop("memory_retry_at", None)
     else:
         state["memory_retry_at"] = time.time() + MEMORY_SUMMARY_RETRY_SEC

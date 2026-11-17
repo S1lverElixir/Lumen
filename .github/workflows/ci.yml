@@ -56,7 +56,7 @@ jobs:
 
       # Workers-релей: контракт тот же, тесты чистых функций офлайн. Node 24
       # выполняет TypeScript без сборки (strip-types по умолчанию).
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
 

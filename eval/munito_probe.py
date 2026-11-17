@@ -49,7 +49,10 @@ def _rate_headers(headers) -> dict:
 
 
 async def _list_models(session: aiohttp.ClientSession, base: str, key: str) -> None:
-    async with session.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"}) as resp:
+    async with session.get(
+        f"{base}/models", headers={"Authorization": f"Bearer {key}"},
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
         data = await resp.json(content_type=None)
         ids = [m.get("id") for m in (data.get("data") or data.get("models") or []) if isinstance(m, dict)]
         print(f"HTTP {resp.status} · моделей в каталоге: {len(ids)}")

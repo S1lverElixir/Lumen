@@ -112,7 +112,9 @@ WEBHOOK_MAX_INFLIGHT_TASKS = 100
 # Отклонения по секрету/капу гроздьями логируем суммарно, а не по одному.
 _WEBHOOK_DENIED_LOG_INTERVAL_SEC = 60.0
 _webhook_denied_count = 0
-_webhook_denied_last_log = 0.0
+# -1e9, а не 0: на свежем хосте monotonic() < 60, и первое отклонение
+# ждало минуту до строки лога (ревью 17.11.2026).
+_webhook_denied_last_log = -1e9
 # Telegram может доставить один update_id повторно (retry после таймаута).
 # Помним последние N: дубль не должен дать второй ответ, скачивание и трату квоты.
 _SEEN_UPDATE_IDS_MAX = 2000
@@ -360,6 +362,12 @@ async def export_state(request: Request) -> Any:
         # закоммитил бы его как дневной (аудит 16.11.2026). Пусть cron повторит.
         log.info("[admin] /export_state requested while state is still loading, asking to retry")
         return JSONResponse(status_code=503, content={"ok": False, "retry": True})
+    import lumen_chat_state as lcs
+    if lcs._state_load_failed or lcs._quota_load_failed:
+        # Сбой загрузки: снимок будет пустым, а state-backup.yml закоммитит его
+        # как дневной бэкап (ревью 17.11.2026). Честный 503 — cron повторит.
+        log.warning("[admin] /export_state requested after a failed startup load, asking to retry")
+        return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     # Снимок живых структур: экспорт отдавал ссылки на мутабельные объекты —
     # запись между возвратом и сериализацией ответа давала несогласованный бэкап.
     chats = {str(cid): _serialize_chat_state(state) for cid, state in list(bot.chat_state.items())}
@@ -383,7 +391,8 @@ async def devtrace(request: Request, n: int = 200) -> Any:
         count = int(n)
     except (TypeError, ValueError):
         count = 200
-    entries = _devtrace.read_tail(count)
+    # Чтение хвоста 5 МБ в потоке: раньше блокировало петлю (ревью 17.11.2026).
+    entries = await asyncio.to_thread(_devtrace.read_tail, count)
     return {
         "enabled": _devtrace.enabled(),
         "path": str(_devtrace.trace_path()),

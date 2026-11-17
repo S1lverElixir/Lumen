@@ -81,6 +81,9 @@ class StatusMessage:
         self._thought_seconds: int | None = None
         self._task: asyncio.Task | None = None
         self._stopped = False
+        # Одна правка пузырька за раз: поздний кадр старой фазы иначе затирал
+        # новую после доставки через прокси (ревью 17.11.2026).
+        self._edit_lock = asyncio.Lock()
 
     @classmethod
     async def start(cls, reply_to: Message, lang: str, key: str, *, timed: bool = False,
@@ -125,8 +128,9 @@ class StatusMessage:
         self._set_phrase(key, timed=timed, **kwargs)
         # Немедленная правка обязана учесться в общем бюджете чата (force).
         take_edit_slot(self._chat_id(), force=True)
-        with contextlib.suppress(Exception):
-            await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+        async with self._edit_lock:
+            with contextlib.suppress(Exception):
+                await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
 
     @classmethod
     async def start_action(cls, reply_to: Message, lang: str, text: str) -> "StatusMessage | None":
@@ -152,8 +156,11 @@ class StatusMessage:
         self._literal = text
         self._literal_timed = timed
         take_edit_slot(self._chat_id(), force=True)
-        with contextlib.suppress(Exception):
-            await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+        # Под тем же замком, что тик и set_phase: поздний кадр не должен
+        # вернуть старую фразу после этой правки (F-070, проход №5).
+        async with self._edit_lock:
+            with contextlib.suppress(Exception):
+                await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
 
     async def set_action_key(self, key: str) -> None:
         await self.set_action(_lang_t(self.lang, key), timed=self._literal_timed)
@@ -271,11 +278,12 @@ class StatusMessage:
                 # Общий бюджет правок на чат: занятый слот — пропущенный кадр,
                 # не задержка анимации (ревью 11.11.2026).
                 if take_edit_slot(self._chat_id()):
-                    with contextlib.suppress(Exception):
-                        await bot._tg_call(
-                            self.message.edit_text, self._render(frame_idx),
-                            parse_mode=None, call_timeout=15.0,
-                        )
+                    async with self._edit_lock:
+                        with contextlib.suppress(Exception):
+                            await bot._tg_call(
+                                self.message.edit_text, self._render(frame_idx),
+                                parse_mode=None, call_timeout=15.0,
+                            )
                 frame_idx += 1
                 await bot._dots_sleep(bot._DOTS_TICK_SEC)
         except asyncio.CancelledError:

@@ -161,7 +161,11 @@ def _strip_identity_names(text: str) -> str:
     # поэтому весь хвост обёрнут в группу.
     for name in _identity_names():
         line = re.sub(
-            r"[\w./:+-]*" + re.escape(name) + r"[\w.:/+-]*(?:" + _NAME_VERSION_TAIL + r")?",
+            # Хвост версии начинается с разделителя: «grokking» и «graphite» больше
+            # не режутся по подстроке имени (ревью 17.11.2026).
+            r"(?<![A-Za-z])(?:[\w.-]+/)*" + re.escape(name)
+            + r"(?:\d[\w.:/+-]*|[./:+-][\w.:/+-]*)?"
+            + r"(?:" + _NAME_VERSION_TAIL + r")?(?![A-Za-z])",
             "", line, flags=re.IGNORECASE,
         )
     # Порядок важен: висячий предлог открывает пустые скобки («( модель gpt-4o )»
@@ -469,7 +473,16 @@ async def run_search_turn(
                 if query:
                     planned_search.append((call, query))
         planned_search = planned_search[:searches_left]
-        planned_read = planned_read[:pages_left]
+        # Один URL — одно чтение: модель иногда просит ту же страницу дважды
+        # или уже прочитанную (ревью 17.11.2026).
+        seen_reads = {p.get("url") for p in result.pages if isinstance(p, dict)}
+        deduped_reads: list[tuple[dict, str]] = []
+        for call, url in planned_read:
+            if url in seen_reads:
+                continue
+            seen_reads.add(url)
+            deduped_reads.append((call, url))
+        planned_read = deduped_reads[:pages_left]
         if not planned_search and not planned_read:
             # Ни одного разобранного вызова: повторять бессмысленно, закрываем цикл.
             result.failed = True

@@ -93,8 +93,8 @@ REVERT_TRIGGER_PREFIXES = [
     # раньше «верни предыдущий» и «верни картинку» молча уходили текстовой модели.
     "верни предыдущий", "верни прошлый", "верни картинку", "верни фото",
     "верни изображение", "верни как было", "верни то", "previous version",
-    "прошлый вариант", "верни как было", "отмени правку", "отмени последнее изменение",
-    "верни назад", "previous version", "back to the previous version", "undo",
+    "прошлый вариант", "отмени правку", "отмени последнее изменение",
+    "верни назад", "back to the previous version", "undo",
 ]
 REDO_TRIGGER_PREFIXES = [
     "верни обратно", "верни последнюю версию", "верни как стало", "повтори правку",
@@ -123,6 +123,29 @@ def _split_image_variants(text: str) -> tuple[int, str]:
             cleaned = (text[:mm.start()] + " " + text[mm.end():]).strip()
             return num, re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
     return 1, text
+
+
+_VARIANTS_STRIP_RE = re.compile(
+    r"(?<!\d)(?:[2-4]\s*)?(?:вариант\w*|variants?)(?!\w)", re.IGNORECASE,
+)
+_VARIANTS_WORD_RE = re.compile(
+    r"(?<!\w)(?:два|две|три|четыре|two|three|four)\s+(?:вариант\w*|variants?)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _strip_variants_phrase(text: str) -> str:
+    """Убирает только фразу про варианты: «3 versions» и «3 изображения» в
+    описании резолвера — часть сюжета, их не трогаем (проход №5, 17.11.2026)."""
+    src = text or ""
+    cleaned = _VARIANTS_STRIP_RE.sub(" ", src)
+    cleaned = _VARIANTS_WORD_RE.sub(" ", cleaned)
+    if cleaned == src:
+        # Ничего не вырезали — возвращаем текст байт-в-байт, точка на конце цела.
+        return src
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return re.sub(r"(?:,\s*)+", ", ", cleaned).strip(" ,")
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
 
 
 def _detect_image_variants(text: str) -> int:
@@ -503,7 +526,7 @@ def _history_user_text(user_text: str) -> str:
 # текущей даты и выдачу поиска (выборка бэкапа: 19 реплик из 210, до 68% объёма
 # user-контекста). Плейсхолдер вместо ответа тоже осел в истории.
 _HISTORY_SERVICE_RE = re.compile(
-    r"\s*\[Context: today[^\]]*\]|\s*\[Web search (?:snippets|results)[\s\S]*$", re.IGNORECASE)
+    r"\s*\[Context: today[^\]]*\]|\s*\[Web search (?:snippets|results)[^\]]{0,200}\][\s\S]*$", re.IGNORECASE)
 
 
 def _clean_history_entry(item: dict) -> dict | None:
@@ -568,7 +591,7 @@ def _mime_matches_media_category(mime: str, category: str) -> bool:
         # PDF/текстовые/офисные файлы + octet-stream (неопознанный бинарник —
         # честная ошибка пользователю всё равно придёт позже из ask_gemini через
         # _is_gemini_supported_mime, а не молчаливое "не нашёл файл").
-        return low.startswith(("application/", "text/")) or low == "application/octet-stream"
+        return low.startswith(("application/", "text/"))
     return False
 
 # ── Кнопки-уточнения (pick-сценарии) ──

@@ -545,7 +545,8 @@ def test_streaming_respects_route_deadline(monkeypatch):
         ))
         elapsed = time.monotonic() - started
         # Бюджет уже прошёл: либо плейсхолдер дальше, либо финал с пометкой — но не вечное ожидание.
-        assert placeholder is not None or answer is not None
+        # Частичный ответ обязан вернуться, а не пустышка (ревью 17.11.2026).
+        assert answer is not None and answer.startswith("начало")
         # Висящий второй кусок (3600с) обязан оборваться бюджетом, а не зависнуть.
         assert elapsed < 30, f"стрим ждал висящий кусок мимо дедлайна: {elapsed:.1f}с"
     finally:
@@ -703,8 +704,13 @@ def test_streaming_fast_path_shows_no_dots_frames():
             piece_agen=instant_pieces(),
         ))
         assert answer == "Привет"
-        for text, _ in incoming.sent[0].edits:
-            assert text not in bot._DOTS_FRAMES
+        texts = [text for text, _ in incoming.sent[0].edits]
+        assert texts and texts[-1] == "Привет", "финальная правка — ровно ответ"
+        # Прежний ассерт «text not in _DOTS_FRAMES» был вакуумным: тикер пишет
+        # «глиф + Думаю…», а не голые точки, и падение стрима с припиской
+        # оставалось зелёным (ревью 17.11.2026). В быстром пути каждая правка —
+        # префикс ответа, ни кадра тикера, ни приписок.
+        assert all("Привет".startswith(t) for t in texts), texts
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1119,7 +1125,10 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
     try:
         answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == long_text.strip()
-        tick_ceiling = max(1, int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / bot.STREAM_TYPING_TICK_SEC))
+        # Шаг — пауза плюс реальная правка, а не только пауза (ревью 17.11.2026).
+        tick_ceiling = max(1, int(
+            bot.STREAM_TYPING_MAX_CATCHUP_SEC
+            / (bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC)))
         assert len(sleep_calls) <= tick_ceiling
         # Длинный хвост идёт ровно, а не восьмью прыжками: тиков заметно больше.
         assert len(sleep_calls) > 8, sleep_calls
@@ -1545,7 +1554,7 @@ def test_group_catchup_uses_the_shorter_ceiling():
     bot._typing_sleep = counting_sleep
     bot.client = fake_client
     try:
-        asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
     finally:
         bot._typing_sleep, bot.client = original_sleep, original_client
         bot.chat_state.pop(chat_id, None)
@@ -1558,6 +1567,9 @@ def test_group_catchup_uses_the_shorter_ceiling():
     group_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_GROUP_SEC / step_sec)
     private_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / step_sec)
     assert len(sleep_calls) <= group_ceiling < private_ceiling
+    # Отключённый довывод (бюджет 0) раньше оставлял тест зелёным:
+    assert len(sleep_calls) > 0
+    assert (answer or "").strip() == ("Буква " * 500).strip()
 def test_catchup_tick_budget_arithmetic():
     import lumen_typing_pace
     # Ревью 11.11.2026: потолок тиков = секунды бюджета / реальный шаг (пауза

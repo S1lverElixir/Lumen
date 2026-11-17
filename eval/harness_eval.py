@@ -163,7 +163,7 @@ def sandbox_config() -> dict:
     }
 
 
-def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool = False) -> None:
+def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool = False) -> Path:
     """Клонирует репозиторий на состояние до правки и ставит тесты из fix-коммита."""
     if sandbox.exists():
         for _ in range(5):
@@ -455,7 +455,9 @@ def score(task: Task, result: RunResult, targets: list[str]) -> None:
         t for t in targets if any(f == t or f.startswith(t + "[") for f in result.post_fail)
     ]
     result.new_failures = sorted(set(result.post_fail) - set(result.pre_fail))
-    result.solved = not result.target_failed and not result.new_failures
+    # Пустые targets — это не «решено»: без единой проверки успех не выдаём
+    # (ревью 17.11.2026).
+    result.solved = bool(targets) and not result.target_failed and not result.new_failures
 
 
 def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, model: str) -> dict:

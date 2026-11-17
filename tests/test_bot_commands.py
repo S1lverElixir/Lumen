@@ -2359,11 +2359,29 @@ def test_lang_table_covers_all_keys_in_all_languages():
             # Фолбэк на английский скрывал пропуски в переводе; теперь каждый
             # ключ обязан иметь явный перевод во всех 25 языках (аудит 28.10.2026).
             assert explicit, f"missing translation {key}[{lang}]"
+            assert explicit != key, f"value equals key {key}[{lang}]"
+            assert "\u00ad" not in explicit, f"soft hyphen {key}[{lang}]"
+            if lang not in ("ru", "uk", "be", "kk"):
+                assert not re.search(r"[\u0400-\u04FF]", explicit), f"Cyrillic in {key}[{lang}]"
+            assert not re.search(r"[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]", explicit), f"CJK in {key}[{lang}]"
             if lang != "en" and explicit == table.get("en"):
                 allowed = (key, lang) in allowed_en_duplicates or key in allowed_en_duplicate_keys
                 assert allowed, (
                     f"untranslated duplicate {key}[{lang}]: delete it, English fallback covers display"
                 )
+    # Плейсхолдеры обязаны совпадать во всех паках: опечатка {current_x}
+    # уезжала в прод видимым литералом (ревью 17.11.2026).
+    import re as _re_ph
+
+    def _placeholders(value):
+        return set(_re_ph.findall(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", value or ""))
+
+    for key in lumen_lang.STRINGS:
+        expected_ph = _placeholders(lumen_lang.t("en", key))
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            explicit = (lumen_lang.LANG_PACKS.get(lang, {}).get(key)
+                        or lumen_lang.STRINGS[key].get(lang) or "")
+            assert _placeholders(explicit) == expected_ph, f"placeholder mismatch {key}[{lang}]"
     for lang in lumen_lang.SUPPORTED_LANGS:
         for scenario in ("film", "series", "music", "books", "games"):
             q, opts, tpl = lumen_lang.pick_texts(lang, scenario)
@@ -2376,6 +2394,8 @@ _OWNER_ONLY_KEYS = ("owner_quota_notice", "selftest_", "stats_", "logs_")
 # Стоп-слова проверены на всех 25 паках: ложных вхождений нет.
 _PROVIDER_STOPWORDS = [
     "gemini", "gemma", "munito", "groq", "whisper", "tikwm", "openai",
+    "claude", "chatgpt", "chat gpt", "google", "deepseek", "glm", "qwen",
+    "llama", "mistral", "nemotron", "hugging face", "huggingface",
     "anthropic", "deepmind", "cloudflare", "pollinations", "openrouter",
     "bot api", r"\bapi\b",
     "провайдер", "provider", "пастаўшчык", "penyedia model", "fournisseur",
@@ -2608,7 +2628,7 @@ def test_profile_strings_fit_telegram_limits():
             assert text and text != key, f"missing {key}[{lang}]"
             assert len(text) <= cap, f"{key}[{lang}] = {len(text)} > {cap}"
             assert not _has_emoji(text), f"{key}[{lang}]: {text}"
-            assert "!" not in text and "!" not in text, f"{key}[{lang}]: {text}"
+            assert "!" not in text and "！" not in text, f"{key}[{lang}]: {text}"
 
 
 def test_profile_texts_never_name_a_provider_or_model():
@@ -2914,7 +2934,6 @@ def test_cmd_selftest_reports_the_search_layer(monkeypatch):
     text = fake_tg_call.text
     assert "Поиск:" in text and "цикл:" in text
     assert "обращений сегодня" in text
-    bot._selftest_last_run = 0.0
 
 
 def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
@@ -3019,7 +3038,7 @@ def test_selftest_llm_head_munito_success_targets_head_without_quota_write(monke
     assert ok is True and detail == "" and elapsed >= 0
     assert seen["model"] == head
     # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
-    assert (bot.GLOBAL_QUOTA.get("munito") or {}).get(head) in (None, marks)
+    # Сама запись проверена до очистки в finally: здесь она всегда None.
 
 
 def test_selftest_llm_head_munito_error_returns_false_without_quota(monkeypatch):
@@ -3203,6 +3222,8 @@ def test_answer_sender_skips_reply_quote_in_private(monkeypatch):
     group = _FakeIncomingMessage(999808)
     group.chat.type = bot.ChatType.GROUP
     assert bot._answer_sender(group) == group.reply
+    # Реальная сессия aiogram: закрываем, иначе «Unclosed client session» (ревью 17.11.2026).
+    asyncio.run(real_bot.session.close())
 
 
 def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
@@ -3309,6 +3330,7 @@ def test_help_command_opens_the_start_screen(rate_guard_setup):
         # фикстура ставит свой AsyncMock на каждый вызов — смотрим его аргументы
         sent.append(bot._tg_call.await_args.args[1])
     assert sent[0] == sent[1] == bot._t(123, "start_text")
+    asyncio.run(real_bot.session.close())
 
 
 
@@ -3345,7 +3367,7 @@ def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(mo
     assert ok is True and detail == "" and elapsed >= 0
     assert fake_models.calls == [head]
     # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
-    assert (bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) in (None, marks)
+    # Сама запись проверена до очистки в finally: здесь она всегда None.
     assert bot._is_quarantined("gemini", head) is False
 
 

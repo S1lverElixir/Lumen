@@ -22,6 +22,8 @@ permissions:
   contents: read
   # deployctl ходит в Deno через GitHub OIDC, токен не нужен (см. denoland/deployctl).
   id-token: write
+  # Ручной запуск проверяет, что CI для этого SHA зелёный (ревью 17.11.2026).
+  actions: read
 
 # Два CI подряд — деплоим по очереди, идущий деплой не отменяем.
 concurrency:
@@ -41,6 +43,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Require a green CI run for the tip
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Ручной запуск деплоил текущий main без доказательства зелёного CI
+          # под id-token: write (ревью 17.11.2026).
+          runs="$(gh run list --workflow CI --commit "${GITHUB_SHA}" --status success --limit 1 --json databaseId --jq 'length')"
+          if [ "${runs}" -eq 0 ]; then
+            echo "Refusing manual deploy: no successful CI run for ${GITHUB_SHA}" >&2
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Тот коммит, что проверялся CI (см. sync-to-hf.yml); при ручном

@@ -80,6 +80,7 @@ async def main() -> None:
     bot._munito_request = fake_request
     bot._build_openai_turn_messages = fake_build
 
+    from lumen_router_config import agent_max_searches as _prod_max_searches
     head = _MUNITO_ORDER[0]
     print(f"голова: {head} · зона 2 · вопросов {len(SHOULD_NOT_SEARCH)}")
     false_searches = []
@@ -87,7 +88,7 @@ async def main() -> None:
         t0 = time.monotonic()
         turn = await lumen_agent.run_search_turn(
             chat_id=900001, user_prompt=question, clean_prompt=question, model_id=head,
-            effort="medium", max_searches=1, status=None,
+            effort="medium", max_searches=_prod_max_searches("medium"), status=None,
             deadline=time.monotonic() + 45.0, history_meta=None,
         )
         dt = time.monotonic() - t0

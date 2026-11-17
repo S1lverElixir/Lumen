@@ -403,22 +403,38 @@ def test_guest_does_not_get_the_bubble(rate_guard_setup, monkeypatch):
     bot.chat_state.pop(123, None)
 
 
-def test_outbound_search_daily_budget_stops_everything():
+def test_outbound_search_daily_budget_stops_everything(monkeypatch):
     # После дневного потолка бот перестаёт ходить в источники и отвечает с честной
     # пометкой; и цикл, и прежняя ветка идут через ту же границу.
+    # Сетевой вход замокан: ослабленный гейт раньше звал DNS и оставался зелёным,
+    # потому что ошибки сети тоже дают [] (ревью 17.11.2026).
+    import contextlib
     import lumen_search
+
+    network_calls = []
+
+    @contextlib.asynccontextmanager
+    async def no_network():
+        network_calls.append(1)
+        raise AssertionError("сеть при исчерпанном бюджете")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(lumen_search, "_search_session", no_network)
 
     async def scenario():
         lumen_search.reset_search_counters_for_tests()
-        for _ in range(lumen_search.WEB_SEARCH_DAILY_LIMIT):
-            lumen_search.note_search_call()
-        assert lumen_search.search_daily_budget_left() is False
-        exhausted = await lumen_search.fetch_web_snippets("кто тренер сборной")
-        lumen_search.reset_search_counters_for_tests()
+        try:
+            for _ in range(lumen_search.WEB_SEARCH_DAILY_LIMIT):
+                lumen_search.note_search_call()
+            assert lumen_search.search_daily_budget_left() is False
+            exhausted = await lumen_search.fetch_web_snippets("кто тренер сборной")
+        finally:
+            lumen_search.reset_search_counters_for_tests()
         assert lumen_search.search_daily_budget_left() is True
         return exhausted
 
     assert asyncio.run(scenario()) == []
+    assert network_calls == []
 
 
 def test_search_query_placeholder_exists_in_every_language():
