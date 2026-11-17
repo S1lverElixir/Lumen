@@ -371,7 +371,21 @@ async def read_page(url: str, *, timeout: float | None = None) -> str | None:
             if ctype not in _ALLOWED_TYPES:
                 log.info("[read-page] unsupported content type %s", ctype or "-")
                 return None
-            raw = await resp.text(errors="replace")
+            # Тело с капом: релей уже режет на 2 МБ, Python не должен верить
+            # на слово (ревью 17.11.2026). Двойники без content — прежний путь.
+            content = getattr(resp, "content", None)
+            if content is not None and hasattr(content, "iter_chunked"):
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in content.iter_chunked(65536):
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024:
+                        log.info("[read-page] body over 2 MB, truncated")
+                        break
+                    chunks.append(chunk)
+                raw = b"".join(chunks).decode("utf-8", errors="replace")
+            else:
+                raw = await resp.text(errors="replace")
         note_read_page_call(count_global=False)
     except asyncio.CancelledError:
         raise
