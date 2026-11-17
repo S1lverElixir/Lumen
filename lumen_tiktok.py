@@ -770,7 +770,13 @@ async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, uni
             ) as resp:
                 if resp.status != 200:
                     continue
-                html = await resp.text(errors="ignore")
+                # Страница TikTok и ответ iTunes читаются с капом, как и TikWM:
+                # без него скомпрометированный апстрим льёт в память без края
+                # (ревью 17.11.2026).
+                raw_html = await _read_capped_body(resp, url, cap_bytes=2 * 1024 * 1024)
+                if raw_html is None:
+                    continue
+                html = raw_html.decode("utf-8", errors="ignore")
             if '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"' in html:
                 hydration_seen = True
             song_id = _extract_tt2dsp_song_id(html)
@@ -804,7 +810,11 @@ async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> tuple[d
             if resp.status != 200:
                 # 429/5xx — временный сбой: не кэшируем отрицательный итог.
                 return None, True
-            payload = json.loads(await resp.text(errors="ignore"))
+            raw_json = await _read_capped_body(
+                resp, "https://itunes.apple.com/lookup", cap_bytes=1024 * 1024)
+            if raw_json is None:
+                return None, True
+            payload = json.loads(raw_json.decode("utf-8", errors="ignore"))
     except Exception as exc:
         log.info("[tiktok-music] iTunes lookup failed: %s", exc)
         return None, True

@@ -401,6 +401,16 @@ def test_fetch_dsp_track_metadata_resolves_real_title_artist_cover():
         def __init__(self, status, body):
             self.status = status
             self._body = body
+            self.headers = {}
+            body_bytes = body.encode("utf-8")
+
+            class _Content:
+                async def iter_chunked(self, n):
+                    yield body_bytes
+
+            # _read_capped_body читает через content.iter_chunked; фейк обязан
+            # отдавать тот же поток, что aiohttp (ревью 17.11.2026).
+            self.content = _Content()
 
         async def __aenter__(self):
             return self
@@ -503,6 +513,14 @@ def test_tiktok_dsp_no_song_id_does_not_disable_future_lookups():
 
         def __init__(self, body):
             self._body = body
+            self.headers = {}
+            body_bytes = body.encode("utf-8")
+
+            class _Content:
+                async def iter_chunked(self, n):
+                    yield body_bytes
+
+            self.content = _Content()
 
         async def __aenter__(self):
             return self
