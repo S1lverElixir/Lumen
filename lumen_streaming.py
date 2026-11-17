@@ -640,6 +640,10 @@ async def _run_streaming_reply(
             if not tail_chunks or len(full_text) - covered_len - tail_basis_len >= 1000:
                 tail_chunks = _split_text_chunks(full_text[covered_len:], bot.TG_MAX_LEN)
                 tail_basis_len = len(full_text) - covered_len
+            # Маляр в пути правит тот же пузырёк, который финализация собирается
+            # заморозить: поздний кадр затирал финальный срез. Порядок правок
+            # сервером Telegram не гарантирован (ревью 17.11.2026).
+            await _await_paint()
             # Чанки кроме последнего (растущего) финализируем тем же разбиением, что у нестримленных ответов.
             while len(frozen) + len(tail_chunks) > len(sent_messages):
                 idx = len(sent_messages) - 1
