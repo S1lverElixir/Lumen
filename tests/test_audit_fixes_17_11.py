@@ -1196,3 +1196,34 @@ def test_first_quota_day_reset_is_not_throttled_on_fresh_runner(monkeypatch):
         assert bot.GLOBAL_QUOTA["gemini"]["m1"]["used"] == 0
     finally:
         lq._last_quota_check_monotonic = original
+
+
+# ── F-107: протухшее не выдаётся за свежее ──
+
+
+def test_rank_does_not_fall_back_to_stale_items():
+    import lumen_search
+    stale = [{"title": "Old", "url": "https://example.com/old",
+              "publisher": "example.com", "date": "2020-01-01", "kind": "web"}]
+    assert lumen_search._rank(stale, wants_fresh=True, wants_entity=False) == []
+
+
+# ── F-088: вытеснение не сносит израсходованные записи и bonus ──
+
+
+def test_lru_eviction_keeps_spent_and_bonus_entries(monkeypatch):
+    import lumen_quotas as lq
+    monkeypatch.setattr(lq, "MAX_USER_DAILY_KEYS", 3)
+    bucket = {
+        "111": {"total": 30, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0},
+        "222": {"total": 0, "gemini": 0, "tts": 0, "draw": 0, "bonus": 5},
+        "333": {"total": 0, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0},
+        "444": {"total": 0, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0},
+        "555": {"total": 0, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0},
+    }
+    bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+    bot.GLOBAL_QUOTA[lq.USER_DAILY_KEY] = bucket
+    lq._user_daily_entry(999)
+    assert "111" in bucket and "222" in bucket, "расход и bonus не вытесняются"
+    assert not {"333", "444", "555"} & set(bucket)
+    assert "999" in bucket

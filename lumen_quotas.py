@@ -572,7 +572,22 @@ def _user_daily_entry(user_id: int | None) -> dict[str, Any]:
     # bonus — задел под платное продление, сам платёж не реализован.
     if len(bucket) > MAX_USER_DAILY_KEYS:
         drop = len(bucket) - int(MAX_USER_DAILY_KEYS * 0.9)
-        for old in list(bucket)[:drop]:
+
+        def _idle(value: Any) -> bool:
+            # Вытеснять можно только пустые записи: расход и bonus — это выданный
+            # лимит, снос обнулял его и пускал флудера снова (ревью 17.11.2026).
+            if not isinstance(value, dict) or value.get("bonus"):
+                return False
+            for field in ("total", "gemini", "tts", "draw"):
+                try:
+                    if int(value.get(field) or 0) > 0:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            return True
+
+        victims = [old for old, value in bucket.items() if old != key and _idle(value)]
+        for old in victims[:drop]:
             bucket.pop(old, None)
     return entry
 

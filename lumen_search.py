@@ -1833,7 +1833,9 @@ def _rank(items: list[dict], *, wants_fresh: bool, wants_entity: bool,
         authority = _authority(item) + (_game_wiki_bonus(item) if wants_game_wiki and wiki_ok else 0)
         return (kind_rank, -authority, recency, -(len(item.get("snippet") or "")))
 
-    return sorted(filtered or items, key=sort_key)
+    # Не подменяем отфильтрованное протухшим: пусто честнее, чем старая статья
+    # как ответ на вопрос о свежести (ревью 17.11.2026).
+    return sorted(filtered, key=sort_key)
 
 
 async def fetch_web_snippets(text: str, *, timeout_sec: float | None = None,
