@@ -326,7 +326,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "nl": 'Bijlagen van het type {mime} worden niet ondersteund voor analyse. Stuur een afbeelding, spraakbericht, video, pdf of tekstdocument.',
         "pl": 'Załączniki typu {mime} nie są obsługiwane w analizie. Wyślij obraz, wiadomość głosową, film, PDF lub dokument tekstowy.',
         "pt": 'Anexos do tipo {mime} não são aceitos para análise. Envie uma imagem, um áudio, um vídeo, um PDF ou um documento de texto.',
-        "ru": 'Вложения типа {mime} не поддерживаются для анализа. Пришлите картинку, голосовое, видео, PDF или текстовый документ.',
+        "ru": 'Вложения типа {mime} не поддерживаются для анализа. Пришли картинку, голосовое, видео, PDF или текстовый документ.',
         "th": 'ไฟล์แนบชนิด {mime} ไม่รองรับการวิเคราะห์ ส่งรูป ข้อความเสียง วิดีโอ PDF หรือเอกสารข้อความ',
         "tr": '{mime} türündeki ekler analiz için desteklenmiyor. Bir görsel, sesli mesaj, video, PDF veya metin belgesi gönderin.',
         "uk": 'Вкладення типу {mime} не підтримуються для аналізу. Надішліть зображення, голосове, відео, PDF або текстовий документ.',
