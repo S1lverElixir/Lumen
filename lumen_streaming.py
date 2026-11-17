@@ -412,6 +412,8 @@ async def _run_streaming_reply(
     paint_max_step = 0
     paint_html_broken = False
     first_piece_ts: float | None = None
+    # Первый кадр, где на экране появился текст: ожидание человека кончается здесь, а не на первом куске.
+    first_paint_ts: float | None = None
     # header_md — короткая activity-строка «✻ Думал N с» над первым пузырём с
     # первой же правки, у Claude она не исчезает (пункт 8, ревью 11.11.2026);
     # пустая при sec < 1 (пункт 11). Считается один раз на первом куске.
@@ -450,7 +452,7 @@ async def _run_streaming_reply(
         (пункт 1). Правки последовательны в этом цикле: пока одна в пути, новых не
         начинается, а следующий кадр берёт самое свежее состояние — coalescing,
         он же защита от мигания и лишних 429."""
-        nonlocal edit_fail_streak, edits_dead, last_painted_plain, last_painted_html, paint_html_broken, paint_frames, paint_max_step
+        nonlocal edit_fail_streak, edits_dead, last_painted_plain, last_painted_html, paint_html_broken, paint_frames, paint_max_step, first_paint_ts
         if edits_dead or not tail_chunks:
             return
         target = tail_chunks[-1]
@@ -477,6 +479,8 @@ async def _run_streaming_reply(
             paint_max_step = max(paint_max_step, len(slice_md) - len(last_painted_plain))
             last_painted_plain = slice_md
             last_painted_html = html_out
+            if first_paint_ts is None and slice_md.strip():
+                first_paint_ts = time.monotonic()
             return
         if parse_mode is ParseMode.HTML:
             # HTML-парсер Telegram отверг частичную разметку — это не мёртвое
@@ -666,6 +670,10 @@ async def _run_streaming_reply(
             # заморозить: поздний кадр затирал финальный срез. Порядок правок
             # сервером Telegram не гарантирован (ревью 17.11.2026).
             await _await_paint()
+            # Свёрнутый блок «Думал N с» считается до первого текста на экране:
+            # иначе статус замирал на «2 с», пока ответ ещё двадцать секунд полз (прод 17.11.2026).
+            if status is not None and first_paint_ts is not None:
+                status.note_extra_thought(first_paint_ts - overall_start_ts)
             # Чанки кроме последнего (растущего) финализируем тем же разбиением, что у нестримленных ответов.
             while len(frozen) + len(tail_chunks) > len(sent_messages):
                 idx = len(sent_messages) - 1
