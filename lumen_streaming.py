@@ -674,6 +674,9 @@ async def _run_streaming_reply(
             # иначе статус замирал на «2 с», пока ответ ещё двадцать секунд полз (прод 17.11.2026).
             if status is not None and first_paint_ts is not None:
                 status.note_extra_thought(first_paint_ts - overall_start_ts)
+                # Строка над телом тоже пересобирается: иначе до конца ответа
+                # висело «Думал 2 с», пока текст ещё дорисовывался.
+                header_md = status.paint_header_md()
             # Чанки кроме последнего (растущего) финализируем тем же разбиением, что у нестримленных ответов.
             while len(frozen) + len(tail_chunks) > len(sent_messages):
                 idx = len(sent_messages) - 1
