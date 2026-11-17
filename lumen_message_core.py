@@ -350,6 +350,9 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
     _sender = getattr(message, "from_user", None)
     if not bot._LOG_USER.get() and _sender is not None:
         utoken = bot._LOG_USER.set(f"user={getattr(_sender, 'id', 0)}")
+    # Актор для per-user лимитов поиска: контекст задачи наследуют фоновые вызовы.
+    import lumen_search as _lumen_search
+    _actor_token = _lumen_search.set_search_actor(getattr(_sender, "id", None))
     try:
         remaining = bot._msg_remaining_sec()
         lock_timeout = bot.CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(bot.CHAT_LOCK_TIMEOUT_SEC, remaining))
@@ -387,6 +390,7 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
             bot._LOG_CHAT.reset(ltoken)
         if utoken is not None:
             bot._LOG_USER.reset(utoken)
+        _lumen_search.reset_search_actor(_actor_token)
         if _stop_scope is not None:
             bot._end_stream_stop_scope(_stop_scope)
 

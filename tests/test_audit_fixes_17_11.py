@@ -968,3 +968,36 @@ def test_generic_500_without_marker_is_provider_error():
     with pytest.raises(lumen_images.ImageProviderError) as exc:
         lumen_images._cloudflare_image_result(500, None, {"messages": [{"message": "x" * 500}]})
     assert not isinstance(exc.value, lumen_images.ImageModerationError)
+
+
+# ── F-114: per-user кап keyed-поиска; владелец без лимита ──
+
+
+def test_keyed_per_user_cap_and_owner_bypass(monkeypatch):
+    import lumen_search as ls
+    monkeypatch.setattr(bot, "OWNER_ID", 999)
+    ls.reset_search_counters_for_tests()
+    token = ls.set_search_actor(501)
+    try:
+        for _ in range(ls._search_api_user_limit()):
+            ls.note_search_api_call()
+        assert ls.search_api_user_budget_left() is False, "свой лимит исчерпан"
+        token2 = ls.set_search_actor(502)
+        try:
+            assert ls.search_api_user_budget_left() is True, "чужой расход не должен мешать"
+        finally:
+            ls.reset_search_actor(token2)
+        ls._search_api_calls = 999
+        assert ls.search_api_budget_left() is False, "общий потолок действует"
+        token3 = ls.set_search_actor(999)
+        try:
+            assert ls.search_api_budget_left() is True
+            assert ls.search_api_user_budget_left() is True
+            for _ in range(20):
+                ls.note_search_api_call()
+            assert ls.search_api_user_budget_left() is True
+        finally:
+            ls.reset_search_actor(token3)
+    finally:
+        ls.reset_search_actor(token)
+        ls.reset_search_counters_for_tests()

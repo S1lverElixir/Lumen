@@ -374,3 +374,9 @@ Both apps must end up with the same file; the token is the `DENO_DEPLOY_TOKEN` r
 - Слайдшоу фото-поста без скачанных слайдов отказывает, если `play` не видеофайл;
   видео-пост с `play=.mp4` по-прежнему уходит в обычную видео-ветку.
 - `eval/live_smoke_probe.py` требует `TEST_BOT_TARGET` и отказывает на прод-адресе.
+- Keyed-поиск (Tavily в проде, `SEARCH_API_PROVIDER=tavily`): глобальный дневной
+  потолок выводится из тарифа (Tavily — 2 кредита за поиск, 12/сутки); сверху
+  действует кап на человека (`SEARCH_API_USER_DAILY_LIMIT`, дефолт 2). Владелец
+  (`OWNER_ID`) не ограничен ни тем, ни другим, реальный предел — тариф провайдера.
+  Кредит списывается только за успешный запрос; актор ставится в
+  `_run_under_chat_lock` через contextvar.

@@ -5,6 +5,7 @@ lumen_search.py — внешний веб-поиск: подготовка за�
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import contextlib
 import html
 import ipaddress
@@ -122,8 +123,10 @@ def reset_search_counters_for_tests() -> None:
     """Счётчик глобальный и дневной: тесту нужен явный сброс, иначе порядок файлов
     решает, кто упрётся в потолок."""
     global _search_day, _search_calls, _search_api_day, _search_api_calls
+    global _search_api_user_day, _search_api_user_calls
     _search_day, _search_calls = "", 0
     _search_api_day, _search_api_calls = "", 0
+    _search_api_user_day, _search_api_user_calls = "", {}
 
 
 # Потолок обращений к провайдеру ПО КЛЮЧУ, отдельно от WEB_SEARCH_DAILY_LIMIT:
@@ -156,8 +159,65 @@ def _roll_search_api_day() -> None:
         _search_api_day, _search_api_calls = today, 0
 
 
+# Кто сейчас ищет: ставится на входе сообщения (_run_under_chat_lock), живёт
+# в контексте задачи. Без актора лимит на человека не применяется (тесты, CLI).
+_SEARCH_ACTOR: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "search_actor", default=None)
+
+
+def set_search_actor(user_id: int | None):
+    return _SEARCH_ACTOR.set(user_id)
+
+
+def reset_search_actor(token) -> None:
+    _SEARCH_ACTOR.reset(token)
+
+
+def _actor_is_owner() -> bool:
+    import bot
+    user_id = _SEARCH_ACTOR.get()
+    return bot.OWNER_ID is not None and user_id is not None and user_id == bot.OWNER_ID
+
+
+def _search_api_user_limit() -> int:
+    """Сколько keyed-запросов в сутки одному человеку. Дефолт 2: при 12/сутки
+    у Tavily это шесть человек до общего потолка, владелец не ограничен."""
+    raw = (os.getenv("SEARCH_API_USER_DAILY_LIMIT", "") or "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            pass
+    return 2
+
+
+_search_api_user_day = ""
+_search_api_user_calls: dict[int, int] = {}
+
+
+def _roll_search_api_user_day() -> None:
+    import bot
+    global _search_api_user_day, _search_api_user_calls
+    today = bot._current_quota_day()
+    if today != _search_api_user_day:
+        _search_api_user_day, _search_api_user_calls = today, {}
+
+
+def search_api_user_budget_left() -> bool:
+    if _actor_is_owner():
+        return True
+    user_id = _SEARCH_ACTOR.get()
+    if user_id is None:
+        return True
+    _roll_search_api_user_day()
+    return _search_api_user_calls.get(user_id, 0) < _search_api_user_limit()
+
+
 def search_api_budget_left() -> bool:
     _roll_search_api_day()
+    if _actor_is_owner():
+        # Владельцу общий keyed-потолок не указ; реальный предел — тариф провайдера.
+        return True
     return _search_api_calls < _search_api_limit()
 
 
@@ -170,6 +230,11 @@ def note_search_api_call() -> None:
     _roll_search_api_day()
     global _search_api_calls
     _search_api_calls += 1
+    # Счётчик владельца тоже растёт — /stats честен, — но гейт его не смотрит.
+    user_id = _SEARCH_ACTOR.get()
+    if user_id is not None and not _actor_is_owner():
+        _roll_search_api_user_day()
+        _search_api_user_calls[user_id] = _search_api_user_calls.get(user_id, 0) + 1
 
 
 def web_search_max_results() -> int:
@@ -1508,6 +1573,11 @@ async def _api_provider_snippets(session: aiohttp.ClientSession, query: str, lim
         # Дневной потолок ключевого провайдера исчерпан: уходим на слои без ключа,
         # как при отсутствии ключа (аудит 16.11.2026).
         log.info("[web-search] keyed provider daily ceiling reached (%s)", provider)
+        return []
+    if not search_api_user_budget_left():
+        # Один человек не должен сжигать общий кредит: остальным слой остаётся
+        # (ревью 17.11.2026). Владелец не ограничен.
+        log.info("[web-search] keyed provider per-user ceiling reached (%s)", provider)
         return []
     budget = aiohttp.ClientTimeout(total=max(0.2, deadline - time.monotonic()))
     try:
