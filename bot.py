@@ -1438,6 +1438,7 @@ from lumen_commands import (
     cmd_ban,
     cmd_unban,
     cmd_banlist,
+    chat_locked,
     _send_pick_question,
     handle_pick_callback,
 )
@@ -1446,8 +1447,8 @@ from lumen_commands import (
 dp.message.register(cmd_start, Command("start", "help"))
 dp.message.register(cmd_draw, Command("draw"))
 dp.callback_query.register(handle_draw_more_callback, F.data == "draw:more")
-dp.message.register(cmd_tts, Command("tts"))
-dp.message.register(cmd_reset, Command("reset"))
+dp.message.register(chat_locked(cmd_tts), Command("tts"))
+dp.message.register(chat_locked(cmd_reset), Command("reset"))
 dp.message.register(cmd_stop, Command("stop"))
 dp.callback_query.register(handle_stop_callback, F.data.startswith("stop:"))
 dp.message.register(cmd_lang, Command("lang"))

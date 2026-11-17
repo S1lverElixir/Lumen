@@ -1107,3 +1107,24 @@ def test_lang_callback_is_rate_limited(monkeypatch):
     asyncio.run(lumen_commands.handle_lang_callback(query))
     assert answers and answers[0] == bot._t(1, "rate_limited")
     assert writes == [], "язык не должен меняться при отказе по окну"
+
+
+# ── F-079: /tts и /reset идут через лок чата ──
+
+
+def test_chat_locked_runs_handler_under_the_lock(monkeypatch):
+    from lumen_commands import chat_locked
+    locked = []
+    done = []
+
+    async def fake_lock(message, run):
+        locked.append(message)
+        await run()
+
+    async def handler(message):
+        done.append(message)
+
+    monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
+    message = SimpleNamespace(chat=SimpleNamespace(id=1))
+    asyncio.run(chat_locked(handler)(message))
+    assert locked == [message] and done == [message]

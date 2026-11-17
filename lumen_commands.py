@@ -1499,6 +1499,16 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
         )
 
+def chat_locked(handler):
+    """Слэш-команда, трогающая чат, идёт через тот же лок: кап ожидающих,
+    честное «занято» и дедлайн сообщения (ревью 17.11.2026)."""
+    async def _run(message):
+        import bot
+        await bot._run_under_chat_lock(message, lambda: handler(message))
+    _run.__name__ = getattr(handler, "__name__", "locked_handler")
+    return _run
+
+
 # выгрузка логов (только для владельца)
 
 def _build_logs_attachment() -> str | None:
