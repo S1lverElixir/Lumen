@@ -1587,6 +1587,19 @@ def test_identity_questions_do_not_trigger_web_search():
     import lumen_message_core as core
     prev = "Кто сейчас канцлер Германии?"
     for q in ("Кто ты?", "кто ты и какое сегодня число?", "как тебя зовут",
-              "что ты умеешь", "Who are you?", "what can you do"):
+              "что ты умеешь", "Who are you?", "what can you do",
+              "Кто я?", "кто я", "что ты знаешь обо мне", "who am I"):
         assert core._wants_web_search(q, previous=prev) is False, q
     assert core._wants_web_search("Кто сейчас канцлер Германии?", previous=prev) is True
+
+
+def test_note_extra_thought_never_lowers_the_block():
+    # Прод 17.11.2026: «Думал 2 с» при двадцатисекундном ожидании. Блок берёт
+    # максимум из времени до первого куска и до первого текста на экране.
+    from lumen_status import StatusMessage
+    st = StatusMessage.__new__(StatusMessage)
+    st._thought_seconds = 2
+    st.note_extra_thought(20)
+    assert st._thought_seconds == 20
+    st.note_extra_thought(5)
+    assert st._thought_seconds == 20

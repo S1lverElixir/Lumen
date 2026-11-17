@@ -180,6 +180,12 @@ class StatusMessage:
             self._thought_seconds = self._elapsed_seconds()
         await self.stop()
 
+    def note_extra_thought(self, sec: float) -> None:
+        """Не даём финальному блоку занизить ожидание: первый кусок мог прийти
+        раньше, чем на экране появился текст (маляр, catch-up)."""
+        cur = self._thought_seconds or 0
+        self._thought_seconds = max(cur, max(0, int(sec)))
+
     async def mark_stage_done(self) -> None:
         """Ранний этап (файл уже скачан) закрываем галочкой и включаем живой
         таймер размышления: иначе фото/видео висели статичной фразой без
