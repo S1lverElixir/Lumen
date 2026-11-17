@@ -79,6 +79,10 @@ def test_sanitize_no_proxy_drops_bracketed_ipv6_only():
     assert touched == ["NO_PROXY"]
     assert os.environ["NO_PROXY"] == "localhost,127.0.0.1,.example.com"
     assert persona_models.sanitize_no_proxy() == []
+    # Убираем за собой: иначе NO_PROXY и sys.path протекают в соседние тесты (ревью 17.11.2026).
+    os.environ.pop("NO_PROXY", None)
+    if str(REPO / "eval") in sys.path:
+        sys.path.remove(str(REPO / "eval"))
 def test_style_flags_catches_the_real_manner_defects():
     # Дешёвая детерминированная сетка на ответ: маркер протокола в тексте,
     # гирлянда эмодзи вместо 1-2 по просьбе, список там, где просили прозу,

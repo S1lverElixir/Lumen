@@ -402,7 +402,10 @@ def test_core_variants_count_comes_from_human_phrase(rate_guard_setup, monkeypat
                        "A ginger cat on the moon, 3 variants, photorealistic.")
     asyncio.run(bot._handle_message_core(message))
     assert bot.inline_draw.await_count == 1, bot.inline_draw.await_args_list
-    assert bot.inline_draw.await_args.args[1].startswith("A ginger cat")
+    _prompt = bot.inline_draw.await_args.args[1]
+    assert _prompt.startswith("A ginger cat")
+    # «3 variants» из чужого текста не должно остаться в промпте (ревью 17.11.2026).
+    assert "3 variants" not in _prompt and "variants" not in _prompt
 
 
 def test_core_variants_count_survives_anaphora(rate_guard_setup, monkeypatch):

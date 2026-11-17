@@ -1203,8 +1203,11 @@ async def _handle_message_core(
                 # вариант» должен находить сюжет, а не слово «это», и писать его
                 # заново не нужно.
                 _draw_variants = _split_image_variants(_prompt_text)[0]
-                _draw_kwargs = {"prepared": prompt_content}
-                _draw_prompt = ""
+                # Фразу количества вырезаем и из описания резолвера: «3 variants»
+                # в чужом тексте уезжало модели и в промпт (ревью 17.11.2026).
+                _clean_resolved = _split_image_variants(prompt_content)[1]
+                _draw_kwargs = {"prepared": _clean_resolved or prompt_content}
+                _draw_prompt = _clean_resolved
             else:
                 _draw_variants, _draw_prompt = _split_image_variants(prompt_content)
                 _draw_kwargs = {}

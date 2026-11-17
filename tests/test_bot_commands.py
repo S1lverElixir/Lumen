@@ -2934,7 +2934,7 @@ def test_cmd_selftest_reports_the_search_layer(monkeypatch):
     text = fake_tg_call.text
     assert "Поиск:" in text and "цикл:" in text
     assert "обращений сегодня" in text
-    bot._selftest_last_run = 0.0
+    lumen_commands._SELFTEST_LAST_RUN_MONOTONIC = 0.0
 
 
 def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
