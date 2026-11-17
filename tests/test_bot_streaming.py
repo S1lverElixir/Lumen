@@ -703,8 +703,13 @@ def test_streaming_fast_path_shows_no_dots_frames():
             piece_agen=instant_pieces(),
         ))
         assert answer == "Привет"
-        for text, _ in incoming.sent[0].edits:
-            assert text not in bot._DOTS_FRAMES
+        texts = [text for text, _ in incoming.sent[0].edits]
+        assert texts and texts[-1] == "Привет", "финальная правка — ровно ответ"
+        # Прежний ассерт «text not in _DOTS_FRAMES» был вакуумным: тикер пишет
+        # «глиф + Думаю…», а не голые точки, и падение стрима с припиской
+        # оставалось зелёным (ревью 17.11.2026). В быстром пути каждая правка —
+        # префикс ответа, ни кадра тикера, ни приписок.
+        assert all("Привет".startswith(t) for t in texts), texts
     finally:
         bot.chat_state.pop(chat_id, None)
 
