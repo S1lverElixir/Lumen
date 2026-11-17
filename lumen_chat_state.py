@@ -23,7 +23,7 @@ from lumen_memory import (
     MAX_MEMORY_MESSAGES,
     MEMORY_KEEP_MESSAGES,
     MAX_MEMORY_PENDING,
-    summary_input,
+    summary_batch,
 )
 from lumen_state_storage import (
     StorageConfig,
@@ -1301,7 +1301,7 @@ async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | N
     # В очередь ДО сетевого вызова: рестарт посреди сводки не должен терять факты.
     state["memory_pending"] = old[-MAX_MEMORY_PENDING:]
     epoch = state.get("memory_epoch")
-    digest = summary_input(state.get("memory_summary") or "", old)
+    digest, consumed = summary_batch(state.get("memory_summary") or "", old)
     # Сводка идёт под локом чата: она не должна выходить за потолок сообщения.
     budget = bot.HISTORY_SUMMARY_BUDGET_SEC
     remaining = bot._msg_remaining_sec()
@@ -1320,7 +1320,10 @@ async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | N
         return
     if summary:
         state["memory_summary"] = summary
-        state["memory_pending"] = []
+        # Съедено только начало: остаток остаётся в pending и уходит в следующую
+        # сводку, а не пропадает вместе с очисткой (ревью 17.11.2026).
+        leftover = old[consumed:]
+        state["memory_pending"] = leftover[-MAX_MEMORY_PENDING:] if leftover else []
         state.pop("memory_retry_at", None)
     else:
         state["memory_retry_at"] = time.time() + MEMORY_SUMMARY_RETRY_SEC

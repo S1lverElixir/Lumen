@@ -333,14 +333,40 @@ def system_prompt_with_memory(base: str, state: dict[str, Any]) -> str:
     )
 
 
-def summary_input(previous: str, entries: list[dict[str, Any]], *, max_chars: int = 16000) -> str:
-    """Вход сводки: прошлая память плюс уходящие из окна реплики."""
+def summary_batch(
+    previous: str, entries: list[dict[str, Any]], *, max_chars: int = 16000,
+) -> tuple[str, int]:
+    """Порция сводки с начала и число съеденных записей.
+
+    Раньше длина резалась с хвоста, а pending очищался целиком: старые факты
+    не доходили до модели и терялись молча (ревью 17.11.2026, правило 06.11.2026)."""
     prev = previous.strip() if isinstance(previous, str) else ""
     head = f"Previous memory:\n{prev}\n\n" if prev else ""
-    body = "\n".join(
-        line for line in (format_summary_line(entry) for entry in entries) if line
-    )
     budget = max_chars - len(head)
-    if budget > 0 and len(body) > budget:
-        body = "…" + body[-budget:]
-    return f"{head}Messages leaving the short-term window:\n{body}".strip()
+    lines: list[str] = []
+    used = 0
+    consumed = 0
+    for entry in entries:
+        line = format_summary_line(entry)
+        if not line:
+            consumed += 1
+            continue
+        add = len(line) + (1 if lines else 0)
+        if budget <= 0 or used + add > budget:
+            if not lines and budget > 0:
+                # Один факт длиннее бюджета: берём его срезом, иначе прогресса нет.
+                lines.append(line[:budget - 1] + "…")
+                used = budget
+                consumed += 1
+            break
+        lines.append(line)
+        used += add
+        consumed += 1
+    body = "\n".join(lines)
+    suffix = "…" if consumed < len(entries) else ""
+    return f"{head}Messages leaving the short-term window:\n{body}{suffix}".strip(), consumed
+
+
+def summary_input(previous: str, entries: list[dict[str, Any]], *, max_chars: int = 16000) -> str:
+    """Вход сводки: прошлая память плюс уходящие из окна реплики."""
+    return summary_batch(previous, entries, max_chars=max_chars)[0]

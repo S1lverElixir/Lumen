@@ -1002,3 +1002,25 @@ def test_keyed_per_user_cap_and_owner_bypass(monkeypatch):
         ls.reset_search_actor(token)
         ls.reset_search_counters_for_tests()
 
+
+
+# ── F-044: сводка памяти не теряет старые факты молча ──
+
+
+def test_summary_consumes_from_the_start_and_keeps_leftover(monkeypatch):
+    history = [
+        {"role": "user", "content": f"MSG{i} " + "x" * 1000, "sender": "u", "ts": time.time()}
+        for i in range(201)
+    ]
+    state = {"history": history, "memory_summary": "", "memory_pending": [], "memory_epoch": 0}
+    captured = {}
+
+    async def fake_summarize(text):
+        captured["digest"] = text
+        return "ok-summary"
+
+    monkeypatch.setattr(lcs, "_summarize_text", fake_summarize)
+    asyncio.run(lcs._trim_history(history, state))
+    assert "MSG0 " in captured["digest"], "самые старые факты должны попасть в сводку"
+    assert state["memory_pending"], "непросуммированный остаток обязан ждать следующего круга"
+    assert state["memory_summary"] == "ok-summary"
