@@ -184,7 +184,7 @@ def test_fresh_query_with_live_gemini_still_gets_external_snippets(rate_guard_se
         # отсутствие предварительной подстановки.
         provenance = kwargs.get("provenance")
         if isinstance(provenance, dict):
-            provenance.update(provider="gemini", model="gemini-2.5-flash")
+            provenance.update(provider="gemini", model="gemini-2.5-flash-lite")
         return "ok", False
 
     monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
@@ -238,7 +238,7 @@ def test_empty_external_search_with_grounded_answer_has_no_note(rate_guard_setup
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         provenance = kwargs.get("provenance")
         if isinstance(provenance, dict):
-            provenance.update(provider="gemini", model="gemini-2.5-flash")
+            provenance.update(provider="gemini", model="gemini-2.5-flash-lite")
         return "свежий ответ", False
 
     monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)

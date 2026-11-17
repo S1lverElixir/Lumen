@@ -29,18 +29,8 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "stream": True,
         "search_grounding": False, "map_grounding": False, "url_context": True,
     },
-    # Прошлый флагман (GA 13 августа 2026), резерв после 3.8.
-    "gemini-3.7-flash": {
-        "stream": True,
-        "search_grounding": False, "map_grounding": False, "url_context": True,
-    },
-    # Резерв после 3.7.
+    # Резерв после 3.8 (дашборд 17.11.2026).
     "gemini-3.6-flash": {
-        "stream": True,
-        "search_grounding": False, "map_grounding": False, "url_context": True,
-    },
-    # Резерв после 3.6. url_context включён: у него нет отдельной дневной квоты.
-    "gemini-3.5-flash": {
         "stream": True,
         "search_grounding": False, "map_grounding": False, "url_context": True,
     },
@@ -60,21 +50,18 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "stream": True,
         "search_grounding": False, "map_grounding": True, "url_context": True,
     },
-    # Баланс скорости и качества. Единственное поколение с квотой search grounding (21/1500).
-    "gemini-2.5-flash": {
-        "stream": True,
-        "search_grounding": True, "map_grounding": True, "url_context": True,
-    },
     # Экономичная: скорость важнее глубины рассуждений.
     "gemini-2.5-flash-lite": {
         "stream": True,
         "search_grounding": True, "map_grounding": True, "url_context": True,
     },
 }
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 
 # ── TTS-модели (аудит техдолга, август 2026) ──
-GEMINI_TTS_MODELS: list[str] = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
+# Дашборд 17.11.2026: старые preview имена отвечали «Unknown name speechConfig»;
+# живы 3.8 Flash TTS (10 RPD) и 3.8 Flash Lite TTS — их и берём.
+GEMINI_TTS_MODELS: list[str] = ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
 
 def _check_unconfirmed_model_quotas() -> None:
     """Напоминаем про модели с quota_unconfirmed: квота/grounding ещё не подтверждены по дашборду."""
@@ -88,6 +75,12 @@ def _check_unconfirmed_model_quotas() -> None:
 # Плоский список ID для детектора утечек, перепроверен по openrouter.ai (июль 2026). Не порядок роутера; снятые с тарифа оставляем: их тоже нельзя в ответ.
 # nemotron-3.5-content-safety — классификатор, а не диалоговая модель, не включаем намеренно.
 _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
+    # Снятые с тарифа Gemini — тоже нельзя называть в ответе (дашборд 17.11.2026).
+    "gemini-2.5-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-tts-preview",
+    "gemini-2.5-flash-preview-tts",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "openai/gpt-oss-120b:free",
@@ -806,26 +799,24 @@ def _munito_payload_extras(effort: str | None = None, model_id: str | None = Non
 # (см. _mark_model_unavailable в lumen_routes.py) — модель с 503 пропускается на
 # QUOTA_RATE_LIMIT_COOLDOWN_SEC, а не тратит попытку на каждом сообщении.
 GEMINI_HEAVY_CHAIN: list[str] = [
-    "gemini-2.5-flash",
+    # Дашборд 17.11.2026: 2.5 Flash и 3.7/3.5 Flash сняты (0/0), живы 3.8/3.6 Flash,
+    # обе Flash Lite и 3 Flash. Порядок — по квоте и свежести линейки.
     "gemini-3.8-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-3-flash-preview",
 ]
 # Сначала модели с реальной квотой search grounding (2.5-flash/lite), линейка 3.x — резервом (ответ по знаниям/url_context).
 GEMINI_SEARCH_CHAIN: list[str] = [
-    "gemini-2.5-flash",
+    # Голова — единственная живая с квотой search grounding (бакет 2.5, 0/1.5K
+    # на дашборде 17.11.2026); линейка 3.x идёт резервом.
     "gemini-2.5-flash-lite",
     "gemini-3.8-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-3-flash-preview",
 ]
 # Дефолт для прямых вызовов ask_gemini без явной цепочки.
