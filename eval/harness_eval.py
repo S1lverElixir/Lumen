@@ -163,7 +163,7 @@ def sandbox_config() -> dict:
     }
 
 
-def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool = False) -> None:
+def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool = False) -> Path:
     """Клонирует репозиторий на состояние до правки и ставит тесты из fix-коммита."""
     if sandbox.exists():
         for _ in range(5):
