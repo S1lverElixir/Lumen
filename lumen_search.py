@@ -1971,7 +1971,10 @@ def _source_label(item: dict) -> str:
     return host or ""
 
 
-_SNIPPET_INVIS_RE = re.compile("[\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufe0f\u3164\ufeff]")
+# Tag-символы, U+2065, FFF9-FFFB и корейские заполнители — невидимая инструкция
+# из чужой выдачи; U+E0000-E007F вообще вне BMP (ревью 17.11.2026).
+_SNIPPET_INVIS_RE = re.compile("[\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2065\u2066-\u206f\ufff9-\ufffb\ufe0f\u115f\u1160\u3164\uffa0\ufeff\U000e0000-\U000e007f]")
+_SNIPPET_MARKER_RE = re.compile(r"(?i)\[\s*search\s*\]")
 _SNIPPET_FRAME_RE = re.compile(r"(?i)\[\s*/?\s*fetched\s*page[^\]\n]{0,200}\]?")
 _SNIPPET_FRAME_WORDS_RE = re.compile(r"(?i)fetched")
 
@@ -1981,6 +1984,8 @@ def _one_line(text: str) -> str:
     заголовок с переводом строки открывал блок страницы от лица промпта
     (аудит 16.11.2026)."""
     clean = _SNIPPET_INVIS_RE.sub("", text or "")
+    # Чужой [[SEARCH]] не должен выглядеть как просьба модели о поиске.
+    clean = _SNIPPET_MARKER_RE.sub("(search)", clean)
     clean = " ".join(clean.splitlines())
     # Сначала скобочная форма, затем само слово: вложенность любой глубины не
     # собирает маркер заново (финальная проверка 16.11.2026).
