@@ -2429,3 +2429,10 @@ def test_itunes_server_error_is_transient(monkeypatch):
 
     track, transient = asyncio.run(lumen_tiktok._itunes_track(_Session(), "1"))
     assert track is None and transient is True
+
+
+@pytest.fixture(autouse=True)
+def _dns_public_by_default(monkeypatch):
+    """Сьют TikTok офлайн: проверка «хост публичный» иначе ходит в реальный DNS
+    (ревью 17.11.2026, F-177). Тесты, которым нужен приватный ответ, патчат своё."""
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_dns)
