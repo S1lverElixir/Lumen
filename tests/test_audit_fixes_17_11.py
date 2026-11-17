@@ -572,7 +572,7 @@ def test_flush_retries_index_after_load_failure_without_dirty_flag():
     lcs._state_load_failed = True
     lcs._index_dirty = False
     calls = []
-    with patch.object(lcs, "_recover_index_ids", side_effect=lambda: calls.append(1) or False):
+    with patch.object(lcs, "_fetch_index_ids", side_effect=lambda: calls.append(1) or set()),          patch.object(lcs, "_apply_recovered_ids", side_effect=lambda ids: True):
         asyncio.run(bot._flush_dirty_state_once())
     assert calls, "без ретрая запись стоит до рестарта"
 
@@ -1406,3 +1406,21 @@ def test_identity_based_on_needs_first_person_in_the_same_sentence():
     assert all(not (start <= based_at < end) for start, end in spans), spans
     leak = "My model is based on Google research."
     assert sec._leak_spans(leak)
+
+
+# ── F-047: чтение индекса не мутирует общие множества ──
+
+
+def test_index_fetch_does_not_mutate_shared_sets():
+    _reset_state_flags()
+    lcs._state_load_failed = True
+    lcs._index_extra_ids.clear()
+    lcs._chat_snapshot_unloaded.clear()
+    lcs._index_retry_last_ts = 0.0
+    with patch("bot._storage_read_text", return_value="[111, 222]"):
+        ids = lcs._fetch_index_ids()
+    assert ids == {111, 222}
+    assert not lcs._index_extra_ids and not lcs._chat_snapshot_unloaded
+    assert lcs._apply_recovered_ids(ids) is True
+    assert 111 in lcs._index_extra_ids
+    _reset_state_flags()

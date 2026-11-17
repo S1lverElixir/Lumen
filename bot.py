@@ -1541,9 +1541,10 @@ async def _handle_message(message: Message) -> None:
             chat_id, type(_in_src).__name__, bool(message.text or message.caption),
         )
 
-    # Если бот не упомянут в группе, это просто контекст — обрабатываем без локов и ожидания
+    # Неупомянутая группа — тоже путь, трогающий чат: тот же лок, кап ожидающих
+    # и дедлайн, иначе фон писал историю параллельно с ответом (ревью 17.11.2026).
     if not is_private and not is_guest and not mentioned:
-        await _handle_message_core(message)
+        await _run_under_chat_lock(message, lambda: _handle_message_core(message))
         return
 
     # Лок, кап ожидающих и потолок сообщения — в общем помощнике, чтобы этот путь,
