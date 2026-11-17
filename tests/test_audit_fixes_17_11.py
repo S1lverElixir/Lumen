@@ -1393,3 +1393,16 @@ def test_waiter_cap_does_not_claim_stop_scope(monkeypatch):
     finally:
         bot._chat_lock_waiters.pop(555, None)
     assert begun == [], "отшитый запрос не должен открывать область стопа"
+
+
+# ── F-005: честное «основано на исследованиях Google» не вырезается ──
+
+
+def test_identity_based_on_needs_first_person_in_the_same_sentence():
+    import lumen_security as sec
+    text = "I am a Gemini model. The transformer architecture is based on Google research."
+    spans = sec._leak_spans(text)
+    based_at = text.index("based on Google")
+    assert all(not (start <= based_at < end) for start, end in spans), spans
+    leak = "My model is based on Google research."
+    assert sec._leak_spans(leak)

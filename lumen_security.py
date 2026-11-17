@@ -556,11 +556,24 @@ def _leak_spans(text: str) -> list[tuple[int, int]]:
     """Диапазоны символов, где нашлась утечка или эхо инструкции."""
     spans: list[tuple[int, int]] = []
     for pattern in (_LEAK_LITERAL_RE, _IDENTITY_LEAK_RE, _INJECTED_PAYLOAD_ECHO_RE,
-                    _IDENTITY_BASED_ON_RE, _PROMPT_REVEAL_RE):
+                    _PROMPT_REVEAL_RE):
         if pattern is None:
             continue
         for m in pattern.finditer(text):
             spans.append((m.start(), m.end()))
+    # _IDENTITY_BASED_ON_RE — только в предложении с первым лицом, как в
+    # _detect_identity_leak: иначе честное «основана на исследованиях Google»
+    # вырезалось вместе с настоящей утечкой (ревью 17.11.2026).
+    if _IDENTITY_BASED_ON_RE is not None:
+        pos = 0
+        for sentence in _SENTENCE_SPLIT_RE.split(text):
+            start = text.find(sentence, pos)
+            if start < 0:
+                start = pos
+            if _FIRST_PERSON_RE.search(sentence):
+                for m in _IDENTITY_BASED_ON_RE.finditer(sentence):
+                    spans.append((start + m.start(), start + m.end()))
+            pos = start + len(sentence)
     return spans
 
 

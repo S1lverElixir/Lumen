@@ -17,7 +17,8 @@ from lumen_agent import (
     _parse_arguments,
     _safe_query_text,
 )
-from lumen_search import fetch_web_snippets, web_search_max_results, web_search_timeout_sec
+from lumen_search import (fetch_web_snippets, format_snippets_for_prompt,
+                         web_search_max_results, web_search_timeout_sec)
 
 log = logging.getLogger("bot")
 
@@ -101,11 +102,16 @@ async def run_search_turn(
             result.failed = True
             break
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-        if remaining is not None and remaining < _MIN_STEP_BUDGET_SEC + web_search_timeout_sec():
+        # Сетевой резерв вычитаем из планирования, как в тракте Munito: иначе
+        # планирующий вызов съедал весь бюджет и поиск стартовал за дедлайном
+        # (ревью 17.11.2026).
+        net_reserve = web_search_timeout_sec()
+        if remaining is not None and remaining < _MIN_STEP_BUDGET_SEC + net_reserve:
             result.failed = True
             break
         config = config or _config(effort, model_id)
-        timeout = _STEP_CALL_MAX_SEC if remaining is None else min(_STEP_CALL_MAX_SEC, remaining)
+        timeout = (_STEP_CALL_MAX_SEC if remaining is None
+                   else min(_STEP_CALL_MAX_SEC, max(1.0, remaining - net_reserve)))
         started = time.monotonic()
         try:
             response = await asyncio.wait_for(
@@ -157,10 +163,10 @@ async def run_search_turn(
         ]))
         contents.append(types.Content(role="user", parts=[
             types.Part.from_function_response(name="web_search", response={
-                "results": "\n".join(
-                    f"{item.get('title') or ''} | {item.get('url') or ''} | {item.get('snippet') or ''}"
-                    for item in snippets
-                ) or "no results",
+                # Та же рамка недоверенных данных и та же чистка, что у Munito:
+                # сырой сниппет мог закрыть фрейм и притащить невидимки
+                # (ревью 17.11.2026).
+                "results": format_snippets_for_prompt(snippets) or "no results",
             })
             for (_call, query), snippets in zip(planned, [
                 found if isinstance(found, list) else [] for found in got
