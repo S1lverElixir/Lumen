@@ -1143,3 +1143,17 @@ def test_deleted_chat_ids_are_capped(monkeypatch):
         lcs.chat_state[800000 + wave] = {"last_activity": 0}
         lcs._prune_old_chats()
     assert len(lcs._deleted_chat_ids) <= 3
+
+
+# ── F-104: DOCTYPE/ENTITY во всём теле RSS, а не в первых 2000 символах ──
+
+
+def test_rss_guard_sees_doctype_after_long_prefix():
+    import lumen_search
+    xml = (
+        "<!--" + "x" * 2100 + "-->"
+        '<!DOCTYPE rss [<!ENTITY a "boom">]>'
+        "<rss><channel><item><title>&a;</title>"
+        "<link>https://example.com/1</link><description>&a;</description></item></channel></rss>"
+    )
+    assert lumen_search.parse_rss_snippets(xml) == []

@@ -814,7 +814,10 @@ def parse_rss_snippets(xml_page: str, max_results: int = _DEFAULT_MAX_RESULTS,
         return out
     # Выдача чужая: DTD и внешние сущности в RSS не читаем вовсе (Eta-атака на
     # стандартном парсере, defusedxml в зависимости не заводим).
-    if "<!DOCTYPE" in xml_page[:2000] or "<!ENTITY" in xml_page[:2000]:
+    # По всему телу, а не первым 2000 символов: отступ в 2100 обходил guard
+    # (ревью 17.11.2026). Проверка O(n) и дешёвая.
+    upper_page = xml_page.upper()
+    if "<!DOCTYPE" in upper_page or "<!ENTITY" in upper_page:
         return out
     try:
         root = ET.fromstring(xml_page)
