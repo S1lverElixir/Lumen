@@ -325,6 +325,10 @@ def image_dimensions(data: bytes) -> tuple[int, int] | None:
                     i += 1
                     continue
                 marker = data[i + 1]
+                if marker == 0xDA:
+                    # SOF всегда до SOS; после него — энтропия, и побайтовый скан
+                    # 8-10 МБ держал GIL 0.4-0.5 с (ревью 17.11.2026).
+                    return None
                 if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
                     i += 2
                     continue
@@ -367,9 +371,10 @@ def size_for_reference(dimensions: tuple[int, int] | None) -> tuple[int, int]:
     if not w or not h:
         return (1024, 1024)
     ratio = w / h
-    names = ("1:1", "4:3", "3:4", "16:9", "9:16")
-    target = {"1:1": 1.0, "4:3": 4 / 3, "3:4": 3 / 4, "16:9": 16 / 9, "9:16": 9 / 16}
-    best = min(names, key=lambda name: abs(math.log(ratio / target[name])))
+    # Все поддерживаемые пропорции, а не пять: 3:2/21:9 раньше съезжали в 4:3/16:9
+    # и кадр дрейфовал при правке (ревью 17.11.2026).
+    target = {name: int(name.split(":")[0]) / int(name.split(":")[1]) for name in _SIZES}
+    best = min(_SIZES, key=lambda name: abs(math.log(ratio / target[name])))
     return _SIZES[best]
 
 

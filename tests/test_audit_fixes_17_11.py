@@ -662,3 +662,28 @@ def test_inline_tts_cancel_during_send_refunds_remaining(monkeypatch):
     monkeypatch.setattr(bot, "_delete_message_quietly", AsyncMock())
     monkeypatch.setattr(lumen_status.StatusMessage, "start_action", AsyncMock(return_value=None))
     asyncio.run(scenario())
+
+
+# ── F-077: после SOS размеры не ищем, GIL не держим на энтропии ──
+
+
+def test_jpeg_scan_stops_at_scan_start():
+    app0 = b"\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    sos = b"\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00"
+    sof_in_entropy = b"\xff\xc0\x00\x11\x08\x00\x10\x00\x20\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01"
+    data = b"\xff\xd8" + app0 + sos + sof_in_entropy + b"\x00" * 64
+    assert lumen_images.image_dimensions(data) is None, (
+        "SOF после SOS — это энтропия, а не заголовок")
+
+
+# ── F-078: правка сохраняет новые пропорции ──
+
+
+@pytest.mark.parametrize(("dims", "expected"), [
+    ((1248, 832), lumen_images._SIZES["3:2"]),
+    ((832, 1248), lumen_images._SIZES["2:3"]),
+    ((1344, 576), lumen_images._SIZES["21:9"]),
+    ((896, 1120), lumen_images._SIZES["4:5"]),
+])
+def test_size_for_reference_keeps_supported_proportions(dims, expected):
+    assert lumen_images.size_for_reference(dims) == expected
