@@ -1491,6 +1491,30 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
 
 # выгрузка логов (только для владельца)
 
+def _build_logs_attachment() -> str | None:
+    """Блокирующая часть /logs: прочитать, вычистить токены, отдать путь файла."""
+    import bot
+    if not bot.LOG_FILE_PATH.exists():
+        return None
+    with open(bot.LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+        log_content = f.read()
+    if not log_content.strip():
+        return None
+    for secret in bot._redactable_secrets():
+        log_content = log_content.replace(secret, "<REDACTED>")
+    fd, temp_log_path = tempfile.mkstemp(prefix="logs_", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
+            f.write(log_content)
+    except Exception:
+        try:
+            os.unlink(temp_log_path)
+        except Exception:
+            pass
+        raise
+    return temp_log_path
+
+
 async def cmd_logs(message: Message) -> None:
     import bot
     is_owner = bot._is_owner(message.from_user.id if message.from_user else None)
@@ -1512,35 +1536,24 @@ async def cmd_logs(message: Message) -> None:
     except Exception:
         pass
 
+    temp_log_path = None
     try:
-        log_content = ""
-        if bot.LOG_FILE_PATH.exists():
-            with open(bot.LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
-                log_content = f.read()
-
-        if not log_content or len(log_content.strip()) == 0:
+        # Чтение, скраб и запись файла — блокирующая часть: лог растёт сутками,
+        # и весь этот объём раньше стопорил event loop (ревью 17.11.2026).
+        temp_log_path = await asyncio.to_thread(_build_logs_attachment)
+        if temp_log_path is None:
             await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_empty"))
             return
-
-        # вычищаем токены из логов перед отправкой — единый список, см. _redactable_secrets
-        for secret in bot._redactable_secrets():
-            log_content = log_content.replace(secret, "<REDACTED>")
-
-        # пишем во временный файл, чтобы не ловить блокировку на живом логе
-        fd, temp_log_path = tempfile.mkstemp(prefix="logs_", suffix=".txt")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
-                f.write(log_content)
-
-            await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
-        finally:
+        await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
+    except Exception as exc:
+        log.exception("Error extracting or sending logs:")
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
+    finally:
+        if temp_log_path:
             try:
                 os.unlink(temp_log_path)
             except Exception:
                 pass
-    except Exception as exc:
-        log.exception("Error extracting or sending logs:")
-        await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
 
 async def cmd_stats(message: Message) -> None:
     """Статистика (скрыта, только владелец — данные по всем чатам)."""

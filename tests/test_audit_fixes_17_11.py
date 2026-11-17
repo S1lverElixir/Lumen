@@ -1039,3 +1039,29 @@ def test_ddg_snippet_is_paired_with_its_own_link():
     out = lumen_search.parse_ddg_html(page)
     assert out[0]["snippet"] == "", "у ссылки A подписи нет"
     assert out[1]["snippet"] == "Snippet belonging to B"
+
+
+# ── F-081: подготовка /logs идёт в рабочем потоке ──
+
+
+def test_logs_preparation_runs_off_event_loop(monkeypatch):
+    import threading
+    from aiogram.enums import ChatType
+    import lumen_commands
+
+    seen = {}
+
+    def fake_build():
+        seen["thread"] = threading.current_thread()
+        return None
+
+    monkeypatch.setattr(lumen_commands, "_build_logs_attachment", fake_build)
+    monkeypatch.setattr(bot, "_is_owner", lambda uid: True)
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=1, type=ChatType.PRIVATE),
+        from_user=SimpleNamespace(id=5),
+        reply=AsyncMock(), reply_document=AsyncMock(),
+    )
+    asyncio.run(lumen_commands.cmd_logs(message))
+    assert seen["thread"] is not threading.main_thread(), "чтение лога не должно идти в петле"
