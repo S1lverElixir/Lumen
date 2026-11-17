@@ -295,6 +295,17 @@ def test_scene_request_without_artifact_word_draws_resolved_text(rate_guard_setu
     assert bot.inline_draw.await_args.args[1] == _RESOLVED
 
 
+def test_scene_request_strips_variants_phrase_from_resolved_text(rate_guard_setup, monkeypatch):
+    # Тот же дефект F-169 на пути визуального сигнала: фраза количества из
+    # описания резолвера не должна уезжать в промпт второй ветки.
+    message = _ctx_env(monkeypatch, rate_guard_setup, "хочу увидеть кота на луне",
+                       "A ginger cat on the moon, 3 variants, photorealistic.")
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once()
+    _prompt = bot.inline_draw.await_args.args[1]
+    assert _prompt.startswith("A ginger cat") and "variants" not in _prompt
+
+
 def test_scene_request_answered_none_stays_text(rate_guard_setup, monkeypatch):
     message = _ctx_env(monkeypatch, rate_guard_setup, "хочу увидеть кота на луне", "NONE")
     run_route = AsyncMock(return_value=("ok", False))
