@@ -1001,3 +1001,23 @@ def test_keyed_per_user_cap_and_owner_bypass(monkeypatch):
     finally:
         ls.reset_search_actor(token)
         ls.reset_search_counters_for_tests()
+
+
+# ── F-072 (проход №5): lower() не должен сдвигать индексы (İ/ß) ──
+
+
+def test_tag_replacement_survives_case_folding_length_change():
+    import lumen_formatting as lf
+    assert "İstanbul <b>bold</b> ok" in lf._md_to_html("İstanbul <b>bold</b> ok")
+    assert "<code>rm -rf</code>" in lf._md_to_html("DİKKAT: <code>rm -rf</code>")
+
+
+def test_rich_math_keeps_old_delimiter_semantics():
+    import lumen_formatting as lf
+    # \(..\) без DOTALL и пустой \[..\] не превращаются в формулу.
+    sample = "\\(" + "a" + chr(10) + "b" + "\\)"
+    assert lf._replace_delimited(sample, "\\(", "\\)", lambda s: "M",
+                                 allow_newlines=False) == sample
+    empty = "\\[\\]"
+    assert lf._replace_delimited(empty, "\\[", "\\]", lambda s: "M",
+                                 min_len=1) == empty

@@ -179,7 +179,24 @@ _LATEX_SYMBOL_MAP: dict[str, str] = {
 }
 
 
-def _replace_delimited(text: str, open_delim: str, close_delim: str, wrap) -> str:
+_CI_NEEDLE_RE: dict[str, re.Pattern] = {}
+
+
+def _find_ci(text: str, needle: str, start: int) -> int:
+    """Индекс без копии text.lower(): на İ/ß нижний регистр меняет длину,
+    и позиции из копии съезжали (адверсариальный проход 17.11.2026)."""
+    pattern = _CI_NEEDLE_RE.get(needle)
+    if pattern is None:
+        pattern = re.compile(re.escape(needle), re.IGNORECASE)
+        _CI_NEEDLE_RE[needle] = pattern
+    match = pattern.search(text, start)
+    return match.start() if match else -1
+
+
+def _replace_delimited(
+    text: str, open_delim: str, close_delim: str, wrap,
+    *, allow_newlines: bool = True, min_len: int = 0,
+) -> str:
     """Парная замена разделителя за один проход: непарное открытие раньше заставляло
     regex сканировать остаток строки от каждой позиции, O(n²) (ревью 17.11.2026)."""
     out: list[str] = []
@@ -193,14 +210,19 @@ def _replace_delimited(text: str, open_delim: str, close_delim: str, wrap) -> st
         if end == -1:
             out.append(text[i:])
             return "".join(out)
+        inner = text[start + len(open_delim):end]
+        if len(inner) < min_len or (not allow_newlines and "\n" in inner):
+            # Старый regex без DOTALL/с +? не трогал такой случай: оставляем как есть.
+            out.append(text[i:end + len(close_delim)])
+            i = end + len(close_delim)
+            continue
         out.append(text[i:start])
-        out.append(wrap(text[start + len(open_delim):end]))
+        out.append(wrap(inner))
         i = end + len(close_delim)
 
 
 def _replace_tag_pairs(text: str, opens: tuple[str, ...], closes: tuple[str, ...], wrap) -> str:
     """Тот же проход для тегов: regex с DOTALL на непарном <b> даёт O(n²)."""
-    low = text.lower()
     out: list[str] = []
     i = 0
     n = len(text)
@@ -208,7 +230,7 @@ def _replace_tag_pairs(text: str, opens: tuple[str, ...], closes: tuple[str, ...
         best = None
         best_tag = None
         for tag in opens:
-            pos = low.find(tag, i)
+            pos = _find_ci(text, tag, i)
             if pos != -1 and (best is None or pos < best):
                 best, best_tag = pos, tag
         if best is None:
@@ -218,7 +240,7 @@ def _replace_tag_pairs(text: str, opens: tuple[str, ...], closes: tuple[str, ...
         close_pos = None
         close_tag = None
         for tag in closes:
-            pos = low.find(tag, inner_start)
+            pos = _find_ci(text, tag, inner_start)
             if pos != -1 and (close_pos is None or pos < close_pos):
                 close_pos, close_tag = pos, tag
         if close_pos is None:
@@ -237,13 +259,12 @@ def _replace_spoiler_spans(text: str) -> str:
     """Линейный проход для спана со спойлером: тот же класс отказа."""
     out: list[str] = []
     i = 0
-    low = text.lower()
     while True:
         m = _SPOILER_SPAN_OPEN_RE.search(text, i)
         if m is None:
             out.append(text[i:])
             return "".join(out)
-        end = low.find("</span>", m.end())
+        end = _find_ci(text, "</span>", m.end())
         if end == -1:
             out.append(text[i:])
             return "".join(out)
@@ -263,7 +284,7 @@ def _scrub_latex(text: str) -> str:
         return text
     # Снимаем только $$/\[..\]/\(..\): одиночный $ не трогаем, иначе сумма "$100" спарится с формулой и испортит оба.
     text = _replace_delimited(text, "\\[", "\\]", lambda s: s)
-    text = _replace_delimited(text, "\\(", "\\)", lambda s: s)
+    text = _replace_delimited(text, "\\(", "\\)", lambda s: s, allow_newlines=False)
     text = re.sub(r"\$\$(.*?)\$\$", r"\1", text, flags=re.DOTALL)
     # \frac{a}{b} -> a/b (одноуровневая вложенность, самый частый случай)
     text = re.sub(r"\\d?frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2", text)
@@ -707,8 +728,9 @@ def _md_to_rich_html(text: str) -> str:
     text = re.sub(r"(?<!\$)\$(?!\$)([^\s$][^$\n]*?)(?<!\s)\$(?!\$)", lambda m: _take(_math, "MM", (m.group(1), False)), text)
     # Скобочные формы LaTeX (реальный кейс nemotron — \[ S = \pi r^{2} \]): тот же
     # смысл, что $/$$ выше, извлекаются раньше них, чтобы $ внутри не разобрали.
-    text = _replace_delimited(text, "\\[", "\\]", lambda s: _take(_math, "MM", (s, True)))
-    text = _replace_delimited(text, "\\(", "\\)", lambda s: _take(_math, "MM", (s, False)))
+    text = _replace_delimited(text, "\\[", "\\]", lambda s: _take(_math, "MM", (s, True)), min_len=1)
+    text = _replace_delimited(text, "\\(", "\\)", lambda s: _take(_math, "MM", (s, False)),
+                               allow_newlines=False)
 
     def _take_heading(m: re.Match) -> str:
         # Тот же допуск, что у легаси _HEADER_MARKER_RE (ведущие пробелы, до 6
