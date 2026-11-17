@@ -739,6 +739,16 @@ async def _flush_dirty_state_once() -> None:
         if _pending_chat_deletions:
             to_delete = list(_pending_chat_deletions)
             _pending_chat_deletions.clear()
+            # Удаление — тоже запись в хранилище: замороженный чат и чат при сбое
+            # загрузки сохраняют удалённую копию до успешного чтения. Раньше защита
+            # стояла только на записи (ревью 17.11.2026).
+            guarded = {cid for cid in to_delete
+                       if _state_load_failed or cid in _chat_snapshot_unloaded}
+            if guarded:
+                _pending_chat_deletions.update(guarded)
+                to_delete = [cid for cid in to_delete if cid not in guarded]
+                log.warning('[state] Skip %d chat deletion(s): remote snapshot not restored yet.',
+                            len(guarded))
             try:
                 del_results = await asyncio.gather(
                     *(bot._delete_chat_storage_limited(cid) for cid in to_delete),
@@ -810,7 +820,7 @@ async def _flush_dirty_state_once() -> None:
                     if _index_generation == started_index_generation:
                         _index_dirty = False
         if _quota_dirty:
-            if _quota_load_failed and not bot.recover_global_quota():
+            if _quota_load_failed and not await asyncio.to_thread(bot.recover_global_quota):
                 # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
                 log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
             else:
@@ -1134,9 +1144,9 @@ async def acquire_chat_lock(chat_id: int, timeout: float) -> asyncio.Lock:
         if bot._chat_locks.get(chat_id) is lock:
             return lock
         lock.release()
-    lock = get_chat_lock(chat_id)
-    await asyncio.wait_for(lock.acquire(), timeout=timeout)
-    return lock
+    # Четвёртая попытка без сверки поколения отдавала чужой лок: два сообщения
+    # одного чата отвечали параллельно (ревью 17.11.2026, дыра в фиксе A5-10).
+    raise TimeoutError("chat lock kept changing during acquisition")
 
 def _evict_orphan_chat_locks() -> int:
     """Сносит локи чатов, которых уже нет в chat_state и которые никто не
