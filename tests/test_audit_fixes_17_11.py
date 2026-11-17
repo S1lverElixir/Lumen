@@ -349,3 +349,42 @@ def test_inline_tts_cancel_during_status_refunds_slots(monkeypatch):
         asyncio.run(scenario())
     finally:
         bot.GLOBAL_QUOTA["user_daily"] = {}
+
+
+# ── F-049: фото-пост без скачанных слайдов отказывает, а не шлёт аудио видео ──
+
+
+def test_slideshow_with_no_downloaded_slides_refuses_instead_of_sending_audio(monkeypatch):
+    import lumen_tiktok
+
+    async def fake_download(session, url, headers=None, cap_bytes=None):
+        return None
+
+    sends = []
+
+    class _FakeTgBot:
+        async def send_photo(self, **kwargs):
+            sends.append("photo")
+            return SimpleNamespace()
+
+        async def send_video(self, **kwargs):
+            sends.append("video")
+            return SimpleNamespace()
+
+        async def send_media_group(self, **kwargs):
+            sends.append("group")
+            return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_download_url_bin", fake_download)
+    monkeypatch.setattr(bot, "bot", _FakeTgBot())
+    incoming = _FakeIncomingMessage(998351)
+    incoming.message_id = 7
+    media_data = {
+        "images": ["http://x/0.jpg"],
+        "live_images": ["http://x/0.mp4"],
+        "play": "http://x/audio.mp3",
+    }
+    with pytest.raises(lumen_tiktok.TikTokUserFacingError):
+        asyncio.run(bot._try_send_tiktok_slideshow(None, media_data, incoming, None, "author", {}))
+    assert sends == [], "аудио не должно уходить ни как видео, ни как фото"
+    bot.chat_state.pop(998351, None)
