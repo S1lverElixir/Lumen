@@ -321,6 +321,13 @@ GROUP_WAKE_WORDS = tuple(
     w.strip() for w in os.getenv("GROUP_WAKE_WORDS", "люмен,lumen").split(",") if w.strip()
 ) or ("люмен", "lumen")
 
+def group_wake_request(text: str) -> tuple[bool, str]:
+    """(адресовано ли словом, текст без имени). Выключатель — GROUP_WAKE_ENABLED."""
+    if not GROUP_WAKE_ENABLED or not text:
+        return False, text
+    return strip_group_wake_word(text, GROUP_WAKE_WORDS)
+
+
 _telegram_proxy_idx = 0  # индекс текущего активного прокси в _TELEGRAM_PROXY_CANDIDATES
 # Ротация мутирует два глобала сразу — под локом, иначе два concurrent-сбоя
 # уводят индекс на два шага и пропускают кандидата (AUD-E-004).
@@ -1475,6 +1482,7 @@ from lumen_streaming import (
 # здесь: ей нужен BOT_USERNAME из этого модуля.
 from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
+    strip_group_wake_word,
     TTS_TRIGGER_PREFIXES,
     _NO_MEDIA_NOTE,
     _clean_history_entry,

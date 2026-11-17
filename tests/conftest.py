@@ -16,6 +16,9 @@ import tempfile
 os.environ.setdefault("BOT_LOG_PATH", os.path.join(tempfile.gettempdir(), "lumen_test_bot.log"))
 os.environ.setdefault("BOT_TOKEN", "test-token-not-real")
 os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
+# Wake-word группы: фиксируем дефолты, иначе шелл владельца переключал бы тесты (ревью 18.11.2026).
+os.environ.setdefault("GROUP_WAKE_ENABLED", "1")
+os.environ.setdefault("GROUP_WAKE_WORDS", "люмен,lumen")
 # Провайдерские ключи — только пустые: иначе bot.py ниже подхватит .env
 # разработчика и тест сходит в живой API (сеть, чужая квота, нестабильность).
 # MUNITO_ENABLED/MUNITO_KEEP_FALLBACKS гасятся вместе с ключом: режим эксперимента
