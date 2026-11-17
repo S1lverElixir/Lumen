@@ -1308,7 +1308,8 @@ async def inline_tts(message: Message, text: str) -> None:
                 return
     except asyncio.CancelledError:
         # Отмена в цикле отправки: уже отданные чанки списаны, остальные — нет.
-        remaining = len(voices) - sent_count
+        # Резерв покрывает все чанки, а синтезировано могло быть меньше (обрезка).
+        remaining = len(chunks) - sent_count
         if remaining > 0:
             bot._refund_user_daily(uid, total=remaining, tts=remaining)
         raise
