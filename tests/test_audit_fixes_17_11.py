@@ -1462,3 +1462,24 @@ def test_proxy_rotation_defers_old_session_close(monkeypatch):
         asyncio.run(scenario())
     finally:
         bot.bot = original_bot
+
+
+# ── F-014: пост канала банится по sender_chat ──
+
+
+def test_channel_post_is_banned_by_sender_chat(monkeypatch):
+    called = []
+
+    async def core(message):
+        called.append(message)
+
+    monkeypatch.setattr(bot, "_handle_message_core", core)
+    monkeypatch.setattr(bot, "_is_banned", lambda uid: uid == 777)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=1, type="supergroup"),
+        from_user=None, sender_chat=SimpleNamespace(id=777),
+        media_group_id=None, text="пост канала", caption=None,
+        reply_to_message=None,
+    )
+    asyncio.run(bot._handle_message(message))
+    assert called == [], "забаненный канал не должен обрабатываться"

@@ -1516,8 +1516,11 @@ async def handle_message(message: Message) -> None:
 
 async def _handle_message(message: Message) -> None:
     # Владельческая блокировка: ни ответа, ни контекста группы, ни счётчиков —
-    # отсекаем раньше всего, включая медиагруппы и пассивный фон.
-    if message.from_user is not None and _is_banned(message.from_user.id):
+    # отсекаем раньше всего, включая медиагруппы и пассивный фон. Пост канала
+    # (sender_chat без from_user) тоже автор: иначе бан обходится каналом
+    # (ревью 17.11.2026).
+    _author = message.from_user if message.from_user is not None else getattr(message, "sender_chat", None)
+    if _author is not None and getattr(_author, "id", None) is not None and _is_banned(_author.id):
         return
 
     if message.media_group_id:
