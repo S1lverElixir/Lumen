@@ -219,9 +219,12 @@ Gemini is the unconditional reserve on every route where Munito answers.
 - Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`): only
   it enforces the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the honest busy reply, and it supplies
   the message deadline (`MESSAGE_TOTAL_BUDGET_SEC`) and the `chat=` log label when the caller did
-  not (ordinary messages get both from `handle_message` in `bot.py` before the lock). A handler may
-  be registered outside the lock and still take it around the work it starts (`/draw` did not, and
-  two people in one group each left a live button over one photo; fixed 10.11.2026).
+  not (ordinary messages get both from `handle_message` in `bot.py` before the lock). Passive group
+  background goes through the same helper with `background=True`: it never answers «busy», never
+  takes a people slot (`_MAX_CHAT_LOCK_BACKGROUND_WAITERS`) and exits silently when the chat is
+  busy, because a non-addressed «привет» must not receive the answer meant for someone else. A
+  handler may be registered outside the lock and still take it around the work it starts (`/draw`
+  did not, and two people in one group each left a live button over one photo; fixed 10.11.2026).
 - After a failed startup load `_state_load_failed` (`lumen_chat_state.py`) suppresses index and
   quota writes, so an Upstash outage cannot overwrite real history with empty in-memory state. Any
   new writer must honor that flag (audit A5-2, 28.10.2026).

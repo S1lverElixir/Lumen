@@ -1654,3 +1654,103 @@ def test_greetings_do_not_trigger_web_search():
     for q in ("привет", "Люмен, привет", "спасибо!", "hello"):
         assert core._wants_web_search(q, previous="нет") is False, q
     assert core._wants_web_search("Кто сейчас канцлер Германии?", previous="привет") is True
+# ── Прод 18.11.2026: фон группы молчит в занятом чате и не занимает очередь людей ──
+
+
+def test_group_message_without_mention_enters_lock_as_background(monkeypatch):
+    calls = []
+
+    async def fake_lock(message, run, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(bot, "_run_under_chat_lock", fake_lock)
+    monkeypatch.setattr(bot, "message_mentions_bot", lambda message: False)
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=1, type="supergroup"),
+        from_user=SimpleNamespace(id=1), sender_chat=None,
+        media_group_id=None, text="День у день", caption=None,
+        reply_to_message=None,
+    )
+    asyncio.run(bot._handle_message(message))
+    assert calls == [{"background": True}], "фон не должен идти по очереди людей"
+
+    calls.clear()
+    monkeypatch.setattr(bot, "message_mentions_bot", lambda message: True)
+    asyncio.run(bot._handle_message(message))
+    assert calls == [{}], "адресованный вопрос идёт обычным путём"
+
+    # «Люмен, …» — обращение, а не фон: в занятом чате он должен получить «занято».
+    calls.clear()
+    monkeypatch.setattr(bot, "message_mentions_bot", lambda message: False)
+    monkeypatch.setattr(bot, "GROUP_WAKE_ENABLED", True)
+    message.text = "Люмен, который час?"
+    asyncio.run(bot._handle_message(message))
+    assert calls == [{}], "wake-word не должен уходить в тихий фон"
+
+
+def test_background_lock_timeout_never_answers_busy(monkeypatch):
+    import lumen_message_core as mc
+    replies = []
+
+    async def fake_tg(chat, text, *args, **kwargs):
+        replies.append(text)
+
+    async def no_lock(chat_id, timeout):
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(bot, "_msg_remaining_sec", lambda: None)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg)
+    monkeypatch.setattr(bot, "acquire_chat_lock", no_lock)
+    monkeypatch.setattr(bot, "_chat_lock_background_waiters", {})
+    message = SimpleNamespace(chat=SimpleNamespace(id=559), from_user=SimpleNamespace(id=1))
+    asyncio.run(mc._run_under_chat_lock(message, lambda: None, background=True))
+    assert replies == [], "«занято» уходило человеку, который к боту не обращался"
+
+
+def test_background_wait_skips_the_people_waiter_cap(monkeypatch):
+    import lumen_message_core as mc
+    ran = []
+
+    class _Lock:
+        def release(self):
+            ran.append("released")
+
+    async def fake_acquire(chat_id, timeout):
+        return _Lock()
+
+    async def run():
+        ran.append("run")
+
+    monkeypatch.setattr(bot, "_msg_remaining_sec", lambda: None)
+    monkeypatch.setattr(bot, "acquire_chat_lock", fake_acquire)
+    monkeypatch.setattr(bot, "_chat_lock_background_waiters", {})
+    bot._chat_lock_waiters[560] = bot._MAX_CHAT_LOCK_WAITERS
+    message = SimpleNamespace(chat=SimpleNamespace(id=560), from_user=SimpleNamespace(id=1))
+    try:
+        asyncio.run(mc._run_under_chat_lock(message, run, background=True))
+    finally:
+        bot._chat_lock_waiters.pop(560, None)
+    assert ran == ["run", "released"]
+    assert bot._chat_lock_background_waiters == {}, "фоновый счётчик не должен течь"
+
+
+def test_passive_album_is_background(monkeypatch):
+    import lumen_message_core as mc
+    group = SimpleNamespace(chat=SimpleNamespace(id=1, type="supergroup"), text=None, caption="")
+
+    monkeypatch.setattr(bot, "message_mentions_bot", lambda message: False)
+    monkeypatch.setattr(bot, "is_guest_message", lambda message: False)
+    assert mc._album_passes_to_background(group) is True
+
+    monkeypatch.setattr(bot, "message_mentions_bot", lambda message: True)
+    assert mc._album_passes_to_background(group) is False
+
+    monkeypatch.setattr(bot, "message_mentions_bot", lambda message: False)
+    monkeypatch.setattr(bot, "GROUP_WAKE_ENABLED", True)
+    assert mc._album_passes_to_background(
+        SimpleNamespace(chat=SimpleNamespace(id=1, type="supergroup"), text=None,
+                        caption="Люмен, смотри фото")
+    ) is False
+    assert mc._album_passes_to_background(
+        SimpleNamespace(chat=SimpleNamespace(id=1, type="private"), text=None, caption="")
+    ) is False
