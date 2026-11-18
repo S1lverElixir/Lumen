@@ -350,12 +350,17 @@ _ALBUM_EXTRA_MAX_BYTES = 100 * 1024 * 1024
 # Параллельных скачиваний альбома: ограничивает in-flight память (3×20МБ).
 _ALBUM_FETCH_CONCURRENCY = 3
 
-async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None:
+async def _run_under_chat_lock(
+    message: Message, run: Callable[[], Any], *, background: bool = False,
+) -> None:
     """Единый вход в обработку под per-chat lock: потолок сообщения, метка чата в
     логе, кап одновременно ждущих и честный отказ «занято». Обычное сообщение,
     альбом и гостевой апдейт иначе расходятся именно в этих защитах: фон и альбомы
     не считались ожиданиями, а у гостя не было потолка сообщения вовсе
-    (аудит 01.11.2026)."""
+    (аудит 01.11.2026).
+
+    background — пассивная запись фона группы: она ничего не отвечает, поэтому
+    не занимает очередь людей и выходит молча, если лок занят (прод 18.11.2026)."""
     import bot
     chat_id = message.chat.id if message.chat else 0
     # Дедлайн и метку чата НЕ переставляем, если они уже стоят (обычный путь и
@@ -380,33 +385,44 @@ async def _run_under_chat_lock(message: Message, run: Callable[[], Any]) -> None
     try:
         remaining = bot._msg_remaining_sec()
         lock_timeout = bot.CHAT_LOCK_TIMEOUT_SEC if remaining is None else max(1.0, min(bot.CHAT_LOCK_TIMEOUT_SEC, remaining))
-        waiters = bot._chat_lock_waiters.get(chat_id, 0)
-        if waiters >= bot._MAX_CHAT_LOCK_WAITERS:
+        # Пассивный фон не занимает слоты очереди людей: иначе три реплики в
+        # занятом чате заполняли кап, и адресованный вопрос отшивался «занято»,
+        # которое к тому же уходило не ему (прод 18.11.2026).
+        counters = bot._chat_lock_background_waiters if background else bot._chat_lock_waiters
+        cap = bot._MAX_CHAT_LOCK_BACKGROUND_WAITERS if background else bot._MAX_CHAT_LOCK_WAITERS
+        waiters = counters.get(chat_id, 0)
+        if waiters >= cap:
+            if background:
+                log.info("[lock] Background record dropped, chat %s is full", chat_id)
+                return
             log.warning("[lock] Too many waiters for chat %s", chat_id)
             with contextlib.suppress(Exception):
                 await bot._tg_call(bot._answer_sender(message), bot._t_no_create(chat_id, "lock_busy"))
             return
         # Область /stop открываем только принятому запросу: отшитый «занято»
-        # раньше оставался владельцем области (ревью 17.11.2026).
-        if _stop_scope is not None:
+        # раньше оставался владельцем области (ревью 17.11.2026); фону стоп не нужен.
+        if _stop_scope is not None and not background:
             bot._begin_stream_stop_scope(
                 _stop_scope, getattr(getattr(message, "from_user", None), "id", None))
         # Ответ без создания чата: обычный _t через get_state завёл бы запись даже
         # тому, кого отшили «занято» (та же причина, что у лимита).
-        bot._chat_lock_waiters[chat_id] = waiters + 1
+        counters[chat_id] = waiters + 1
         try:
             lock = await bot.acquire_chat_lock(chat_id, lock_timeout)
         except asyncio.TimeoutError:
+            if background:
+                log.info("[lock] Background record skipped, chat %s is busy", chat_id)
+                return
             log.warning("[lock] Timeout waiting for lock on chat %s", chat_id)
             with contextlib.suppress(Exception):
                 await bot._tg_call(bot._answer_sender(message), bot._t_no_create(chat_id, "lock_busy"))
             return
         finally:
-            left = bot._chat_lock_waiters.get(chat_id, 1) - 1
+            left = counters.get(chat_id, 1) - 1
             if left > 0:
-                bot._chat_lock_waiters[chat_id] = left
+                counters[chat_id] = left
             else:
-                bot._chat_lock_waiters.pop(chat_id, None)
+                counters.pop(chat_id, None)
         try:
             await run()
         finally:
@@ -444,9 +460,27 @@ async def _process_media_group_buffers(mgid: str) -> None:
     if not messages:
          return
     # Альбом — под тем же per-chat lock и с теми же защитами, что у обычного
-    # сообщения (см. _run_under_chat_lock).
-    main_msg = messages[0]
-    await _run_under_chat_lock(main_msg, lambda: _process_media_group_buffers_locked(messages))
+    # сообщения (см. _run_under_chat_lock). Пассивный альбом группы — тихий фон.
+    main_msg = next((m for m in messages if m.text or m.caption), messages[0])
+    await _run_under_chat_lock(
+        main_msg, lambda: _process_media_group_buffers_locked(messages),
+        background=_album_passes_to_background(main_msg),
+    )
+
+def _album_passes_to_background(main_msg: Any) -> bool:
+    """Альбом группы без обращения к боту — пассивный фон, как одиночное сообщение."""
+    import bot
+    if main_msg.chat is None or main_msg.chat.type == ChatType.PRIVATE:
+        return False
+    return bot._should_only_record_passively(
+        main_msg, main_msg.text or main_msg.caption or "",
+        is_private=False,
+        is_guest=bot.is_guest_message(main_msg),
+        mentioned=(
+            bot.message_mentions_bot(main_msg)
+            or bot.group_wake_request(main_msg.text or main_msg.caption or "")[0]
+        ),
+    )
 
 async def _process_media_group_buffers_locked(messages: list) -> None:
     """Тело обработки альбома под per-chat lock (см. выше)."""
@@ -456,22 +490,16 @@ async def _process_media_group_buffers_locked(messages: list) -> None:
     # Альбом в группе без упоминания бота — такой же пассивный фон, как обычное
     # сообщение: раньше он всё равно тратил слот лимита и качал файлы (враждебное
     # ревью 27.09.2026). В личке и при прямом обращении альбом обрабатывается как раньше.
-    if main_msg.chat and main_msg.chat.type != ChatType.PRIVATE:
+    if _album_passes_to_background(main_msg):
         t_text = main_msg.text or main_msg.caption or ""
-        if bot._should_only_record_passively(
-            main_msg, t_text,
-            is_private=False,
-            is_guest=bot.is_guest_message(main_msg),
-            mentioned=bot.message_mentions_bot(main_msg) or bot.group_wake_request(t_text)[0],
-        ):
-            # Файлы 2..10 пассивного альбома тоже в общий лог: иначе
-            # "что на втором фото" их не найдёт (порядок — как в альбоме).
-            _passive_state = bot.get_state(main_msg.chat.id)
-            await bot._record_passive_group_context(
-                main_msg, _passive_state, t_text,
-                extra_sources=[_msg_media_source(m) for m in messages[1:]],
-            )
-            return
+        # Файлы 2..10 пассивного альбома тоже в общий лог: иначе
+        # "что на втором фото" их не найдёт (порядок — как в альбоме).
+        _passive_state = bot.get_state(main_msg.chat.id)
+        await bot._record_passive_group_context(
+            main_msg, _passive_state, t_text,
+            extra_sources=[_msg_media_source(m) for m in messages[1:]],
+        )
+        return
     # Лимит — ДО скачивания: раньше альбом грузился целиком даже для отклонённого
     # автора (аудит 26.09.2026). Слот ровно один: handle_message буферизует альбом
     # целиком и в _handle_message_core не заходит.

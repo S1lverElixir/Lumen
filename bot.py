@@ -747,6 +747,11 @@ CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 45, min_value=1)
 # (аудит 28.10.2026). Четвёртый и следующие сразу получают «занято».
 _MAX_CHAT_LOCK_WAITERS = 3
 _chat_lock_waiters: dict[int, int] = {}
+# Пассивный фон группы ждёт лок отдельным счётчиком: он ничего не отвечает,
+# не занимает место в очереди людей и не получает «занято». Иначе реплики в
+# занятом чате заполняли кап людей, и адресованный вопрос отшивался (прод 18.11.2026).
+_MAX_CHAT_LOCK_BACKGROUND_WAITERS = 20
+_chat_lock_background_waiters: dict[int, int] = {}
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
 # завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
 INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = _env_number("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", 10, min_value=0)
@@ -1651,6 +1656,14 @@ async def _handle_message(message: Message) -> None:
     is_private = message.chat.type == ChatType.PRIVATE if message.chat else True
     is_guest = is_guest_message(message)
     mentioned = message_mentions_bot(message)
+    # «Люмен, …» — тоже обращение: без этого такой вопрос шёл бы тихим фоном
+    # и не получал честное «занято» в занятом чате (wake-word 18.11.2026).
+    if (
+        not mentioned and not is_private and not is_guest
+        and message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+        and not getattr(message, "forward_origin", None)
+    ):
+        mentioned = group_wake_request(message.text or message.caption or "")[0]
     # Входящее медиа логируем всегда: молчаливый дроп (прод 23.09.2026) иначе
     # не диагностировать вообще.
     _in_src = _msg_media_source(message)
@@ -1660,10 +1673,12 @@ async def _handle_message(message: Message) -> None:
             chat_id, type(_in_src).__name__, bool(message.text or message.caption),
         )
 
-    # Неупомянутая группа — тоже путь, трогающий чат: тот же лок, кап ожидающих
-    # и дедлайн, иначе фон писал историю параллельно с ответом (ревью 17.11.2026).
+    # Неупомянутая группа — тоже путь, трогающий чат: тот же лок и дедлайн,
+    # иначе фон писал историю параллельно с ответом (ревью 17.11.2026).
+    # background=True: фон не отвечает «занято» и не занимает очередь людей
+    # (прод 18.11.2026: «День у день» посреди ответа получал адресованное «занято»).
     if not is_private and not is_guest and not mentioned:
-        await _run_under_chat_lock(message, lambda: _handle_message_core(message))
+        await _run_under_chat_lock(message, lambda: _handle_message_core(message), background=True)
         return
 
     # Лок, кап ожидающих и потолок сообщения — в общем помощнике, чтобы этот путь,
