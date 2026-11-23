@@ -32,9 +32,9 @@
       "git push --force*": "deny",
       "git push -f*": "deny",
       "rm -rf *": "deny",
-      "gh secret *": "deny",
       "gh *": "ask",
-      "curl *api.github.com*": "ask"
+      "curl *api.github.com*": "ask",
+      "gh secret *": "deny"
     }
   }
 }
