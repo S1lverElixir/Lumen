@@ -6,18 +6,6 @@
       "sentry": {
         "type": "remote",
         "url": "https://mcp.sentry.dev/mcp"
-      },
-      "context7": {
-        "type": "remote",
-        "url": "https://mcp.context7.com/mcp"
-      },
-      "github": {
-        "type": "remote",
-        "url": "https://api.githubcopilot.com/mcp/",
-        "oauth": false,
-        "headers": {
-          "Authorization": "Bearer {env:GITHUB_PERSONAL_ACCESS_TOKEN}"
-        }
       }
     }
   },
@@ -43,7 +31,10 @@
       "git reset --hard*": "ask",
       "git push --force*": "deny",
       "git push -f*": "deny",
-      "rm -rf *": "deny"
+      "rm -rf *": "deny",
+      "gh secret *": "deny",
+      "gh *": "ask",
+      "curl *api.github.com*": "ask"
     }
   }
 }
