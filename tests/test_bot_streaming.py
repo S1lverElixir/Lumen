@@ -1311,6 +1311,29 @@ def test_rich_send_used_for_final_answer_with_table():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_rich_send_keeps_table_when_split_would_exceed_message_limit():
+    # Прод 24.11.2026: split широкой таблицы плюс обычный текст мог превысить
+    # 4096, и rich-путь целиком терялся. Повтор без split сохраняет таблицу.
+    from lumen_formatting import _tg_len
+
+    chat_id = 999403
+    incoming = _FakeIncomingMessage(chat_id)
+    original_bot = bot.bot
+    bot.bot = _FakeRichBot()
+    rows = "\n".join(f"| row{i} | a{i} | b{i} | c{i} |" for i in range(40))
+    text = "x" * 1000 + "\n| key | a | b | c |\n|---|---|---|---|\n" + rows
+    try:
+        asyncio.run(bot._safe_reply(incoming, text))
+        assert len(bot.bot.rich_sent) == 1
+        html = bot.bot.rich_sent[0]["rich_message"].html
+        assert html.count("<table bordered compact>") == 1
+        assert _tg_len(html) <= bot.TG_MAX_LEN
+        assert incoming.sent == []
+    finally:
+        bot.bot = original_bot
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_rich_failure_falls_back_to_legacy_html():
     chat_id = 999402
     incoming = _FakeIncomingMessage(chat_id)

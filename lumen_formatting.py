@@ -701,20 +701,38 @@ def _rich_inline(text: str) -> str:
     return text
 
 
-def _build_rich_table(header: list[str], rows: list[list[str]]) -> str:
+def _build_rich_table(header: list[str], rows: list[list[str]], *, split: bool = True) -> str:
     """Строит <table bordered> из распарсенных ячеек (см. _split_table_cells).
     Ячейки идут через _rich_inline — внутри работают **bold**/*italic*/`код`
     (кодовые плейсхолдеры раскрываются общим финалом позже)."""
-    parts = ["<table bordered>"]
-    parts.append("<tr>" + "".join(f"<th>{_rich_inline(h)}</th>" for h in header) + "</tr>")
-    for row in rows:
-        cells = [row[i] if i < len(row) else "" for i in range(len(header))]
-        parts.append("<tr>" + "".join(f"<td>{_rich_inline(c)}</td>" for c in cells) + "</tr>")
-    parts.append("</table>")
-    return "".join(parts)
+    def render(indexes: list[int], *, compact: bool) -> str:
+        attr = " bordered compact" if compact else " bordered"
+        parts = [f"<table{attr}>"]
+        parts.append("<tr>" + "".join(f"<th>{_rich_inline(header[i])}</th>" for i in indexes) + "</tr>")
+        for row in rows:
+            cells = [row[i] if i < len(row) else "" for i in indexes]
+            parts.append("<tr>" + "".join(f"<td>{_rich_inline(c)}</td>" for c in cells) + "</tr>")
+        parts.append("</table>")
+        return "".join(parts)
+
+    if not split or len(header) <= 3:
+        return render(list(range(len(header))), compact=len(header) > 3)
+
+    # Прод 24.11.2026: четыре и более колонок уезжали за правый край чата.
+    # Делим на блоки до трёх колонок, повторяя первую как подпись строки.
+    tables: list[str] = []
+    for start in range(1, len(header), 2):
+        indexes = [0, *range(start, min(start + 2, len(header)))]
+        tables.append(render(indexes, compact=True))
+    split = "".join(tables)
+    # Повтор строки раздувает HTML и число блоков. Большую таблицу оставляем
+    # одной compact-таблицей: лучше горизонтальный скролл, чем потеря rich.
+    if (len(rows) + 1) * len(tables) > 500 or _tg_len(split) > 4096:
+        return render(list(range(len(header))), compact=True)
+    return split
 
 
-def _md_to_rich_html(text: str) -> str:
+def _md_to_rich_html(text: str, *, split_tables: bool = True) -> str:
     """Вариант _md_to_html для Rich Messages (Bot API 10.1+, sendRichMessage):
     сервер Telegram сам рендерит структурные блоки, поэтому здесь НЕ действуют
     три запрета обычного пути — markdown-таблицы идут настоящим <table>,
@@ -859,7 +877,7 @@ def _md_to_rich_html(text: str) -> str:
     for key, (tag_level, inner) in _heads.items():
         text = text.replace(key, f"<h{tag_level}>{_rich_inline(inner)}</h{tag_level}>")
     for key, (header, rows) in _tables.items():
-        text = text.replace(key, _build_rich_table(header, rows))
+        text = text.replace(key, _build_rich_table(header, rows, split=split_tables))
     for key, (latex, block) in _math.items():
         latex = latex.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         tag = "tg-math-block" if block else "tg-math"

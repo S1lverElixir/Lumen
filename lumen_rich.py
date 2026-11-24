@@ -34,6 +34,16 @@ log = logging.getLogger("bot")
 # иначе раздувает их preview-карточкой во весь блок (прод 23.11.2026).
 NO_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
+
+def _rich_html_with_limit(text: str) -> str:
+    """Rich с учётом всего сообщения: если разбиение таблицы раздуло HTML,
+    повторяем конвертацию без split, сохраняя саму таблицу (prod 24.11.2026)."""
+    import bot
+    rich_html = _md_to_rich_html(text)
+    if _tg_len(rich_html) > bot.TG_MAX_LEN:
+        rich_html = _md_to_rich_html(text, split_tables=False)
+    return rich_html
+
 def is_guest_message(message: Message | dict) -> bool:
     if isinstance(message, dict):
         return bool(message.get("guest_query_id"))
@@ -144,7 +154,7 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
             # Длина рич-HTML не проверялась: чанк в пределах 4096 по markdown
             # раздувался разметкой и получал 400 с молчаливым фолбэком на HTML
             # (внешний аудит 16.11.2026). Слишком длинный шлём сразу обычным путём.
-            rich_html = _md_to_rich_html(chunk)
+            rich_html = _rich_html_with_limit(chunk)
             if _tg_len(rich_html) <= bot.TG_MAX_LEN:
                 rich_res = await bot._try_send_rich(message, rich_html, is_first_chunk=(i == 0), **chunk_kwargs)
                 if rich_res is not None:
@@ -197,7 +207,9 @@ async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     try:
         # Порядок: рич → HTML → голый текст; таблицы видны только через рич.
-        if bot.RICH_MESSAGES_ENABLED and await bot._try_edit_rich(msg, _md_to_rich_html(text), **kwargs):
+        rich_html = _rich_html_with_limit(text)
+        if (bot.RICH_MESSAGES_ENABLED and _tg_len(rich_html) <= bot.TG_MAX_LEN
+                and await bot._try_edit_rich(msg, rich_html, **kwargs)):
             return True
         kwargs.setdefault("parse_mode", ParseMode.HTML)
         res = await bot._tg_call(msg.edit_text, _md_to_html(text), **kwargs)

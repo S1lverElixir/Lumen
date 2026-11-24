@@ -720,6 +720,48 @@ def test_rich_table_renders_bordered_table():
     assert result == "<table bordered><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
 
 
+def test_rich_wide_table_splits_into_narrow_blocks():
+    # Прод 24.11.2026: сравнение четырёх сервисов уезжало за правый край
+    # Telegram Desktop. Первую колонку повторяем, чтобы куски оставались
+    # осмысленными, и не показываем больше трёх колонок за раз.
+    result = lumen_formatting._md_to_rich_html(
+        "| Критерий | Obsidian | Notion | Apple Notes |\n"
+        "|---|---|---|---|\n"
+        "| Связи | backlinks | базы | заметки |"
+    )
+    assert result.count("<table bordered compact>") == 2
+    assert result.count("<th>Критерий</th>") == 2
+    assert "<th>Obsidian</th>" in result and "<th>Notion</th>" in result
+    assert "<th>Apple Notes</th>" in result
+    assert result.count("<td>Связи</td>") == 2
+    assert result.count("<td>backlinks</td>") == 1
+    assert result.count("<td>базы</td>") == 1
+    assert result.count("<td>заметки</td>") == 1
+    assert all(table.count("<th>") <= 3 for table in result.split("</table>")[:-1])
+
+
+def test_rich_wide_table_keeps_one_block_when_split_would_break_limits():
+    # Повтор первой колонки не должен упираться в лимит 4096 или 500 блоков:
+    # для больших таблиц оставляем один compact-блок, иначе rich-путь теряется.
+    rows = "\n".join(f"| row{i} | a{i} | b{i} | c{i} |" for i in range(60))
+    many_rows = lumen_formatting._md_to_rich_html(
+        "| key | a | b | c |\n|---|---|---|---|\n" + rows
+    )
+    assert many_rows.count("<table bordered compact>") == 1
+    assert many_rows.count("<tr>") == 61
+
+    header = "| key |" + "".join(f" c{i} |" for i in range(19))
+    separator = "|" + "---|" * 20
+    wide_rows = "\n".join(
+        "| row" + str(i) + " |" + "".join(f" v{i}_{j} |" for j in range(19)) + " |"
+        for i in range(50)
+    )
+    many_columns = lumen_formatting._md_to_rich_html(header + "\n" + separator + "\n" + wide_rows)
+    assert many_columns.count("<table bordered compact>") == 1
+    assert many_columns.count("<th>") == 20
+    assert many_columns.count("<tr>") == 51
+
+
 def test_rich_table_cells_support_inline_markup_and_escape():
     result = lumen_formatting._md_to_rich_html("| H | K |\n|---|---|\n| **b** <x> | 2 |")
     assert result == "<table bordered><tr><th>H</th><th>K</th></tr><tr><td><b>b</b> &lt;x&gt;</td><td>2</td></tr></table>"
