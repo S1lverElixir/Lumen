@@ -29,9 +29,9 @@ import sys
 import threading
 import time
 from pathlib import Path
-from datetime import date
 from typing import Any
 import urllib.request as _urllib_request
+from urllib.parse import urlsplit
 
 import aiohttp
 import sentry_sdk
@@ -88,10 +88,93 @@ def _current_log_secrets() -> tuple[str, ...]:
 # Метка текущего чата на всех строках обработки: aiogram печатает только update
 # id, и собрать путь одного запроса по логу было нельзя (прод 27.10.2026).
 _LOG_CHAT: contextvars.ContextVar[str] = contextvars.ContextVar("log_chat", default="")
+# Автор запроса для вклада в карантин моделей: два чата одного человека — это
+# один человек, а не два источника плохих ответов (аудит 16.11.2026).
+_LOG_USER: contextvars.ContextVar[str] = contextvars.ContextVar("log_user", default="")
 
 # Общий дедлайн сообщения: каждый этап берёт min(свой таймаут, остаток), иначе
 # лок + поиск + маршрут + саммари в сумме давали до двух минут (аудит 27.10.2026).
 _MSG_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("msg_deadline", default=None)
+
+# Один апдейт = одно списание суточного лимита. Второй и третий проходы маршрута
+# (ретрай после [[SEARCH]], повтор за свежестью, автопродолжение) — это тот же
+# ответ человеку, а не новый: без флага 30 сообщений съедались за 15 (аудит 16.11.2026).
+_ANSWER_COUNTED: contextvars.ContextVar[bool] = contextvars.ContextVar("answer_counted", default=False)
+
+# Остановка ответа (аудит 16.11.2026): /stop выставляет флаг, цикл стрима выходит на
+# следующем куске, частичный текст остаётся на экране и ложится в историю. Один
+# активный стрим на чат; пользователь = автор вопроса, отказ молчаливый.
+_STREAM_STOPS: dict[int, dict[str, object]] = {}
+
+
+def _begin_stream_stop_scope(chat_id: int, user_id: int | None, *, stream: bool = False) -> None:
+    """Область с глубиной: внешняя ставится на весь апдейт (чтобы /stop работал и
+    во время фазы поиска), внутренняя — на стрим. Флаг переживает вложенную область."""
+    entry = _STREAM_STOPS.get(chat_id)
+    if entry is None:
+        entry = {"event": asyncio.Event(), "user_id": user_id, "depth": 0,
+                 "token": secrets.token_hex(4)}
+        _STREAM_STOPS[chat_id] = entry
+    if user_id is not None and entry.get("user_id") is None:
+        entry["user_id"] = user_id
+    depth = int(entry.get("depth") or 0)
+    # Очередь может открыть внешнюю область следующего сообщения до завершения
+    # текущего. Токен меняем только при входе в новый стрим, чтобы кнопка
+    # прошлого ответа не гасила следующий (review 24.11.2026).
+    if stream and depth == 1:
+        entry["token"] = secrets.token_hex(4)
+        entry["user_id"] = user_id
+    entry["depth"] = depth + 1
+
+
+def _end_stream_stop_scope(chat_id: int) -> None:
+    entry = _STREAM_STOPS.get(chat_id)
+    if not entry:
+        return
+    entry["depth"] = int(entry.get("depth") or 0) - 1
+    if entry["depth"] <= 0:
+        _STREAM_STOPS.pop(chat_id, None)
+
+
+def _stream_stop_token(chat_id: int) -> str | None:
+    entry = _STREAM_STOPS.get(chat_id)
+    return str(entry.get("token")) if entry and entry.get("token") else None
+
+
+def _stream_stop_requested(chat_id: int) -> bool:
+    entry = _STREAM_STOPS.get(chat_id)
+    event = entry.get("event") if entry else None
+    return bool(event is not None and event.is_set())
+
+
+def _consume_stream_stop(chat_id: int) -> None:
+    """Остановка исполнена: флаг и автор сбрасываются, иначе следующий апдейт
+    в очереди того же чата гаснет молча (второй проход аудита 16.11.2026)."""
+    entry = _STREAM_STOPS.get(chat_id)
+    if not entry:
+        return
+    event = entry.get("event")
+    if event is not None:
+        event.clear()
+    entry["user_id"] = None
+
+
+def _request_stream_stop(chat_id: int, user_id: int | None = None, *, token: str | None = None) -> bool:
+    """True — флаг поставлен. Чужой человек в группе остановить ответ не может.
+    token защищает от запоздалого нажатия кнопки прошлого ответа."""
+    entry = _STREAM_STOPS.get(chat_id)
+    if not entry:
+        return False
+    if token is not None and entry.get("token") != token:
+        return False
+    owner = entry.get("user_id")
+    if owner is not None and user_id is not None and user_id != owner and user_id != OWNER_ID:
+        return False
+    event = entry.get("event")
+    if event is None or event.is_set():
+        return False
+    event.set()
+    return True
 
 
 def _msg_remaining_sec() -> float | None:
@@ -247,6 +330,20 @@ _TELEGRAM_PROXY_FALLBACKS = [
     _normalize_telegram_base_url(u) for u in os.getenv("TELEGRAM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
 ]
 _TELEGRAM_PROXY_CANDIDATES: list[str] = [TELEGRAM_API_BASE_URL] + [u for u in _TELEGRAM_PROXY_FALLBACKS if u != TELEGRAM_API_BASE_URL]
+# Wake-word в группах: «Люмен, ...» работает как упоминание. Выключение одной
+# переменной, слова-синонимы — списком (прод 18.11.2026 по просьбе владельца).
+GROUP_WAKE_ENABLED = os.getenv("GROUP_WAKE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+GROUP_WAKE_WORDS = tuple(
+    w.strip() for w in os.getenv("GROUP_WAKE_WORDS", "люмен,lumen").split(",") if w.strip()
+) or ("люмен", "lumen")
+
+def group_wake_request(text: str) -> tuple[bool, str]:
+    """(адресовано ли словом, текст без имени). Выключатель — GROUP_WAKE_ENABLED."""
+    if not GROUP_WAKE_ENABLED or not text:
+        return False, text
+    return strip_group_wake_word(text, GROUP_WAKE_WORDS)
+
+
 _telegram_proxy_idx = 0  # индекс текущего активного прокси в _TELEGRAM_PROXY_CANDIDATES
 # Ротация мутирует два глобала сразу — под локом, иначе два concurrent-сбоя
 # уводят индекс на два шага и пропускают кандидата (AUD-E-004).
@@ -261,6 +358,92 @@ TIKWM_API_BASE_URL = os.getenv("TIKWM_API_BASE_URL", "").strip().rstrip("/")
 _TIKWM_API_BASE_URL_FALLBACKS = [
     u.strip().rstrip("/") for u in os.getenv("TIKWM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
 ]
+
+# Релеи с жёстким лимитом тела (Vercel Hobby — 4,5 МБ) не годятся для отправки
+# медиа. Список хостов задаётся в env; голова aiogram-сессии выбирается только
+# из «больших» релеев, иначе видео/аудио гарантированно падают (прод 17.11.2026).
+_SMALL_BODY_PROXY_HOSTS = {
+    h.strip().lower() for h in os.getenv("TELEGRAM_API_SMALL_BODY_HOSTS", "").split(",") if h.strip()
+}
+
+
+def _proxy_host(base_url: str) -> str:
+    try:
+        return (urlsplit(base_url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _pick_media_candidate(
+    candidates: list[str], healthy: dict[str, bool], small_hosts: set[str] | None = None,
+) -> str | None:
+    """Первая здоровая база, не помеченная «маленькой»; если таких нет — первая
+    здоровая. Чистая функция: выбор проверяется тестами без сети."""
+    small = _SMALL_BODY_PROXY_HOSTS if small_hosts is None else small_hosts
+    for base in candidates:
+        if healthy.get(base) and _proxy_host(base) not in small:
+            return base
+    for base in candidates:
+        if healthy.get(base):
+            return base
+    return None
+
+
+async def _probe_telegram_base(base_url: str, timeout_sec: float = 5.0) -> bool:
+    """getMe через релей: 200=живой, всё остальное — нет. Секрет в заголовке,
+    токен не логируется (в URL он есть, поэтому в логах только хост)."""
+    if not base_url or base_url == "https://api.telegram.org":
+        return True
+    url = f"{base_url}/bot{BOT_TOKEN}/getMe"
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=timeout_sec),
+        ) as probe:
+            async with probe.get(url, headers={PROXY_AUTH_HEADER: LUMEN_PROXY_SECRET}) as resp:
+                return resp.status == 200
+    except Exception:
+        return False
+
+
+async def _choose_telegram_media_base() -> str | None:
+    """Проверяет релеи параллельно и возвращает голову для aiogram-сессии."""
+    candidates = list(_TELEGRAM_PROXY_CANDIDATES)
+    checks = await asyncio.gather(*(_probe_telegram_base(u) for u in candidates))
+    healthy = dict(zip(candidates, checks))
+    for base, ok in healthy.items():
+        log.info("[telegram] Relay probe %s: %s", _proxy_host(base) or base, "ok" if ok else "down")
+    return _pick_media_candidate(candidates, healthy)
+
+
+_media_base_url = TELEGRAM_API_BASE_URL
+_media_probe_failures = 0
+
+
+async def _telegram_media_relay_watchdog() -> None:
+    """Раз в минуту проверяет текущую базу медиа и переключает aiogram-сессию на
+    здоровый «большой» релей. Прямой api.telegram.org не трогаем."""
+    global _media_base_url, _media_probe_failures
+    while True:
+        await asyncio.sleep(60)
+        if _media_base_url in ("", "https://api.telegram.org"):
+            return
+        if await _probe_telegram_base(_media_base_url):
+            _media_probe_failures = 0
+            continue
+        _media_probe_failures += 1
+        if _media_probe_failures < 2:
+            continue
+        chosen = await _choose_telegram_media_base()
+        _media_probe_failures = 0
+        if chosen and chosen != _media_base_url:
+            _media_base_url = chosen
+            if bot is not None and getattr(bot, "session", None) is not None:
+                with contextlib.suppress(Exception):
+                    bot.session.api = TelegramAPIServer.from_base(chosen)
+            log.warning("[telegram] Media relay switched to %s", _proxy_host(chosen) or "direct")
+        elif not chosen:
+            log.error("[telegram] No healthy media relay found; keeping %s", _proxy_host(_media_base_url))
+
 
 def _tikwm_proxy_candidates() -> list[str]:
     """Список прокси-адресов для TikWM в порядке попытки: основной + резервные
@@ -295,7 +478,8 @@ def _cloudflare_proxy_candidates() -> list[str]:
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
 
-def _env_number(name: str, default: float | int, *, cast: type = float, min_value: float | None = None) -> float | int:
+def _env_number(name: str, default: float | int, *, cast: type = float,
+                min_value: float | None = None, max_value: float | None = None) -> float | int:
     """Число из переменной окружения с внятной диагностикой.
 
     Раньше все таймауты и лимиты читались голым int()/float(): опечатка в HF
@@ -314,6 +498,9 @@ def _env_number(name: str, default: float | int, *, cast: type = float, min_valu
         return cast(default)
     if min_value is not None and value < min_value:
         log.warning("[setup] %s=%s is below the allowed minimum %s — using default %s", name, value, min_value, default)
+        return cast(default)
+    if max_value is not None and value > max_value:
+        log.warning("[setup] %s=%s is above the allowed maximum %s — using default %s", name, value, max_value, default)
         return cast(default)
     return value
 
@@ -341,6 +528,11 @@ def _sentry_scrub_secrets(event: dict, hint: dict) -> dict | None:
     payload = json.dumps(event, default=str, ensure_ascii=False)
     for secret in _redactable_secrets():
         payload = payload.replace(secret, "<REDACTED>")
+        # JSON экранирует кавычки/бэкслеши/управляющие: точная строка секрета
+        # тогда не находится, и он уезжает в Sentry (ревью 17.11.2026).
+        escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
+        if escaped != secret:
+            payload = payload.replace(escaped, "<REDACTED>")
     return json.loads(payload)
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
@@ -384,6 +576,10 @@ def _media_semaphore() -> asyncio.Semaphore:
     loop = asyncio.get_running_loop()
     sem = _media_semaphores.get(loop)
     if sem is None:
+        # Закрытые циклы держат ссылку и всё, что к ним привязано: снимаем
+        # старые записи при создании новой (ревью 17.11.2026).
+        for stale_loop in [lp for lp in _media_semaphores if lp.is_closed()]:
+            _media_semaphores.pop(stale_loop, None)
         sem = asyncio.Semaphore(MEDIA_GLOBAL_CONCURRENCY)
         _media_semaphores[loop] = sem
     return sem
@@ -407,15 +603,47 @@ TIKTOK_GROUP_REQUIRE_MENTION = os.getenv("TIKTOK_GROUP_REQUIRE_MENTION", "0") ==
 # Лимит ожидания следующего куска для любого провайдера: зависший стрим иначе держит лок чата бесконечно.
 STREAM_CHUNK_TIMEOUT_SEC = _env_number("STREAM_CHUNK_TIMEOUT_SEC", 30, min_value=1)
 # ── Паттерн "живой печати" при стриминге (см. lumen_typing_pace.py) ──
-# Показ подкрашивается под оценённую скорость модели, чтобы куски не мигали
-# скачками. Три константы ниже — периоды правок и предел довывода остатка.
-STREAM_EDIT_MIN_INTERVAL_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_SEC", 1.2, min_value=0)
+# Правки рисуются по таймеру (маляр), а не по приходу куска; интервал правок
+# один на чат и для тикера статуса, и для стрима (ревью 11.11.2026).
+# STREAM_EDIT_MIN_INTERVAL_SEC — общий бюджет в личке: тикер (0.3) в него
+# укладывается, суммарно не больше ~3 правок/с в один чат.
+STREAM_EDIT_MIN_INTERVAL_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_SEC", 0.3, min_value=0)
+# В группе та же анимация жрёт квоту чата на несколько человек: бюджет 1.5-2 с.
+STREAM_EDIT_MIN_INTERVAL_GROUP_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_GROUP_SEC", 1.8, min_value=0)
+# Кадр маляра: Claude дописывает пословно каждые ~50-100 мс, Telegram позволяет
+# чаще раза в секунду; 0.55 с — компромисс плавности и 429 (личка).
+STREAM_PAINT_TICK_SEC = _env_number("STREAM_PAINT_TICK_SEC", 0.55, min_value=0)
+STREAM_PAINT_TICK_GROUP_SEC = _env_number("STREAM_PAINT_TICK_GROUP_SEC", 1.8, min_value=0)
 STREAM_TYPING_TICK_SEC = _env_number("STREAM_TYPING_TICK_SEC", 0.5, min_value=0)
-STREAM_TYPING_MAX_CATCHUP_TICKS = _env_number("STREAM_TYPING_MAX_CATCHUP_TICKS", 6, cast=int, min_value=0)
+# Потолок довывода — в секундах, а не в тиках: с 8 тиками хвост длинного
+# ответа вываливался прыжками по 300-500 символов (прод 11.11.2026: 6201
+# символов, max_step=326), а Claude печатает длинный ответ ровно, пока печатает.
+STREAM_TYPING_MAX_CATCHUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_SEC", 20, min_value=1)
+# В группе лок чата общий: 20 секунд довывода одного длинного ответа
+# задерживали бы всех, поэтому там потолок короче.
+STREAM_TYPING_MAX_CATCHUP_GROUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_GROUP_SEC", 8, min_value=1)
+# Шаг довывода — это пауза ПЛЮС правка: через реле она стоит 0,5-0,7 с, и
+# считать бюджет только по сну значило бы уйти за дедлайн сообщения
+# (ревью 11.11.2026: 40 тиков по 0,5 с = 20 с сна это ~40 с стеновых).
+STREAM_TYPING_STEP_RTT_SEC = _env_number("STREAM_TYPING_STEP_RTT_SEC", 0.7, min_value=0)
 # FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска (см.
 # lumen_model_speed.first_chunk_limit_sec): быструю зависшую модель бросаем рано.
 # Предел только укорачивает ожидание: первым сработает минимум из двух таймаутов.
-FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 12, min_value=1)
+# 12 с держали «Думаю…» при зависшей голове; для текста хватает 5 с — медленные
+# модели уже покрыты адаптивным floor из EMA×2.5, которое здесь только floor.
+FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
+# Пока куски прибывают, бюджет стрима продлевается: прод 11.11.2026 резал
+# 5700-символьный ответ на 35-й секунде («Route time budget exhausted»), и
+# человек видел «Соединение прервалось». Потолок держим ниже 60 с — дольше релей
+# (proxy/proxy.ts) обрывает upstream сам.
+# Верхняя граница 59: дольше держать лок чата нельзя, дефолт 55 — запас.
+STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10, max_value=59)
+# Остановка ответа командой /stop: выключатель, как у остальных новых слоёв.
+STOP_COMMAND_ENABLED = (os.getenv("STOP_COMMAND_ENABLED", "1") or "").strip().lower() not in ("0", "false", "off")
+# Stop-контроль включён всегда: отдельная reply-кнопка не раздувает правки
+# ответа и остаётся доступной даже у длинного сообщения.
+STOP_BUTTON_ENABLED = True
+STREAM_ROUTE_STALL_GRACE_SEC = _env_number("STREAM_ROUTE_STALL_GRACE_SEC", 20, min_value=2)
 # Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
 # дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).
 _DOTS_START_AFTER_SEC = 0.5
@@ -503,6 +731,9 @@ DRAW_CONTEXT_TIMEOUT_SEC = _env_number("DRAW_CONTEXT_TIMEOUT_SEC", 10, min_value
 # видит «сервис недоступен» (замер 10.11.2026). Без счётчика каждый новый
 # человек бился бы в провайдера, у которого день кончился.
 IMAGE_DAILY_LIMIT = _env_number("IMAGE_DAILY_LIMIT", 80, cast=int, min_value=1)
+# Бюджет картинок в Neuron: 80 генераций × 104.2 = 8336 из 10 000 бесплатных,
+# 8300 оставляет запас; правка весит 1 + 0.2 на МП входа (аудит 16.11.2026).
+IMAGE_DAILY_NEURONS = _env_number("IMAGE_DAILY_NEURONS", 8300, cast=int, min_value=1)
 # Картинка — самый дорогой по памяти и по бюджету вызов в боте, поэтому общий
 # семафор: раньше параллельные /draw из разных чатов складывали в RAM до 30 МБ каждый
 # без предела (аудит 09.11.2026, тот же класс, что MEDIA_GLOBAL_CONCURRENCY).
@@ -532,6 +763,11 @@ CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 45, min_value=1)
 # (аудит 28.10.2026). Четвёртый и следующие сразу получают «занято».
 _MAX_CHAT_LOCK_WAITERS = 3
 _chat_lock_waiters: dict[int, int] = {}
+# Пассивный фон группы ждёт лок отдельным счётчиком: он ничего не отвечает,
+# не занимает место в очереди людей и не получает «занято». Иначе реплики в
+# занятом чате заполняли кап людей, и адресованный вопрос отшивался (прод 18.11.2026).
+_MAX_CHAT_LOCK_BACKGROUND_WAITERS = 20
+_chat_lock_background_waiters: dict[int, int] = {}
 # INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
 # завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
 INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = _env_number("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", 10, min_value=0)
@@ -621,6 +857,8 @@ from lumen_chat_state import (
     _record_stats_event,
     _image_usage_total,
     _image_budget_exhausted,
+    _image_neurons_total,
+    recover_global_quota,
     _image_provider_block_reason,
     _image_provider_ready,
     _note_image_success,
@@ -656,15 +894,16 @@ from lumen_limits import (
 )
 
 # ── Инициализация клиентов внутри цикла обработки событий (решает RuntimeError) ──
-bot: Bot = None
+bot: Bot | None = None
 dp = Dispatcher()
-client: genai.Client = None
+client: genai.Client | None = None
 
 _http_session: aiohttp.ClientSession | None = None
 _chat_locks: dict[int, asyncio.Lock] = {}
 
 # Транспорт — в lumen_transport_calls.py.
 from lumen_telegram_transport import (
+    PROXY_AUTH_HEADER,
     _TelegramProxyCircuitBreaker,
     IPv4AiohttpSession,
 )
@@ -1014,6 +1253,8 @@ __all__ = [
     "_record_quota_usage",
     "_image_usage_total",
     "_image_budget_exhausted",
+    "_image_neurons_total",
+    "recover_global_quota",
     "_image_provider_block_reason",
     "_image_provider_ready",
     "_note_image_success",
@@ -1262,6 +1503,7 @@ from lumen_streaming import (
 # здесь: ей нужен BOT_USERNAME из этого модуля.
 from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
+    strip_group_wake_word,
     TTS_TRIGGER_PREFIXES,
     _NO_MEDIA_NOTE,
     _clean_history_entry,
@@ -1312,6 +1554,8 @@ def message_mentions_bot(message: Message) -> bool:
 # и регистрация хендлеров явными register (тот же порядок, то же поведение).
 from lumen_commands import (
     cmd_start,
+    cmd_stop,
+    handle_stop_callback,
     inline_draw,
     _translate_draw_prompt,
     resolve_draw_request,
@@ -1331,14 +1575,19 @@ from lumen_commands import (
     cmd_ban,
     cmd_unban,
     cmd_banlist,
+    chat_locked,
     _send_pick_question,
     handle_pick_callback,
 )
-dp.message.register(cmd_start, Command("start"))
+# /help — алиас /start: по привычке человек просит справку именно так, а без
+# алиаса его текст уезжал в модель (решение владельца 11.11.2026). В меню не дублируем.
+dp.message.register(cmd_start, Command("start", "help"))
 dp.message.register(cmd_draw, Command("draw"))
 dp.callback_query.register(handle_draw_more_callback, F.data == "draw:more")
-dp.message.register(cmd_tts, Command("tts"))
-dp.message.register(cmd_reset, Command("reset"))
+dp.message.register(chat_locked(cmd_tts), Command("tts"))
+dp.message.register(chat_locked(cmd_reset), Command("reset"))
+dp.message.register(cmd_stop, Command("stop"))
+dp.callback_query.register(handle_stop_callback, F.data.startswith("stop:"))
 dp.message.register(cmd_lang, Command("lang"))
 dp.callback_query.register(handle_lang_callback, F.data.startswith("lang:"))
 dp.message.register(cmd_logs, Command("logs"))
@@ -1381,19 +1630,27 @@ async def handle_message(message: Message) -> None:
     # Метка чата на всех строках обработки (см. _LOG_CHAT); сброс в finally —
     # иначе значение утечёт в следующий апдейт этого же процесса.
     token = _LOG_CHAT.set(f"chat={message.chat.id if message.chat else 0}")
+    utoken = _LOG_USER.set(f"user={message.from_user.id if getattr(message, 'from_user', None) else 0}")
     # Потолок сообщения ставится здесь: альбомные задачи наследуют контекст.
     dtoken = _MSG_DEADLINE.set(time.monotonic() + MESSAGE_TOTAL_BUDGET_SEC)
+    # Сброс на входе: значение не имеет права утечь в следующий апдейт.
+    ctoken = _ANSWER_COUNTED.set(False)
     try:
         await _handle_message(message)
     finally:
         _LOG_CHAT.reset(token)
+        _LOG_USER.reset(utoken)
+        _ANSWER_COUNTED.reset(ctoken)
         _MSG_DEADLINE.reset(dtoken)
 
 
 async def _handle_message(message: Message) -> None:
     # Владельческая блокировка: ни ответа, ни контекста группы, ни счётчиков —
-    # отсекаем раньше всего, включая медиагруппы и пассивный фон.
-    if message.from_user is not None and _is_banned(message.from_user.id):
+    # отсекаем раньше всего, включая медиагруппы и пассивный фон. Пост канала
+    # (sender_chat без from_user) тоже автор: иначе бан обходится каналом
+    # (ревью 17.11.2026).
+    _author = message.from_user if message.from_user is not None else getattr(message, "sender_chat", None)
+    if _author is not None and getattr(_author, "id", None) is not None and _is_banned(_author.id):
         return
 
     if message.media_group_id:
@@ -1408,6 +1665,14 @@ async def _handle_message(message: Message) -> None:
     is_private = message.chat.type == ChatType.PRIVATE if message.chat else True
     is_guest = is_guest_message(message)
     mentioned = message_mentions_bot(message)
+    # «Люмен, …» — тоже обращение: без этого такой вопрос шёл бы тихим фоном
+    # и не получал честное «занято» в занятом чате (wake-word 18.11.2026).
+    if (
+        not mentioned and not is_private and not is_guest
+        and message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+        and not getattr(message, "forward_origin", None)
+    ):
+        mentioned = group_wake_request(message.text or message.caption or "")[0]
     # Входящее медиа логируем всегда: молчаливый дроп (прод 23.09.2026) иначе
     # не диагностировать вообще.
     _in_src = _msg_media_source(message)
@@ -1417,9 +1682,12 @@ async def _handle_message(message: Message) -> None:
             chat_id, type(_in_src).__name__, bool(message.text or message.caption),
         )
 
-    # Если бот не упомянут в группе, это просто контекст — обрабатываем без локов и ожидания
+    # Неупомянутая группа — тоже путь, трогающий чат: тот же лок и дедлайн,
+    # иначе фон писал историю параллельно с ответом (ревью 17.11.2026).
+    # background=True: фон не отвечает «занято» и не занимает очередь людей
+    # (прод 18.11.2026: «День у день» посреди ответа получал адресованное «занято»).
     if not is_private and not is_guest and not mentioned:
-        await _handle_message_core(message)
+        await _run_under_chat_lock(message, lambda: _handle_message_core(message), background=True)
         return
 
     # Лок, кап ожидающих и потолок сообщения — в общем помощнике, чтобы этот путь,
@@ -1449,6 +1717,124 @@ SETWEBHOOK_BACKOFF_SEC = 5.0
 # пришедший во время загрузки, создаёт пустой чат и перезаписывает удалённую
 # историю/индекс (аудит 28.10.2026).
 _state_ready = True
+
+
+# Локали профиля — те же, что у меню команд (тот же гейт ISO 639-1, тот же «fil»
+# вне списка). Десять «самых ходовых» оставили бы тайца, урду и зулу с английским
+# «О себе», хотя описания команд на их языке есть (проверено 11.11.2026).
+PROFILE_LANGS: tuple[str, ...] = (DEFAULT_LANG,) + tuple(COMMAND_LOCALES)
+
+# ключ STRINGS -> (метод Bot, имя аргумента с текстом)
+_PROFILE_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("profile_name", "set_my_name", "name"),
+    ("profile_short", "set_my_short_description", "short_description"),
+    ("profile_description", "set_my_description", "description"),
+)
+
+
+# Очередь полей профиля: PROFILE_LANGS × 3 поля = 72 вызова. Семьдесят два вызова
+# параллельно (как было) ловят flood control: прод 11.11.2026 после деплоя получил
+# шторм «Flood control exceeded on method 'SetMyName'. Retry in 79522 seconds» с
+# 17:44 до 17:47 — и у живых людей в эти минуты рвались ответы. Поэтому очередь
+# раздаётся по одному вызову с паузой, а на первом же отказе встает: долбить
+# Telegram нельзя, остаток добирает часовой цикл.
+# Второй вывод того же замера: штраф копят повторные записи, а перезапуск
+# Space после деплоя писал все поля заново. Отсюда два правила — не слать
+# локализованное поле, если текст совпадает с дефолтным (имя «Lumen» одинаков
+# во всех паках: 19 вызовов SetMyName сворачиваются в один), и сверять с
+# Telegram перед записью: то, что уже стоит, не пишется вовсе.
+_profile_queue: list[tuple[str, dict[str, str]]] = []
+_PROFILE_CALL_GAP_SEC = 0.6
+_PROFILE_STARTUP_FIELDS = 20
+_profile_sleep = asyncio.sleep
+# К каждому set* есть пара get*: чтение почти не лимитировано, а повторная запись
+# одного и того же значения стоит того же лимита, что и первая.
+_PROFILE_READ_METHODS = {
+    "set_my_name": ("get_my_name", "name"),
+    "set_my_short_description": ("get_my_short_description", "short_description"),
+    "set_my_description": ("get_my_description", "description"),
+}
+
+
+def _profile_payloads() -> list[tuple[str, dict[str, str]]]:
+    payloads: list[tuple[str, dict[str, str]]] = []
+    for lang in PROFILE_LANGS:
+        where = {} if lang == DEFAULT_LANG else {"language_code": lang}
+        for key, method_name, arg_name in _PROFILE_FIELDS:
+            value = _lang_t(lang, key)
+            # Языку без собственного текста Telegram показывает значение по
+            # умолчанию: отдельная запись ничего не меняет, а лимит съедает.
+            if lang != DEFAULT_LANG and value == _lang_t(DEFAULT_LANG, key):
+                continue
+            payloads.append((method_name, {arg_name: value, **where}))
+    return payloads
+
+
+def _profile_field_value(kwargs: dict[str, str]) -> str:
+    return next(v for k, v in kwargs.items() if k != "language_code")
+
+
+async def _profile_pending_payloads() -> list[tuple[str, dict[str, str]]]:
+    """Поля, которых в Telegram ещё нет. Ошибка чтения записи не блокирует: лучше
+    лишняя правка, чем профиль, застрявший в тексте из BotFather."""
+    pending: list[tuple[str, dict[str, str]]] = []
+    for method_name, kwargs in _profile_payloads():
+        read = _PROFILE_READ_METHODS.get(method_name)
+        method = getattr(bot, read[0], None) if read else None
+        if method is None:
+            pending.append((method_name, kwargs))
+            continue
+        getter_name, attr = read
+        read_kwargs = {"language_code": kwargs["language_code"]} if "language_code" in kwargs else {}
+        try:
+            got = await _tg_call(method, **read_kwargs, call_timeout=10.0, retries=0)
+            current = getattr(got, attr, None)
+        except Exception as exc:
+            log.info("[webhook] %s read skipped (%s): %s", getter_name, kwargs.get("language_code", DEFAULT_LANG), type(exc).__name__)
+            current = None
+        if current != _profile_field_value(kwargs):
+            pending.append((method_name, kwargs))
+    return pending
+
+
+async def _register_bot_profile(limit: int | None = None) -> int:
+    """Имя и «О себе» в профиле бота задаются из кода, а не только BotFather:
+    иначе тексты расходятся с lumen_lang и не закрыты тестами. Ничего не кидает:
+    профиль не влияет на приём сообщений, ронять из-за него старт нельзя."""
+    global _profile_queue
+    if bot is None:
+        log.warning("[webhook] Bot profile skipped: bot instance is not initialized")
+        return 0
+    if not _profile_queue:
+        _profile_queue = await _profile_pending_payloads()
+        if not _profile_queue:
+            log.info("[webhook] Bot profile already matches lumen_lang: nothing to write.")
+            return 0
+
+    done = 0
+    while _profile_queue and (limit is None or done < limit):
+        method_name, kwargs = _profile_queue[0]
+        try:
+            # retries=0: на flood control повтор только ухудшает штраф.
+            ok = await _tg_call(getattr(bot, method_name), **kwargs, call_timeout=15.0, retries=0) is not None
+        except Exception as exc:
+            log.warning(
+                "[webhook] %s failed (%s): %s",
+                method_name, kwargs.get("language_code", DEFAULT_LANG), exc,
+            )
+            ok = False
+        if not ok:
+            if not done:
+                log.warning("[webhook] Bot profile was not set for any language.")
+            log.info("[webhook] Bot profile paused: %d field(s) left for the hourly pass.", len(_profile_queue))
+            return done
+        _profile_queue.pop(0)
+        done += 1
+        if _profile_queue:
+            await _profile_sleep(_PROFILE_CALL_GAP_SEC)
+    if done:
+        log.info("[webhook] Bot profile set for %d field(s); %d left.", done, len(_profile_queue))
+    return done
 
 
 async def _webhook_startup() -> None:
@@ -1604,6 +1990,12 @@ async def _webhook_startup() -> None:
             log.info("[webhook] Bot commands set successfully.")
         else:
             log.warning("[webhook] Bot commands were not set for any language.")
+        # Профиль не влияет на приём сообщений, поэтому его провал не должен
+        # уходить в main(): любая ошибка старта там = выход контейнера с кодом 1.
+        # На старте — только первые поля: остальные добирает часовой цикл, иначе
+        # 72 вызова подряд ловят flood control (прод 11.11.2026).
+        with contextlib.suppress(Exception):
+            await _register_bot_profile(limit=_PROFILE_STARTUP_FIELDS)
         return webhook_ok
 
     setup_ok = await try_setup()
@@ -1613,16 +2005,21 @@ async def _webhook_startup() -> None:
     log.info("[webhook] Bot is running in webhook mode. Updates arrive via POST /webhook")
     # Суточные перепроверки моделей в часовом цикле: истёкшее промо иначе видно
     # только после рестарта.
-    _last_daily_check_date = date.today()
+    # Сутки — те же, что у квоты (America/Los_Angeles), а не UTC контейнера
+    # (ревью 17.11.2026).
+    _last_daily_check_date = _current_quota_day()
     while True:
         await asyncio.sleep(3600)
         try:
             _cleanup_rate_limit_dict()
             _evict_orphan_chat_locks()
+            # Поля профиля, недобраниые на старте или вставшие на flood control:
+            # часовой цикл добирает очередь медленно, вне пути живого ответа.
+            await _register_bot_profile()
             # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
             # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
             _reset_quota_if_new_day()
-            today = date.today()
+            today = _current_quota_day()
             if today != _last_daily_check_date:
                 _last_daily_check_date = today
                 _check_unconfirmed_model_quotas()
@@ -1679,13 +2076,17 @@ def _capture_signals_gracefully(server: Any):
 
 
 async def main() -> None:
-    global bot, client, _state_ready
+    global bot, client, _state_ready, _media_base_url
 
     _require_bot_token()
 
-    # Сессия с принудительным IPv4 и таймаутами под HF Space.
-    if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
-        api_server = TelegramAPIServer.from_base(TELEGRAM_API_BASE_URL)
+    global _media_base_url
+    # Сессия с принудительным IPv4 и таймаутами под HF Space. Голова aiogram —
+    # только здоровый релей без лимита тела (иначе видео падает на 4,5 МБ).
+    _media_base_url = await _choose_telegram_media_base() or TELEGRAM_API_BASE_URL
+    log.info("[telegram] Media relay in use: %s", _proxy_host(_media_base_url) or "direct")
+    if _media_base_url != "https://api.telegram.org":
+        api_server = TelegramAPIServer.from_base(_media_base_url)
         sess = IPv4AiohttpSession(
             api=api_server,
             proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
@@ -1695,11 +2096,17 @@ async def main() -> None:
             proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
         )
     bot = Bot(token=BOT_TOKEN, session=sess)
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    # v1beta: system_instruction («Developer instruction») и response_modalities
+    # на v1 отвечают «not enabled for api version v1» (прод 17.11.2026).
+    client = genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=types.HttpOptions(api_version="v1beta"),
+    )
 
     _state_ready = False
     startup_task = asyncio.create_task(_webhook_startup(), name="webhook_startup")
     flush_task = asyncio.create_task(_flush_dirty_state(), name="state_flush")
+    media_watchdog = asyncio.create_task(_telegram_media_relay_watchdog(), name="media_relay_watchdog")
     srv_config = uvicorn.Config(
         # log_level=None: uvicorn с любым уровнем сам выставляет uvicorn.access
         # обратно в INFO и перебивает глушение в _setup_logging — health-check
@@ -1741,10 +2148,13 @@ async def main() -> None:
     finally:
         startup_task.cancel()
         flush_task.cancel()
+        media_watchdog.cancel()
         with contextlib.suppress(asyncio.CancelledError):
              await startup_task
         with contextlib.suppress(asyncio.CancelledError):
              await flush_task
+        with contextlib.suppress(asyncio.CancelledError):
+             await media_watchdog
         # Незавершённым апдейтам — шанс закончиться ДО сброса состояния/закрытия сессий (иначе правки chat_state терялись, сеть рвалась — LUMEN-2).
         await _drain_inflight_tasks()
         # Финальный синхронный сброс — не ждём следующего тика периодического

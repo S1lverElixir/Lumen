@@ -12,7 +12,11 @@ import {
   buildForwardHeaders,
   buildResponseHeaders,
   handleRequest,
+  READ_PAGE_MAX_BYTES,
+  isPrivateAddress,
+  resolveReadTarget,
   limitStreamBytes,
+  warnOnTruncation,
   resolveTarget,
 } from "./proxy.ts";
 
@@ -98,6 +102,10 @@ Deno.test("resolveTarget пропускает Workers AI и только его"
   }
   assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/zones", "").ok, false);
   assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/abc123/workers/scripts", "").ok, false);
+  // Каталог моделей нужен /diag (проход №5); голый /ai/models и остальное — нет.
+  assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/abc123/ai/models/search", "?limit=1").ok, true);
+  assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/abc123/ai/models", "").ok, false);
+  assertEquals(resolveTarget("/fetch/api.cloudflare.com/client/v4/accounts/abc123/ai", "").ok, false);
   assertEquals(resolveTarget("/fetch/api.cloudflare.com/", "").ok, false);
 });
 
@@ -445,4 +453,136 @@ Deno.test("buildForwardHeaders убирает расширенный hop-by-hop 
     assertEquals(forwarded.has(name), false);
   }
   assertEquals(forwarded.get("x-custom"), "keep");
+});
+
+const PUBLIC_DNS = () => Promise.resolve(["93.184.216.34"]);
+
+Deno.test("read: приватные адреса распознаются в обоих семействах", () => {
+  for (const ip of ["10.0.0.5", "127.0.0.1", "169.254.169.254", "172.16.9.9", "192.168.1.1", "100.64.0.1", "224.0.0.1"]) {
+    assert(isPrivateAddress(ip), "должен быть приватным: " + ip);
+  }
+  for (const ip of ["::1", "fd00::1", "fe80::1", "::ffff:10.0.0.1"]) {
+    assert(isPrivateAddress(ip), "должен быть приватным: " + ip);
+  }
+  for (const ip of ["93.184.216.34", "2606:2800:220:1::1"]) {
+    assert(!isPrivateAddress(ip), "должен быть публичным: " + ip);
+  }
+});
+
+Deno.test("read: цель обязана быть публичным https без кредов и нестандартного порта", async () => {
+  const bad = [
+    "http://example.com/x",
+    "https://127.0.0.1/x",
+    "https://[::1]/x",
+    "https://localhost/x",
+    "https://printer.local/x",
+    "https://user:pass@example.com/",
+    "https://example.com:8443/x",
+    "ftp://example.com/x",
+  ];
+  for (const raw of bad) {
+    const r = await resolveReadTarget(raw, PUBLIC_DNS);
+    assert(!r.ok, "должен быть отвергнут: " + raw);
+  }
+  const priv = await resolveReadTarget("https://example.com/x", () => Promise.resolve(["10.1.2.3"]));
+  assert(!priv.ok, "имя, ведущее на приватный адрес, отвергается");
+  const none = await resolveReadTarget("https://example.com/x", () => Promise.reject(new Error("nx")));
+  assert(!none.ok, "неразрешимое имя отвергается");
+  const good = await resolveReadTarget("https://example.com/article?x=1", PUBLIC_DNS);
+  assert(good.ok, "публичный https проходит");
+});
+
+Deno.test("read: маршрут отдаёт только текст, кап и редирект держатся", async () => {
+  const req = (url: string, method = "GET") =>
+    new Request("https://proxy.test/read?url=" + encodeURIComponent(url), { method, headers: AUTH_HEADERS });
+
+  const html = () => Promise.resolve(new Response("<html>hi</html>", { headers: { "content-type": "text/html; charset=utf-8" } }));
+  const ok = await handleRequest(req("https://example.com/"), html as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(ok.status, 200);
+  assert((ok.headers.get("content-type") ?? "").startsWith("text/html"), "content-type с charset");
+
+  const png = () => Promise.resolve(new Response("x", { headers: { "content-type": "image/png" } }));
+  const refused = await handleRequest(req("https://example.com/"), png as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(refused.status, 415);
+
+  const redirect = () => Promise.reject(new DOMException("redirect", "TypeError"));
+  const failed = await handleRequest(req("https://example.com/"), redirect as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(failed.status, 502);
+
+  const post = await handleRequest(req("https://example.com/", "POST"), html as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(post.status, 405);
+
+  const noSecret = await handleRequest(
+    new Request("https://proxy.test/read?url=" + encodeURIComponent("https://example.com/")),
+    html as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS,
+  );
+  assertEquals(noSecret.status, 401);
+});
+
+Deno.test("warnOnTruncation рвёт ответ сверх капа", async () => {
+  const src = new ReadableStream({
+    start(c) {
+      c.enqueue(new Uint8Array(4));
+      c.close();
+    },
+  });
+  const capped = warnOnTruncation(src, 3, "example.com");
+  assert(capped !== null, "поток обязан остаться потоком");
+  const reader = capped!.getReader();
+  let failed = false;
+  try {
+    await reader.read();
+  } catch {
+    failed = true;
+  }
+  assert(failed, "поток обязан упасть после капа");
+});
+
+Deno.test("handleRequest HEAD отдаёт пустое тело, таймаут апстрима — 504", async () => {
+  const headReq = new Request("https://proxy.test/fetch/api.telegram.org/bot1/getMe", {
+    method: "HEAD",
+    headers: AUTH_HEADERS,
+  });
+  const withBody = () => Promise.resolve(new Response("data", { headers: { "content-type": "text/plain" } }));
+  const headRes = await handleRequest(headReq, withBody as typeof fetch, TEST_SECRET);
+  assertEquals(await headRes.text(), "");
+
+  const timeout = () => Promise.reject(new DOMException("t", "TimeoutError"));
+  const res = await handleRequest(
+    new Request("https://proxy.test/fetch/api.telegram.org/bot1/getMe", { headers: AUTH_HEADERS }),
+    timeout as typeof fetch,
+    TEST_SECRET,
+  );
+  assertEquals(res.status, 504);
+});
+
+Deno.test("read: hex-виды и зарезервированные диапазоны считаются приватными", () => {
+  for (const ip of ["::ffff:7f00:1", "::127.0.0.1", "64:ff9b::10.0.0.1", "ff02::1", "192.0.0.8", "198.51.100.4", "203.0.113.9"]) {
+    assert(isPrivateAddress(ip), "должен быть приватным: " + ip);
+  }
+});
+
+Deno.test("read: charset пробрасывается, слишком большая страница обрезается, а не рвётся", async () => {
+  const req = new Request("https://proxy.test/read?url=" + encodeURIComponent("https://example.com/"), { headers: AUTH_HEADERS });
+  const cp1251 = () => Promise.resolve(new Response("<html>привет</html>", {
+    headers: { "content-type": "text/html; charset=windows-1251" },
+  }));
+  const res = await handleRequest(req, cp1251 as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(res.headers.get("content-type"), "text/html; charset=windows-1251");
+
+  const huge = () => {
+    const chunk = new Uint8Array(1024 * 1024);
+    return Promise.resolve(new Response(new ReadableStream({
+      start(c) {
+        c.enqueue(chunk);
+        c.enqueue(chunk);
+        c.enqueue(chunk);
+        c.close();
+      },
+    }), { headers: { "content-type": "text/html" } }));
+  };
+  const capped = await handleRequest(req, huge as typeof fetch, TEST_SECRET, MAX_REQUEST_BODY_BYTES, PUBLIC_DNS);
+  assertEquals(capped.status, 200);
+  const body = await capped.arrayBuffer();
+  assert(body.byteLength <= READ_PAGE_MAX_BYTES + 1024 * 1024, "тело не должно расти бесконечно");
 });

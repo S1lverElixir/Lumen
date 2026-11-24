@@ -15,7 +15,7 @@ from typing import Any
 
 import aiohttp
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, Message
 from google.genai import types
 
 from lumen_errors import _is_empty_like
@@ -27,14 +27,15 @@ import lumen_memory
 from lumen_model_speed import (
     speed_key as _model_speed_key,
     record_response as _record_model_latency,
-    reorder_route as _reorder_route_by_speed,
+    reorder_route as _speed_reorder_route,
 )
 from lumen_router_config import (
     GEMINI_MODELS,
     GEMINI_DEFAULT_CHAIN,
     _looks_like_heavy_query,
 )
-from lumen_security import _scrub_identity_leak, _detect_garbled_mix, _is_garbled_echo
+from lumen_search import _SearchRequested, search_marker_requested, strip_search_marker
+from lumen_security import _polish_answer, _detect_garbled_mix, _is_garbled_echo
 from lumen_rich import NO_LINK_PREVIEW
 
 # Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
@@ -147,6 +148,17 @@ def _is_gemini_daily_quota(text: str) -> bool:
         "per day", "per_day", "perday", "daily limit", "daily quota", "quota exceeded for the day",
     ))
 
+# Отказ имени/версии модели в тексте 400: «invalid model», «does not exist»,
+# «not found for API version», «deprecated», «unsupported model».
+_MODEL_MISSING_RE = re.compile(
+    r"(?:invalid|unknown|no such|unsupported|deprecated|not a valid)\s+model"
+    r"|model(?!\s+(?:output|response|file|image|request))[^.\n]{0,60}"
+    r"(?:not valid|invalid|does not exist|not found|deprecated|unsupported|no longer available|shut down)"
+    r"|model_not_found",
+    re.IGNORECASE,
+)
+
+
 def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> bool:
     """Отказ "модель недоступна" (503/404/invalid model) → короткая остывка, как на 429.
 
@@ -160,25 +172,51 @@ def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> boo
     import bot
     try:
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
-        if bot._classify_model_error(bot._error_status(exc, txt), txt) != "unavailable":
+        status = bot._error_status(exc, txt)
+        if bot._classify_model_error(status, txt) != "unavailable":
             return False
+        # 400 — детерминированная ошибка одного запроса (слишком большая картинка),
+        # а не недоступность модели: остывка выключала голову для всех (ревью 17.11.2026).
+        if status == 400:
+            # Только отказ про МОДЕЛЬ: «File ... does not exist» и «Requested
+            # entity does not exist» — ошибка запроса и остывки не заслуживают
+            # (адверсариальный проход №2).
+            if not _MODEL_MISSING_RE.search(txt):
+                return False
         bot._mark_rate_limited(provider, model_id)
         return True
     except Exception:
         return False
+
+
+def _raise_if_search_requested(answer: str, provider: str, model_id: str) -> str:
+    """Ответ — ровно маркер [[SEARCH]]: данных не хватило, модель просит поиск.
+    Останавливает маршрут ДО записи в память чата (маркер в истории подсказывал
+    бы себе в следующих ходах); квоту вызова пишем — он реально состоялся
+    (замер 11.11.2026)."""
+    if not search_marker_requested(answer):
+        return strip_search_marker(answer)
+    import bot
+    log.info('[router] %s/%s asked for a web search instead of answering', provider, model_id)
+    bot._record_quota_usage(provider, model_id)
+    raise _SearchRequested()
+
 
 async def _chat_completion_chain(
     messages: list[dict], trial_models: list[str], primary_model_id: str, *,
     request_fn, provider: str, deadline: float | None = None,
     log_label: str | None = None, chat_id: Any = None, user_text: str | None = None,
     out: dict | None = None, extra_payload: dict | None = None,
-    record_latency: bool = True,
+    extra_payload_fn=None, record_latency: bool = True,
 ) -> tuple[str, str]:
     """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (сейчас — Munito).
 
     extra_payload — провайдерские поля поверх стандартного тела (у Munito это
     reasoning_effort): копия payload в одной ветке не должна расходиться с
-    остальными (аудит 26.09.2026).
+    остальными (аудит 26.09.2026). extra_payload_fn нужен там, где поля зависят от
+    модели попытки: reasoning_effort принимают не все модели каталога (замер
+    12.11.2026: gemma-4-12b отвечает 400), и после откатa на другую модель поле
+    обязано пересчитаться.
 
     Ровно одна попытка на модель — ретраи одной модели при массовой нестабильности
     замедляли весь маршрут. Раньше этот цикл жил в трёх копиях, и копии молча
@@ -197,10 +235,17 @@ async def _chat_completion_chain(
             raise bot.RouteBudgetExceededError(tried)
         tried.append(model_trial)
         bot._record_stats_event("model_attempts")
-        messages[0]["content"] = bot.get_system_prompt(model_trial)
+        system_text = bot.get_system_prompt(model_trial)
+        if chat_id is not None:
+            # Билдер уже вкладывает память; перезапись голым промптом теряла её
+            # на каждой попытке нестримового Munito (ревью 17.11.2026).
+            system_text = lumen_memory.system_prompt_with_memory(
+                system_text, bot.get_state(chat_id))
+        messages[0]["content"] = system_text
         attempt_start = time.monotonic()
         try:
-            payload = {"model": model_trial, "messages": messages, "stream": False, **(extra_payload or {})}
+            extras = extra_payload_fn(model_trial) if extra_payload_fn else (extra_payload or {})
+            payload = {"model": model_trial, "messages": messages, "stream": False, **extras}
             resp = await request_fn(payload, deadline)
             choices = resp.get("choices") or []
             answer = ""
@@ -212,7 +257,7 @@ async def _chat_completion_chain(
                 bot._record_model_outcome(provider, model_trial, bad=True)
                 raise RuntimeError(f"Model {model_trial} returned an empty response")
 
-            answer = _scrub_identity_leak(answer, source=f"{provider}_chat_completion:{model_trial}")
+            answer = _polish_answer(answer, source=f"{provider}_chat_completion:{model_trial}")
             # Каша-каша тоже считается плохим (доставляется как есть, как раньше),
             # успех сбрасывает счётчик карантина. Повтор смешанных токенов за
             # пользователем — эхо, а не каша модели, в счётчик не идёт.
@@ -257,7 +302,7 @@ async def _chat_completion_chain(
     raise RuntimeError("No candidate model returned an answer.")
 
 
-async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None, provenance: dict | None = None, history_meta: dict[str, Any] | None = None) -> str:
+async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None, provenance: dict | None = None, history_meta: dict[str, Any] | None = None, effort: str | None = None) -> str:
     """Текст через Munito AI: одна попытка на модель, скраб утечек, расход в квоту "munito".
     Память — единый лог до 200 сообщений; прошлые фото прикладываются отдельной репликой."""
     import bot
@@ -276,9 +321,10 @@ async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], 
     answer, model_trial = await _chat_completion_chain(
         messages, trial_models, primary_model_id,
         request_fn=_request, provider="munito", deadline=deadline, chat_id=chat_id, user_text=user_text,
-        out=_out, extra_payload=_munito_payload_extras(),
+        out=_out, extra_payload_fn=lambda model: _munito_payload_extras(effort, model),
     )
     _note_provenance(provenance, "munito", _out)
+    answer = _raise_if_search_requested(answer, "munito", model_trial)
 
     hist_text = _history_user_text(history_text if history_text is not None else user_text)
     lumen_memory.append_user_from_meta(state, hist_text, history_meta)
@@ -291,6 +337,7 @@ async def ask_munito_multimodal(
     chat_id: int, user_text: str, media_tuple: tuple[bytes, str] | list[tuple[bytes, str]], media_filename: str,
     model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None,
     provenance: dict | None = None, history_meta: dict[str, Any] | None = None,
+    effort: str | None = None,
 ) -> str:
     """Картинки через Munito AI (vision проверен 05.11.2026 живым вызовом): все картинки
     одним сообщением блоками image_url — по одному на фото, иначе 2-9 фото альбома
@@ -326,9 +373,10 @@ async def ask_munito_multimodal(
     answer, model_trial = await _chat_completion_chain(
         messages, trial_models, primary_model_id,
         request_fn=_request, provider="munito", deadline=deadline, chat_id=chat_id, user_text=user_text,
-        out=_out, extra_payload=_munito_payload_extras(),
+        out=_out, extra_payload_fn=lambda model: _munito_payload_extras(effort, model),
     )
     _note_provenance(provenance, "munito", _out)
+    answer = _raise_if_search_requested(answer, "munito", model_trial)
 
     hist_text = _history_user_text(history_text if history_text is not None else user_text)
     lumen_memory.append_user_from_meta(state, hist_text, history_meta)
@@ -350,10 +398,10 @@ def _selftest_short_error(exc: BaseException) -> str:
 async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool, str, float]:
     """Одна крошечная проба в голову маршрута (munito/gemini) для /selftest.
 
-    Успех честно пишется в квоту тем же _record_quota_usage, что у настоящих
-    ответов; неуспех квоту не трогает (как в ask_*). Историю чата не трогаем —
-    проба не должна оседать в контексте владельца. Никогда не кидает: неуспех
-    возвращается кортежем (False, причина, секунды)."""
+    Проба сервисная (service=True): квоту НЕ пишет ни при успехе, ни при неуспехе —
+    она не ответ человеку. Историю чата не трогаем — проба не должна оседать в
+    контексте владельца. Никогда не кидает: неуспех возвращается кортежем
+    (False, причина, секунды)."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_payload_extras
     start = time.monotonic()
@@ -473,6 +521,7 @@ async def _gemini_history_contents(history: list[dict]) -> list[types.Content]:
 
 def _build_gemini_call_config(
     model_id: str, contents: list[types.Content], *, memory_summary: str = "",
+    effort: str | None = None,
 ) -> tuple[list[types.Content], "types.GenerateContentConfig | None"]:
     """Строит (call_contents, gconfig) для ОДНОГО вызова Gemini: system_instruction и
     grounding по дашборду. Одна функция на ask_gemini и стриминг — чтобы не расходились."""
@@ -501,13 +550,22 @@ def _build_gemini_call_config(
             pass  # в этом SDK нет url_context
     if tools_list:
         kwargs["tools"] = tools_list
-    # Эффорт мышления — низкий только для не-heavy: калибровка 18.08.2026 поймала 3.7-flash на 17 таймаутах из 18. Heavy не трогаем (дефолт модели балансирует лучше). 3.x — thinking_level, 2.5 — thinking_budget.
-    last_text = next((p.text for p in reversed(contents[-1].parts) if getattr(p, "text", None)), "") if contents else ""
-    if not _looks_like_heavy_query(last_text):
-        if model_id.startswith("gemini-3"):
-            kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="low")
-        elif model_id.startswith("gemini-2.5"):
-            kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+    # Эффорт мышления: с 12.11.2026 уровень считается для всего запроса (Claude-style
+    # effort) и только при EFFORT_AUTO=0 остаётся прежняя эвристика не-heavy (калибровка
+    # 18.08.2026 поймала 3.7-flash на 17 таймаутах из 18). 3.x — thinking_level, 2.5 — thinking_budget.
+    if effort is not None:
+        from lumen_router_config import gemini_thinking_for
+
+        _param, _value = gemini_thinking_for(model_id, effort)
+        if _param:
+            kwargs["thinking_config"] = types.ThinkingConfig(**{_param: _value})
+    else:
+        last_text = next((p.text for p in reversed(contents[-1].parts) if getattr(p, "text", None)), "") if contents else ""
+        if not _looks_like_heavy_query(last_text):
+            if model_id.startswith("gemini-3"):
+                kwargs["thinking_config"] = types.ThinkingConfig(thinking_level="low")
+            elif model_id.startswith("gemini-2.5"):
+                kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
     gconfig = types.GenerateContentConfig(**kwargs) if kwargs else None
 
     return contents, gconfig
@@ -603,6 +661,7 @@ async def ask_gemini(
     youtube_url: str | None = None, model_chain: list[str] | None = None,
     deadline: float | None = None, provenance: dict | None = None,
     history_text: str | None = None, history_meta: dict[str, Any] | None = None,
+    effort: str | None = None,
 ) -> str:
     import bot
     state = bot.get_state(chat_id)
@@ -617,7 +676,8 @@ async def ask_gemini(
              if _is_gemini_supported_mime(mime):
                  extra_parts.append(types.Part.from_bytes(data=b, mime_type=mime))
              else:
-                 raise bot.UserFacingInputError(f"Тип вложения '{_user_mime_label(mime)}' не поддерживается для анализа. Отправьте картинку, аудиозапись, видео, PDF или текстовый документ.")
+                 raise bot.UserFacingInputError(bot._t(
+                     chat_id, "err_unsupported_attachment", mime=_user_mime_label(mime)))
     if youtube_url:
           # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))
@@ -647,6 +707,7 @@ async def ask_gemini(
         bot._record_stats_event("model_attempts")
         call_contents, gconfig = bot._build_gemini_call_config(
             curr_model_id, contents, memory_summary=state.get("memory_summary") or "",
+            effort=effort,
         )
 
         attempt_start = time.monotonic()
@@ -728,9 +789,10 @@ async def ask_gemini(
                    prompt=_gpt, completion=_gct, total=_gtt)
     _record_model_latency(_model_speed_key("gemini", curr_model_id), total_sec=time.monotonic() - attempt_start)
 
-    ans = _scrub_identity_leak(ans, source=f"ask_gemini:{curr_model_id}")
+    ans = _polish_answer(ans, source=f"ask_gemini:{curr_model_id}")
     bot._record_model_outcome("gemini", curr_model_id,
                               bad=_detect_garbled_mix(ans) and not _is_garbled_echo(ans, user_text))
+    ans = _raise_if_search_requested(ans, "gemini", curr_model_id)
 
     hist_text = _history_user_text(history_text if history_text is not None else user_text)
     lumen_memory.append_user_from_meta(state, hist_text, history_meta)
@@ -756,7 +818,7 @@ async def _build_gemini_turn_contents(
         past = lumen_memory.recent_media(
             state, "photo",
             window=lumen_memory.PHOTO_CONTEXT_WINDOW,
-            max_items=lumen_memory.PHOTO_CONTEXT_MAX,
+            max_items=lumen_memory.photo_context_limit(user_text),
             skip_file_ids=skip,
         )
         if past:
@@ -806,7 +868,7 @@ async def _build_openai_turn_messages(
         past = lumen_memory.recent_media(
             state, "photo",
             window=lumen_memory.PHOTO_CONTEXT_WINDOW,
-            max_items=lumen_memory.PHOTO_CONTEXT_MAX,
+            max_items=lumen_memory.photo_context_limit(user_text),
             skip_file_ids=skip,
         )
         if past:
@@ -856,7 +918,7 @@ def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_a
     if isinstance(exc, bot.RouteBudgetExceededError):
         return bot._lang_t(lang, "err_budget")
     if isinstance(exc, bot.MunitoAPIError):
-        return bot._or_error_msg(exc, "munito", lang)
+        return bot._or_error_msg(exc, lang)
     return bot._gemini_error_msg(exc, head_model, lang)
 
 
@@ -867,6 +929,26 @@ class RouteBudgetExceededError(RuntimeError):
         super().__init__(f"Route time budget exhausted. Tried: {', '.join(tried) or 'none'}")
 
 
+def _reorder_route_by_speed(
+    route: list[tuple[str, str]], *, preserve_grounded_head: bool = False,
+) -> list[tuple[str, str]]:
+    """Порядок по замеренной скорости. На свежем маршруте границу search grounding
+    не переступаем: иначе в голове модель без живого поиска (ревью 17.11.2026).
+    На обычном маршруте пин головы не нужен — там сортировка и создана, чтобы
+    убрать медленную модель (прод 17.09.2026), и адверсариальный проход показал,
+    что общий пин замораживал медленную голову тяжёлой цепочки."""
+    if not preserve_grounded_head:
+        return _speed_reorder_route(route)
+
+    def _capability(item: tuple[str, str]) -> bool:
+        provider, model_id = item
+        if provider == "gemini":
+            # Неизвестная конфигурация — не повод ставить её вперёд головы.
+            return bool(GEMINI_MODELS.get(model_id, {}).get("search_grounding", False))
+        return True
+    return _speed_reorder_route(route, group_key=_capability)
+
+
 # Маршрутизация вынесена в lumen_router_config.py — порядок имён для остального кода не менялся.
 
 async def _run_route(
@@ -875,7 +957,8 @@ async def _run_route(
     youtube_url: str | None = None, allow_stream: bool = False,
     deadline: float | None = None, provenance: dict | None = None,
     status: Any | None = None, history_text: str | None = None,
-    history_meta: dict[str, Any] | None = None,
+    history_meta: dict[str, Any] | None = None, effort: str | None = None,
+    preserve_grounded_head: bool = False,
 ) -> tuple[str, bool]:
     """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
     import bot
@@ -887,7 +970,7 @@ async def _run_route(
     if history_text is None:
         history_text = ai_prompt
     # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
-    route = _reorder_route_by_speed(route)
+    route = _reorder_route_by_speed(route, preserve_grounded_head=preserve_grounded_head)
     if deadline is None:
         # Снаружи дедлайн приходит с транскрибацией: она уже потратила часть бюджета.
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
@@ -906,6 +989,11 @@ async def _run_route(
     # С 05.11.2026 в счёт идёт только Gemini: у Munito лимит оконный на стороне
     # провайдера, своя суточная метка ему не нужна.
     def _count_user_answer(provider_name: str) -> None:
+        # Один апдейт — одно списание: ретрай после [[SEARCH]], повтор за свежестью
+        # и автопродолжение входят в _run_route повторно (аудит 16.11.2026).
+        if bot._ANSWER_COUNTED.get():
+            return
+        bot._ANSWER_COUNTED.set(True)
         bot._record_user_daily(bot._user_key_for_message(message), gemini=provider_name == "gemini")
         bot._record_stats_event("answers_sent")
 
@@ -937,6 +1025,7 @@ async def _run_route(
             deadline=deadline, status=status, history_text=history_text,
             history_meta=history_meta,
             reuse_placeholder=reusable_placeholder, wait_started=stream_wait_started,
+            effort=effort,
         )
         if provider_name == "gemini":
             return await bot._try_gemini_streaming(chat_id, ai_prompt, message, model_id, **kwargs)
@@ -968,16 +1057,34 @@ async def _run_route(
                     reusable_placeholder = placeholder
                 if streamed is not None:
                     log.info('[router] chat=%s response received via streaming (%s:%s)', chat_id, provider, stream_model)
-                    _count_user_answer(provider)
-                    _note_answered(provider, stream_model)
+                    # Остановка до первого куска: пузырь закрыт пометкой, ответа нет,
+                    # слот не списываем (низкая находка аудита 16.11.2026).
+                    if (streamed or "").strip():
+                        _count_user_answer(provider)
+                        _note_answered(provider, stream_model)
                     return streamed, True
+        if reusable_placeholder is not None and getattr(reusable_placeholder, "reply_markup", None):
+            # Нестримовый фолбэк не умеет реагировать на Stop: убираем кнопку,
+            # чтобы она не выглядела рабочей во время обычного запроса (review
+            # 24.11.2026).
+            clear = getattr(status, "clear_reply_markup", None) if status is not None else None
+            if clear is not None and getattr(status, "reply_markup", None) is not None:
+                await clear()
+            else:
+                edit = getattr(reusable_placeholder, "edit_reply_markup", None)
+                if edit is not None:
+                    await bot._tg_call(
+                        edit, reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                        call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                    )
+            reusable_placeholder.reply_markup = None
         try:
             if provider == "gemini":
-                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text, history_meta=history_meta)
+                ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text, history_meta=history_meta, effort=effort)
             elif provider == "munito" and media:
-                ans = await bot.ask_munito_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta)
+                ans = await bot.ask_munito_multimodal(chat_id, ai_prompt, media, media_filename, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta, effort=effort)
             elif provider == "munito":
-                ans = await bot.ask_munito_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta)
+                ans = await bot.ask_munito_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta, effort=effort)
             else:
                 # Явный провайдер вместо «всё остальное = Munito»: опечатка в имени
                 # молча ушла бы в чужой API с нашим ключом (ревью 05.11.2026).
@@ -1016,10 +1123,20 @@ async def _run_route(
                     await bot._delete_message_quietly(reusable_placeholder)
                 reusable_placeholder = None
                 if reused:
-                    _count_user_answer(provider)
+                    # Пустой ответ (остановка до первого куска) не списывает слот:
+                    # человек не получил ничего, а лимит — про ответы (аудит 16.11.2026).
+                    if (ans or "").strip():
+                        _count_user_answer(provider)
                     return ans, True
-            _count_user_answer(provider)
+            if (ans or "").strip():
+                _count_user_answer(provider)
             return ans, False
+        except _SearchRequested as req:
+            # Не неудача провайдера: следующая модель ничего не изменит, а пузырь
+            # (если он уже в чате) отдаётся вызывающему коду живым.
+            if req.placeholder is None:
+                req.placeholder = reusable_placeholder
+            raise
         except asyncio.CancelledError:
             # Отмена посреди ответа: плейсхолдер чистим, отмену пробрасываем —
             # иначе в чате навсегда висело "…".
@@ -1058,4 +1175,8 @@ async def _run_route(
 
     # Суточный счётчик /stats: маршрут исчерпан, ответа не будет.
     bot._record_stats_event("all_failed")
+    if last_exc is None and time.monotonic() > deadline:
+        # Бюджет кончился до первой попытки: это RouteBudgetExceededError, а не
+        # невнятный RuntimeError — иначе неверный текст и статистика (ревью 17.11.2026).
+        raise RouteBudgetExceededError([])
     raise last_exc or RuntimeError("No route candidate returned an answer.")

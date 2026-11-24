@@ -33,6 +33,23 @@ from lumen_telegram_transport import (
 
 log = logging.getLogger("bot")
 
+# Отложенные закрытия старых aiogram-сессий: держим ссылки, чтобы GC не
+# убил задачу раньше срока.
+_deferred_session_closes: set[asyncio.Task] = set()
+
+
+async def _close_session_later(session) -> None:
+    """Дать живым запросам доиграть: закрытие сессии под ними давало
+    «Session is closed» и теряло правки чужих чатов (ревью 17.11.2026)."""
+    import bot
+    try:
+        await asyncio.sleep(max(5.0, float(bot.TELEGRAM_REQUEST_TIMEOUT) + 5.0))
+        with contextlib.suppress(Exception):
+            await session.close()
+    except asyncio.CancelledError:
+        raise
+
+
 async def _get_telegram_session() -> aiohttp.ClientSession:
     import bot
     return await _lumen_get_telegram_session(
@@ -50,15 +67,19 @@ async def _rotate_telegram_proxy() -> bool:
         new_url = bot._TELEGRAM_PROXY_CANDIDATES[bot._telegram_proxy_idx]
         old_url = bot.TELEGRAM_API_BASE_URL
         bot.TELEGRAM_API_BASE_URL = new_url
+        # Подмена и закрытие сессии — тоже под локом: два конкурентных сбоя иначе
+        # читают одну и ту же old_session и оставляют новую незакрытой (аудит 16.11.2026).
+        if bot.bot is not None:
+            old_session = bot.bot.session
+            bot.bot.session = IPv4AiohttpSession(
+                api=TelegramAPIServer.from_base(new_url),
+                proxy_secret=bot.LUMEN_PROXY_SECRET, proxy_base_urls=bot._TELEGRAM_PROXY_CANDIDATES,
+            )
+            # Не закрываем под живыми запросами: откладываем и держим ссылку.
+            task = asyncio.create_task(_close_session_later(old_session))
+            _deferred_session_closes.add(task)
+            task.add_done_callback(_deferred_session_closes.discard)
     log.warning('[telegram] Switching to fallback proxy: %s -> %s', old_url, new_url)
-    if bot.bot is not None:
-        old_session = bot.bot.session
-        bot.bot.session = IPv4AiohttpSession(
-            api=TelegramAPIServer.from_base(new_url),
-            proxy_secret=bot.LUMEN_PROXY_SECRET, proxy_base_urls=bot._TELEGRAM_PROXY_CANDIDATES,
-        )
-        with contextlib.suppress(Exception):
-            await old_session.close()
     return bot._telegram_proxy_idx != 0
 
 async def _get_http_session() -> aiohttp.ClientSession:
@@ -206,16 +227,23 @@ async def _tg_call(method: Any, *args: Any, call_timeout: float | None = None, r
             raise
         except asyncio.TimeoutError as exc:
             # Таймаут — исход неизвестен (запрос мог дойти): повтор отправки
-            # дал бы дубль. Не ретраим, как клиентские ошибки.
+            # дал бы дубль. Не ретраим, как клиентские ошибки. Но для breaker
+            # это отказ: молчащий прокси иначе никогда не триггерил резерв
+            # (ревью 17.11.2026).
+            bot._tg_proxy_breaker.note_failure()
             last_exc = exc
             break
         except Exception as exc:
             last_exc = exc
             if _tg_is_client_error(exc):
-                # Клиентская ошибка: повтор с теми же аргументами даст то же самое.
+                # Клиентская ошибка — валидный JSON от Telegram, прокси здоров:
+                # без сброса счётчика серия «мусорных» ответов прокси после одной
+                # такой ошибки глушила все чаты на остывание (аудит 16.11.2026).
+                bot._tg_proxy_breaker.note_success()
                 break
             if isinstance(exc, TelegramNetworkError) and "timeout" in str(exc).lower():
                 # Таймаут aiogram-сессии той же природы, что выше: мог дойти.
+                bot._tg_proxy_breaker.note_failure()
                 break
             if attempt < retries:
                 # Флуд-контроль ждём по retry_after, остальное — коротким бэкоффом.

@@ -112,7 +112,9 @@ WEBHOOK_MAX_INFLIGHT_TASKS = 100
 # Отклонения по секрету/капу гроздьями логируем суммарно, а не по одному.
 _WEBHOOK_DENIED_LOG_INTERVAL_SEC = 60.0
 _webhook_denied_count = 0
-_webhook_denied_last_log = 0.0
+# -1e9, а не 0: на свежем хосте monotonic() < 60, и первое отклонение
+# ждало минуту до строки лога (ревью 17.11.2026).
+_webhook_denied_last_log = -1e9
 # Telegram может доставить один update_id повторно (retry после таймаута).
 # Помним последние N: дубль не должен дать второй ответ, скачивание и трату квоты.
 _SEEN_UPDATE_IDS_MAX = 2000
@@ -196,6 +198,13 @@ async def webhook_handler(request: Request) -> Any:
         if isinstance(body, dict) and _is_duplicate_update(body.get("update_id")):
             log.info("[webhook] Duplicate update_id %s ignored", body.get("update_id"))
             return {"ok": True}
+        # Перепроверка капа прямо перед create_task: между первой проверкой и этим
+        # местом есть await'ы (чтение тела), и пачка одновременных POST проходила
+        # на пустом наборе, создавая больше задач, чем кап (аудит 16.11.2026).
+        if len(bot._inflight_tasks) >= WEBHOOK_MAX_INFLIGHT_TASKS:
+            log.warning("[webhook] In-flight cap reached after body read (%d), asking Telegram to retry",
+                        len(bot._inflight_tasks))
+            return JSONResponse(status_code=503, content={"ok": False, "retry": True})
         bot._track_inflight_task(asyncio.create_task(bot._process_raw_update(body)))
     except Exception as exc:
         log.warning("[webhook] Failed to process incoming update: %s", exc, exc_info=True)
@@ -269,6 +278,9 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         "gemini_api": "https://generativelanguage.googleapis.com",
         "huggingface": "https://huggingface.co",
         "groq_api": "https://api.groq.com",
+        # Реальный API-путь справочного слоя поиска: корень отвечал бы 200 и при
+        # недоступном api.php — тот же принцип, что у pollinations_models.
+        "wikipedia_api": "https://ru.wikipedia.org/w/api.php?action=query&meta=siteinfo&format=json",
         # Голое начало адреса: путь /chat/completions без ключа ответил бы 401/404
         # и окрасил живой хост красным.
         "munito_api": urlsplit(bot.MUNITO_BASE_URL)._replace(path="", query="", fragment="").geturl(),
@@ -326,15 +338,36 @@ async def network_diagnostics(request: Request) -> dict[str, Any]:
         results[tasks[task]] = {"error": "diag budget exceeded", "elapsed_sec": diag_budget, "ok": False}
     with contextlib.suppress(Exception):
         await asyncio.gather(*pending, return_exceptions=True)
-    return {"diagnostics": results, "telegram_api_base_configured": bot.TELEGRAM_API_BASE_URL}
+    # Состояние хранилища — здесь же: «замороженная» запись чатов после сбоя
+    # индекса иначе видна только в логе (аудит 16.11.2026).
+    import lumen_chat_state as lcs
+    state_info = {
+        "ready": bool(getattr(bot, "_state_ready", True)),
+        "index_unreadable": bool(lcs._state_load_failed),
+        "quota_unreadable": bool(lcs._quota_load_failed),
+        "persist_frozen_chats": len(lcs._chat_snapshot_unloaded),
+    }
+    return {"diagnostics": results, "state": state_info,
+            "telegram_api_base_configured": bot.TELEGRAM_API_BASE_URL}
 
 @app.get("/export_state")
-async def export_state(request: Request) -> dict[str, Any]:
+async def export_state(request: Request) -> Any:
     """Ручной бэкап для cron: эфемерный диск и тир Upstash без реплики; гейт ADMIN_PANEL_KEY."""
     if not _check_admin_key(request):
         _log_denied(request, "GET /export_state")
         return _forbidden()
     import bot
+    if not getattr(bot, "_state_ready", True):
+        # Бэкап во время загрузки — пустой или частичный, а state-backup.yml
+        # закоммитил бы его как дневной (аудит 16.11.2026). Пусть cron повторит.
+        log.info("[admin] /export_state requested while state is still loading, asking to retry")
+        return JSONResponse(status_code=503, content={"ok": False, "retry": True})
+    import lumen_chat_state as lcs
+    if lcs._state_load_failed or lcs._quota_load_failed:
+        # Сбой загрузки: снимок будет пустым, а state-backup.yml закоммитит его
+        # как дневной бэкап (ревью 17.11.2026). Честный 503 — cron повторит.
+        log.warning("[admin] /export_state requested after a failed startup load, asking to retry")
+        return JSONResponse(status_code=503, content={"ok": False, "retry": True})
     # Снимок живых структур: экспорт отдавал ссылки на мутабельные объекты —
     # запись между возвратом и сериализацией ответа давала несогласованный бэкап.
     chats = {str(cid): _serialize_chat_state(state) for cid, state in list(bot.chat_state.items())}
@@ -358,7 +391,8 @@ async def devtrace(request: Request, n: int = 200) -> Any:
         count = int(n)
     except (TypeError, ValueError):
         count = 200
-    entries = _devtrace.read_tail(count)
+    # Чтение хвоста 5 МБ в потоке: раньше блокировало петлю (ревью 17.11.2026).
+    entries = await asyncio.to_thread(_devtrace.read_tail, count)
     return {
         "enabled": _devtrace.enabled(),
         "path": str(_devtrace.trace_path()),

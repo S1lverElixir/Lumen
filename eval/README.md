@@ -36,6 +36,7 @@ python eval/harness_eval.py check                    # задачи валидн
 python eval/harness_eval.py probe <fix-sha>:<tests>  # разведка кандидатов из истории
 python eval/harness_eval.py run --task <id> --variant base
 python eval/harness_eval.py run --task <id> --variant candidate --agents-md <файл>
+python eval/harness_eval.py batch --tasks <id,id>        # несколько прогонов подряд
 python eval/harness_eval.py propose --base-dir <каталог с базовыми прогонами>
 python eval/harness_eval.py report --out <каталог>
 ```

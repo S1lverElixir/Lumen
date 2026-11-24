@@ -101,7 +101,7 @@ def image_filename(data: bytes) -> str | None:
     return None
 
 
-def _error_strings(payload: Any) -> str:
+def _error_strings(payload: Any, cap: int | None = 400) -> str:
     """Сообщения об ошибке из JSON-ответа одним текстом: у Cloudflare это
     errors:[{code,message}], у Pollinations — одиночный error:{code,message}
     (в нём и живёт код FREE_LIMIT), у обёртки Workers AI текст несёт messages[]
@@ -136,7 +136,14 @@ def _error_strings(payload: Any) -> str:
         else:
             values = []
         out.extend(v for v in values if isinstance(v, str) and len(v) < 120)
-    return " ".join(out)[:400]
+    joined = " ".join(out)
+    return joined if cap is None else joined[:cap]
+
+
+def _error_strings_full(data: Any) -> str:
+    """Тот же текст без капа 400: маркер модерации мог уехать за обрезку,
+    и 403/500 уходили в резерв (ревью 17.11.2026)."""
+    return _error_strings(data, cap=None)
 
 
 def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
@@ -146,9 +153,16 @@ def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
     if not raw:
         return None
     try:
-        return max(0.0, float(raw))
+        seconds = float(raw)
     except ValueError:
-        pass
+        seconds = None
+    if seconds is not None:
+        # inf/1e309 — мусорный заголовок: кап в сутки вместо вечной остывки.
+        # None здесь значил бы «заголовка нет», и 402 без FREE_LIMIT уходил бы
+        # в «бюджет исчерпан» (ревью 17.11.2026). nan сравнивается сам с собой.
+        if seconds != seconds:
+            return 0.0
+        return min(max(0.0, seconds), 86400.0)
     try:
         when = parsedate_to_datetime(raw)
     except (TypeError, ValueError):
@@ -318,6 +332,10 @@ def image_dimensions(data: bytes) -> tuple[int, int] | None:
                     i += 1
                     continue
                 marker = data[i + 1]
+                if marker == 0xDA:
+                    # SOF всегда до SOS; после него — энтропия, и побайтовый скан
+                    # 8-10 МБ держал GIL 0.4-0.5 с (ревью 17.11.2026).
+                    return None
                 if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
                     i += 2
                     continue
@@ -360,9 +378,10 @@ def size_for_reference(dimensions: tuple[int, int] | None) -> tuple[int, int]:
     if not w or not h:
         return (1024, 1024)
     ratio = w / h
-    names = ("1:1", "4:3", "3:4", "16:9", "9:16")
-    target = {"1:1": 1.0, "4:3": 4 / 3, "3:4": 3 / 4, "16:9": 16 / 9, "9:16": 9 / 16}
-    best = min(names, key=lambda name: abs(math.log(ratio / target[name])))
+    # Все поддерживаемые пропорции, а не пять: 3:2/21:9 раньше съезжали в 4:3/16:9
+    # и кадр дрейфовал при правке (ревью 17.11.2026).
+    target = {name: int(name.split(":")[0]) / int(name.split(":")[1]) for name in _SIZES}
+    best = min(_SIZES, key=lambda name: abs(math.log(ratio / target[name])))
     return _SIZES[best]
 
 
@@ -419,7 +438,8 @@ def _is_moderation_detail(detail: str) -> bool:
 
 def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) -> bytes:
     """Общая расшифровка ответа flux-2-klein: успех, бюджет, темп, модерация."""
-    detail = _error_strings(data)
+    full_detail = _error_strings_full(data)
+    detail = full_detail[:400]
     if status == 200 and not isinstance(data, dict):
         raise ImageProviderError("Cloudflare вернул JSON не-объектом")
     if status == 402:
@@ -434,10 +454,10 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
     # честнее «ошибка генерации, переформулируй». Тот же флаг приходит и телом
     # (обёртка Workers AI) при любом статусе, поэтому проверка до ветки статусов:
     # иначе sana дорисовывала отклонённое содержимое (ревью 10.11.2026).
-    if _is_moderation_detail(detail) and (
-        status == 400 or (isinstance(data, dict) and not data.get("success", True))
-    ):
-        raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {detail[:200]}")
+    if (status != 200 or (isinstance(data, dict) and not data.get("success", True)))             and _is_moderation_detail(full_detail):
+        # Полный текст, не обрезанный: «flagged» за капом 400 иначе не виден,
+        # и 403/500 уходили в резерв (ревью 17.11.2026).
+        raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {full_detail[:200]}")
     if status != 200:
         raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
     if not data.get("success", True):

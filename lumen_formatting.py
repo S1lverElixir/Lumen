@@ -5,7 +5,6 @@ lumen_formatting.py — markdown Lumen в Telegram HTML.
 
 from __future__ import annotations
 
-import html
 import re
 from urllib.parse import urlparse
 
@@ -61,6 +60,41 @@ def _split_table_cells(line: str) -> list[str]:
     if s.endswith("|"):
         s = s[:-1]
     return [c.strip() for c in s.split("|")]
+
+def _convert_orphan_table_rows(text: str) -> str:
+    """Строки таблицы без шапки (ответ разрезан на несколько сообщений) в
+    "• a — b": иначе человек видел сырые "|" (внешний аудит 16.11.2026).
+    Одиночные строки не трогаем: "| sort -u |" и "|a| = |b|" — не таблица."""
+    if "|" not in text:
+        return text
+
+    def _is_row(line: str) -> bool:
+        s = line.strip()
+        return s.startswith("|") and s.endswith("|") and line.count("|") >= 2
+
+    lines = text.split(chr(10))
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if _is_row(lines[i]):
+            j = i
+            while j < n and _is_row(lines[j]):
+                j += 1
+            if j - i >= 2:
+                for line in lines[i:j]:
+                    cells = [c.strip() for c in line.strip()[1:-1].split("|")]
+                    cells = [c for c in cells if c and not set(c) <= set("-: ")]
+                    if len(cells) >= 2:
+                        out.append("• " + " — ".join(cells))
+                    else:
+                        out.append(line)
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    return chr(10).join(out)
+
 
 def _convert_markdown_tables_to_lists(text: str) -> str:
     """Telegram не рендерит таблицы: блок "заголовок + дефисы + строки" разворачиваем
@@ -128,6 +162,10 @@ def _table_block_line_indexes(lines: list[str]) -> set[int]:
 # страхуем детерминированной пост-обработкой в юникод.
 _LATEX_SUPERSCRIPT_MAP = {"0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "n": "ⁿ"}
 _LATEX_SUBSCRIPT_MAP = {"0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉"}
+_INLINE_MATH_DOLLAR_RE = re.compile(r"(?<![\\$])\$(?!\$)([^\s$][^$\n]*?)(?<![\\\s])\$(?!\$)")
+_LATEX_TEXT_RE = re.compile(r"\\(?:text|mathrm|mathbf|operatorname)\{([^{}]*)\}")
+_LATEX_ENV_RE = re.compile(r"\\(?:begin|end)\{[^{}]+\}")
+_CURRENCY_MATH_RE = re.compile(r"\d[\d\s.,]*")
 # Порядок важен: многобуквенные команды (\times, \infty...) должны замениться
 # ДО одиночного \t/\i и т.п., иначе оставшийся общий "\команда -> без бэкслеша"
 # в конце срежет их раньше времени. dict сохраняет порядок вставки в Python 3.7+.
@@ -144,17 +182,105 @@ _LATEX_SYMBOL_MAP: dict[str, str] = {
     r"\phi": "φ", r"\omega": "ω", r"\Omega": "Ω",
 }
 
+
+_CI_NEEDLE_RE: dict[str, re.Pattern] = {}
+
+
+def _find_ci(text: str, needle: str, start: int) -> int:
+    """Индекс без копии text.lower(): на İ/ß нижний регистр меняет длину,
+    и позиции из копии съезжали (адверсариальный проход 17.11.2026)."""
+    pattern = _CI_NEEDLE_RE.get(needle)
+    if pattern is None:
+        pattern = re.compile(re.escape(needle), re.IGNORECASE)
+        _CI_NEEDLE_RE[needle] = pattern
+    match = pattern.search(text, start)
+    return match.start() if match else -1
+
+
+def _replace_delimited(
+    text: str, open_delim: str, close_delim: str, wrap,
+    *, allow_newlines: bool = True, min_len: int = 0,
+) -> str:
+    """Парная замена разделителя за один проход: непарное открытие раньше заставляло
+    regex сканировать остаток строки от каждой позиции, O(n²) (ревью 17.11.2026)."""
+    out: list[str] = []
+    i = 0
+    while True:
+        start = text.find(open_delim, i)
+        if start == -1:
+            out.append(text[i:])
+            return "".join(out)
+        end = text.find(close_delim, start + len(open_delim))
+        if end == -1:
+            out.append(text[i:])
+            return "".join(out)
+        inner = text[start + len(open_delim):end]
+        if len(inner) < min_len or (not allow_newlines and "\n" in inner):
+            # Старый regex без DOTALL/с +? не трогал такой случай: оставляем как есть.
+            out.append(text[i:end + len(close_delim)])
+            i = end + len(close_delim)
+            continue
+        out.append(text[i:start])
+        out.append(wrap(inner))
+        i = end + len(close_delim)
+
+
+def _replace_tag_pairs(text: str, opens: tuple[str, ...], closes: tuple[str, ...], wrap) -> str:
+    """Тот же проход для тегов: regex с DOTALL на непарном <b> даёт O(n²)."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i <= n:
+        best = None
+        best_tag = None
+        for tag in opens:
+            pos = _find_ci(text, tag, i)
+            if pos != -1 and (best is None or pos < best):
+                best, best_tag = pos, tag
+        if best is None:
+            out.append(text[i:])
+            break
+        inner_start = best + len(best_tag)
+        close_pos = None
+        close_tag = None
+        for tag in closes:
+            pos = _find_ci(text, tag, inner_start)
+            if pos != -1 and (close_pos is None or pos < close_pos):
+                close_pos, close_tag = pos, tag
+        if close_pos is None:
+            out.append(text[i:])
+            break
+        out.append(text[i:best])
+        out.append(wrap(text[inner_start:close_pos]))
+        i = close_pos + len(close_tag)
+    return "".join(out)
+
+
+_SPOILER_SPAN_OPEN_RE = re.compile(r'<span\s+class=["\']tg-spoiler["\']>', re.IGNORECASE)
+
+
+def _replace_spoiler_spans(text: str) -> str:
+    """Линейный проход для спана со спойлером: тот же класс отказа."""
+    out: list[str] = []
+    i = 0
+    while True:
+        m = _SPOILER_SPAN_OPEN_RE.search(text, i)
+        if m is None:
+            out.append(text[i:])
+            return "".join(out)
+        end = _find_ci(text, "</span>", m.end())
+        if end == -1:
+            out.append(text[i:])
+            return "".join(out)
+        out.append(text[i:m.start()])
+        out.append(text[m.end():end])
+        i = end + len("</span>")
+
 def _latex_superscript(m: re.Match) -> str:
     return "".join(_LATEX_SUPERSCRIPT_MAP.get(ch, ch) for ch in m.group(1))
 
 def _latex_subscript(m: re.Match) -> str:
     return "".join(_LATEX_SUBSCRIPT_MAP.get(ch, ch) for ch in m.group(1))
-
-_INLINE_MATH_DOLLAR_RE = re.compile(r"(?<![\\$])\$(?!\$)([^\s$][^$\n]*?)(?<![\\\s])\$(?!\$)")
-_LATEX_TEXT_RE = re.compile(r"\\(?:text|mathrm|mathbf|operatorname)\{([^{}]*)\}")
-_LATEX_ENV_RE = re.compile(r"\\(?:begin|end)\{[^{}]+\}")
-_CURRENCY_MATH_RE = re.compile(r"\d[\d\s.,]*")
-
 
 def _is_currency_math_match(match: re.Match) -> bool:
     body = match.group(1)
@@ -180,22 +306,6 @@ def _scrub_inline_math(match: re.Match) -> str:
     return re.sub(r"\s+", " ", match.group(1).replace("&", " ").replace("*", "∗")).strip()
 
 
-def _split_bare_url_markdown(match: re.Match) -> tuple[str, str]:
-    raw = match.group(0)
-    previous = match.string[match.start() - 1] if match.start() else ""
-    # Regex URL захватывает и закрывающий Markdown, и точку после него. Сначала
-    # отделяем пунктуацию, затем маркер; иначе `**url**.` становится сырой строкой.
-    core = raw
-    suffix = ""
-    while core and core[-1] in ".,;:!?…»”’":
-        suffix = core[-1] + suffix
-        core = core[:-1]
-    for marker in ("**", "__", "~~", "*", "_"):
-        if previous == marker[0] and core.endswith(marker) and len(core) > len(marker):
-            return core[:-len(marker)], marker + suffix
-    return raw, ""
-
-
 def _scrub_latex(text: str) -> str:
     """Сырой LaTeX в юникод. Вызывать только после вырезки кода, иначе портятся слэши в regex/путях Windows."""
     if "\\" not in text and "$" not in text:
@@ -207,8 +317,8 @@ def _scrub_latex(text: str) -> str:
     text = re.sub(r"\\\\", " ", text)
     text = re.sub(r"\\(?:quad|qquad)\b", " ", text)
     text = _INLINE_MATH_DOLLAR_RE.sub(_scrub_inline_math, text)
-    text = re.sub(r"\\\[(.*?)\\\]", r"\1", text, flags=re.DOTALL)
-    text = re.sub(r"\\\((.*?)\\\)", r"\1", text, flags=re.DOTALL)
+    text = _replace_delimited(text, "\\[", "\\]", lambda s: s)
+    text = _replace_delimited(text, "\\(", "\\)", lambda s: s, allow_newlines=False)
     text = re.sub(r"\$\$(.*?)\$\$", r"\1", text, flags=re.DOTALL)
     # \frac{a}{b} -> a/b (одноуровневая вложенность, самый частый случай)
     text = re.sub(r"\\d?frac\{([^{}]*)\}\{([^{}]*)\}", r"\1/\2", text)
@@ -374,6 +484,22 @@ def _convert_blockquotes(text: str) -> str:
     _flush()
     return "\n".join(out)
 
+def _split_bare_url(url: str) -> tuple[str, str]:
+    """(адрес без хвоста, хвост). Хвост возвращаем в текст: «_» — это курсив,
+    «)» — скобка фразы, кириллица — продолжение предложения (ревью 17.11.2026)."""
+    cut = len(url)
+    for i, ch in enumerate(url):
+        if "\u0400" <= ch <= "\u04FF":
+            cut = i
+            break
+    clean = url[:cut]
+    while clean and clean[-1] in ".,;:!?…»\"'_":
+        clean = clean[:-1]
+    while clean.endswith(")") and clean.count(")") > clean.count("("):
+        clean = clean[:-1]
+    return clean, url[len(clean):]
+
+
 def _md_to_html(text: str) -> str:
     """Конвертирует markdown-подобный текст в Telegram HTML.
 
@@ -416,30 +542,28 @@ def _md_to_html(text: str) -> str:
     # <br> в сентинел, <blockquote> не трогаем.
     text = re.sub(r"<br\s*/?>", "\x00BR\x00", text, flags=re.IGNORECASE)
     text = re.sub(r"</?(?:b|strong|i|em|u|s|code|pre)\s*/>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"**\1**", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"*\1*", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<u>(.*?)</u>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _replace_tag_pairs(text, ("<b>", "<strong>"), ("</b>", "</strong>"), lambda s: f"**{s}**")
+    text = _replace_tag_pairs(text, ("<i>", "<em>"), ("</i>", "</em>"), lambda s: f"*{s}*")
+    text = _replace_tag_pairs(text, ("<u>",), ("</u>",), lambda s: s)
     # spoiler — тот же трюк, что и <u> выше: system_prompt.py не просит модель их
     # использовать, поэтому это чисто защитная сетка на случай, если модель всё же
     # напишет буквальный тег. Раньше он не ловился здесь вообще и долетал до Phase 2
     # экранирования — показывался пользователю как видимый мусор "&lt;tg-spoiler&gt;".
-    text = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r'<span\s+class=["\']tg-spoiler["\']>(.*?)</span>', r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<s>(.*?)</s>", r"~~\1~~", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<pre>(.*?)</pre>", lambda m: f"```\n{m.group(1)}\n```", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _replace_tag_pairs(text, ("<tg-spoiler>",), ("</tg-spoiler>",), lambda s: s)
+    text = _replace_spoiler_spans(text)
+    text = _replace_tag_pairs(text, ("<s>",), ("</s>",), lambda s: f"~~{s}~~")
+    text = _replace_tag_pairs(text, ("<pre>",), ("</pre>",), lambda s: f"```\n{s}\n```")
+    text = _replace_tag_pairs(text, ("<code>",), ("</code>",), lambda s: f"`{s}`")
+
+    # Незакрытый ``` модель оставляет в оборванном ответе; стрим хвост
+    # дозакрывал, финальная сборка показывала человеку буквальный забор
+    # (внешний аудит 16.11.2026).
+    if text.count("```") % 2 and not text.rstrip().endswith("```"):
+        text = text.rstrip() + "\n```"
 
     # ── Фаза 1: вырезаем код до обработки ────────────────
     _saved: dict[str, str] = {}
-    _urls: dict[str, str] = {}
     _counter = [0]
-
-    def _save_bare_url(m: re.Match) -> str:
-        url, suffix = _split_bare_url_markdown(m)
-        key = f"\x00URL{_counter[0]}\x00"
-        _counter[0] += 1
-        _urls[key] = url
-        return key + suffix
 
     def _save_block(m: re.Match) -> str:
         key = f"\x00CB{_counter[0]}\x00"
@@ -447,11 +571,23 @@ def _md_to_html(text: str) -> str:
         _saved[key] = m.group(0)
         return key
 
+    def _save_bare_block(m: re.Match) -> str:
+        clean, tail = _split_bare_url(m.group(0))
+        key = f"\x00CB{_counter[0]}\x00"
+        _counter[0] += 1
+        _saved[key] = clean
+        return key + tail
+
     text = re.sub(r"```[a-zA-Z0-9]*\n.*?\n```", _save_block, text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]+`", _save_block, text)
     # Ссылки вырезаем как код: "_" в URL ломает italic/bold. Markdown внутри label не поддерживаем.
-    text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", _save_block, text)
-    text = re.sub(r"https?://[^\s()<>|\"']+", _save_bare_url, text)
+    # Скобки в URL — одна сбалансированная пара (вики-тайтлы «X_(1993)»); двойное
+    # вложение сознательно не поддерживаем: реальных тайтлов с ним нет, а рекурсивный
+    # регекс рискует бэктрекингом (ревью 16.11.2026).
+    text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", _save_block, text)
+    # Голые ссылки прячем до inline-разметки: "__b__" и "*x*" в пути — часть
+    # адреса, а не жирный/курсив (внешний аудит 16.11.2026).
+    text = re.sub(r"https?://[^\s<>\"'`*~|]+", _save_bare_block, text)
 
     # ── Phase 1.3: сырой LaTeX → юникод (см. _scrub_latex выше) — код уже
     # вынесен на предыдущем шаге, поэтому обратные слэши в реальном коде
@@ -489,13 +625,24 @@ def _md_to_html(text: str) -> str:
     # tables_to_lists выше) — код уже вынесен на предыдущем шаге, поэтому "|"
     # внутри кода (например, битовое ИЛИ в Rust/C) сюда не попадёт.
     text = _convert_markdown_tables_to_lists(text)
+    # Хвост таблицы без шапки — после основного разбора, чтобы не трогать
+    # распознанные таблицы (внешний аудит 16.11.2026).
+    text = _convert_orphan_table_rows(text)
 
     # ── Фаза 2: экранируем остальное в HTML ────────────────────────────────────────
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     # ── Фаза 3: применяем markdown ───────────────────────────────────────────────
-    text = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", text, flags=re.DOTALL)
-    text = re.sub(r"(\*|_)(.*?)\1", r"<i>\2</i>", text)
+    # Тройное выделение первым: иначе "***x***" давал пересечённые
+    # <b><i>…</b></i>, Telegram такой HTML отвергал и весь чанк терял разметку
+    # (внешний аудит 16.11.2026).
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text, flags=re.DOTALL)
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
+    # как в _strip_markdown (внешний аудит 16.11.2026).
+    text = re.sub(r"(?<!\w)__([^\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
 
     # ── Phase 3.5: blockquote-сентинелы → настоящие <blockquote> ─────────────
@@ -510,7 +657,7 @@ def _md_to_html(text: str) -> str:
     for key, orig in _saved.items():
         if not orig.startswith("["):
             continue
-        m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
+        m = re.match(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", orig, re.DOTALL)
         label, url = m.group(1), m.group(2)
         label = _safe_link_label(label, url)
         label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -519,7 +666,10 @@ def _md_to_html(text: str) -> str:
     for key, orig in _saved.items():
         if orig.startswith("["):
             continue
-        if orig.startswith("```"):
+        if orig.startswith("http"):
+            # Голая ссылка: возвращаем как есть, только экранируем HTML-символы.
+            replacement = orig.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        elif orig.startswith("```"):
             m = re.match(r"```([a-zA-Z0-9]*)\n(.*)\n```", orig, re.DOTALL)
             lang, inner = (m.group(1), m.group(2)) if m else ("", orig[3:-3])
             inner = inner.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -539,9 +689,6 @@ def _md_to_html(text: str) -> str:
     # <b>/<i> в коде выше; код-примеры с буквальным <br> редки.
     text = text.replace("\x00BR\x00", "\n")
 
-    for key, url in _urls.items():
-        text = text.replace(key, html.escape(url, quote=True))
-
     return text
 
 
@@ -551,26 +698,52 @@ def _rich_inline(text: str) -> str:
     Плейсхолдеры кода/ссылок (символы \x00) намеренно не трогаются — они
     восстанавливаются позже общим финалом, как и в _md_to_html."""
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", text, flags=re.DOTALL)
-    text = re.sub(r"(\*|_)(.*?)\1", r"<i>\2</i>", text)
+    # Тройное выделение первым: иначе "***x***" давал пересечённые
+    # <b><i>…</b></i>, Telegram такой HTML отвергал и весь чанк терял разметку
+    # (внешний аудит 16.11.2026).
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text, flags=re.DOTALL)
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
+    # как в _strip_markdown (внешний аудит 16.11.2026).
+    text = re.sub(r"(?<!\w)__([^\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
     return text
 
 
-def _build_rich_table(header: list[str], rows: list[list[str]]) -> str:
+def _build_rich_table(header: list[str], rows: list[list[str]], *, split: bool = True) -> str:
     """Строит <table bordered> из распарсенных ячеек (см. _split_table_cells).
     Ячейки идут через _rich_inline — внутри работают **bold**/*italic*/`код`
     (кодовые плейсхолдеры раскрываются общим финалом позже)."""
-    parts = ["<table bordered>"]
-    parts.append("<tr>" + "".join(f"<th>{_rich_inline(h)}</th>" for h in header) + "</tr>")
-    for row in rows:
-        cells = [row[i] if i < len(row) else "" for i in range(len(header))]
-        parts.append("<tr>" + "".join(f"<td>{_rich_inline(c)}</td>" for c in cells) + "</tr>")
-    parts.append("</table>")
-    return "".join(parts)
+    def render(indexes: list[int], *, compact: bool) -> str:
+        attr = " bordered compact" if compact else " bordered"
+        parts = [f"<table{attr}>"]
+        parts.append("<tr>" + "".join(f"<th>{_rich_inline(header[i])}</th>" for i in indexes) + "</tr>")
+        for row in rows:
+            cells = [row[i] if i < len(row) else "" for i in indexes]
+            parts.append("<tr>" + "".join(f"<td>{_rich_inline(c)}</td>" for c in cells) + "</tr>")
+        parts.append("</table>")
+        return "".join(parts)
+
+    if not split or len(header) <= 3:
+        return render(list(range(len(header))), compact=len(header) > 3)
+
+    # Прод 24.11.2026: четыре и более колонок уезжали за правый край чата.
+    # Делим на блоки до трёх колонок, повторяя первую как подпись строки.
+    tables: list[str] = []
+    for start in range(1, len(header), 2):
+        indexes = [0, *range(start, min(start + 2, len(header)))]
+        tables.append(render(indexes, compact=True))
+    split = "".join(tables)
+    # Повтор строки раздувает HTML и число блоков. Большую таблицу оставляем
+    # одной compact-таблицей: лучше горизонтальный скролл, чем потеря rich.
+    if (len(rows) + 1) * len(tables) > 500 or _tg_len(split) > 4096:
+        return render(list(range(len(header))), compact=True)
+    return split
 
 
-def _md_to_rich_html(text: str) -> str:
+def _md_to_rich_html(text: str, *, split_tables: bool = True) -> str:
     """Вариант _md_to_html для Rich Messages (Bot API 10.1+, sendRichMessage):
     сервер Telegram сам рендерит структурные блоки, поэтому здесь НЕ действуют
     три запрета обычного пути — markdown-таблицы идут настоящим <table>,
@@ -590,21 +763,26 @@ def _md_to_rich_html(text: str) -> str:
     # (валидный рич-тег переноса, в т.ч. внутри ячеек <td>).
     text = re.sub(r"<br\s*/?>", "\x00BR\x00", text, flags=re.IGNORECASE)
     text = re.sub(r"</?(?:b|strong|i|em|u|s|code|pre)\s*/>", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"<(?:b|strong)>(.*?)</(?:b|strong)>", r"**\1**", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<(?:i|em)>(.*?)</(?:i|em)>", r"*\1*", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<u>(.*?)</u>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<tg-spoiler>(.*?)</tg-spoiler>", r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r'<span\s+class=["\']tg-spoiler["\']>(.*?)</span>', r"\1", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<s>(.*?)</s>", r"~~\1~~", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<pre>(.*?)</pre>", lambda m: f"```\n{m.group(1)}\n```", text, flags=re.IGNORECASE | re.DOTALL)
-    text = re.sub(r"<code>(.*?)</code>", r"`\1`", text, flags=re.IGNORECASE | re.DOTALL)
+    text = _replace_tag_pairs(text, ("<b>", "<strong>"), ("</b>", "</strong>"), lambda s: f"**{s}**")
+    text = _replace_tag_pairs(text, ("<i>", "<em>"), ("</i>", "</em>"), lambda s: f"*{s}*")
+    text = _replace_tag_pairs(text, ("<u>",), ("</u>",), lambda s: s)
+    text = _replace_tag_pairs(text, ("<tg-spoiler>",), ("</tg-spoiler>",), lambda s: s)
+    text = _replace_spoiler_spans(text)
+    text = _replace_tag_pairs(text, ("<s>",), ("</s>",), lambda s: f"~~{s}~~")
+    text = _replace_tag_pairs(text, ("<pre>",), ("</pre>",), lambda s: f"```\n{s}\n```")
+    text = _replace_tag_pairs(text, ("<code>",), ("</code>",), lambda s: f"`{s}`")
+
+    # Незакрытый забор закрываем и в rich-пути: иначе финальное сообщение
+    # показывало "```python" буквально (внешний аудит 16.11.2026).
+    if text.count("```") % 2 and not text.rstrip().endswith("```"):
+        text = text.rstrip() + "\n```"
 
     _code: dict[str, str] = {}
     _links: dict[str, str] = {}
+    _bare: dict[str, str] = {}
     _math: dict[str, tuple[str, bool]] = {}
     _tables: dict[str, tuple[list[str], list[list[str]]]] = {}
     _heads: dict[str, tuple[int, str]] = {}
-    _urls: dict[str, str] = {}
     _counter = [0]
 
     def _take(store: dict, prefix: str, value) -> str:
@@ -613,14 +791,13 @@ def _md_to_rich_html(text: str) -> str:
         store[key] = value
         return key
 
-    def _save_bare_url(m: re.Match) -> str:
-        url, suffix = _split_bare_url_markdown(m)
-        return _take(_urls, "URL", url) + suffix
-
     text = re.sub(r"```[a-zA-Z0-9]*\n.*?\n```", lambda m: _take(_code, "CB", m.group(0)), text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]+`", lambda m: _take(_code, "CB", m.group(0)), text)
-    text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", lambda m: _take(_links, "CB", m.group(0)), text)
-    text = re.sub(r"https?://[^\s()<>|\"']+", _save_bare_url, text)
+    text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", lambda m: _take(_links, "CB", m.group(0)), text)
+    # Голые ссылки прячем и в рич-пути: "__b__" в пути — адрес, не жирный.
+    text = re.sub(r"https?://[^\s<>\"'`*~|]+",
+                  lambda m: _take(_bare, "CB", _split_bare_url(m.group(0))[0]) + _split_bare_url(m.group(0))[1],
+                  text)
     text = re.sub(r"\$\$([\s\S]+?)\$\$", lambda m: _take(_math, "MM", (m.group(1), True)), text)
     # Инлайн-форма требует содержимого без пробелов по краям (как в GFM): иначе
     # цены вида "$50 до $100" превратились бы в "формулу". Одиночные "$80 000"
@@ -633,8 +810,9 @@ def _md_to_rich_html(text: str) -> str:
     text = _INLINE_MATH_DOLLAR_RE.sub(_take_inline_math, text)
     # Скобочные формы LaTeX (реальный кейс nemotron — \[ S = \pi r^{2} \]): тот же
     # смысл, что $/$$ выше, извлекаются раньше них, чтобы $ внутри не разобрали.
-    text = re.sub(r"\\\[([\s\S]+?)\\\]", lambda m: _take(_math, "MM", (m.group(1), True)), text)
-    text = re.sub(r"\\\((.+?)\\\)", lambda m: _take(_math, "MM", (m.group(1), False)), text)
+    text = _replace_delimited(text, "\\[", "\\]", lambda s: _take(_math, "MM", (s, True)), min_len=1)
+    text = _replace_delimited(text, "\\(", "\\)", lambda s: _take(_math, "MM", (s, False)),
+                               allow_newlines=False)
 
     def _take_heading(m: re.Match) -> str:
         # Тот же допуск, что у легаси _HEADER_MARKER_RE (ведущие пробелы, до 6
@@ -668,7 +846,7 @@ def _md_to_rich_html(text: str) -> str:
                     continue
         out.append(line)
         i += 1
-    text = "\n".join(out)
+    text = _convert_orphan_table_rows("\n".join(out))
 
     # Остаточный LaTex ВНЕ разделителей ($…$, \[…\]) → юникод, как в обычном пути.
     # Раньше rich-путь его не трогал, и пользователь видел "\frac{1}{2}" и "\alpha\times\beta"
@@ -685,8 +863,16 @@ def _md_to_rich_html(text: str) -> str:
 
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    text = re.sub(r"(\*\*|__)(.*?)\1", r"<b>\2</b>", text, flags=re.DOTALL)
-    text = re.sub(r"(\*|_)(.*?)\1", r"<i>\2</i>", text)
+    # Тройное выделение первым: иначе "***x***" давал пересечённые
+    # <b><i>…</b></i>, Telegram такой HTML отвергал и весь чанк терял разметку
+    # (внешний аудит 16.11.2026).
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text, flags=re.DOTALL)
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Подчёркивания внутри слова — имя файла или URL, а не курсив: граница слова,
+    # как в _strip_markdown (внешний аудит 16.11.2026).
+    text = re.sub(r"(?<!\w)__([^\n]+?)__(?!\w)", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", text)
 
     text = text.replace(_BLOCKQUOTE_START, "<blockquote>").replace(_BLOCKQUOTE_END, "</blockquote>")
@@ -702,18 +888,20 @@ def _md_to_rich_html(text: str) -> str:
     for key, (tag_level, inner) in _heads.items():
         text = text.replace(key, f"<h{tag_level}>{_rich_inline(inner)}</h{tag_level}>")
     for key, (header, rows) in _tables.items():
-        text = text.replace(key, _build_rich_table(header, rows))
+        text = text.replace(key, _build_rich_table(header, rows, split=split_tables))
     for key, (latex, block) in _math.items():
         latex = latex.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         tag = "tg-math-block" if block else "tg-math"
         text = text.replace(key, f"<{tag}>{latex}</{tag}>")
     for key, orig in _links.items():
-        m = re.match(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", orig, re.DOTALL)
+        m = re.match(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", orig, re.DOTALL)
         label, url = m.group(1), m.group(2)
         label = _safe_link_label(label, url)
         label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         url = url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
         text = text.replace(key, f'<a href="{url}">{label}</a>')
+    for key, orig in _bare.items():
+        text = text.replace(key, orig.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
     for key, orig in _code.items():
         if orig.startswith("```"):
             m = re.match(r"```([a-zA-Z0-9]*)\n(.*)\n```", orig, re.DOTALL)
@@ -725,9 +913,6 @@ def _md_to_rich_html(text: str) -> str:
             inner = inner.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             replacement = f"<code>{inner}</code>"
         text = text.replace(key, replacement)
-
-    for key, url in _urls.items():
-        text = text.replace(key, html.escape(url, quote=True))
 
     text = text.replace("\x00BR\x00", "<br/>")
 
@@ -745,18 +930,18 @@ def _strip_markdown(text: str) -> str:
     _urls: dict[str, str] = {}
     _code: dict[str, str] = {}
     def _save_url(m: re.Match) -> str:
-        url, suffix = _split_bare_url_markdown(m)
+        clean, tail = _split_bare_url(m.group(0))
         key = f"\x00U{len(_urls)}\x00"
-        _urls[key] = url
-        return key + suffix
+        _urls[key] = clean
+        return key + tail
     def _save_code(m: re.Match) -> str:
         key = f"\x00C{len(_code)}\x00"
         _code[key] = m.group(1)
         return key
     text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", _save_code, text, flags=re.DOTALL)
     text = re.sub(r"`([^`\n]+)`", _save_code, text)
-    text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", r"\1", text)
-    text = re.sub(r"https?://[^\s()<>|\"']+", _save_url, text)
+    text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", r"\1", text)
+    text = re.sub(r"https?://[^\s<>\"'`*~|]+", _save_url, text)
     text = _scrub_latex(text)
     text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text, flags=re.DOTALL)
     # Одиночное "_" только вне слова: my_file_name и имена файлов не трогаем.
@@ -920,7 +1105,55 @@ def _split_text_chunks(text: str, max_len: int = 4096) -> list[str]:
     out: list[str] = []
     for chunk in md_chunks:
         out.extend(_split_to_fit_html(chunk, max_len))
-    return _merge_short_chunks(out, max_len) or [text]
+    return _pull_dangling_headings(_merge_short_chunks(out, max_len) or [text], max_len)
+
+
+# Строка, которая не должна оставаться последней в пузыре: markdown-заголовок,
+# жирная строка целиком, нумерованный раздел («III. Итоги»), разделитель или
+# короткая строка, заканчивающаяся двоеточием.
+_DANGLING_HEAD_RE = re.compile(
+    r"^\s*(?:#{1,6}\s"
+    r"|\*\*[^*\n]{1,60}\*\*[:：]?\s*"
+    r"|(?:[IVXLC]{1,4}|\d{1,2})[.)]\s+\S[^.!?]{0,55}$"
+    r"|(?:---+|———+|___+)\s*$"
+    r"|\S[^.!?]{0,55}[:：]\s*$)"
+)
+
+
+def _pull_dangling_headings(chunks: list[str], max_len: int) -> list[str]:
+    """Кусок не должен кончаться заголовком или разделителем без тела: в живом
+    ответе 11.11.2026 пузырь закончился строкой «III. Итоги», а сами потери
+    уехали в следующий. У Claude заголовок стоит над своим текстом. Переносим
+    только одиночную короткую строку, отделённую пустой строкой, — обычный
+    абзац без последней точки не сдвигаем."""
+    if len(chunks) < 2:
+        return chunks
+    out = list(chunks)
+    for i in range(len(out) - 1):
+        head_part, sep, tail_part = out[i].rpartition("\n\n")
+        if not sep:
+            continue
+        candidate = tail_part.strip()
+        if not candidate or "\n" in candidate or len(candidate) > 60:
+            continue
+        if not _DANGLING_HEAD_RE.match(candidate):
+            continue
+        if not head_part.strip():
+            continue
+        joined = candidate + "\n\n" + out[i + 1].lstrip("\n")
+        if _tg_len(joined) <= max_len:
+            out[i] = head_part.rstrip()
+            out[i + 1] = joined
+        else:
+            # Не влезает целиком: заголовок всё равно уезжает вперёд, а следующий
+            # кусок перерезается так, чтобы заголовок остался НАД первым абзацем
+            # (иначе получался пузырь из одних «## Итоги»).
+            room = max(16, max_len - _tg_len(candidate) - 2)
+            subs = _split_to_fit_html(out[i + 1].strip(), room) or [out[i + 1].strip()]
+            subs[0] = candidate + "\n\n" + subs[0]
+            out[i] = head_part.rstrip()
+            out[i + 1:i + 2] = subs
+    return out
 
 
 def _truncate_html_to_fit(md_text: str, limit: int) -> str:

@@ -1,8 +1,10 @@
 """lumen_quotas.py — суточные квоты провайдеров, дневные лимиты пользователей и счётчики /stats: единое персистентное хранилище GLOBAL_QUOTA."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import math
 import time
 from typing import Any, TypedDict
 
@@ -41,7 +43,9 @@ async def _maybe_alert_gemini_exhausted() -> None:
     _last_gemini_exhausted_alert_monotonic = now
     await bot._notify_owner(bot._t(bot.OWNER_ID, "owner_quota_notice"))
 
-_last_quota_check_monotonic: float = 0.0
+# -1e9, а не 0: на свежем раннере monotonic() < 60, и первый сброс суток
+# пропускался, вчерашние used/exhausted жили до минуты (ревью 17.11.2026).
+_last_quota_check_monotonic: float = -1e9
 
 
 def _reset_quota_if_new_day() -> None:
@@ -54,7 +58,7 @@ def _reset_quota_if_new_day() -> None:
     import bot
     global _last_quota_check_monotonic
     now_mono = time.monotonic()
-    if now_mono - _last_quota_check_monotonic < _QUOTA_CHECK_THROTTLE_SEC:
+    if _last_quota_check_monotonic and now_mono - _last_quota_check_monotonic < _QUOTA_CHECK_THROTTLE_SEC:
         return
     _last_quota_check_monotonic = now_mono
     today = bot._current_quota_day()
@@ -105,17 +109,35 @@ def load_global_quota() -> None:
     import lumen_chat_state as lcs
     try:
         raw = bot._storage_read_text("lumen:global_quota", lcs.GLOBAL_QUOTA_FILE)
+        if raw is None:
+            # None — и «ключа нет», и «шлюз ответил без result»: флаг не трогаем.
+            # На первом запуске он и так False, а после сбоя остаётся защита
+            # (второй проход аудита 16.11.2026).
+            return
         if not raw:
-            # Пусто — первый запуск, а не отказ: сбрасывать нечего.
-            lcs._state_load_failed = False
+            # Пустая строка — ключ есть, но пуст: сбрасывать нечего.
+            lcs._quota_load_failed = False
             return
         loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            # Валидный JSON не-словарь — не снимок квоты: успехом считать нельзя,
+            # иначе первый флаш затирает удалённые баны (ревью 17.11.2026).
+            lcs._quota_load_failed = True
+            log.warning('[quota] Loaded quota is %s, expected object — keeping the write guard.',
+                        type(loaded).__name__)
+            bot._reset_quota_if_new_day()
+            return
         if isinstance(loaded, dict):
             for provider in _QUOTA_PROVIDERS:
                 if provider in loaded:
                     # Чужой тип (список вместо dict) раньше ломал _quota_entry на каждом обращении.
                     if isinstance(loaded[provider], dict):
-                        GLOBAL_QUOTA[provider] = loaded[provider]
+                        clean_provider: dict[str, Any] = {}
+                        for model_id, entry in loaded[provider].items():
+                            sanitized = _sanitize_loaded_entry(entry)
+                            if sanitized is not None:
+                                clean_provider[model_id] = sanitized
+                        GLOBAL_QUOTA[provider] = clean_provider
                     else:
                         log.warning("[quota] Skip provider %s: expected dict, got %s", provider, type(loaded[provider]).__name__)
             # Пользовательские счётчики переживают рестарт тем же файлом/ключом.
@@ -127,13 +149,14 @@ def load_global_quota() -> None:
                         continue
                     try:
                         clean[str(uid)] = {
+                            # OverflowError от Infinity не ловился прежним (TypeError, ValueError).
                             "total": max(0, int(entry.get("total") or 0)),
                             "gemini": max(0, int(entry.get("gemini") or 0)),
                             "tts": max(0, int(entry.get("tts") or 0)),
                             "draw": max(0, int(entry.get("draw") or 0)),
                             "bonus": max(0, int(entry.get("bonus") or 0)),
                         }
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         continue
                 GLOBAL_QUOTA[USER_DAILY_KEY] = clean
             if "quota_day" in loaded:
@@ -145,7 +168,7 @@ def load_global_quota() -> None:
                 for field in _STATS_FIELDS:
                     try:
                         clean_stats[field] = max(0, int(raw_stats.get(field) or 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         clean_stats[field] = 0
                 GLOBAL_QUOTA[STATS_KEY] = clean_stats
             # Владельческая блокировка переживает рестарт тем же файлом/ключом.
@@ -155,26 +178,165 @@ def load_global_quota() -> None:
                 for uid, ts in raw_banned.items():
                     try:
                         clean_banned[str(int(uid))] = max(0, int(ts or 0))
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         continue
                 GLOBAL_QUOTA[lcs.BANNED_KEY] = clean_banned
             raw_ts = loaded.get("last_storage_write_ts")
-            if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool) and raw_ts > 0:
-                GLOBAL_QUOTA["last_storage_write_ts"] = float(raw_ts)
-        lcs._state_load_failed = False
+            try:
+                ts_value = float(raw_ts)
+            except (TypeError, ValueError):
+                ts_value = 0.0
+            # Infinity в timestamp ронял /stats через time.localtime (проход №3).
+            if (not isinstance(raw_ts, bool) and math.isfinite(ts_value) and ts_value > 0):
+                GLOBAL_QUOTA["last_storage_write_ts"] = ts_value
+            # Чего в снапшоте нет, того не было и удалённо: живой локальный
+            # остаток здесь — это расход сбоя, его добавит merge.
+            # Без очистки merge складывал локальную копию сама с собой
+            # (адверсариальный проход №2).
+            for provider in _QUOTA_PROVIDERS:
+                if provider not in loaded:
+                    GLOBAL_QUOTA[provider] = {}
+            if USER_DAILY_KEY not in loaded:
+                GLOBAL_QUOTA[USER_DAILY_KEY] = {}
+            if STATS_KEY not in loaded:
+                GLOBAL_QUOTA[STATS_KEY] = {field: 0 for field in _STATS_FIELDS}
+        lcs._quota_load_failed = False
     except Exception as exc:
         # Чтение/разбор упали — память недостоверна, перезапись запрещена (см. флаг).
-        lcs._state_load_failed = True
+        lcs._quota_load_failed = True
         log.warning("[quota] Failed to load global quota: %s", exc)
     # Проверяем сразу после загрузки — если бот был перезапущен уже на следующие
     # сутки (обычное дело при редеплое), счётчики должны обнулиться сразу на
     # старте, а не ждать первого сообщения после полуночи или ближайшего часового тика.
     bot._reset_quota_if_new_day()
 
+_quota_retry_last_ts = 0.0
+_QUOTA_RETRY_SEC = 60.0
+
+
+def _sanitize_loaded_entry(entry: Any) -> dict[str, Any] | None:
+    """Снапшот мог хранить Infinity/мусор: нефинитная метка запирала провайдера
+    навсегда, потому что квота переживает рестарт (ревью 17.11.2026)."""
+    if not isinstance(entry, dict):
+        return None
+    clean = dict(entry)
+    for field in ("used", "neurons"):
+        if field not in clean:
+            continue
+        try:
+            value = float(clean.get(field) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if not math.isfinite(value) or value < 0:
+            value = 0.0
+        clean[field] = int(value) if field == "used" else value
+    for field in ("exhausted_at", "cooldown_until"):
+        if field not in clean:
+            continue
+        try:
+            value = float(clean.get(field) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        clean[field] = value if math.isfinite(value) and value > 0 else None
+    return clean
+
+
+def _merge_recovered_quota(local: dict[str, Any]) -> None:
+    """Снапшот мог устареть, пока шёл сбой: баны объединяем, счётчики берём
+    по максимуму, иначе поставленный во время сбоя бан терялся (ревью 17.11.2026)."""
+    import lumen_chat_state as lcs
+    # Баны не привязаны к суткам: объединяем их всегда, иначе бан, поставленный
+    # во время сбоя, исчезает при переходе через полночь (адверсариальный проход 17.11.2026).
+    for uid, ts in (local.get(lcs.BANNED_KEY) or {}).items():
+        if uid not in (GLOBAL_QUOTA.get(lcs.BANNED_KEY) or {}):
+            GLOBAL_QUOTA.setdefault(lcs.BANNED_KEY, {})[uid] = ts
+    if local.get("quota_day") != GLOBAL_QUOTA.get("quota_day"):
+        return
+    remote_daily = GLOBAL_QUOTA.setdefault(USER_DAILY_KEY, {})
+    for uid, entry in (local.get(USER_DAILY_KEY) or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        cur = remote_daily.get(uid)
+        if not isinstance(cur, dict):
+            remote_daily[uid] = dict(entry)
+            continue
+        for field in ("total", "gemini", "tts", "draw"):
+            try:
+                # Сумма, а не max: на время сбоя запись в хранилище выключена,
+                # и локальные счётчики — это расход, которого в снапшоте нет.
+                cur[field] = int(cur.get(field) or 0) + int(entry.get(field) or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+        # bonus — дневная доттация, а не расход: складывать её с удалённой
+        # значило бы выдавать лимит дважды (адверсариальный проход №2).
+        try:
+            cur["bonus"] = max(int(cur.get("bonus") or 0), int(entry.get("bonus") or 0))
+        except (TypeError, ValueError, OverflowError):
+            pass
+    remote_stats = GLOBAL_QUOTA.setdefault(STATS_KEY, {field: 0 for field in _STATS_FIELDS})
+    local_stats = local.get(STATS_KEY) or {}
+    for field in _STATS_FIELDS:
+        try:
+            remote_stats[field] = int(remote_stats.get(field) or 0) + int(local_stats.get(field) or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    for provider in _QUOTA_PROVIDERS:
+        local_models = local.get(provider) or {}
+        if not isinstance(local_models, dict):
+            continue
+        remote_models = GLOBAL_QUOTA.setdefault(provider, {})
+        for model, entry in local_models.items():
+            if not isinstance(entry, dict):
+                continue
+            cur = remote_models.get(model)
+            if not isinstance(cur, dict):
+                remote_models[model] = dict(entry)
+                continue
+            for field in ("used", "neurons"):
+                if field not in entry and field not in cur:
+                    continue
+                try:
+                    if field == "used":
+                        cur[field] = int(cur.get(field) or 0) + int(entry.get(field) or 0)
+                    else:
+                        cur[field] = float(cur.get(field) or 0.0) + float(entry.get(field) or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            for field in ("exhausted_at", "cooldown_until"):
+                try:
+                    merged = max(float(cur.get(field) or 0.0), float(entry.get(field) or 0.0))
+                except (TypeError, ValueError):
+                    continue
+                cur[field] = merged if math.isfinite(merged) and merged > 0 else None
+
+
+def recover_global_quota() -> bool:
+    """Повторное чтение квоты после стартового сбоя, не чаще раза в минуту:
+    без него баны и дневные счётчики терялись до конца жизни процесса."""
+    global _quota_retry_last_ts
+    import lumen_chat_state as lcs
+    if not lcs._quota_load_failed:
+        return True
+    now = time.monotonic()
+    # Ноль — «ещё не пробовали»: на свежем раннере monotonic() < 60, и первый
+    # ретрай считался слишком частым (ревью 17.11.2026, как в индексе состояния).
+    if _quota_retry_last_ts and now - _quota_retry_last_ts < _QUOTA_RETRY_SEC:
+        return False
+    _quota_retry_last_ts = now
+    local = copy.deepcopy(GLOBAL_QUOTA)
+    try:
+        load_global_quota()
+    except Exception as exc:
+        log.warning("[quota] Retry failed: %s", exc)
+    if not lcs._quota_load_failed:
+        _merge_recovered_quota(local)
+    return not lcs._quota_load_failed
+
+
 def save_global_quota() -> None:
     import bot
     import lumen_chat_state as lcs
-    if lcs._state_load_failed:
+    if lcs._quota_load_failed and not recover_global_quota():
         # Стартовая загрузка не удалась: удалённая квота новее пустой памяти, не затираем.
         log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
         return
@@ -231,6 +393,10 @@ def _record_quota_usage(provider: str, model_id: str, *, service: bool = False) 
 # Тот же QuotaEntry, что у текстовых моделей: used на успехе, exhausted_at до завтра,
 # cooldown_until на короткую перегрузку. Отдельного хранилища не заводим.
 IMAGE_QUOTA_PROVIDER = "image"
+# Один «юнит» бюджета — 104.2 Neuron: столько стоит одна генерация klein-4b
+# (80 генераций = 8336 Neuron из 10 000 бесплатных). Правка дороже: плюс 21 Neuron
+# на мегапиксель входа, то есть 12 МП фото ≈ 3.4 юнита (аудит 16.11.2026).
+IMAGE_UNIT_NEURONS = 104.2
 
 
 def _image_usage_total() -> int:
@@ -249,11 +415,40 @@ def _image_usage_total() -> int:
     return total
 
 
-def _image_budget_exhausted() -> bool:
-    """Общий дневной бюджет картинок: отказ до обращения к провайдеру, а не после.
-    Владелец без лимита — ему нужен живой прогон фичи в диагностике."""
+def _image_neurons_total() -> float:
+    """Израсходовано Neuron за квотный день. Старый снапшот без веса считается по
+    числу картинок: апгрейд не имеет права обнулить уже потраченный бюджет."""
     import bot
-    return _image_usage_total() >= bot.IMAGE_DAILY_LIMIT
+    bot._reset_quota_if_new_day()
+    sub = GLOBAL_QUOTA.get(IMAGE_QUOTA_PROVIDER)
+    if not isinstance(sub, dict):
+        return 0.0
+    total = 0.0
+    for entry in sub.values():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            neurons = entry.get("neurons")
+            if neurons is None:
+                total += max(0, int(entry.get("used") or 0)) * IMAGE_UNIT_NEURONS
+            else:
+                total += max(0.0, float(neurons))
+        except (TypeError, ValueError):
+            # Битый neurons не должен скрывать расход: считаем по числу картинок
+            # (ревью 17.11.2026).
+            try:
+                total += max(0, int(entry.get("used") or 0)) * IMAGE_UNIT_NEURONS
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+def _image_budget_exhausted() -> bool:
+    """Общий дневной бюджет картинок в Neuron: отказ до обращения к провайдеру.
+    Раньше считались штуки, и тяжёлая правка 12 МП списывала треть бюджета,
+    оставаясь одной из 80 (аудит 16.11.2026). Владелец без лимита."""
+    import bot
+    return _image_neurons_total() >= bot.IMAGE_DAILY_NEURONS
 
 
 def _image_provider_block_reason(provider: str) -> str | None:
@@ -275,17 +470,39 @@ def _image_provider_ready(provider: str) -> bool:
     return _image_provider_block_reason(provider) is None
 
 
-def _note_image_success(provider: str) -> None:
-    """И used++, и снятие обеих меток — делает _record_quota_usage."""
+def _note_image_success(provider: str, *, units: float = 1.0) -> None:
+    """used++ для /stats и лимита человека, плюс вес в Neuron для бюджета провайдера.
+    Единица — генерация (104.2 Neuron); правка передаёт свой вес с мегапикселями."""
     import bot
-    bot._record_quota_usage(IMAGE_QUOTA_PROVIDER, provider)
+    entry = bot._quota_entry(IMAGE_QUOTA_PROVIDER, provider)
+    try:
+        used = int(entry.get("used") or 0)
+    except (TypeError, ValueError):
+        used = 0
+    try:
+        neurons = float(entry.get("neurons") or 0.0)
+    except (TypeError, ValueError):
+        neurons = 0.0
+    entry["used"] = used + 1
+    entry["neurons"] = neurons + max(0.0, float(units)) * IMAGE_UNIT_NEURONS
+    entry["exhausted_at"] = None
+    entry["cooldown_until"] = None
+    bot.mark_quota_dirty()
 
 
 def _note_image_rate_limited(provider: str, *, retry_after_sec: float | None = None) -> None:
     """Пауза на провайдера: Retry-After сервиса, но не меньше IMAGE_PROVIDER_COOLDOWN_SEC."""
     import bot
     entry = bot._quota_entry(IMAGE_QUOTA_PROVIDER, provider)
-    wait = max(float(bot.IMAGE_PROVIDER_COOLDOWN_SEC), float(retry_after_sec or 0.0))
+    try:
+        wait = float(retry_after_sec or 0.0)
+    except (TypeError, ValueError):
+        wait = 0.0
+    if not math.isfinite(wait) or wait < 0:
+        wait = 0.0
+    # Потолок в сутки: мусорный Retry-After не должен отключать картинки
+    # навсегда — квота переживает рестарт (ревью 17.11.2026).
+    wait = min(max(float(bot.IMAGE_PROVIDER_COOLDOWN_SEC), wait), 86400.0)
     entry["cooldown_until"] = time.time() + wait
     bot.mark_quota_dirty()
 
@@ -368,7 +585,22 @@ def _user_daily_entry(user_id: int | None) -> dict[str, Any]:
     # bonus — задел под платное продление, сам платёж не реализован.
     if len(bucket) > MAX_USER_DAILY_KEYS:
         drop = len(bucket) - int(MAX_USER_DAILY_KEYS * 0.9)
-        for old in list(bucket)[:drop]:
+
+        def _idle(value: Any) -> bool:
+            # Вытеснять можно только пустые записи: расход и bonus — это выданный
+            # лимит, снос обнулял его и пускал флудера снова (ревью 17.11.2026).
+            if not isinstance(value, dict) or value.get("bonus"):
+                return False
+            for field in ("total", "gemini", "tts", "draw"):
+                try:
+                    if int(value.get(field) or 0) > 0:
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            return True
+
+        victims = [old for old, value in bucket.items() if old != key and _idle(value)]
+        for old in victims[:drop]:
             bucket.pop(old, None)
     return entry
 

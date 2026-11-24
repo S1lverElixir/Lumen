@@ -1,6 +1,8 @@
 # Секреты — не должны попасть в образ ни при каких обстоятельствах
 .env
 *.env
+# .env.local/.env.production и подобные: * .env их не ловит (аудит 16.11.2026)
+.env*
 
 # git-метаданные не нужны в контейнере
 .git
@@ -10,10 +12,12 @@
 tests/
 requirements-dev.txt
 .pytest_cache/
+eval/
 README.md
 docs/
 assets/
 proxy/
+worker/
 
 # Внутренние доки и метаданные — в рантайме не читаются, в слои образа не едут
 AGENTS.md

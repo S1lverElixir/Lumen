@@ -34,7 +34,9 @@ def _env(name: str, default: str = "") -> str:
     value = os.getenv(name, "").strip()
     if value:
         return value
-    env_file = ROOT / ".env"
+    # Как у остальных проб: из worktree ключи берём там, где их указал
+    # LUMEN_ENV_DIR (ревью 17.11.2026).
+    env_file = Path(os.getenv("LUMEN_ENV_DIR") or ROOT) / ".env"
     if not env_file.exists():
         return default
     for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():

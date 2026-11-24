@@ -68,6 +68,48 @@ class _FakeExc(Exception):
         self.status_code = status_code
 
 
+class _FakeStatus:
+    """Запись того, что обработчик показал в живом пузыре: закрытые этапы, фазы с
+    подстановками, строки действия и источники. Один на все модульные тесты статуса,
+    чтобы правка StatusMessage не требовала правки трёх копий фейка."""
+
+    def __init__(self):
+        self.message = object()
+        self.started: tuple[str, bool] | None = None
+        self.done: list[tuple[str, dict]] = []
+        self.phases: list[tuple[str, bool]] = []
+        self.phase_kwargs: list[dict] = []
+        self.actions: list[str] = []
+        self.sources: list[str] = []
+        self.stopped = False
+        self.deleted = False
+
+    def add_done(self, key, **kwargs):
+        self.done.append((key, kwargs))
+
+    def set_sources(self, hosts):
+        self.sources = list(hosts)
+
+    async def set_phase(self, key, *, timed=False, **kwargs):
+        self.phases.append((key, timed))
+        self.phase_kwargs.append(kwargs)
+
+    async def set_action(self, text, *, timed=True):
+        self.actions.append(text)
+
+    async def mark_stage_done(self):
+        pass
+
+    async def finish(self):
+        self.stopped = True
+
+    async def stop(self):
+        self.stopped = True
+
+    async def delete(self):
+        self.deleted = True
+
+
 class _FakeStatusExc(Exception):
     def __init__(self, msg, status_code=None):
         super().__init__(msg)
@@ -155,10 +197,17 @@ class _FakeGeminiResponse:
 class _FakeSentMessage:
     def __init__(self):
         self.edits = []
+        self.edit_kwargs = []
+        self.markup_edits = []
         self.deleted = False
 
     async def edit_text(self, text, **kwargs):
         self.edits.append((text, kwargs.get("parse_mode")))
+        self.edit_kwargs.append(kwargs)
+        return self
+
+    async def edit_reply_markup(self, **kwargs):
+        self.markup_edits.append(kwargs)
         return self
 
     async def delete(self):
@@ -179,6 +228,7 @@ class _FakeIncomingMessage:
 
     async def reply(self, text, **kwargs):
         msg = _FakeSentMessage()
+        msg.send_kwargs = kwargs
         self.sent.append(msg)
         return msg
 
@@ -325,6 +375,12 @@ class _FakeTikTokBot:
 
     async def send_audio(self, **kwargs):
         return SimpleNamespace()
+
+    async def send_photo(self, **kwargs):
+        return SimpleNamespace()
+
+    async def send_media_group(self, **kwargs):
+        return [SimpleNamespace() for _ in kwargs.get("media") or []]
 
 
 class _FakeTikTokResponse:

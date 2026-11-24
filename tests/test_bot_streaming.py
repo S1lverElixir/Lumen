@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import asyncio
 import bot
 import lumen_router_config
+import lumen_search
 import lumen_streaming
 import pytest
 import time
@@ -477,7 +478,7 @@ def test_sse_pieces_hanging_post_entry_times_out(deadline_mode, monkeypatch):
 def test_try_munito_streaming_happy_path_accumulates_and_finalizes(monkeypatch):
     chat_id = 999105
 
-    async def fake_stream_pieces(model_id, messages, *, deadline=None):
+    async def fake_stream_pieces(model_id, messages, *, deadline=None, effort=None):
         for piece in ["Привет", ", как ", "дела?"]:
             yield piece
 
@@ -523,7 +524,10 @@ def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
-def test_streaming_respects_route_deadline():
+def test_streaming_respects_route_deadline(monkeypatch):
+    # Grace-окно живого стрима в проде 20 с; в тесте окно уменьшаем, иначе
+    # он спит 20 секунд, а проверяется именно застой куска.
+    monkeypatch.setattr(bot, "STREAM_ROUTE_STALL_GRACE_SEC", 0.3)
     # Внешний аудит: капающий по куску стрим жил мимо ROUTE_TOTAL_BUDGET_SEC и держал lock.
     chat_id = 999309
 
@@ -541,7 +545,8 @@ def test_streaming_respects_route_deadline():
         ))
         elapsed = time.monotonic() - started
         # Бюджет уже прошёл: либо плейсхолдер дальше, либо финал с пометкой — но не вечное ожидание.
-        assert placeholder is not None or answer is not None
+        # Частичный ответ обязан вернуться, а не пустышка (ревью 17.11.2026).
+        assert answer is not None and answer.startswith("начало")
         # Висящий второй кусок (3600с) обязан оборваться бюджетом, а не зависнуть.
         assert elapsed < 30, f"стрим ждал висящий кусок мимо дедлайна: {elapsed:.1f}с"
     finally:
@@ -555,7 +560,7 @@ def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
     import lumen_streaming
     seen = {}
 
-    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit, first_task=None, status=None, wait_started=None):
+    async def fake_feedback(piece_agen, placeholder, *, first_chunk_limit, first_task=None, status=None, wait_started=None, reply_markup=None):
         seen["limit"] = first_chunk_limit
         if first_task is not None:
             yield await first_task
@@ -663,11 +668,14 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
             raise asyncio.CancelledError
 
     monkeypatch.setattr(bot, "_dots_sleep", fake_sleep)
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    import lumen_streaming
+    markup = lumen_streaming._stop_button_markup(999300)
     placeholder = _FakeSentMessage()
 
     async def run():
         with pytest.raises(asyncio.CancelledError):
-            await bot._tick_waiting_dots(placeholder)
+            await bot._tick_waiting_dots(placeholder, reply_markup=markup)
 
     asyncio.run(run())
     assert calls[0] == bot._DOTS_START_AFTER_SEC
@@ -680,6 +688,7 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     # иначе первая же правка повторяет тот же символ (ревью 28.10.2026).
     assert placeholder.edits[0][0].startswith(lumen_status._TRIO_FRAMES[1])
     assert [text[0] for text, _ in placeholder.edits] == list(lumen_status._TRIO_FRAMES[1:4])
+    assert all(kw.get("reply_markup") is markup for kw in placeholder.edit_kwargs)
     # Код языка не должен утечь в chat_state строковым ключом (прод 28.10.2026).
     assert "en" not in bot.chat_state
 
@@ -699,8 +708,13 @@ def test_streaming_fast_path_shows_no_dots_frames():
             piece_agen=instant_pieces(),
         ))
         assert answer == "Привет"
-        for text, _ in incoming.sent[0].edits:
-            assert text not in bot._DOTS_FRAMES
+        texts = [text for text, _ in incoming.sent[0].edits]
+        assert texts and texts[-1] == "Привет", "финальная правка — ровно ответ"
+        # Прежний ассерт «text not in _DOTS_FRAMES» был вакуумным: тикер пишет
+        # «глиф + Думаю…», а не голые точки, и падение стрима с припиской
+        # оставалось зелёным (ревью 17.11.2026). В быстром пути каждая правка —
+        # префикс ответа, ни кадра тикера, ни приписок.
+        assert all("Привет".startswith(t) for t in texts), texts
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -725,6 +739,28 @@ def test_streaming_plain_text_has_no_thought_line():
         assert final_text == "Привет"
         assert "Thought for" not in final_text
         assert "<blockquote" not in final_text
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_slow_first_chunk_has_no_synthetic_thought_line():
+    # Прод 23.11.2026: Claude убрал финальную строку активности у простого
+    # ответа. Медленный первый кусок не должен возвращать синтетический заголовок.
+    chat_id = 999322
+
+    async def pieces():
+        await asyncio.sleep(1.05)
+        yield "Привет"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-slow",
+            piece_agen=pieces(),
+        ))
+        assert answer == "Привет"
+        assert all("✻" not in text for text, _ in incoming.sent[0].edits)
+        assert incoming.sent[0].edits[-1][0].strip() == "Привет"
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -775,10 +811,11 @@ def test_streaming_final_split_sends_missing_continuation(monkeypatch):
 
 
 def test_streaming_resplit_shifted_boundary_re_edits_shown_message(monkeypatch):
-    # Границы _split_text_chunks зависят от всего текста (соседние куски склеиваются
-    # по итоговому HTML), поэтому рост ответа сдвигает границу УЖЕ показанного куска.
-    # Старый код финализированные сообщения не трогал, и символы между старой и новой
-    # границей не попадали в чат вовсе (аудит 01.11.2026).
+    # Границы _split_text_chunks зависят от всего текста (склейка соседей по
+    # итоговому HTML), поэтому рост ответа сдвигал границу УЖЕ показанного куска,
+    # старый код дописывал за этим правку финализированного сообщения, и видимый
+    # текст перетекал между пузырями (аудит 01.11.2026; ревью 11.11.2026 п.5
+    # против: граница замораживается один раз, пересчитывается только хвост).
     from lumen_formatting import _md_to_html, _split_text_chunks
 
     chat_id = 999326
@@ -808,10 +845,23 @@ def test_streaming_resplit_shifted_boundary_re_edits_shown_message(monkeypatch):
         ))
         final = _split_text_chunks(answer, bot.TG_MAX_LEN)
         assert len(final) > 1
-        # На первой итерации разбиения границ был левее — иначе тест ничего не проверяет.
-        assert len(_split_text_chunks(base, bot.TG_MAX_LEN)[0]) < len(final[0])
+        # На первом куске граница была левее — иначе тест ничего не проверяет.
+        frozen_boundary = _split_text_chunks(base, bot.TG_MAX_LEN)
+        assert len(frozen_boundary) > 1, "первое разбиение обязано дать >1 куска"
+        assert len(frozen_boundary[0]) < len(final[0])
         shown_first = incoming.sent[0].edits[-1][0]
-        assert shown_first == _md_to_html(final[0])
+        # Первый пузырь остался на замороженной границе: old-код переставил бы
+        # его на финальную (сдвинутую) границу.
+        assert shown_first == _md_to_html(frozen_boundary[0])
+        # Покрытие не потерялось: хвост ушёл в продолжения, последнее показанное
+        # сообщение заканчивается фразой модели; «…» среди продолжений не слан.
+        cont_texts = [str(kw.get("text", "")) for kw, _m in bot.bot.sent]
+        assert cont_texts and "…" not in cont_texts
+        last_shown = cont_texts[-1] or ""
+        for _kw, msg in bot.bot.sent:
+            if msg.edits:
+                last_shown = msg.edits[-1][0]
+        assert "который дописала модель" in last_shown
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -850,6 +900,11 @@ def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
 
         async def finish(self):
             self.finished = True
+
+        def paint_header_md(self):
+            # Стрим нарисовал бы под этой строкой тело ответа; здесь ответ
+            # мгновенный, секунд 0 — строки нет (ревью 11.11.2026).
+            return ""
 
         def compose_answer(self, answer_md):
             return ("<blockquote expandable>✻ Thought for 1s</blockquote>\n\n" + answer_md,
@@ -922,7 +977,7 @@ def test_streaming_reveal_follows_arrival_pace_not_full_dump():
 def test_try_munito_streaming_returns_none_on_early_failure(monkeypatch):
     chat_id = 999106
 
-    async def fake_stream_pieces_raises(model_id, messages, *, deadline=None):
+    async def fake_stream_pieces_raises(model_id, messages, *, deadline=None, effort=None):
         raise RuntimeError("boom before any content")
         yield ""  # делает функцию async-генератором (недостижимо)
 
@@ -987,11 +1042,14 @@ def test_run_streaming_reply_paces_reveal_for_burst_instead_of_dumping_full_text
         answer, placeholder = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == long_text.strip()
         assert placeholder is None
-        plain_edits = [text for text, parse_mode in incoming.sent[0].edits if parse_mode is None]
+        partial_edits = [text for text, parse_mode in incoming.sent[0].edits if parse_mode is bot.ParseMode.HTML]
         # Хотя бы одна промежуточная правка должна была показать ЧАСТЬ текста, а
         # не весь ответ разом — иначе пейсинг не сработал (регрессия на исходную
-        # проблему: "скачками по 15-20 слов" вместо плавного набора).
-        assert any(0 < len(p) < len(long_text) for p in plain_edits)
+        # проблему: "скачками по 15-20 слов" вместо плавного набора). С ревью
+        # 11.11.2026 п.4 промежуточные кадры идут HTML с закрытой разметкой, а
+        # не голым текстом, поэтому фильтр по HTML, а не по None.
+        assert any(0 < len(p) < len(long_text) for p in partial_edits)
+        assert all("**" not in p for p in partial_edits)
         # Финальная правка — уже HTML с полным текстом, как и раньше.
         assert incoming.sent[0].edits[-1][1] == bot.ParseMode.HTML
         history = bot.chat_state[chat_id]["history"]
@@ -1036,7 +1094,7 @@ def test_run_streaming_reply_records_observed_speed_on_success():
 def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_burst():
     # РЕГРЕССИЯ на ключевое требование: сколько бы ни оценивалась скорость модели
     # заниженно и сколько бы символов ни осталось "довыводить" одним куском, число
-    # искусственных пауз ограничено STREAM_TYPING_MAX_CATCHUP_TICKS — реальная
+    # искусственных пауз ограничено STREAM_TYPING_MAX_CATCHUP_SEC — реальная
     # скорость ответа не должна страдать ради красивости набора текста.
     import lumen_typing_pace
     chat_id = 999112
@@ -1064,7 +1122,13 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
     try:
         answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == long_text.strip()
-        assert len(sleep_calls) <= bot.STREAM_TYPING_MAX_CATCHUP_TICKS
+        # Шаг — пауза плюс реальная правка, а не только пауза (ревью 17.11.2026).
+        tick_ceiling = max(1, int(
+            bot.STREAM_TYPING_MAX_CATCHUP_SEC
+            / (bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC)))
+        assert len(sleep_calls) <= tick_ceiling
+        # Длинный хвост идёт ровно, а не восьмью прыжками: тиков заметно больше.
+        assert len(sleep_calls) > 8, sleep_calls
     finally:
         bot._typing_sleep = original_sleep
         bot.client = original_client
@@ -1252,6 +1316,29 @@ def test_rich_send_used_for_final_answer_with_table():
         bot.chat_state.pop(chat_id, None)
 
 
+def test_rich_send_keeps_table_when_split_would_exceed_message_limit():
+    # Прод 24.11.2026: split широкой таблицы плюс обычный текст мог превысить
+    # 4096, и rich-путь целиком терялся. Повтор без split сохраняет таблицу.
+    from lumen_formatting import _tg_len
+
+    chat_id = 999403
+    incoming = _FakeIncomingMessage(chat_id)
+    original_bot = bot.bot
+    bot.bot = _FakeRichBot()
+    rows = "\n".join(f"| row{i} | a{i} | b{i} | c{i} |" for i in range(40))
+    text = "x" * 1000 + "\n| key | a | b | c |\n|---|---|---|---|\n" + rows
+    try:
+        asyncio.run(bot._safe_reply(incoming, text))
+        assert len(bot.bot.rich_sent) == 1
+        html = bot.bot.rich_sent[0]["rich_message"].html
+        assert html.count("<table bordered compact>") == 1
+        assert _tg_len(html) <= bot.TG_MAX_LEN
+        assert incoming.sent == []
+    finally:
+        bot.bot = original_bot
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_rich_failure_falls_back_to_legacy_html():
     chat_id = 999402
     incoming = _FakeIncomingMessage(chat_id)
@@ -1374,3 +1461,595 @@ def test_streaming_falls_back_to_reply_when_edits_die(monkeypatch):
     finally:
         bot.chat_state.pop(chat_id, None)
 
+
+
+def test_stream_search_marker_never_reaches_the_screen_and_keeps_the_bubble():
+    # Скрины из группы 11.11.2026: «когда вышла Fable 5.2» отвечали по памяти,
+    # потому что классификатор формулировки не узнаёт их. Решение отдано модели
+    # маркером [[SEARCH]] — он не имеет права мелькнуть на экране даже покусочно,
+    # а пузырёк «Думаю…» должен дожить до второго прохода со сниппетами.
+    chat_id = 999151
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream(
+        ["[[SE", "ARCH]]", " этот хвост не дойдёт"])
+    incoming = _FakeIncomingMessage(chat_id)
+    original_client = bot.client
+    saved_gemini = dict(bot.GLOBAL_QUOTA.get("gemini") or {})
+    before_used = sum(int((e or {}).get("used") or 0)
+                      for e in saved_gemini.values() if isinstance(e, dict))
+    bot.client = fake_client
+    try:
+        with pytest.raises(lumen_search._SearchRequested) as caught:
+            asyncio.run(bot._try_gemini_streaming(chat_id, "когда вышла Fable 5.2", incoming, bot.DEFAULT_GEMINI_MODEL))
+        assert incoming.sent[0].edits == []
+        assert caught.value.placeholder is incoming.sent[0]
+        assert bot.chat_state[chat_id].get("history") == []
+        after_used = sum(int((e or {}).get("used") or 0)
+                         for e in (bot.GLOBAL_QUOTA.get("gemini") or {}).values() if isinstance(e, dict))
+        # Решение «нужен поиск» — тоже вызов провайдера: расход записан (аудит 16.11.2026).
+        assert after_used == before_used + 1
+    finally:
+        bot.client = original_client
+        bot.GLOBAL_QUOTA["gemini"] = saved_gemini
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_live_stream_is_not_cut_by_the_route_budget(monkeypatch):
+    # РЕГРЕССИЯ на прод 11.11.2026: 5700-символьный ответ оборвался на 35-й
+    # секунде с пометкой «Соединение прервалось», потому что стрим проверялся
+    # общим 40-секундным бюджетом маршрута. Пока куски прибывают, ответ должен
+    # дойти до конца.
+    chat_id = 999311
+    monkeypatch.setattr(bot, "STREAM_ROUTE_MAX_SEC", 30)
+
+    async def steady_drip_pieces():
+        for n in range(30):
+            yield "кусочек%02d " % n
+            await asyncio.sleep(0.05)
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-y",
+            piece_agen=steady_drip_pieces(), deadline=time.monotonic() - 1.0,
+        ))
+        assert answer is not None and placeholder is None
+        assert "кусочек29" in answer, answer
+        assert not any("interrupted" in (t or "").lower() for t, _ in incoming.sent[0].edits)
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_stream_extension_never_exceeds_the_message_budget():
+    # Аудит 16.11.2026: продление живого стрима (STREAM_ROUTE_MAX_SEC) не учитывало
+    # остаток MESSAGE_TOTAL_BUDGET_SEC, хотя комментарий в bot.py обещает min(свой
+    # таймаут, остаток) на каждом этапе. Без клампа поиск на 40 с плюс 55 с стрима
+    # держали лок чата дольше заявленного потолка сообщения.
+    from lumen_streaming import _stream_deadline
+
+    now = time.monotonic()
+    token = bot._MSG_DEADLINE.set(now + 3.0)
+    try:
+        assert _stream_deadline(now - 1.0, now) <= now + 3.05
+    finally:
+        bot._MSG_DEADLINE.reset(token)
+    # Вне handle_message потолка нет: продление длинного ответа работает как раньше.
+    assert _stream_deadline(now - 1.0, now) == now + bot.STREAM_ROUTE_STALL_GRACE_SEC
+
+
+def test_stop_ends_the_stream_and_keeps_the_partial_answer():
+    # Аудит 16.11.2026: остановка ответа — обещанный контроль. Частичный текст
+    # остаётся на экране и ложится в историю; хвост, пришедший после остановки,
+    # в ответ не попадает; автопродолжение после осознанного стопа не запускается.
+    chat_id = 999313
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def pieces():
+        yield "Первый кусок текста. "
+        bot._request_stream_stop(chat_id)
+        yield "этот кусок не должен попасть в ответ"
+
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-stop",
+            piece_agen=pieces(), deadline=time.monotonic() + 30,
+        ))
+        assert answer is not None and "Первый кусок текста." in answer
+        assert "не должен попасть" not in answer
+        note = bot._t(chat_id, "stream_note_stopped").strip()
+        assert any(note in (text or "") for text, _ in incoming.sent[0].edits)
+        assert bot.chat_state[chat_id]["interrupted"] is True
+        assert bot.chat_state[chat_id].get("stopped_by_user") is True
+        assert bot.chat_state[chat_id].get("stream_interrupted") is None
+        assert bot._STREAM_STOPS.get(chat_id) is None
+    finally:
+        bot.chat_state.pop(chat_id, None)
+        bot._STREAM_STOPS.pop(chat_id, None)
+
+
+def test_stop_command_is_silent_without_an_active_stream():
+    from types import SimpleNamespace
+    import lumen_commands
+
+    sent = []
+
+    async def answer(*args, **kwargs):
+        sent.append(args)
+
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=999314),
+        from_user=SimpleNamespace(id=777001),
+        answer=answer,
+    )
+    asyncio.run(lumen_commands.cmd_stop(message))
+    assert sent == []
+
+
+def test_group_catchup_uses_the_shorter_ceiling():
+    # В группе лок чата общий: длинный хвост не должен держать его 20 секунд.
+    import lumen_typing_pace
+
+    chat_id = 999113
+    pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
+    original_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.chat.type = "group"
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream(["Буква " * 500])
+    sleep_calls: list[float] = []
+
+    async def counting_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    original_sleep, original_client = bot._typing_sleep, bot.client
+    bot._typing_sleep = counting_sleep
+    bot.client = fake_client
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
+    finally:
+        bot._typing_sleep, bot.client = original_sleep, original_client
+        bot.chat_state.pop(chat_id, None)
+        if original_ema is not None:
+            lumen_typing_pace._speed_ema[pace_key] = original_ema
+        else:
+            lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+    step_sec = bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC
+    group_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_GROUP_SEC / step_sec)
+    private_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / step_sec)
+    assert len(sleep_calls) <= group_ceiling < private_ceiling
+    # Отключённый довывод (бюджет 0) раньше оставлял тест зелёным:
+    assert len(sleep_calls) > 0
+    assert (answer or "").strip() == ("Буква " * 500).strip()
+def test_catchup_tick_budget_arithmetic():
+    import lumen_typing_pace
+    # Ревью 11.11.2026: потолок тиков = секунды бюджета / реальный шаг (пауза
+    # + правка). Нулевой бюджет и нулевой шаг не имеют права ни на одну паузу.
+    assert lumen_typing_pace.catchup_tick_budget(20.0, 1.2) == 16
+    assert lumen_typing_pace.catchup_tick_budget(8.0, 1.2) == 6
+    assert lumen_typing_pace.catchup_tick_budget(0.0, 1.2) == 0
+    assert lumen_typing_pace.catchup_tick_budget(20.0, 0.0) == 0
+
+
+def test_catchup_tick_count_follows_the_real_step_not_the_sleep_only():
+    # РЕГРЕССИЯ на ревью 11.11.2026: бюджет довывода делился только на паузу,
+    # хотя каждый тик стоит ещё и правку (0,5-0,7 с через реле). 20 секунд
+    # бюджета при шаге 1,2 с — это 16 тиков, а не 40: раньше длинный хвост
+    # держал лок чата вдвое дольше разрешённого и уходил за бюджет сообщения.
+    import lumen_typing_pace
+    chat_id = 999312
+    pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
+    saved_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC
+    text = "Буква " * 500
+    incoming = _FakeIncomingMessage(chat_id)
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream([text])
+    sleeps: list[float] = []
+
+    async def counting_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    saved_client, saved_sleep = bot.client, bot._typing_sleep
+    bot.client, bot._typing_sleep = fake_client, counting_sleep
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
+        assert answer == text.strip()
+        step_sec = bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC
+        ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / step_sec)
+        assert len(sleeps) <= ceiling, (len(sleeps), ceiling)
+        assert len(sleeps) > 8, "хвост длинного ответа всё ещё доводится плавно, а не одним куском"
+    finally:
+        bot.client, bot._typing_sleep = saved_client, saved_sleep
+        bot.chat_state.pop(chat_id, None)
+        if saved_ema is not None:
+            lumen_typing_pace._speed_ema[pace_key] = saved_ema
+        else:
+            lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+
+def test_catchup_survives_zero_typing_tick_setting(monkeypatch):
+    # Ревью 11.11.2026: STREAM_TYPING_TICK_SEC допускает 0, и деление бюджета
+    # на ноль уводило целый ответ в ветку сбоя с пометкой «Соединение
+    # прервалось». Конфиг-опечатка не должна ломать доставку.
+    import lumen_typing_pace
+    chat_id = 999313
+    pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
+    saved_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC
+    monkeypatch.setattr(bot, "STREAM_TYPING_TICK_SEC", 0.0)
+    text = "Буква " * 300
+    incoming = _FakeIncomingMessage(chat_id)
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = _fake_gemini_stream([text])
+    saved_client = bot.client
+    bot.client = fake_client
+    try:
+        answer, _ = asyncio.run(bot._try_gemini_streaming(
+            chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL,
+        ))
+        assert answer == text.strip()
+    finally:
+        bot.client = saved_client
+        bot.chat_state.pop(chat_id, None)
+        if saved_ema is not None:
+            lumen_typing_pace._speed_ema[pace_key] = saved_ema
+        else:
+            lumen_typing_pace._speed_ema.pop(pace_key, None)
+
+
+def test_stop_permissions_and_idempotency():
+    # Аудит 16.11.2026: чужой человек в группе остановить ответ не может, повторный
+    # /stop ничего не делает, область снимается без утечки на следующий ответ.
+    bot._STREAM_STOPS.clear()
+    bot._begin_stream_stop_scope(424242, 100)
+    try:
+        assert bot._request_stream_stop(424242, 999) is False
+        assert bot._stream_stop_requested(424242) is False
+        assert bot._request_stream_stop(424242, 100) is True
+        assert bot._stream_stop_requested(424242) is True
+        assert bot._request_stream_stop(424242, 100) is False
+        # Вложенная область (стрим) не снимает внешнюю и не теряет флаг.
+        bot._begin_stream_stop_scope(424242, 100)
+        bot._end_stream_stop_scope(424242)
+        assert bot._stream_stop_requested(424242) is True
+    finally:
+        bot._end_stream_stop_scope(424242)
+    assert bot._STREAM_STOPS.get(424242) is None
+
+
+def test_stop_flag_is_consumed_and_does_not_kill_the_next_queued_question():
+    # Второй проход аудита 16.11.2026: флаг на чат переживал апдейт, и второй
+    # вопрос, ждавший лок, гас на первой же проверке стрима.
+    bot._STREAM_STOPS.clear()
+    bot._begin_stream_stop_scope(515151, 100)
+    bot._begin_stream_stop_scope(515151, 200)
+    try:
+        assert bot._request_stream_stop(515151, 100) is True
+        bot._consume_stream_stop(515151)
+        assert bot._stream_stop_requested(515151) is False
+        assert bot._request_stream_stop(515151, 200) is True
+    finally:
+        bot._end_stream_stop_scope(515151)
+        bot._end_stream_stop_scope(515151)
+    assert bot._STREAM_STOPS.get(515151) is None
+
+
+def test_stop_button_is_off_by_default_and_wired_when_on(monkeypatch):
+    # Аудит 16.11.2026: кнопка добавляет две правки на ответ, поэтому по умолчанию
+    # выключена до живого смоука; включённая несёт локализованную подпись и callback
+    # на конкретный чат.
+    import lumen_streaming
+
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", False)
+    assert lumen_streaming._stop_button_markup(1) is None
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    kb = lumen_streaming._stop_button_markup(424242)
+    assert kb is not None
+    btn = kb.inline_keyboard[0][0]
+    assert btn.callback_data == "stop:424242"
+    assert btn.text == bot._t(424242, "stop_button")
+
+
+def test_private_stop_keyboard_survives_stream_edits(monkeypatch):
+    # Прод 24.11.2026: inline-кнопка под растущим ответом уезжала за экран.
+    # В личке Stop живёт в reply-клавиатуре над композером.
+    from types import SimpleNamespace
+    from aiogram.types import ReplyKeyboardRemove
+
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    chat_id = 999404
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=77)
+
+    class _Placeholder:
+        def __init__(self):
+            self.chat = incoming.chat
+            self.message_id = 1
+            self.text_edits = []
+
+        async def edit_text(self, text, **kwargs):
+            self.text_edits.append(kwargs)
+            return self
+
+    async def pieces():
+        yield "Привет"
+
+    placeholder = _Placeholder()
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-stop-button",
+            piece_agen=pieces(), reuse_placeholder=placeholder,
+        ))
+        assert answer == "Привет"
+        assert len(incoming.sent) == 2
+        control, remover = incoming.sent
+        assert control.send_kwargs["reply_markup"].keyboard[0][0].text == "/stop"
+        assert isinstance(remover.send_kwargs["reply_markup"], ReplyKeyboardRemove)
+        assert all("reply_markup" not in kw for kw in placeholder.text_edits)
+        assert control.deleted is True and remover.deleted is True
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_stop_control_moves_below_each_continuation(monkeypatch):
+    # Длинный ответ создаёт continuation-пузыри. Stop должен оставаться последним
+    # сообщением, иначе новый пузырь снова выталкивает кнопку за экран.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    chat_id = 999407
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=77)
+    events = []
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            msg = _FakeSentMessage()
+            msg.chat = incoming.chat
+            msg.message_id = len(events) + 10
+            events.append(("answer", msg))
+            return msg
+
+    async def reply(text, **kwargs):
+        msg = _FakeSentMessage()
+        msg.send_kwargs = kwargs
+        events.append(("control", msg))
+        return msg
+
+    original_bot = bot.bot
+    bot.bot = _Bot()
+    incoming.reply = reply
+    placeholder = _FakeSentMessage()
+    placeholder.chat = incoming.chat
+    placeholder.message_id = 1
+
+    async def pieces():
+        yield "a" * 5000
+
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "длинный ответ", incoming, provider="munito", model_id="probe-stop-continuation",
+            piece_agen=pieces(), reuse_placeholder=placeholder,
+        ))
+        assert answer == "a" * 5000
+        controls = [msg for kind, msg in events if kind == "control"]
+        answers = [msg for kind, msg in events if kind == "answer"]
+        assert len(answers) >= 1
+        # В личке reply-клавиатура не пересоздаётся для continuation; второй
+        # control — служебное сообщение с ReplyKeyboardRemove.
+        assert len(controls) == 2
+        assert all(msg.deleted for msg in controls)
+    finally:
+        bot.bot = original_bot
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_stop_button_cleanup_waits_for_status_ticker(monkeypatch):
+    # При явном stop тикер останавливается раньше, чем удаляется отдельный
+    # control-пузырь; поздних правок, которые могли бы вернуть кнопку, нет.
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    chat_id = 999405
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=77)
+    events = []
+
+    class _Control(_FakeSentMessage):
+        async def delete(self):
+            events.append("control_delete")
+            await super().delete()
+
+    control = _Control()
+    remover = _FakeSentMessage()
+
+    async def reply(text, **kwargs):
+        if kwargs["reply_markup"].__class__.__name__ == "ReplyKeyboardRemove":
+            events.append("keyboard_remove")
+            remover.send_kwargs = kwargs
+            return remover
+        events.append("control_sent")
+        control.send_kwargs = kwargs
+        return control
+
+    incoming.reply = reply
+
+    class _Placeholder:
+        def __init__(self):
+            self.chat = incoming.chat
+            self.message_id = 1
+
+        async def edit_text(self, text, **kwargs):
+            return self
+
+    class _Status:
+        def __init__(self, placeholder):
+            self.message = placeholder
+            self.reply_markup = None
+
+        async def finish(self):
+            pass
+
+        async def stop(self):
+            events.append("status_stop")
+
+    async def stop_before_first_piece():
+        assert bot._request_stream_stop(chat_id, 77)
+        yield "Привет"
+
+    placeholder = _Placeholder()
+    status = _Status(placeholder)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-stop-cleanup",
+            piece_agen=stop_before_first_piece(), reuse_placeholder=placeholder, status=status,
+        ))
+        assert answer == ""
+        assert events == ["control_sent", "status_stop", "keyboard_remove", "control_delete"]
+        assert control.deleted is True and remover.deleted is True
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_stop_control_is_removed_when_placeholder_is_reused(monkeypatch):
+    # Ранний таймаут отдаёт пузырёк следующей попытке, но отдельный Stop-control
+    # удаляется: следующая попытка создаст свой и не оставит два Control в чате.
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    monkeypatch.setattr(lumen_streaming, "_model_first_chunk_limit", lambda key, floor: 0.01)
+    chat_id = 999406
+    incoming = _FakeIncomingMessage(chat_id)
+
+    class _Placeholder:
+        def __init__(self):
+            self.chat = incoming.chat
+            self.message_id = 1
+            self.reply_markup = None
+
+    class _Status:
+        def __init__(self, placeholder):
+            self.message = placeholder
+            self.reply_markup = None
+            self.stopped = False
+
+        async def stop(self):
+            self.stopped = True
+
+    async def hanging():
+        if False:
+            yield ""
+        await asyncio.Future()
+
+    placeholder = _Placeholder()
+    status = _Status(placeholder)
+    try:
+        answer, reused = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-stop-reuse",
+            piece_agen=hanging(), reuse_placeholder=placeholder, status=status,
+        ))
+        assert answer is None and reused is placeholder
+        assert len(incoming.sent) == 2
+        assert incoming.sent[0].send_kwargs["reply_markup"].keyboard
+        assert incoming.sent[1].send_kwargs["reply_markup"].__class__.__name__ == "ReplyKeyboardRemove"
+        assert all(msg.deleted for msg in incoming.sent)
+        assert status.stopped is False
+        assert placeholder.reply_markup is None
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_private_stop_keyboard_uses_prelock_stop_command(monkeypatch):
+    # /stop обрабатывается командным хендлером до chat-lock, поэтому кнопка
+    # действительно прерывает текущий стрим, а не ждёт его завершения.
+    import lumen_streaming
+
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    keyboard = lumen_streaming._stop_reply_keyboard(999408)
+    assert keyboard.keyboard[0][0].text == "/stop"
+
+
+def test_stop_token_rotates_for_next_queued_stream():
+    bot._STREAM_STOPS.clear()
+    bot._begin_stream_stop_scope(77, 5)
+    outer_token = bot._stream_stop_token(77)
+    bot._begin_stream_stop_scope(77, 5, stream=True)
+    first_token = bot._stream_stop_token(77)
+    bot._begin_stream_stop_scope(77, 5)  # следующий запрос уже ждёт лок
+    assert bot._stream_stop_token(77) == first_token
+    bot._end_stream_stop_scope(77)
+    bot._end_stream_stop_scope(77)
+    bot._begin_stream_stop_scope(77, 5, stream=True)
+    second_token = bot._stream_stop_token(77)
+    try:
+        assert outer_token and first_token and second_token
+        assert first_token != outer_token
+        assert second_token not in (outer_token, first_token)
+    finally:
+        bot._end_stream_stop_scope(77)
+        bot._end_stream_stop_scope(77)
+        bot._STREAM_STOPS.clear()
+
+
+def test_stop_callback_rejects_stale_button_token(monkeypatch):
+    from types import SimpleNamespace
+    import lumen_commands
+
+    bot._STREAM_STOPS.clear()
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    bot._begin_stream_stop_scope(77, 5)
+    token = bot._stream_stop_token(77)
+
+    async def answer(*args, **kwargs):
+        pass
+
+    stale = SimpleNamespace(
+        data="stop:77:stale", from_user=SimpleNamespace(id=5),
+        message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
+    )
+    try:
+        asyncio.run(lumen_commands.handle_stop_callback(stale))
+        assert bot._stream_stop_requested(77) is False
+        legacy = SimpleNamespace(
+            data="stop:77", from_user=SimpleNamespace(id=5),
+            message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
+        )
+        asyncio.run(lumen_commands.handle_stop_callback(legacy))
+        assert bot._stream_stop_requested(77) is False
+        fresh = SimpleNamespace(
+            data=f"stop:77:{token}", from_user=SimpleNamespace(id=5),
+            message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
+        )
+        asyncio.run(lumen_commands.handle_stop_callback(fresh))
+        assert bot._stream_stop_requested(77) is True
+    finally:
+        bot._end_stream_stop_scope(77)
+        bot._STREAM_STOPS.clear()
+
+
+def test_stop_callback_stops_only_for_the_author(monkeypatch):
+    from types import SimpleNamespace
+    import lumen_commands
+
+    bot._STREAM_STOPS.clear()
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    answered = []
+
+    async def answer(*args, **kwargs):
+        answered.append(True)
+
+    bot._begin_stream_stop_scope(77, 5)
+    token = bot._stream_stop_token(77)
+    q = SimpleNamespace(
+        data=f"stop:77:{token}", from_user=SimpleNamespace(id=5),
+        message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
+    )
+    try:
+        asyncio.run(lumen_commands.handle_stop_callback(q))
+        assert bot._stream_stop_requested(77) is True
+        assert answered
+    finally:
+        bot._end_stream_stop_scope(77)
+        bot._STREAM_STOPS.clear()

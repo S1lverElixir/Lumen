@@ -29,18 +29,8 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "stream": True,
         "search_grounding": False, "map_grounding": False, "url_context": True,
     },
-    # Прошлый флагман (GA 13 августа 2026), резерв после 3.8.
-    "gemini-3.7-flash": {
-        "stream": True,
-        "search_grounding": False, "map_grounding": False, "url_context": True,
-    },
-    # Резерв после 3.7.
+    # Резерв после 3.8 (дашборд 17.11.2026).
     "gemini-3.6-flash": {
-        "stream": True,
-        "search_grounding": False, "map_grounding": False, "url_context": True,
-    },
-    # Резерв после 3.6. url_context включён: у него нет отдельной дневной квоты.
-    "gemini-3.5-flash": {
         "stream": True,
         "search_grounding": False, "map_grounding": False, "url_context": True,
     },
@@ -60,21 +50,18 @@ GEMINI_MODELS: dict[str, dict[str, Any]] = {
         "stream": True,
         "search_grounding": False, "map_grounding": True, "url_context": True,
     },
-    # Баланс скорости и качества. Единственное поколение с квотой search grounding (21/1500).
-    "gemini-2.5-flash": {
-        "stream": True,
-        "search_grounding": True, "map_grounding": True, "url_context": True,
-    },
     # Экономичная: скорость важнее глубины рассуждений.
     "gemini-2.5-flash-lite": {
         "stream": True,
         "search_grounding": True, "map_grounding": True, "url_context": True,
     },
 }
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 
 # ── TTS-модели (аудит техдолга, август 2026) ──
-GEMINI_TTS_MODELS: list[str] = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"]
+# Дашборд 17.11.2026: старые preview имена отвечали «Unknown name speechConfig»;
+# живы 3.8 Flash TTS (10 RPD) и 3.8 Flash Lite TTS — их и берём.
+GEMINI_TTS_MODELS: list[str] = ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
 
 def _check_unconfirmed_model_quotas() -> None:
     """Напоминаем про модели с quota_unconfirmed: квота/grounding ещё не подтверждены по дашборду."""
@@ -88,6 +75,12 @@ def _check_unconfirmed_model_quotas() -> None:
 # Плоский список ID для детектора утечек, перепроверен по openrouter.ai (июль 2026). Не порядок роутера; снятые с тарифа оставляем: их тоже нельзя в ответ.
 # nemotron-3.5-content-safety — классификатор, а не диалоговая модель, не включаем намеренно.
 _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION: list[str] = [
+    # Снятые с тарифа Gemini — тоже нельзя называть в ответе (дашборд 17.11.2026).
+    "gemini-2.5-flash",
+    "gemini-3.7-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-tts-preview",
+    "gemini-2.5-flash-preview-tts",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "nvidia/nemotron-3-ultra-550b-a55b:free",
     "openai/gpt-oss-120b:free",
@@ -169,12 +162,26 @@ def _skip_exhausted(provider: str, models: list[str]) -> list[str]:
 
 # ── Временный карантин моделей ──
 # Только в памяти: N плохих ответов подряд (пусто или mush-каша) — и роутер
-# пропускает модель до конца суток квоты.
+# обходит модель QUARANTINE_WINDOW_SEC секунд (счётчик и бан живут в памяти).
 _QUARANTINE: dict[tuple[str, str], dict[str, Any]] = {}
-# Окно карантина: счётчик и сам бан живут не до полуночи, а столько секунд
-# (аудит run-2: три плохих ответа из одного чата выключали модель всем до конца
-# квотных суток, потому что успехом проверить её было уже нечем).
-QUARANTINE_WINDOW_SEC = max(60, int(os.getenv("QUARANTINE_WINDOW_SEC", "") or 900))
+# Окно карантина: счётчик и сам бан живут не до полуночи, а столько секунд,
+# причём отсчёт идёт от ПЕРВОГО плохого ответа окна (аудит run-2: три плохих
+# ответа из одного чата выключали модель всем до конца квотных суток, потому что
+# успехом проверить её было уже нечем). Мусорное значение в env не имеет права
+# валить импорт модуля — а с ним и весь бот (проверено 12.11.2026:
+# QUARANTINE_WINDOW_SEC=abc давало ValueError на старте).
+def _quarantine_window_sec() -> int:
+    raw = (os.getenv("QUARANTINE_WINDOW_SEC", "") or "").strip()
+    if not raw:
+        return 900
+    try:
+        return max(60, int(raw))
+    except ValueError:
+        log.warning("[quarantine] QUARANTINE_WINDOW_SEC=%r is not a number, using 900", raw[:40])
+        return 900
+
+
+QUARANTINE_WINDOW_SEC = _quarantine_window_sec()
 
 def _quarantine_threshold() -> int:
     """Сколько плохих подряд до карантина (MODEL_QUARANTINE_BAD_LIMIT, дефолт 3)."""
@@ -202,9 +209,10 @@ def _quarantine_window_over(entry: dict[str, Any]) -> bool:
 def _record_model_outcome(provider: str, model_id: str, *, bad: bool) -> None:
     """Плохой ответ +1 к счётчику в текущем окне (на пороге — карантин с записью
     в лог), успешный — сбрасывает счётчик. За пределами окна счётчик начинает
-    с нуля, а один чат вносит не больше половины порога: раньше три пустых ответа
-    из одного чата выключали модель всем остальным (аудит run-2). Вклад лимитим
-    только когда чат известен — служебные вызовы вне контекста сообщения не считаем."""
+    с нуля, а один чат вносит не больше threshold-1 из порога: раньше три пустых
+    ответа из одного чата выключали модель всем остальным (аудит run-2). Вклад
+    лимитим только когда чат известен — служебные вызовы вне контекста сообщения
+    не считаем."""
     if not bad:
         if _QUARANTINE.pop((provider, model_id), None) is not None:
             log.debug("[quarantine] %s/%s answered well, counter reset.", provider, model_id)
@@ -215,12 +223,14 @@ def _record_model_outcome(provider: str, model_id: str, *, bad: bool) -> None:
         entry.update({"bad": 0, "since": time.monotonic()})
         entry.pop("by_chat", None)
     threshold = _quarantine_threshold()
-    chat = str(bot._LOG_CHAT.get() or "")
-    if chat:
+    # Источник вклада — человек, а не чат: два чата одного человека раньше давали
+    # два независимых вклада и вдвоём выключали модель всем (аудит 16.11.2026).
+    actor = str(bot._LOG_USER.get() or bot._LOG_CHAT.get() or "")
+    if actor:
         per_chat = entry.setdefault("by_chat", {})
-        if int(per_chat.get(chat) or 0) >= max(1, threshold - 1):
+        if int(per_chat.get(actor) or 0) >= max(1, threshold - 1):
             return
-        per_chat[chat] = int(per_chat.get(chat) or 0) + 1
+        per_chat[actor] = int(per_chat.get(actor) or 0) + 1
     entry["bad"] = int(entry.get("bad") or 0) + 1
     if entry["bad"] == threshold:
         log.warning(
@@ -293,24 +303,488 @@ def _munito_active() -> bool:
         return False
 
 
+def _munito_requests_today() -> int:
+    """Сумма успешных ответов Munito за квотный день: то же число, что показывает
+    /stats. Планирующие вызовы и сорвавшиеся попытки сюда не входят, поэтому
+    метр осторожный (меньше реального расхода) — это защита от шторма 429, а не
+    биллинг."""
+    import bot
+    # Сброс суток троттлится 60 с, поэтому первых сообщений после полуночи PT он
+    # не дожидается: сверяем день сами, иначе маршрут видел вчерашние 250
+    # (третий проход аудита 16.11.2026).
+    bot._reset_quota_if_new_day()
+    if (bot.GLOBAL_QUOTA.get("quota_day") or "") != bot._current_quota_day():
+        return 0
+    sub = bot.GLOBAL_QUOTA.get("munito") or {}
+    total = 0
+    for entry in sub.values():
+        if isinstance(entry, dict):
+            try:
+                total += int(entry.get("used") or 0)
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
+_MUNITO_CEILING_DAY = ""
+
+
 def _munito_route() -> list[tuple[str, str]]:
     """Пусто без ключа или под выключателем: маршрут тогда целиком идёт в Gemini."""
+    global _MUNITO_CEILING_DAY
     if not _munito_active():
         return []
+    try:
+        import bot
+        _used = _munito_requests_today()
+        if _used >= bot.MUNITO_DAILY_LIMIT:
+            # Одна строка на квотный день: иначе оператор не отличит исчерпанный
+            # бюджет от выключенного провайдера (второй проход аудита 16.11.2026).
+            if _MUNITO_CEILING_DAY != bot._current_quota_day():
+                _MUNITO_CEILING_DAY = bot._current_quota_day()
+                log.warning("[router] Munito daily ceiling reached (%d) — routes use the Gemini reserve", _used)
+            # Суточный бюджет провайдера исчерпан: молча уходим на безусловный
+            # резерв Gemini. Раньше потолок был только цифрой в /stats, и 251-й
+            # запрос получал 429 с остыванием на всех моделях сразу (аудит 16.11.2026).
+            return []
+    except Exception as exc:
+        # Битое состояние квоты не имеет права обнулить маршрут целиком: считаем
+        # потолок невыясненным и пробуем как раньше.
+        log.debug("[router] Munito daily ceiling unreadable, assuming available: %s", exc)
     return [("munito", m) for m in _skip_exhausted("munito", _MUNITO_ORDER)]
 
 
-def _munito_payload_extras() -> dict[str, Any]:
-    """reasoning_effort для запросов Munito (MUNITO_REASONING_EFFORT, по умолчанию low).
-    Замер 05.11.2026: у glm-5.3-flash reasoning падает с ~60 токенов до 0-20 (первый
-    токен 0.13-0.26s вместо 0.5-1.0s), у deepseek-1017 почти не меняется, а
-    qwen3.8-27b без поля съедал весь лимит вывода размышлением и отдавал пустой
-    content. Цена: на двухшаговой задаче про дистанцию GLM ответил неверно (180 при
-    low, 240 при minimal, верно 210) и исправился на повторе — риск есть, но
-    плавающий, головой остаётся DeepSeek. Пустое значение = поле не отправляем:
-    провайдер отвечает 400 на незнакомые параметры."""
-    effort = (os.getenv("MUNITO_REASONING_EFFORT", "low") or "").strip()
-    return {"reasoning_effort": effort} if effort else {}
+# ── Усилие модели: автовыбор на каждый запрос (Claude-like effort, 12.11.2026) ──
+# Claude не получает бюджет размышления руками: adaptive thinking решает сам, а
+# effort (low..max) — поведенческий сигнал о том, сколько работы вложить в ответ,
+# включая число и длину вызовов инструментов (офиц. docs "Thinking" и "Effort").
+# У наших открытых моделей тот же рычаг — reasoning_effort (Munito) и
+# thinking_level/thinking_budget (Gemini), поэтому уровень считается по тексту
+# запроса детерминированно, без второго вызова LLM.
+# Замер 12.11.2026 живым вызовом (3 задачи x effort low/high/xhigh): у
+# glm-5.3-flash «средняя скорость пути» дала 64 при low и верные 60 при high, то
+# есть уровень переключает правильность, а не только длину (запись в
+# eval/RESULTS.md, «Сетка усилия»).
+# Остальные цифры того же разового зонда в репозиторий не лёг и повторить их
+# нечем: 242 против 89 reasoning-токенов у deepseek-1017 на разных уровнях,
+# пустой content при medium+ на логической задаче (~1200 токенов размышления) и
+# неверный ответ qwen3.8-27b при xhigh. Отношусь к ним как к памяти об одном
+# прогоне — поэтому выше high без нового замера не поднимаемся.
+EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
+
+# Возможности моделей по параметрам запроса — по живому замеру 12.11.2026, по
+# одному вызову на пару (модель, параметр): gemma-4-12b принимает tools (отдала
+# корректный tool_calls) и отвечает 400 на reasoning_effort; pplx-decider-v1.2
+# отвечает 400 и на tools, и на reasoning_effort; четыре текстовые головы
+# принимают minimal..xhigh и отдают tool_calls и в стриме, и без него. Модель вне
+# каталога считается поддерживающей прежний набор: молча потерять усилие или tools
+# для новой головы хуже, чем один 400, который виден в логе и в резервной ветке.
+_MUNITO_CAPS: dict[str, dict[str, bool]] = {
+    "deepseek-ai/deepseek-v4.1-flash-1017": {"reasoning_effort": True, "tools": True},
+    "deepseek-ai/deepseek-v4-flash": {"reasoning_effort": True, "tools": True},
+    "zai-org/glm-5.3-flash": {"reasoning_effort": True, "tools": True},
+    "qwen/qwen3.8-27b": {"reasoning_effort": True, "tools": True},
+    "google/gemma-4-12b": {"reasoning_effort": False, "tools": True},
+    "perplexity-ai/pplx-decider-v1.2": {"reasoning_effort": False, "tools": False},
+}
+
+
+def _known_effort(value: str) -> bool:
+    """Значение усилия из шкалы провайдера. Munito отвечает 200 и на «none», и на
+    опечатку (замер 12.11.2026), то есть кривое значение молча ничего не меняет —
+    его видно только в логе."""
+    return value in EFFORT_LEVELS
+
+
+def _munito_model_supports(model_id: str | None, param: str) -> bool:
+    """Есть ли у модели параметр. None (цепочка не выбрана) и модель вне каталога =
+    не проверяем: тихо выключить усилие для новой модели хуже, чем один 400 на
+    неизвестный параметр, а тест на полноте записи не даёт поставить её молча."""
+    if not model_id:
+        return True
+    return bool(_MUNITO_CAPS.get(model_id, {}).get(param, True))
+
+
+def _effort_auto_on() -> bool:
+    """EFFORT_AUTO=0/off возвращает прежний плоский режим: уровень берётся только
+    из MUNITO_REASONING_EFFORT, как было до 12.11.2026."""
+    return (os.getenv("EFFORT_AUTO", "") or "").strip().lower() not in ("0", "false", "off")
+
+
+# Явная просьба подумать как следует или разбор предыдущей ошибки: Claude в этом
+# случае поднимает усилие, а не отвечает быстрее.
+_EFFORT_DEEPER_RE = re.compile(
+    r"подумай|посчитай\s+(внимательн|заново|ещё)|не торопи|как следует|перепровер|проверь\s+расчёт"
+    r"|внимательн\w*|разбер(и|ём)\s+(детальн|по\s+косточкам)|подробн\w*\s+и\s+объясн"
+    r"|think\s+(carefully|hard|twice)|take\s+your\s+time|double[\s-]check|reconsider"
+    # Человек ловит модель на ошибке: прошлый ответ был слабым, повторять его нельзя.
+    r"|ты\s+(не\s+прав|ошиб|снова|опять)|снова\s+ошиб|неверн\w*,?\s+(это|тут)|я\s+(же\s+)?говорил",
+    re.IGNORECASE,
+)
+# Просьба коротко — снижаем, но не ниже low: ниже low не опускаемся сознательно
+# (minimal провайдер принимает, но на нём ничего не меряло; неверная арифметика
+# показана на low — замер 12.11.2026), а «коротко» не значит «неверно».
+_EFFORT_SHORTER_RE = re.compile(
+    r"коротко|кратко|в\s+один\s+(строку|слова?)|одним\s+словом|без\s+(пояснений|воды|деталей)"
+    r"|быстро|парой\s+слов|максимально\s+коротк|в одном предложении"
+    r"|\bbriefly\b|\bshort\s+answer\b|one\s+word|\bconcise\b|no\s+explanation|tl;?dr"
+    # Те же просьбы на остальных языках бота: из-за одного RU/EN-списка сетка
+    # 12.11.2026 оставляла на medium «was ist ein JWT kurz» и «kiut a költő?
+    # röviden», хотя человек просил две строки.
+    r"|\bkurz\b|\bkurze\b|\bkurzen\b|r[öo]viden|lyhysti|lyhemmin"
+    # Только те формы, которые в своём языке значат «коротко», а не «быстро,
+    # скоро, маленький». «rapid», «vite», «presto», «pronto» и «corto» без
+    # ударения в живых фразах — обычные слова, и они снижали настоящие вопросы:
+    # «how does a rapid transit system work» уходило на low (ревью 12.11.2026).
+    r"|promptement|r[áa]pid[oa]\b|m[áa]s\s+(?:corto|r[áa]pido)|brevemente"
+    r"|\bkort\b|kr[óo]tko|k[ıi]sa\b|qisqa\b"
+    r"|ng[ảa]n\b|ng[ảa]n ?g[ọo]n|singkat|ringkas|pendek|maikli"
+    "|สั้น|สั้นๆ|\u0628\u062e\u0627\u0635\u0631|\u062e\u0644\u0627\u0635\u0647"
+    "|\u0645\u062e\u062a\u0635\u0631|\u0938\u0902\u0915\u094d\u0937\u0947\u092a",
+    re.IGNORECASE,
+)
+# Дальний горизонт: чертёж, доказательство, многошаговый разбор — то, где Claude
+# думает дольше всего. Снят с _HEAVY_QUERY_RE, но уже: heavy — это «код/статья»,
+# xhigh — «архитектура/доказательство/план на несколько недель». Слово «код» и
+# «рефакторинг» сюда НЕ входят: это heavy-задача, а не дальний горизонт (сетка
+# effort_grid ловила перегруз на «объясни как ребёнку, что такое рефакторинг»).
+_EFFORT_LONGHORIZON_RE = re.compile(
+    r"архитектур|докажи|доказательств|спроектир\w*|аппроксим\w*|сходимость"
+    # «план на четыре недели», «график на месяц», «план тренировок на 12 недель».
+    # «план на четыре недели», «график на месяц», «программа на 12 недель».
+    # Границы слова обязательны: без них «Планирую отпуск на месяц» и «Планета
+    # Венера, месяц за месяцем» уезжали на xhigh (блоклер ревью 12.11.2026).
+    # Окно — 25 знаков внутри одной фразы: склеивать несвязные предложения
+    # «план …» и «…неделя» права нет.
+    r"|\b(?:план|плана|плану|плане|график|программ\w*|список\s+задач"
+    r"|инструкц\w*|разбор|разбора|сравнен\w*)\b"
+    r"[^\n.!?]{0,25}?\b(?:недел\w*|мес[ея]ц\w*|этап\w*|\d+\s+(?:этап|шаг|ден\w*))\b"
+
+    r"|по\s*шагам|пошагов\w*|многошагов\w*|шаг\s+за\s+шагом|сравни\s+(все|нескольк|эти)"
+    r"|продумай\s+все|trade-?offs?|end[\s-]to[\s-]end|architecture|proof\b|\bprove\b"
+    r"|step[\s-]by[\s-]step|\btwo[\s-]week\b|\broadmap\b",
+    re.IGNORECASE,
+)
+
+# Сколько ПОИСКОВ разрешаем за один ход на каждом уровне (Claude: effort решает,
+# сколько работы модель делает, а web_search ограничен max_uses). Каждый поиск —
+# это отдельный планирующий вызов плюс внешняя сеть, поэтому потолок жёсткий, а
+# шаги цикла считаются отдельно (lumen_agent._MAX_STEPS).
+_AGENT_SEARCHES_BY_EFFORT: dict[str, int] = {
+    # Эталон Claude (доки web-search-tool, снимок 02.08.2026): простой фактический
+    # вопрос — 1-3 поиска, сравнительный — 10+. Один counted-вызов Lumen уже веером
+    # 9-18 HTTP по 5-6 хостам, поэтому 2 при medium дают то, чего не давал 1:
+    # второй, иначе сформулированный запрос по увиденной выдаче (замер 12.11.2026:
+    # 11 из 12 вопросов получили второй запрос при потолке 2). Фаза на 2 поиска —
+    # 44 с, потолок 45 с в lumen_agent; 3 при xhigh упираются в него же (аудит 16.11).
+    "minimal": 0, "low": 0, "medium": 2, "high": 2, "xhigh": 3,
+}
+
+
+# Вопрос по форме, а не только по маркеру свежести: «что за город Брест» —
+# стабильный факт, но на нём цена догадки выше цены лишних reasoning-токенов
+# (замер 12.11.2026: при low glm-5.3-flash дал 64 вместо верных 60; на medium эту
+# задачу не проверяли, но на логической задаче medium+ съедал весь бюджет вывода
+# размышлением и возвращал пустой content).
+# Сетка eval/effort_grid.py 12.11.2026: одних знаков вопроса и длины мало —
+# «почему небо голубое» и «deux fois deux font combien» приходили на low, а
+# список слов только RU/EN для бота на 25 языках (lumen_lang.SUPPORTED_LANGS)
+# непригоден в принципе. Сигнал теперь такой: знак вопроса любой письменности,
+# цифра, длиннее четырёх слов ИЛИ вопросительное слово.
+_QUESTION_ANY_RE = re.compile(
+    # ASCII «?», перевёрнутый испанский U+00BF, арабский и персидский U+061F,
+    # полноширинный U+FF1F, греческий вопросительный знак U+037E. Данда U+0965 и
+    # бирманский U+104A из прежнего класса убраны: это концы фраз, а не вопрос.
+    # Персидский знак «؛» (U+061B) не добавлен: в арабском это точка с запятой.
+    r"[?\u00bf\u061f\uff1f\u037e]"
+)
+_ANY_DIGIT_RE = re.compile(r"\d")
+
+# «huh????» — один вопрос с четырьмя знаками, а не четыре вопроса в столбик:
+# на дальний горизонт ведёт только достаточное число слов (проверено 12.11.2026).
+_MULTI_QUESTION_MARKS = 4
+_MULTI_QUESTION_WORDS = 5
+
+# Список шире SUPPORTED_LANGS: люди пишут боту и на языках, которых у него в
+# переводах нет (польский, чешский, шведский), а промах вверх стоит одну ступень
+# усилия, промах вниз — неверный факт. Часть орфографии сверена со строк самого
+# бота (lumen_lang._START_EXAMPLES и его переводы): так сняты тайские ใคร иอะไร;
+# «ทำไม» в строках бота не встречается, и её в списке нет.
+# СОЗНАТЕЛЬНО ИСКЛЮЧЕНЫ слова, которые в короткой реплике чаще значат не вопрос:
+# «как»/«how»/«wie»/«hur»/«comment»/«come»/«nasıl» — это приветствие («как дела»,
+# «how are you»), и настоящее вопросительное слово в длинной фразе и так
+# попадает на medium по длине; шведские «var» (это ещё и прошедшее время «был»)
+# и «när» с норвежским «når» (союз «когда») — они давали ложный вопрос на
+# «var i = arr» и на коротких фразах без вопроса.
+# Многословные «how much», «how many», «por que» оставлены: они однозначны.
+_ASK_WORDS = (
+    # русский, украинский, белорусский
+    "кто", "кем", "кём", "чем", "что", "где", "куда", "откуда", "когда",
+    "почему", "зачем", "какой", "какая", "какое", "какие", "сколько", "который",
+    "которая", "которое", "которые",
+    "хто", "що", "де", "куди", "звідки", "коли", "чому", "навіщо", "який",
+    "яка", "яке", "які", "скільки", "ким", "чим", "чи",
+    # казахский, узбекский: кириллическое «не» — отрицание, поэтому его здесь нет
+    "кім", "қайда", "қашан", "неге", "қанша", "қандай", "неше",
+    "nima", "qayerda", "qayerga", "qachon", "nega", "necha", "nechta", "qaysi", "qanday",
+    # английский, немецкий, нидерландский
+    "who", "whom", "whose", "what", "where", "when", "why", "which",
+    "how much", "how many", "how old", "how long", "how far", "how come",
+    "wer", "was", "wo", "woher", "wohin", "wann", "warum", "weshalb", "wieso",
+    "welche", "welcher", "welches", "wieviel", "wie viel",
+    "wat", "waar", "wanneer", "waarom", "welke", "hoeveel", "hoe veel",
+    # французский, испанский, итальянский, португальский
+    "qui", "quoi", "quand", "pourquoi", "combien", "quel", "quelle", "quels",
+    "quelles", "où",
+    "quién", "quiénes", "qué", "dónde", "cuándo", "cuánto", "cuánta", "cuántos",
+    "cuántas", "cuál", "cuáles",
+    "por qué",
+    "chi", "dove", "quando", "perché", "perche", "quanto", "quanti", "quante",
+    "quale", "quali",
+    "quem", "onde", "quanto", "quantos", "quantas", "qual", "quais", "por que",
+    # польский, турецкий, шведский, датский, норвежский
+    "kto", "czy", "gdzie", "kiedy", "dlaczego", "jaki", "jaka", "jakie", "ile",
+    "kim", "czym",
+    "kim", "nerede", "nereye", "ne zaman", "neden", "niçin", "kaç", "hangi",
+    "vem", "vad", "varför", "vilken", "vilket", "vilka",
+    "hvem", "hvad", "hva", "hvor", "hvorfor", "hvilken", "hvilket",
+    # индонезийский, малайский, филиппинский
+    "siapa", "apa", "di mana", "kapan", "bila", "kenapa", "mengapa", "berapa",
+    "sino", "ano", "saan", "kailan", "bakit", "gaano", "alin", "ilang",
+    # вьетнамский, зулусский
+    "ai", "gì", "đâu", "khi nào", "bao giờ", "tại sao", "vì sao", "bao nhiêu",
+    "mấy", "nào", "không",
+    "ubani", "yini", "phi", "nini", "kungani", "angaki", "mingaki", "kuphi",
+    # хинди, бенгали
+    "कौन", "क्या", "कहाँ", "कहां", "कब", "क्यों", "कितना", "कितने", "किस",
+    "কে", "কী", "কোথায়", "কখন", "কেন", "কত",
+    # арабский, персидский, урду: двусмысленные «кто/что» (من، ما، کیا، چه)
+    # ушли в _ASK_LEADING_RE, здесь только однозначные
+    "أين", "متى", "لماذا", "كم",
+    "کی", "کجا", "چرا", "چند", "کدام",
+    "کون", "کہاں", "کتنی", "کتنا", "کس", "کیوں",
+    # тайский пишет слова подряд, границы там не работают — см. _ASK_TIGHT_RE
+)
+
+# Слово в деванагари или бенгали обязан граничить не с «не-буквой», а с чем-то
+# ВНЕ самой письменности: гласные и носовые знаки (U+093E-U+094F, U+0982-U+09FC)
+# буквами не считаются, поэтому "\b" рвётся внутри слова — "\bकिस\b" ловило
+# «किसी» («чей-то»), а подстрока «কে» ловила «থেকে» («из, от») (блоклер ревью
+# 12.11.2026: 13 из 24 коротких бытовых фраз на хинди и бенгали теряли low).
+# Те же look-around заодно принимают формы на гласовом знаке (कहाँ, কে), которым
+# граница слова противопоказана. Тайский пишется без пробелов вообще: там только
+# подстрока (_ASK_WORDS_THAI).
+_INDIC_SCRIPT = "\u0900-\u097F\u0980-\u09FF"
+
+
+def _is_indic(word: str) -> bool:
+    """Первый символ — буква деванагари или бенгали: значит, слово из той же
+    письменности и границу надо проверять по диапазону, а не по \b."""
+    return bool(word) and re.match("[" + _INDIC_SCRIPT + "]", word) is not None
+
+
+def _alternation(words) -> str:
+    """Альтернатива регулярки из слов: каждое экранировано (иначе точка или
+    вопросительный знак в слом молча испортят весь класс), длинные вперёд —
+    короткая форма иначе затенит длинную («сколько» против «сколь»)."""
+    return "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
+
+
+# Тайский вопросительный ряд: кто, что, какой/где.
+_ASK_WORDS_NO_SPACE = (
+    "ใคร", "อะไร", "ไหน"
+)
+
+_ASK_WORDS_SPACED = tuple(w for w in _ASK_WORDS if not _is_indic(w))
+_ASK_WORDS_INDIC = tuple(w for w in _ASK_WORDS if _is_indic(w))
+
+# Границы слова работают везде, где слова разделяются пробелом, а буквы
+# считаются словами: без них «что» ловилось бы внутри «почтово».
+_ASK_WORDS_RE = re.compile(
+    r"\b(?:%s)\b" % _alternation(_ASK_WORDS_SPACED),
+    re.IGNORECASE,
+)
+
+_ASK_INDIC_RE = re.compile(
+    f"(?<![{_INDIC_SCRIPT}])(?:{_alternation(_ASK_WORDS_INDIC)})(?![{_INDIC_SCRIPT}])",
+    re.IGNORECASE,
+)
+
+# Тайский вопросительный ряд: кто, что, какой/где. Подстрока — единственное,
+# что там работает, и она обязана оставаться короткой и однозначной.
+_ASK_TIGHT_RE = re.compile(_alternation(_ASK_WORDS_NO_SPACE), re.IGNORECASE)
+
+# Двусмысленные «кто/что» там, где то же слово — союз, предлог или междометие:
+# рус. просторечное «чё», араб. «من» и «ما», урду «کیا», перс. «چه» и ударные
+# испанские «qué/quién» (только с ударением: «que» без него — союз). Ловим их только в начале реплики и
+# только в начале строки (MULTILINE: «ok\nque pasa» — одно сообщение).
+# Голые «que», «che», «co», «ne», «ou» из правила убраны целиком: они и в начале
+# фразы чаще служебные слова, чем вопрос («que bom!», «ne bouge pas»,
+# «co-founder thing»), а вопрос без ударения и без знака в испанском редкость
+# дороже, чем лишний шаг усилия (ревью 12.11.2026).
+_ASK_LEADING_RE = re.compile(
+    r"^(?:qué|qui[ée]n(?:es)?|чё|чо|\u0645\u0646|\u0645\u0627"
+    r"|\u06a9\u06cc\u0627|\u0686\u0647)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Болтовня короче этих границ и без вопросительных сигналов — единственный
+# случай, когда берём low. Считаем и слова, и длину: в тайском и в деванагари
+# пробелов мало, и по одному «слову» уезжал бы целый вопрос.
+_CHAT_MAX_WORDS = 4
+_CHAT_MAX_CHARS = 40
+
+def pick_reasoning_effort(
+    text: str, *, is_heavy: bool = False, needs_freshness: bool = False,
+    corrections: int = 0, history_len: int = 0,
+) -> str:
+    """Уровень усилия для одного запроса. Дешевле ошибиться вверх, чем вниз:
+    лишние reasoning-токены стоят секунды, неверный ответ — доверие.
+    minimal не используем намеренно: провайдер его принимает, но на нём ничего
+    не меряло, а выигрыш — доли секунды; неверная арифметика показана на low."""
+    body = text or ""
+    marks = len(_QUESTION_ANY_RE.findall(body))
+    if (_EFFORT_LONGHORIZON_RE.search(body) or len(body) > 1200
+            or (marks >= _MULTI_QUESTION_MARKS
+                and len(body.split()) >= _MULTI_QUESTION_WORDS)):
+        level = "xhigh"
+    elif is_heavy:
+        level = "high"
+    elif needs_freshness:
+        # Свежий факт требует аккуратности с источниками, а не глубокого reasoning.
+        level = "medium"
+    else:
+        stripped = body.strip()
+        words = stripped.split()
+        is_small_talk = (
+            len(words) <= _CHAT_MAX_WORDS
+            and len(stripped) <= _CHAT_MAX_CHARS
+            and not _QUESTION_ANY_RE.search(stripped)
+            and not _ASK_WORDS_RE.search(stripped)
+            and not _ASK_INDIC_RE.search(stripped)
+            and not _ASK_TIGHT_RE.search(stripped)
+            and not _ASK_LEADING_RE.search(stripped)
+            and not _ANY_DIGIT_RE.search(stripped)
+        )
+        if is_small_talk:
+            # Болтовня и короткие реплики: здесь печать важнее глубины.
+            level = "low"
+        else:
+            level = "medium"
+    if _EFFORT_DEEPER_RE.search(body):
+        level = _bump_effort(level, 1)
+    if corrections > 0:
+        # Человек уже ловил модель на ошибке в этом разговоре.
+        level = _bump_effort(level, 1)
+    if _EFFORT_SHORTER_RE.search(body):
+        level = _bump_effort(level, -2 if level == "xhigh" else -1)
+        if level == "minimal":
+            level = "low"
+    if history_len > 40 and level == "low":
+        # Длинный разговор: цена неверного «быстрого» ответа выше, чем пауза.
+        level = "medium"
+    return level
+
+
+def recent_corrections(history: list[Any], limit: int = 3) -> int:
+    """Сколько из последних реплик человека ловили модель на ошибке («ты не прав»,
+    «неверно»): по ним усилие поднимается на ступень, как у Claude, где человек
+    прямо выбирает уровень глубже после промаха. Считаем по роли user и только по
+    коротким репликам — в развёрнутом тексте та же фраза может быть цитатой."""
+    found = 0
+    for entry in reversed(history or []):
+        if not isinstance(entry, dict) or entry.get("role") != "user":
+            continue
+        text = entry.get("content")
+        if not isinstance(text, str):
+            continue
+        if len(text) <= 200 and _EFFORT_DEEPER_RE.search(text):
+            found += 1
+        if len(text) <= 200:
+            limit -= 1
+            if limit <= 0:
+                break
+    return found
+
+
+def _bump_effort(level: str, delta: int) -> str:
+    """Сдвиг по шкале EFFORT_LEVELS с упором в края. xhigh — потолок: выше него
+    открытые модели на замере 12.11.2026 возвращали пустой content."""
+    try:
+        idx = EFFORT_LEVELS.index(level)
+    except ValueError:
+        return "low"
+    return EFFORT_LEVELS[max(0, min(len(EFFORT_LEVELS) - 1, idx + delta))]
+
+
+def agent_max_searches(effort: str | None) -> int:
+    """Сколько поисков за ход разрешено при этом усилии. None = автовыбор выключен
+    (EFFORT_AUTO=0), и цикл тогда выключается тоже: без усилия нет и обоснованного
+    потолка поиска, а гибрид «авто выключено, цикл работает» не замерян.
+    AGENT_MAX_SEARCHES перекрывает, 0 глушит цикл совсем."""
+    if not effort:
+        return 0
+    raw = (os.getenv("AGENT_MAX_SEARCHES", "") or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return _AGENT_SEARCHES_BY_EFFORT.get(effort, 0)
+
+
+def agent_searches_capped_by_env() -> bool:
+    """AGENT_MAX_SEARCHES выставлен владельцем явно — перекрывает таблицу усилий.
+    Зона 2 не имеет права поднимать такой потолок флором: «0 глушит цикл» —
+    килл-свитч, а не значение по умолчанию (ревью 16.11.2026)."""
+    return bool((os.getenv("AGENT_MAX_SEARCHES", "") or "").strip())
+
+
+def gemini_thinking_for(model_id: str, effort: str | None) -> tuple[str, Any]:
+    """Пары (параметр, значение) для thinking_config резерва: у линейки 3.x это
+    thinking_level (офиц. docs Gemini: minimal/low/medium/high по модели), у 2.5 —
+    thinking_budget в токенах. ('', None) = поле не трогаем, дефолт модели.
+    effort=None — автовыбор выключен (EFFORT_AUTO=0), прежняя эвристика остаётся
+    на вызывающей стороне, здесь ничего не назначаем."""
+    if not effort:
+        return "", None
+    if model_id.startswith("gemini-3"):
+        if effort in ("minimal", "low", "medium", "high"):
+            return "thinking_level", effort
+        return "thinking_level", "high"
+    if model_id.startswith("gemini-2.5"):
+        # Замера по budget у нас нет; калибровка 18.08.2026 оставила только две
+        # подтверждённые точки: выключенное размышление на лёгких и дефолт на
+        # остальных, поэтому high/xhigh здесь не поднимаем руками.
+        if effort in ("minimal", "low"):
+            return "thinking_budget", 0
+        return "", None
+    return "", None
+
+
+def _munito_payload_extras(effort: str | None = None, model_id: str | None = None) -> dict[str, Any]:
+    """reasoning_effort для запроса Munito.
+    Порядок: пустая MUNITO_REASONING_EFFORT = поле не отправляем вовсе (замер
+    05.11.2026: у glm-5.3-flash reasoning падает с ~60 токенов до 0-20, первый
+    токен 0.13-0.26s вместо 0.5-1.0s; qwen3.8-27b без поля съедал весь лимит
+    вывода размышлением и отдавал пустой content); непустая = пин, он важнее
+    автовыбора, так владелец глушит эксперимент без правки кода; без переменной —
+    автовыбор по запросу, а без него прежний дефолт low. Без аргумента effort
+    служебные вызовы (selftest, описания /draw, сводки) остаются на дефолте."""
+    raw = os.getenv("MUNITO_REASONING_EFFORT")
+    if raw is not None and not raw.strip():
+        return {}
+    chosen = raw.strip() if raw is not None else (effort or "low").strip()
+    if not chosen:
+        return {}
+    if not _known_effort(chosen):
+        # Munito принимает любое значение с HTTP 200 (замер 12.11.2026: «none» и
+        # опечатка проходят), то есть кривой пин выглядел бы как работающая галочка.
+        log.warning("[effort] Unknown reasoning_effort %r is not in the provider scale,"
+                    " the field is sent as is — check MUNITO_REASONING_EFFORT", chosen)
+    if not _munito_model_supports(model_id, "reasoning_effort"):
+        return {}
+    return {"reasoning_effort": chosen}
 
 
 # ── Цепочки Gemini: где нужен именно Gemini (ссылки, YouTube, видео/аудио) и где
@@ -325,26 +799,24 @@ def _munito_payload_extras() -> dict[str, Any]:
 # (см. _mark_model_unavailable в lumen_routes.py) — модель с 503 пропускается на
 # QUOTA_RATE_LIMIT_COOLDOWN_SEC, а не тратит попытку на каждом сообщении.
 GEMINI_HEAVY_CHAIN: list[str] = [
-    "gemini-2.5-flash",
+    # Дашборд 17.11.2026: 2.5 Flash и 3.7/3.5 Flash сняты (0/0), живы 3.8/3.6 Flash,
+    # обе Flash Lite и 3 Flash. Порядок — по квоте и свежести линейки.
     "gemini-3.8-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
+    "gemini-2.5-flash-lite",
     "gemini-3-flash-preview",
 ]
 # Сначала модели с реальной квотой search grounding (2.5-flash/lite), линейка 3.x — резервом (ответ по знаниям/url_context).
 GEMINI_SEARCH_CHAIN: list[str] = [
-    "gemini-2.5-flash",
+    # Голова — единственная живая с квотой search grounding (бакет 2.5, 0/1.5K
+    # на дашборде 17.11.2026); линейка 3.x идёт резервом.
     "gemini-2.5-flash-lite",
     "gemini-3.8-flash",
+    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-3-flash-preview",
 ]
 # Дефолт для прямых вызовов ask_gemini без явной цепочки.
@@ -396,8 +868,8 @@ def _looks_like_heavy_query(text: str) -> bool:
 # Годы свежести — окном от текущей даты, а не зашитым диапазоном (иначе протухает).
 _FRESHNESS_YEAR_ALTS = "|".join(str(date.today().year + i) for i in range(4))
 _FRESHNESS_QUERY_RE = re.compile(
-    r"сейчас|сегодня|текущ\w*|последн\w*|актуальн\w*|свеж\w*|недавно|на\s+данный\s+момент"
-    r"|новост\w*|курс\s+(валют|доллара|евро|рубл\w*)|погод\w*|прогноз\w*"
+    r"сейчас|сегодня|текущ\w*|\bпоследн\w*|актуальн\w*|свеж\w*|недавно|на\s+данный\s+момент"
+    r"|новост\w*|курс\s+(валют|доллара|евро|рубл\w*)|погод[аеыоу]\w*|прогноз\w*"
     r"|расписани\w*|афиш\w*"
     # Астрономия, зависящая от даты (eval 22.10.2026: «рассвет в Москве» ушёл
     # по памяти — Q6 провал, маршрут строился как обычный текст без поиска).
@@ -408,6 +880,13 @@ _FRESHNESS_QUERY_RE = re.compile(
     r"|(брать|взять|купить|выбрать)\s+лучше"
     r"|кто\s+(сейчас|является|президент|премьер|глава|ceo|мэр)"
     r"|результат\w*\s+(матч\w*|игр\w*|выбор\w*)"
+    # Ставка и курс меняются по расписанию: вопрос о них свежий и без слова «сейчас»
+    # (замер 11.11.2026: «какая ключевая ставка в России» — Claude ищет, бот — нет).
+    r"|ключев\w*\s+ставк|ставк\w*\s+(?:цб|банка\w*\s+россии)"
+    # «вышёл ли финал / что нового в сезоне» — вопрос о текущем состоянии дела: поиск
+    # не запускался вовсе, хотя на таком вопросе он нужен (замер 11.11.2026).
+    r"|что\s+нов\w*|выш\w*\s+ли|когда\s+выйдет|когда\s+вышли|премьер\w*|последн\w*\s+(эпизод|серии|серий|выпуск|обновление|тур)"
+    r"|new\s+episode|premiere[ds]?\b|\b(?:come\s+out|out\s+now|aired|is\s+out)\b|\brelease\s+date\b"
     r"|в\s+эт(ом|ой)\s+(году|месяце|неделе)"
     rf"|\b(?:{_FRESHNESS_YEAR_ALTS})\b"
     # EN-набор: детект был только русским при 25 языках (внешний аудит). Границы слов обязательны: now ловил know/snow.
@@ -444,9 +923,132 @@ _FRESHNESS_QUERY_RE = re.compile(
     r"|\b(ngayon|kasalukuyan|pinakabago|balita|presyo|bukas|kahapon)\b"
     r"|\b(namuhla|manje|okwamanje|kwakamuva|izindaba|intengo|isimo sezulu|isibikezelo|kusasa|izolo)\b"
     r"|\b(сёння|зараз|актуальн\w*|апошн\w*|навіны|кошт|цана|надвор'е|прагноз|заўтра|учора)\b"
-    r"|\b(сьогодні|зараз|актуальн\w*|останн\w*|новини|ціна|погода|прогноз|завтра|вчора)\b"
+    # «погоді» отдельно: класс «погод[аеыоу]» выше отсёк русское «погоди» (императив),
+    # но украинский местный падеж пишется через «і» — вернули словом, а не классом.
+    r"|\b(сьогодні|зараз|актуальн\w*|останн\w*|новини|ціна|погода|погоді|прогноз|завтра|вчора)\b"
     r"|\b(бүгін|қазір|ағымдағы|соңғы|жаңалықтар|баға|ауа райы|болжам|ертең|кеше)\b"
     r"|\bзавтра\b|\bвчера\b",
+    re.IGNORECASE,
+)
+
+# ── Структурные сигналы свежести (требование владельца 11.11.2026: списочный
+# перечень форм не покрывает язык — в проде «когда вышла Fable 5.2» ответили без
+# поиска; Claude решает по классу вопроса, а не по ключевому слову).
+# Ложное срабатывание здесь так же дёшево, как у _FRESHNESS_QUERY_RE: искать или нет,
+# решает модель.
+
+# Морфология релизов: корень вместо перечисления рода и числа (вышла/вышло/вышли/вышедшая).
+_RELEASE_LEX_RE = re.compile(
+    r"\b(?:выш(?:ел|ла|ло|ли|ед|увш)\w*|выйд\w*|выпуст\w*|выпуск\w*|релиз\w*|анонс\w*|презент\w*"
+    r"|появ\w*|обнов\w*|добав(?:и|л)\w*|стартов\w*|откры(?:л|т)\w*|поступ(?:ил|а|я)\w*"
+    r"|в\s+(?:прокат|продаж)\w*)",
+    re.IGNORECASE,
+)
+# Слово про релиз — сигнал только вместе с вопросом: вопросительное слово, частица «ли»
+# или знак вопроса. «как» в список не входит: «как добавить муку» — рецепт, не новость.
+_QUESTION_MARK_RE = re.compile(
+    r"\b(?:когда|уже|ли|сколько|какой|какая|какое|какие|каков|правда|существует)\b"
+    r"|есть\s+ли|что\s+нов\w*|[?？]",
+    re.IGNORECASE,
+)
+_HAS_DIGIT_RE = re.compile(r"\d")
+
+# Имя собственное: латиница в любом регистре (прод: «claude Fable 5.2» писали строчными)
+# или кириллица с большой буквы. Вопросительные, служебные и глаголы-приказы в начале фразы
+# отфильтрованы: иначе «Сколько будет 45.5» превращало арифметику в новость.
+_NAME_TOK = (
+    r"(?!(?:is|are|was|were|the|this|that|with|from|just|about|will|would|could|should|shall"
+    r"|how|what|when|why|who|which|does|did|have|has|had|not|now|out|it|on|in|at|to|of)\b)[A-Za-z]{2,}"
+    r"|(?!(?:Что|Как|Кто|Где|Когда|Почему|Зачем|Какой|Какая|Какое|Какие|Сколько|Это|Этот|Эта|Эти"
+    r"|Он|Она|Оно|Они|Мы|Вы|Ты|Будет|Есть|Вот|Тут|Здесь|Напиши|Переведи|Исправь|Реши|Составь"
+    r"|Расскажи|Объясни|Покажи|Сделай|Найди|Посчитай|Вычисли|Помнишь)\s)[А-ЯЁ][а-яё]{2,}"
+)
+# Токены версии: x.y, имя-число, 19 Pro, римские цифры, поколение. Регистр значим:
+# под IGNORECASE [А-ЯЁ] ловил строчное «вспомним 2039» как имя (тест 11.11.2026).
+_ROMAN_TOKEN = r"\b(?:XVIII|XVII|XVI|XV|XIV|XIII|XII|XI|XXI|IX|VIII|VII|VI|V|IV|III|II)\b"
+_NAMED_VERSION_RE = re.compile(
+    # «Fable 5.2», «GTA 7», «Silent Hill 2», «iPhone-15»: имя рядом с версией — сущности
+    # нет в памяти модели, ответ только из веба, даже без слов-триггеров (замер 11.11.2026).
+    # \b вокруг имени обязателен: без него ловились латинские подслова «ко», «то» внутри русских слов.
+    rf"\b(?:{_NAME_TOK})\b\s*[-—–]?\s*\d+[.,]\d+"
+    rf"|\b(?:{_NAME_TOK})\b\s*(?:[-—–]\s*\d+|\s*\d{{1,4}}\b)"
+    rf"|\b(?:{_NAME_TOK})\b[^.?!,;]{{0,12}}{_ROMAN_TOKEN}"
+    r"|\d+\s*(?i:pro|max|ultra|mini|plus)\b"
+    r"|(?i:поколен\w*|gen)\s*№?\s*\d+"
+    r"|\d+\s*(?:[-—–]\s*(?:е|й))?\s*(?i:поколен\w*|gen\b)"
+    # Название с однобуквенным хвостом: «Silent Hill f», «Wolverine X» — у такой
+    # сущности нет номера версии, но её точно не было в обучающей выборке
+    # (замер корпуса 11.11.2026: «расскажи про Silent Hill f» отвечали по памяти).
+    rf"|\b(?:{_NAME_TOK})\b\s+\b(?:{_NAME_TOK})\b\s+[A-Za-z]\b"
+)
+# «модель claude», «фильм „Аватар“», «сезон 3 The Bear»: класс артефакта или события рядом с именем.
+_EVENT_CLASS = (
+    r"модел\w*|верси\w*|релиз\w*|игр\w*|фильм\w*|сериал\w*|сезон\w*|эпизод\w*|альбом\w*"
+    r"|смартфон\w*|процессор\w*|видеокарт\w*|обновлени\w*|прошивк\w*|приложени\w*|фреймворк\w*"
+    r"|лиг\w*|турнир\w*|выбор\w*|назначени\w*|отставк\w*|смерт\w*|свадьб\w*|закон\w*|санкци\w*|суд\w*"
+)
+_CLASS_NEAR_NAME_RE = re.compile(rf"(?i:\b(?:{_EVENT_CLASS}))\s+(?:\d+\s+)?\b(?:{_NAME_TOK})\b")
+
+# Вопросы про собственную модель и версию бота: ответ не из веба, а поиск подталкивал бы
+# говорить о модели (требование владельца 11.11.2026). Гасит только новые структурные правила.
+_SELF_MODEL_RE = re.compile(
+    r"\b(?:ты|тебя|у\s+тебя|у\s+вас)\b[^.?!,;]{0,30}\b(?:верси|модел|движк|нейросет)\w*"
+    r"|\b(?:верси|модел|нейросет)\w*[^.?!,;]{0,30}\b(?:ты|тебя|у\s+тебя|у\s+вас|работаешь)\b"
+    r"|\b(?:what|which)\b[^.?]{0,30}\b(?:model|version)\b[^.?]{0,30}\b(?:you|your|running|using)\b",
+    re.IGNORECASE,
+)
+
+# Английский набор той же схемы (мультиязычные наборы основного regex не тронуты).
+_EN_RELEASE_RE = re.compile(
+    r"\bis\s+out\b|\bout\s+now\b|\b(?:come|came)\s+out\b|\brelease\s+date|\breleas(?:e|ed|es)\b"
+    r"|\bis\s+there\s+a\b|\bany\s+news\s+about\b|\bdid\s+(?:it|they|this|that)?\s*drop\b"
+    r"|\blatest\s+version\b|\bwhat(?:'s|\s+is)\s+new\b",
+    re.IGNORECASE,
+)
+
+def _looks_like_release_question(text: str) -> bool:
+    """Форма глагола релиза (вышла/выйдет/анонсирована…) плюс любой вопрос или версия рядом."""
+    if _SELF_MODEL_RE.search(text):
+        return False
+    if not _RELEASE_LEX_RE.search(text):
+        return False
+    return bool(_QUESTION_MARK_RE.search(text)) or bool(_HAS_DIGIT_RE.search(text)) or _is_bare_question(text)
+
+def _looks_like_named_version_query(text: str) -> bool:
+    """Неизвестная сущность с номером версии — самый важный сигнал: ловит «Fable 5.2» без слов-триггеров."""
+    if _SELF_MODEL_RE.search(text):
+        return False
+    return bool(_NAMED_VERSION_RE.search(text)) or bool(_CLASS_NEAR_NAME_RE.search(text))
+
+def _looks_like_en_freshness_query(text: str) -> bool:
+    """Английские эквиваленты релизного сигнала: is out, released, is there a, what's new."""
+    if _SELF_MODEL_RE.search(text):
+        return False
+    return bool(_EN_RELEASE_RE.search(text))
+
+# Должности, спортивные результаты и счётчики серий протухают независимо от слова
+# «сейчас»: на «кто канцлер Германии» и «кто выиграл Лигу наций» Claude ищет, а
+# списочный детект пропускал (замер корпуса eval/search_trigger_corpus.py
+# 11.11.2026: 7 промахов из 35). Имя собственное рядом обязательно — иначе «кто
+# главный в семье» уезжал бы в веб.
+_OFFICE_OR_RESULT_RE = re.compile(
+    r"\b(?:кто|какой|какая|какие|каков|чем|за\s+кого)\b[^.?]{0,40}"
+    r"\b(?:канцлер\w*|президент\w*|премьер\w*|глава\w*|главн\w*|руководител\w*|председател\w*"
+    r"|директор\w*|ректор\w*|спикер\w*|мэр\w*|губернатор\w*|сенатор\w*|министр\w*|monarch\w*"
+    r"|king|queen|pm|ceo|founder|основател\w*)\b[^.?]{0,40}"
+    r"(?:[A-ZА-ЯЁ][\wА-ЯЁ-]{2,}|\b(?:германи|франци|великобритани|сша|америк|росси|украин|белорусси"
+    r"|польши|поли|итали|испани|китая|китай|турци|турции|казаш|беларус)\w*)",
+    re.IGNORECASE,
+)
+_SPORT_RESULT_RE = re.compile(
+    r"\b(?:выиграл\w*|выигрыва\w*|победил\w*|побежда\w*|чемпион\w*|призёр\w*|обладател\w*"
+    r"|финалист\w*|полуфинал\w*)\b[^.?]{0,40}"
+    r"(?:[A-ZА-ЯЁ][\wА-ЯЁ-]{2,}|\b(?:лиг\w*|кубк\w*|турнир\w*|олимпиад\w*|чемпионат\w*)\b)",
+    re.IGNORECASE,
+)
+# Счётчик эпизодов и сезонов: меняется с каждым показом, памяти не доверять.
+_EPISODE_COUNT_RE = re.compile(
+    r"\b(?:сколько|какой|какие|когда)\b[^.?]{0,40}\b(?:эпизод\w*|серий|серия|серии|выпуск\w*|сезон\w*|трейлер\w*)",
     re.IGNORECASE,
 )
 
@@ -464,8 +1066,71 @@ def _looks_like_search_request(text: str) -> bool:
     return bool(text) and bool(_SEARCH_REQUEST_RE.search(text))
 
 
+def _is_bare_question(text: str) -> bool:
+    """Реплика без точки в конце — в мессенджере это вопрос по умолчанию:
+    «обновление прошивки на телефоне вышло» без вопросительного знака (замер
+    корпуса 11.11.2026). Работает только вместе с релизным или событийным глаголом,
+    поэтому на болтовне без такого глагола не срабатывает вовсе."""
+    stripped = (text or "").strip()
+    return bool(stripped) and stripped[-1] not in ".!…?"
+
+
+# Состояние дела, которое меняется: «забастовка закончилась», «переговоры продолжаются»,
+# «суд идёт». Память модели здесь всегда устаревшая, а слов свежести в фразе нет.
+_STATE_CHANGE_RE = re.compile(
+    r"\b(?:забастовк\w*|переговор\w*|перемири\w*|оружие|санкци\w*|дело|суд|процесс|"
+    r"режим|договор|контракт|сделка|стачка|выборы|референдум)\b[^.?]{0,40}"
+    r"\b(?:законч\w*|прекрат\w*|возобнов\w*|продолжа\w*|заверш\w*|идёт|идут|действу\w*|"
+    r"подписан\w*|введён\w*|снят\w*|продлён\w*|истёк\w*|истёкш\w*|достигнут\w*)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_office_or_state_query(text: str) -> bool:
+    """Должность, результат турнира, счётчик серий и текущее состояние события —
+    классы вопросов, которые Claude ищет всегда, независимо от слов «сейчас»."""
+    if _SELF_MODEL_RE.search(text):
+        return False
+    if _OFFICE_OR_RESULT_RE.search(text) or _SPORT_RESULT_RE.search(text) or _EPISODE_COUNT_RE.search(text):
+        return True
+    return bool(_STATE_CHANGE_RE.search(text)) and (bool(_QUESTION_MARK_RE.search(text)) or _is_bare_question(text))
+
+
 def _looks_like_freshness_query(text: str) -> bool:
-    return bool(text) and bool(_FRESHNESS_QUERY_RE.search(text))
+    if not text:
+        return False
+    return bool(_FRESHNESS_QUERY_RE.search(text)) or _looks_like_release_question(text) \
+        or _looks_like_named_version_query(text) or _looks_like_en_freshness_query(text) \
+        or _looks_like_office_or_state_query(text)
+
+
+# ── Зона 2 агент-цикла: регекс свежести молчит, но содержательное сообщение
+# может нуждаться в поиске — решает сама модель (как у Claude). Болтовня в цикл
+# не входит: каждый лишний планирующий вызов — секунда и токены впустую
+# (замер корпуса 15.11.2026: «скок стоит терминал старлинк» регекс пропускал).
+_SEARCH_PLANNER_SKIP_RE = re.compile(
+    r"^(?:привет+|прив|хай+|hello|hi|здравств\w*|добр\w*\s*(?:утро|день|вечер)"
+    r"|спасибо+|спс|пасиб\w*|благодар\w*|ок+|окей|хорошо|ладно|понятн\w*|понял\b|ясно"
+    r"|угу|ага|ну\s+да|давай|ну\s+давай|не\s+понял\w*|жаль|бывает|жесть|прикол\w*"
+    r"|круто|класс|(?:ах){2,}а?|(?:ха){2,}|хихи|хех|кек|лол|жестк\w*|жёстк\w*"
+    r"|как\s+дела?\??|что\s+нового\??|ты\s+тут\??|альо|алло|ау\??)"
+    r"[\s,.!?…:)(-]*$",
+    re.IGNORECASE,
+)
+
+
+def search_planner_skipped(text: str) -> bool:
+    """Болтовня без содержания: агент-цикл зоны 2 не зовётся вовсе."""
+    if not text:
+        return True
+    if len(text) < 12:
+        return True
+    if text.lstrip().startswith("/"):
+        return True
+    # Только эмодзи и пунктуация — не вопрос.
+    if not re.search(r"[А-Яа-яЁёA-Za-z0-9]", text):
+        return True
+    return bool(_SEARCH_PLANNER_SKIP_RE.match(text.strip()))
 
 
 def _gemini_text_chain(*, needs_freshness: bool) -> list[str]:

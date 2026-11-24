@@ -1,5 +1,6 @@
 # Секреты и локальный конфиг — никогда не должны попасть в git
 .env
+.env*
 *.env
 
 # Байткод/кэш Python
@@ -33,3 +34,4 @@ audit-*.md
 .idea/
 .vscode/
 .qoder/
+worker/.wrangler/

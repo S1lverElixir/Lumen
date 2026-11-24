@@ -21,7 +21,14 @@ def extract_url(text: str) -> str | None:
     m = re.search(r"https?://[^\s]+", text)
     if not m:
          return None
-    return m.group(0).rstrip(".,!?;:)>]'\"")
+    url = m.group(0)
+    # Закрывающую скобку срезаем только при дисбалансе: иначе адрес
+    # "…/Doom_(1993_video_game)" терял скобку и не читался (внешний аудит 16.11.2026).
+    while url and url[-1] in ".,!?;:>'\"])":
+        if url[-1] == ")" and url.count("(") >= url.count(")"):
+            break
+        url = url[:-1]
+    return url
 
 def is_tiktok(url: str) -> bool:
     try:
@@ -86,8 +93,8 @@ REVERT_TRIGGER_PREFIXES = [
     # раньше «верни предыдущий» и «верни картинку» молча уходили текстовой модели.
     "верни предыдущий", "верни прошлый", "верни картинку", "верни фото",
     "верни изображение", "верни как было", "верни то", "previous version",
-    "прошлый вариант", "верни как было", "отмени правку", "отмени последнее изменение",
-    "верни назад", "previous version", "back to the previous version", "undo",
+    "прошлый вариант", "отмени правку", "отмени последнее изменение",
+    "верни назад", "back to the previous version", "undo",
 ]
 REDO_TRIGGER_PREFIXES = [
     "верни обратно", "верни последнюю версию", "верни как стало", "повтори правку",
@@ -116,6 +123,106 @@ def _split_image_variants(text: str) -> tuple[int, str]:
             cleaned = (text[:mm.start()] + " " + text[mm.end():]).strip()
             return num, re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
     return 1, text
+
+
+_VARIANTS_STRIP_RE = re.compile(
+    r"(?<!\d)(?:[2-4]\s*)?(?:вариант\w*|variants?)(?!\w)", re.IGNORECASE,
+)
+_VARIANTS_WORD_RE = re.compile(
+    r"(?<!\w)(?:два|две|три|четыре|two|three|four)\s+(?:вариант\w*|variants?)(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _strip_variants_phrase(text: str) -> str:
+    """Убирает только фразу про варианты: «3 versions» и «3 изображения» в
+    описании резолвера — часть сюжета, их не трогаем (проход №5, 17.11.2026)."""
+    src = text or ""
+    cleaned = _VARIANTS_STRIP_RE.sub(" ", src)
+    cleaned = _VARIANTS_WORD_RE.sub(" ", cleaned)
+    if cleaned == src:
+        # Ничего не вырезали — возвращаем текст байт-в-байт, точка на конце цела.
+        return src
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return re.sub(r"(?:,\s*)+", ", ", cleaned).strip(" ,")
+    return re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
+
+
+# ── Wake-word в группах: «Люмен, ...» вместо @упоминания ──
+# Правила против ложных срабатываний (ревью 18.11.2026):
+#  - только начало сообщения (после коротких обращений «эй/слушай/окей»);
+#  - обычная форма — имя + пунктуация («,» «:» «—» «!» «?» «.» + пробел);
+#  - форма через пробел — эвристика: блокируем третье лицо («умеет», «хороший»);
+#  - точка — делимитер только перед пробелом/концом: «lumen.example.com» не имя;
+#  - имя внутри слова, в середине фразы, @упоминание и URL не трогаем.
+_WAKE_PARTICLE_RE = re.compile(
+    r"^(?:эй|слушай|окей|okay|hey)\s*[,.!—–-]?\s+", re.IGNORECASE,
+)
+_WAKE_WEAK_PARTICLE_RE = re.compile(
+    r"^(?:а|ну|ладно)\s*[,.!—–-]\s*", re.IGNORECASE,
+)
+_WAKE_COPULA_RE = re.compile(
+    r"^(?:это|is|является|был|была|было|были)(?![А-Яа-яA-Za-z])", re.IGNORECASE,
+)
+# Третье лицо в форме через пробел: «люмен умеет…», «люмен хороший…».
+_WAKE_THIRD_PERSON_RE = re.compile(
+    r"^(?:умеет|может|хорош\w*|лучш\w*|работает|отвечает|жив[её]т|приш[её]л|"
+    r"упал\w*|стоит|любит|знает|понимает|принадлежит|не\s+бот|бот\b|"
+    r"is|was|can|works|helps)(?![А-Яа-яA-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def strip_group_wake_word(text: str, words: tuple[str, ...] = ("люмен", "lumen")) -> tuple[bool, str]:
+    """(сработал ли wake-word, текст без него)."""
+    src = (text or "").strip()
+    if not src or src.startswith("/"):
+        return False, text
+    rest = src
+    for _ in range(2):
+        m = _WAKE_PARTICLE_RE.match(rest) or _WAKE_WEAK_PARTICLE_RE.match(rest)
+        if not m:
+            break
+        rest = rest[m.end():]
+    rest = rest.lstrip("\"'«“(")
+    low = rest.lower()
+    for word in words:
+        w = (word or "").strip().lower()
+        if not w or not low.startswith(w):
+            continue
+        after = rest[len(w):]
+        if after[:1] and (after[0].isalnum() or after[0] in "_@"):
+            continue
+        after = after.lstrip().lstrip("\"'»”)")
+        punct_delim = False
+        if after[:1] in ("—", "–", "-"):
+            # Тире — обращение, но «Люмен — это бот» остаётся болтовнёй: копулу проверяем.
+            after = after[1:].lstrip()
+        elif after[:1] in (",", ":", ";", "!", "?"):
+            after = after[1:].lstrip()
+            punct_delim = True
+        elif after[:1] == ".":
+            # «lumen.example.com» — не обращение; «Люмен. Привет» — обращение.
+            nxt = after[1:2]
+            if nxt and not nxt.isspace():
+                continue
+            after = after[1:].lstrip()
+            punct_delim = True
+        elif after[:1].isspace():
+            after = after.lstrip()
+        if not after:
+            continue
+        if not punct_delim:
+            # Форма через пробел: снимаем очевидное третье лицо и связку.
+            if _WAKE_COPULA_RE.match(after) or _WAKE_THIRD_PERSON_RE.match(after):
+                return False, text
+        after = re.sub(r"^[^\w/]+", "", after, flags=re.UNICODE)
+        if not after:
+            continue
+        if not re.search(r"[0-9A-Za-zА-Яа-яЁё]", after):
+            continue
+        return True, after
+    return False, text
 
 
 def _detect_image_variants(text: str) -> int:
@@ -305,6 +412,45 @@ def _strip_trigger_fillers(text_lower: str) -> tuple[str, int]:
     return text_lower[cut:], cut
 
 
+# «draw a table of the results» — просьба собрать таблицу словами, а не картинку
+# (внешний аудит 16.11.2026). Слабый английский глагол без визуального объекта
+# в начале остатка уходит обычной модели; русские триггеры не ограничены.
+_WEAK_DRAW_PREFIXES = frozenset(("draw a", "draw an", "draw me", "paint", "paint me", "sketch"))
+# Любой триггер, кончающийся глаголом рисования, тоже слабый: "can you draw" и
+# "please draw" иначе проходили мимо проверки (проверка правок 16.11.2026).
+_WEAK_DRAW_LAST_WORDS = frozenset(("draw", "paint", "sketch"))
+# Текстовые артефакты — ответ модели словами. "summary card/poster/…" остаются
+# картинками: это визуальный объект, а не пересказ (проверка правок 16.11.2026).
+_DRAW_TEXTUAL_TAIL_RE = re.compile(
+    r"^(?:a |an |the )?(?:table|list|comparison|conclusion|summary)\b"
+    r"(?!\s+(?:card|poster|infographic|chart|diagram|image|picture))", re.IGNORECASE)
+
+
+def _draw_trigger_is_visual(trigger: str, rest: str) -> bool:
+    """Слабый английский триггер рисует, только если дальше объект картинки.
+    Модификатор ("table with a vase") не спасает: «table of the results» и
+    «table with the results» — одно и то же, а лишний рисованный ответ жжёт
+    личный слот; редкий стол-мебель человек спросит как «photo of a table»."""
+    words = trigger.split()
+    if trigger not in _WEAK_DRAW_PREFIXES and not (words and words[-1] in _WEAK_DRAW_LAST_WORDS):
+        return True
+    tail = rest.lstrip(" ,:;\t")
+    return not _DRAW_TEXTUAL_TAIL_RE.match(tail)
+
+
+# «прочти инструкцию и объясни, что делать» — просьба разобраться, а не озвучить
+# (внешний аудит 16.11.2026). Голые «прочти/зачитай» без глагола пересказа
+# остаются озвучкой: «зачитай этот абзац» — именно TTS.
+_TTS_BARE_READ = frozenset(("прочти", "прочтите", "зачитай", "зачитайте"))
+_TTS_EXPLAIN_RE = re.compile(r"\b(?:объясни|объясните|расскажи|расскажите|перескажи|перескажите)\b")
+
+
+def _tts_trigger_is_speech(trigger: str, rest: str) -> bool:
+    if trigger not in _TTS_BARE_READ:
+        return True
+    return not _TTS_EXPLAIN_RE.search(rest)
+
+
 def _match_trigger_with_fillers(text_lower: str, prefixes) -> tuple[str | None, int]:
     """(триггер, сколько символов снято). Триггер в чистом начале приоритетнее:
     прежние маршруты не двигаются. Дальше перебираем границы обвязки — «ну ещё
@@ -457,7 +603,7 @@ def _history_user_text(user_text: str) -> str:
 # текущей даты и выдачу поиска (выборка бэкапа: 19 реплик из 210, до 68% объёма
 # user-контекста). Плейсхолдер вместо ответа тоже осел в истории.
 _HISTORY_SERVICE_RE = re.compile(
-    r"\s*\[Context: today[^\]]*\]|\s*\[Web search snippets[\s\S]*$", re.IGNORECASE)
+    r"\s*\[Context: today[^\]]*\]|\s*\[Web search (?:snippets|results)[^\]]{0,200}\][\s\S]*$", re.IGNORECASE)
 
 
 def _clean_history_entry(item: dict) -> dict | None:
@@ -522,7 +668,7 @@ def _mime_matches_media_category(mime: str, category: str) -> bool:
         # PDF/текстовые/офисные файлы + octet-stream (неопознанный бинарник —
         # честная ошибка пользователю всё равно придёт позже из ask_gemini через
         # _is_gemini_supported_mime, а не молчаливое "не нашёл файл").
-        return low.startswith(("application/", "text/")) or low == "application/octet-stream"
+        return low.startswith(("application/", "text/"))
     return False
 
 # ── Кнопки-уточнения (pick-сценарии) ──

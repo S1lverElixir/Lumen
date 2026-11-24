@@ -42,6 +42,24 @@ async def _gemini_tts_bytes(
 ) -> tuple[bytes, str, str]:
     """Gemini TTS, возвращает (pcm_bytes, mime_type, used_model). Состояние параметрами, расход в GLOBAL_QUOTA (у TTS 10 запросов/сутки на модель). Async-клиент + wait_for: синхронный to_thread нельзя отменить, зависший вызов держал лок чата (аудит 26.09.2026)."""
     async def call_tts(model_name: str):
+        # GA-путь TTS — Interactions API: generate_content с speech_config теперь
+        # отвечает «Unknown name speechConfig» (прод 17.11.2026). Старый путь оставлен
+        # резервом для SDK без interactions и для тестовых двойников.
+        interactions = getattr(client.aio, "interactions", None)
+        if interactions is not None:
+            try:
+                return await interactions.create(
+                    model=model_name,
+                    input=text,
+                    # Строчными: API отвечает «'AUDIO' is not supported», ждёт 'audio'.
+                    response_modalities=["audio"],
+                    # v1 отвечает «response_modalities is only available in v1beta»
+                    # (прод 17.11.2026): звук живёт только на бете.
+                    api_version="v1beta",
+                )
+            except (AttributeError, TypeError):
+                # Двойник без настоящего create: ниже старый путь generate_content.
+                pass
         contents = [
             types.Content(
                 role="user",
@@ -98,7 +116,12 @@ async def _gemini_tts_bytes(
 
     audio_bytes = None
     mime_type = "audio/mp3"
-    for candidate in (getattr(resp, "candidates", []) or []):
+    # Interactions API: готовый output_audio с base64-данными.
+    _out_audio = getattr(resp, "output_audio", None)
+    if _out_audio is not None:
+        audio_bytes = getattr(_out_audio, "data", None)
+        mime_type = getattr(_out_audio, "mime_type", mime_type) or mime_type
+    for candidate in ([] if audio_bytes else (getattr(resp, "candidates", []) or [])):
         content = getattr(candidate, "content", None)
         if content:
             for part in (getattr(content, "parts", []) or []):

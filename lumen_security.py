@@ -104,18 +104,49 @@ _IDENTITY_BASED_ON_RE = re.compile(
     rf"\bоснован\w*\s+на\s+{_LEAK_BRAND_TOKENS}\b"
     rf"|\bbuilt\s+on\s+{_LEAK_BRAND_TOKENS}\b"
     rf"|\bpowered\s+by\s+{_LEAK_BRAND_TOKENS}\b"
-    rf"|\bbased\s+on\s+{_LEAK_BRAND_TOKENS}\b",
+    rf"|\bbased\s+on\s+{_LEAK_BRAND_TOKENS}\b"
+    # «I am running on gemini-2.5-flash», «we run on OpenAI»: по-русски «работаю
+    # на» уже ловилось, по-английски — нет (ревью приватности 12.11.2026).
+    # Требование первого лица в том же предложении остаётся: «The demo runs on
+    # Google hardware» — честный рассказ о чужом стеке, а не самоопределение.
+    rf"|\b(?:running|run|runs)\s+on\s+(?:the\s+)?(?:model\s+)?{_LEAK_BRAND_TOKENS}\b"
+    # То же по-русски в любой форме: «мы работаем на OpenAI», «я работал на
+    # Gemini» (ревью приватности 12.11.2026). Узкий «работаю на» выше оставлен
+    # как есть, а сюда форма попала под защитой первого лица: «приложение
+    # работает на Google Cloud» — честный рассказ о чужом стеке.
+    rf"|\bработ\w*\s+на\s+(?:базе\s+)?{_LEAK_BRAND_TOKENS}\b",
     re.IGNORECASE,
 )
-_FIRST_PERSON_RE = re.compile(r"\b(я|меня|мне|мной|мною|i|me|my)\b", re.IGNORECASE)
+_FIRST_PERSON_RE = re.compile(
+    # Множественное число обязательно: «мы работаем на OpenAI» — то же
+    # самоопределение, что и «I run on OpenAI» (ревью приватности 12.11.2026).
+    r"\b(я|мы|меня|мне|мной|мною|нас|нам|нами|i|we|me|my|our)\b",
+    re.IGNORECASE,
+)
+# «My system prompt is: …» и «мой системный промпт запрещает …» — выдача
+# собственной инструкции, а не объяснение жанра: притяжательное слово
+# обязательно. Дыра стала видна на агентском слое: модель, которой показывают
+# инструмент и чужие сниппеты, в живом прогоне пересказывала промпт (12.11.2026).
+_PROMPT_REVEAL_RE = re.compile(
+    r"\b(?:my|our)\s+(?:hidden\s+)?system\s+prompt\b"
+    r"|\bмо[яийугв]\s+системн\w*\s+промпт"
+    r"|\bнаш\s+системн\w*\s+промпт",
+    re.IGNORECASE,
+)
 _SENTENCE_SPLIT_RE = re.compile(r"[.!?…\n]+")
 
 # Точные ID моделей ловим как отдельные токены, а не подстрокой: слаг внутри
-# более длинного слова ("gemini-3.8-flashback") утечкой не считаем.
+# более длинного слова ("gemini-3.8-flashback") утечкой не считаем. Прежний класс
+#([\w/:.\-]) после id отбрасывал и обычную пунктуацию конца фразы, поэтому
+# «I work on gemini-2.5-flash.» и «Модель gemini-2.5-flash.» фильтром не ловились
+# вовсе (ревью приватности 12.11.2026). Отказываем только в продолжении id
+# (буква, цифра, дефис), в пути или адресе («/gemini-2.5-flash/model»,
+# «openai.com/gpt-4o») и в расширении файла («gemini-2.5-flash.ru»): там это не
+# самоопределение, а часть ссылки.
 _LEAK_LITERAL_RE = re.compile(
     r"(?<![\w/:.\-])(?:" + "|".join(
         re.escape(lit) for lit in sorted(_LEAK_LITERAL_STRINGS, key=len, reverse=True) if lit
-    ) + r")(?![\w/:.\-])",
+    ) + r")(?![\w\-]|\.\w|[/:])",
     re.IGNORECASE,
 ) if _LEAK_LITERAL_STRINGS else None
 
@@ -163,6 +194,12 @@ def _detect_identity_leak(text: str) -> bool:
         return True
     for sentence in _SENTENCE_SPLIT_RE.split(text):
         if _IDENTITY_BASED_ON_RE.search(sentence) and _FIRST_PERSON_RE.search(sentence):
+            return True
+        # Пересказ собственного промпта: притяжательное («my/mой», «our/наш»)
+        # уже входит в шаблон, поэтому отдельного первого лица не требует. Без
+        # этого «Мой системный промпт запрещает…» и «Вот наш системный промпт:»
+        # фильтром не ловились (ревью приватности 12.11.2026).
+        if _PROMPT_REVEAL_RE.search(sentence):
             return True
     return False
 
@@ -231,14 +268,312 @@ def _is_garbled_echo(answer: str, user_text: str | None) -> bool:
     return all(token.lower() in low_user for token in mixed)
 
 
+# ─────────────────── отделка готового ответа под Claude ───────────────────
+# Промпт запрещает и декоративные эмодзи, и смешение языков в ответе, но
+# бесплатные головы нарушают оба правила: живой прогон корпуса 11.11.2026 дал
+# 12 эмодзи в поздравлении при норме «1-2 на ответ» и «в нём everywhere плавают
+# частички» в русском рассказе про небо. Рубеж в коде детерминирован, как скраб
+# утечек: показываем то, что показал бы Claude, а не что сгенерировала модель.
+
+# Код и ссылки — не манера речи: эмодзи и латиница внутри них это контент.
+# Маска той же длины, что и оригинал, поэтому смещения правок совпадают.
+_PROTECTED_SPANS_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`|https?://\S+", re.DOTALL)
+
+# База эмодзи плюс вариативный знак и ZWJ: «🥂🎂» — одна последовательность.
+# Служебные значки бота (✻ ✓ ∴ ∵ ⋯ ⋰ ⋱) живут в тех же блоках Dingbats/Math,
+# поэтому последовательность проверяется по первому символу — значки бота
+# под снятие не попадают.
+# Потолок 2 — норма промпта для украшательства; легенда (значок в начале строки
+# с разделителем: «🔍 — лупа») — это контент, промпт допускает до пяти таких.
+# У значков-маркеров списка (три и больше в начале строк) правка тоже
+# одновременная: половина пунктов со значком, половина без — два стиля в одном
+# списке (ревью 11.11.2026). В прозе же сверх потолка снимаются только лишние:
+# эмодзи там держит границу предложения, и замеры 12.11.2026 на вопросе «с
+# эмодзи» показали слитые без точки фразы после тотальной зачистки.
+_EMOJI_MAX_PER_ANSWER = 2
+_EMOJI_MIN_LIST_MARKERS = 3
+_EMOJI_MAX_LEGEND = 5
+# Значок в ячейке таблицы — это значение столбца, а не декор.
+_TABLE_CELL_CH = "|"
+
+_EMOJI_KEEP = "✻✓∴∵⋯⋰⋱"
+_EMOJI_BASE = "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF]"
+_EMOJI_RUN_RE = re.compile(_EMOJI_BASE + "(?:[\\uFE0F\\u200D]?" + _EMOJI_BASE + "|[\\uFE0F\\u200D])*")
+_LEGEND_AFTER_RE = re.compile(r"\s*(?:[—–-]|:|•|\d{1,2}[.)])")
+# ZWJ-склейка, вариативный знак и тона кожи: «👨‍👩‍👧» — один знак,
+# а не три (ревью 11.11.2026: семья из четырёх кодпоинтов считалась гирляндой).
+_EMOJI_JOIN_CH = "\u200d\ufe0f\U0001f3fb\U0001f3fc\U0001f3fd\U0001f3fe\U0001f3ff"
+
+
+# Только закрытые классы: артикли, предлоги, союзы, указатели, наречия.
+# Существительные и полные глаголы — открытые: в техническом русском это
+# термины (dict, asyncio, get). Из закрытых убраны все, что в коде работают
+# ключевым словом или оператором: not, all, any, each, both (проверка
+# 11.11.2026), затем for, in, with, within, without, is, are, was, were, been,
+# being, have, has, had, will, would, could, should, shall, must, might, they,
+# them, their, there, then, than, over, under, above, below, between, during,
+# while, about, against, you, your. Ревью 11.11.2026 посчитало жертвы вида
+# «цикл for перебирает» и «экран game over»: снимать такое слово — значить
+# испортить правильный ответ, а вставное «the» или «everywhere» остаётся видно.
+_FOREIGN_FUNC_WORDS = frozenset({
+    "the", "and", "but", "or", "from", "this", "that", "these", "those",
+    "very", "quite", "rather", "almost", "enough", "much", "many", "more",
+    "most", "other", "another", "such", "some", "every", "few", "less",
+    "least", "anything", "something", "everything", "nothing", "because",
+    "although", "though", "however", "therefore", "otherwise", "where",
+    "wherever", "when", "whenever", "which", "what", "whatever", "who", "whom",
+    "whose", "why", "how", "into", "onto", "since", "until", "again",
+    "already", "yet", "still", "just", "also", "even", "only", "too", "maybe",
+    "perhaps", "really", "actually", "basically", "literally", "clearly",
+    "obviously", "finally", "eventually", "always", "never", "often",
+    "sometimes", "soon", "now", "here", "everywhere", "somewhere", "anywhere",
+    "nowhere", "today", "tonight", "yesterday", "tomorrow",
+})
+
+# Сразу за словом стоит один из этих знаков — значит это идентификатор или
+# термин (value=, take(2), only-child), а не вставное английское слово.
+_CODEISH_AFTER = "([:=/#_.,;+-"
+# Предложение-носитель артефакта: не меньше 5 слов не-латинской графики и
+# 60% букв в ней. Правило не привязано к кириллице — тот же сбой головы
+# одинаково выглядит в тайском, арабском или корейском ответе (проверка
+# 25 языков 11.11.2026), а латинское предложение трогать нельзя: там these
+# и because — норма, а не артефакт.
+_LATIN_LETTERS_RE = re.compile(r"[A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u024F\u1E00-\u1EFF]")
+_LETTER_TOKEN_RE = re.compile(r"[^\W\d_]+")
+# Целое латинское вхождение вместе с апострофами: «you're» — одно слово,
+# а не «you» с хвостом «'re» (ревью 11.11.2026: после снятия оставалось «'re прав»).
+_LATIN_RUN_RE = re.compile(r"[A-Za-z][A-Za-z']*", re.ASCII)
+_LATIN_RUN_CH = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'"
+# Признак того, что в предложении код: английские слова в нём могут быть
+# идентификаторами, и вычистивать их нельзя.
+_CODE_SIGNAL_RE = re.compile(r"[={}#_]|->|[A-Za-z0-9]+\.[A-Za-z_]+|[A-Z][a-z]+[A-Z]", re.ASCII)
+_LANG_MIX_MIN_NONLATIN_WORDS = 5
+_LANG_MIX_MIN_NONLATIN_SHARE = 0.6
+# Знаки, перед которыми пробел не ставится: вычищая слово, соседний пробел
+# убираем вместе с ним, иначе в строке остаётся дыра «улыбки ,».
+_TIGHT_PUNCT = ",.;:!?)]»”"
+
+
+def _masked_copy(text: str) -> str:
+    """Текст той же длины, где код и ссылки вытеснены пробелами: по нему ищем
+    артефакты, а правим оригинал на тех же смещениях."""
+    out = list(text)
+    for m in _PROTECTED_SPANS_RE.finditer(text):
+        for i in range(m.start(), m.end()):
+            out[i] = " "
+    return "".join(out)
+
+
+def _sentence_bounds(text: str) -> list[tuple[int, int]]:
+    """Границы предложений без разделителей: правка не переезжает через точку."""
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for m in _SENTENCE_SPLIT_RE.finditer(text):
+        if m.start() > start:
+            bounds.append((start, m.start()))
+        start = m.end()
+    if start < len(text):
+        bounds.append((start, len(text)))
+    return bounds
+
+
+def _drop_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """Вычёркивает диапазоны и прибирает соседний пробел: перед пунктуацией —
+    ведущий, между словами — один из двух, иначе остаётся дыра «улыбки ,» или
+    слитное «внёмплавают». Глобальное схлопывание пробелов не делаем — оно
+    сжигало бы отступы в коде."""
+    if not spans:
+        return text
+    parts: list[str] = []
+    prev = 0
+    for s, e in spans:
+        s = max(s, prev)
+        if s >= e:
+            continue
+        lead = s > 0 and text[s - 1] == " "
+        nxt = text[e] if e < len(text) else ""
+        head = s == 0 or text[s - 1] in "\n\r"
+        if lead and (nxt in _TIGHT_PUNCT or nxt in "\n\r" or not nxt):
+            s -= 1
+        elif (lead or head) and nxt == " ":
+            e += 1
+
+        parts.append(text[prev:s])
+        prev = e
+    parts.append(text[prev:])
+    return "".join(parts)
+
+
+def _emoji_clusters(run: str) -> int:
+    """Сколько самостоятельных знаков в последовательности: ZWJ склеивает
+    соседей в один (семья — это один знак), вариативный знак и тон кожи нового
+    кластера не создают. Гирлянда «🎉✨🔥» без ZWJ остаётся тремя."""
+    total = 0
+    joined = False
+    for ch in run:
+        if ch == "\u200d":
+            joined = True
+            continue
+        if ch in _EMOJI_JOIN_CH:
+            continue
+        if not joined:
+            total += 1
+        joined = False
+    return total
+
+
+def _trim_decoration_emoji(text: str, *, source: str) -> str:
+    """Гирлянда decorative-эмодзи урезается до нормы промпта («1-2 на ответ»).
+    Эмодзи в начале строки, сразу за которым стоит разделитель («🔍 — лупа»), —
+    это легенда, то есть контент: промпт разрешает до пяти таких. В коде,
+    ссылках и ячейках таблицы эмодзи — контент, его не считаем и не снимаем."""
+    if not text:
+        return text
+    visible = _masked_copy(text[:_MUSH_MAX_TEXT_LEN])
+    legend: list[tuple[tuple[int, int], int]] = []
+    flourish: list[tuple[tuple[int, int], int]] = []
+    for m in _EMOJI_RUN_RE.finditer(visible):
+        if m.group(0)[0] in _EMOJI_KEEP:
+            continue
+        line_start = visible.rfind("\n", 0, m.start()) + 1
+        line_end = visible.find("\n", m.start())
+        line_end = len(visible) if line_end < 0 else line_end
+        if _TABLE_CELL_CH in visible[line_start:line_end]:
+            continue
+        at_line_head = not visible[line_start:m.start()].strip()
+        size = _emoji_clusters(m.group(0))
+        if at_line_head and _LEGEND_AFTER_RE.match(visible, m.end()):
+            legend.append((m.span(), size))
+        else:
+            flourish.append((m.span(), size, at_line_head))
+    cut: list[tuple[int, int]] = []
+    markers = [span for span, _size, head in flourish if head]
+    if len(markers) < _EMOJI_MIN_LIST_MARKERS:
+        # Один-два значка в начале строк — это проза, а не список: режем по
+        # потолку, иначе одинокий маркер строки вообще не снимался бы.
+        markers = []
+    else:
+        cut.extend(markers)
+    kept_flow = 0
+    for span, size, _head in flourish:
+        if span in markers:
+            continue
+        if kept_flow + size > _EMOJI_MAX_PER_ANSWER:
+            cut.append(span)
+        else:
+            kept_flow += size
+    kept = 0
+    for span, size in legend:
+        if kept + size > _EMOJI_MAX_LEGEND:
+            cut.append(span)
+        else:
+            kept += size
+    if not cut:
+        return text
+    cut.sort()
+    log.warning("[emoji-style] Trimmed %d decorative emoji run(s) over the 1-2 norm (source=%s, len=%d)", len(cut), source, len(text))
+    return _drop_spans(text, cut)
+
+
+def _nonlatin_shape(seg: str) -> tuple[int, float]:
+    """(слов не-латинской графики, доля не-латинских букв) в отрезке текста."""
+    tokens = _LETTER_TOKEN_RE.findall(seg)
+    all_letters = sum(len(t) for t in tokens)
+    if not all_letters:
+        return 0, 0.0
+    latin_letters = sum(len(_LATIN_LETTERS_RE.findall(t)) for t in tokens)
+    foreign_words = sum(1 for t in tokens if not _LATIN_LETTERS_RE.search(t))
+    return foreign_words, (all_letters - latin_letters) / all_letters
+
+
+def _foreign_insert_spans(text: str) -> list[tuple[int, int]]:
+    """Вставные английские служебные слова в предложении, написанном другим
+    алфавитом (кириллица, арабица, тайский — любой не-латинский)."""
+    if not text or len(text) < _MUSH_MIN_TEXT_LEN:
+        return []
+    visible = _masked_copy(text[:_MUSH_MAX_TEXT_LEN])
+    spans: list[tuple[int, int]] = []
+    for lo, hi in _sentence_bounds(visible):
+        seg = visible[lo:hi]
+        words, share = _nonlatin_shape(seg)
+        if words < _LANG_MIX_MIN_NONLATIN_WORDS or share < _LANG_MIX_MIN_NONLATIN_SHARE:
+            continue
+        if _CODE_SIGNAL_RE.search(seg):
+            continue
+        for m in _LATIN_RUN_RE.finditer(seg):
+            if m.group(0).lower() not in _FOREIGN_FUNC_WORDS:
+                continue
+            # Остров: слева и справа не латиница. «the beatles» — не вставное
+            # «the», а имя: вычищаем только одиночное служебное слово.
+            before = seg[m.start() - 1] if m.start() else ""
+            after = seg[m.end()] if m.end() < len(seg) else ""
+            if before in _LATIN_RUN_CH or after in _LATIN_RUN_CH:
+                continue
+            if after in _CODEISH_AFTER:
+                continue
+            spans.append((lo + m.start(), lo + m.end()))
+    return spans
+
+
+def _strip_foreign_inserts(text: str, *, source: str) -> str:
+    spans = _foreign_insert_spans(text)
+    if not spans:
+        return text
+    log.warning("[lang-mix] Removed %d inserted Latin word(s) from a non-Latin answer (source=%s, len=%d)", len(spans), source, len(text))
+    return _drop_spans(text, spans)
+
+
+def _polish_answer(text: str, *, source: str) -> str:
+    """Единый выходной полировщик ответа: утечки, эмодзи-декор, вставные слова.
+    Вызывать там, где стоял _scrub_identity_leak — до показа и до записи в
+    историю, иначе артефакт осел бы в контексте следующих ответов.
+    Ответ из одних эмодзи — это ответ: если правка съела всё видимое,
+    возвращаем оригинал (ревью 11.11.2026: пустой текст уходил в edit_text)."""
+    text = _scrub_identity_leak(text, source=source)
+    polished = _strip_foreign_inserts(_trim_decoration_emoji(text, source=source), source=source)
+    if text.strip() and not polished.strip():
+        return text
+    return polished
+
+
+def _polished_prefix_len(text: str, index: int, *, source: str) -> int:
+    """Сколько знаков уже показано, если текст укорочен полировкой: длина общего
+    префикса оригинала и полированного. Завысить не может, поэтому хвост не
+    теряет показанное; при разнобое на самой границе он повторит пару символов,
+    что для ответа лучше пропажи (ревью 11.11.2026)."""
+    if index <= 0:
+        return 0
+    polished = _polish_answer(text, source=source)
+    shown = _polish_answer(text[:index], source=source)
+    limit = min(len(shown), len(polished))
+    n = 0
+    while n < limit and shown[n] == polished[n]:
+        n += 1
+    return n
+
+
 def _leak_spans(text: str) -> list[tuple[int, int]]:
     """Диапазоны символов, где нашлась утечка или эхо инструкции."""
     spans: list[tuple[int, int]] = []
-    for pattern in (_LEAK_LITERAL_RE, _IDENTITY_LEAK_RE, _INJECTED_PAYLOAD_ECHO_RE, _IDENTITY_BASED_ON_RE):
+    for pattern in (_LEAK_LITERAL_RE, _IDENTITY_LEAK_RE, _INJECTED_PAYLOAD_ECHO_RE,
+                    _PROMPT_REVEAL_RE):
         if pattern is None:
             continue
         for m in pattern.finditer(text):
             spans.append((m.start(), m.end()))
+    # _IDENTITY_BASED_ON_RE — только в предложении с первым лицом, как в
+    # _detect_identity_leak: иначе честное «основана на исследованиях Google»
+    # вырезалось вместе с настоящей утечкой (ревью 17.11.2026).
+    if _IDENTITY_BASED_ON_RE is not None:
+        pos = 0
+        for sentence in _SENTENCE_SPLIT_RE.split(text):
+            start = text.find(sentence, pos)
+            if start < 0:
+                start = pos
+            if _FIRST_PERSON_RE.search(sentence):
+                for m in _IDENTITY_BASED_ON_RE.finditer(sentence):
+                    spans.append((start + m.start(), start + m.end()))
+            pos = start + len(sentence)
     return spans
 
 
@@ -263,11 +598,13 @@ def _scrub_contaminated_sentences(text: str, *, kind: str) -> str | None:
             lo, hi = bounds[idx], bounds[idx + 1]
             if lo <= start < hi or lo < end <= hi:
                 drop.add(idx)
-    kept = "".join(text[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1) if i not in drop)
-    kept = kept.strip()
+    kept_raw = "".join(text[bounds[i]:bounds[i + 1]] for i in range(len(bounds) - 1) if i not in drop)
+    kept = kept_raw.strip()
     if not kept:
         return None
-    if len(kept) < len(text) * _SCRUB_MAX_CONTAMINATED_RATIO:
+    # Долю считаем по необстриженному остатку: ведущий пробел съедал границу
+    # и честный ответ падал в fallback (ревью 17.11.2026).
+    if len(kept_raw) < len(text) * _SCRUB_MAX_CONTAMINATED_RATIO:
         return None
     log.warning('[%s] Scrubbed only the offending sentence(s), kept %d of %d chars', kind, len(kept), len(text))
     return kept

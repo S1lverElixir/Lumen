@@ -37,6 +37,12 @@ from lumen_tiktok import (
 )
 from lumen_status import StatusMessage
 
+# Лимиты Telegram на один файл: фото 10 МБ, видео 50 МБ. Слайд качается с
+# резервом до TIKTOK_DOWNLOAD_MAX_BYTES; переполненный по типу слайд выкидываем,
+# иначе Telegram отклоняет всю группу разом (внешний аудит 16.11.2026).
+_TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+_TG_VIDEO_MAX_BYTES = 50 * 1024 * 1024
+
 
 def _status_message(status: "StatusMessage | Message | None"):
     """Реальное сообщение статуса для правок ошибок (актор или голый Message)."""
@@ -287,10 +293,16 @@ async def _send_tiktok_music(session, media_data: dict, message: Message, author
          log.warning("[tiktok] failed to send music: %s", e)
     finally:
          # Ранний выход/исключение не должны оставлять DSP-запрос в фоне.
-         with contextlib.suppress(asyncio.CancelledError, Exception):
+         with contextlib.suppress(Exception):
               if not dsp_task.done():
                    dsp_task.cancel()
+         try:
               await dsp_task
+         except asyncio.CancelledError:
+              # Своя отмена (дедлайн сообщения) обязана пройти дальше: suppress
+              # глушил её и обработчик дорабатывал сверх бюджета (ревью 17.11.2026).
+              if asyncio.current_task().cancelling():
+                   raise
 
 async def handle_tiktok_sound(message: Message, status: Message | None) -> None:
     """Ссылка на страницу звука TikTok (не видео) — см. комментарий выше по файлу:
@@ -424,8 +436,17 @@ async def _try_send_tiktok_slideshow(
               probed = await asyncio.gather(*(_probe_bounded(downloaded[i]) for i in video_indices))
               probe_results = dict(zip(video_indices, probed))
          media_items: list[Any] = []
+         capped_slides = 0
          for idx, item_bytes in enumerate(downloaded):
               if not item_bytes:
+                   continue
+              if idx in probe_results and len(item_bytes) > _TG_VIDEO_MAX_BYTES:
+                   log.warning("[tiktok] Slide %d skipped: %d MB over the 50 MB video cap.", idx, len(item_bytes) // (1024 * 1024))
+                   capped_slides += 1
+                   continue
+              if idx not in probe_results and len(item_bytes) > _TG_PHOTO_MAX_BYTES:
+                   log.warning("[tiktok] Slide %d skipped: %d MB over the 10 MB photo cap.", idx, len(item_bytes) // (1024 * 1024))
+                   capped_slides += 1
                    continue
               if idx in probe_results:
                     # Видео-слайд — как видео со звуком-как-есть, плюс те же duration/size/thumbnail, что у цельного видео (иначе Telegram не распознаёт контейнер).
@@ -444,12 +465,29 @@ async def _try_send_tiktok_slideshow(
                    media_items.append(InputMediaVideo(**video_kwargs))
               else:
                    media_items.append(InputMediaPhoto(media=BufferedInputFile(item_bytes, filename=f"photo_{idx}.jpg")))
+         if not media_items:
+              # Слайды-видео честно отдаёт обычная видео-ветка, но только если play
+              # действительно видео: у фото-поста play — аудио, и по live_images.mp4
+              # оно уезжало как видео (регрессия 16.11.2026, ревью 17.11.2026).
+              play_url = str(
+                   media_data.get("play") or media_data.get("hdplay")
+                   or media_data.get("wmplay") or "")
+              if play_url.lower().split("?")[0].endswith((".mp4", ".m4v", ".webm")):
+                   return False
+              raise TikTokUserFacingError(bot._t(message.chat.id, "tiktok_generic_fail"))
          if media_items:
               # Статус держим до конца (включая музыку ниже) — иначе человек висит в тишине, пока качается трек.
               if len(media_items) == 1:
                     # Один уцелевший слайд — обычным send_photo/send_video: media group требует минимум 2.
                    only_item = media_items[0]
                    if isinstance(only_item, InputMediaVideo):
+                        # Те же duration/size/thumbnail, что у группы: без них
+                        # одиночный слайд уходил сырым файлом 0:00 (внешний аудит 16.11.2026).
+                        slide_kwargs: dict[str, Any] = {}
+                        for attr in ("duration", "width", "height", "thumbnail"):
+                             value = getattr(only_item, attr, None)
+                             if value:
+                                  slide_kwargs[attr] = value
                         sent_slide = await bot._tg_call(
                              bot.bot.send_video,
                              chat_id=message.chat.id, video=only_item.media,
@@ -457,6 +495,7 @@ async def _try_send_tiktok_slideshow(
                              call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
                              # Без слепого ретрая: повтор отправки после сбоя дал бы дубль.
                              retries=0,
+                             **slide_kwargs,
                         )
                    else:
                         sent_slide = await bot._tg_call(
@@ -485,17 +524,18 @@ async def _try_send_tiktok_slideshow(
                               # Пауза между группами — против анти-флуда.
                              await asyncio.sleep(0.3)
               total_elapsed = time.perf_counter() - started_at
+              sent_videos = sum(1 for item in media_items if isinstance(item, InputMediaVideo))
               log.info(
                    '[tiktok] Slideshow delivered: %d of %d slides (%d video, %d photo) in %d group(s), %.1f MB, download %.1fs, send %.1fs.',
-                   len(media_items), len(images_to_fetch), len(probe_results),
-                   len(media_items) - len(probe_results),
+                   len(media_items), len(images_to_fetch), sent_videos,
+                   len(media_items) - sent_videos,
                    len(_chunk_tiktok_media_items(media_items)),
                    downloaded_bytes / (1024 * 1024),
                    download_elapsed, total_elapsed - download_elapsed,
               )
               await _send_tiktok_music(session, media_data, message, author, headers)
               await _status_delete(status)
-              if skipped_slides:
+              if skipped_slides or capped_slides:
                    # Кадров пришло меньше, чем обещал статус. Тот же локализованный
                    # шаблон счётчика, уже без анимации: молча показать 5 из 12 —
                    # выглядит как «бот съел половину поста» (аудит 01.11.2026).

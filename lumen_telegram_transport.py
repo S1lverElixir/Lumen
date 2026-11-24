@@ -130,6 +130,7 @@ def proxy_auth_middlewares(
     *, proxy_secret: str = "", proxy_base_urls: Sequence[str] = (),
 ) -> tuple:
     scopes = []
+    read_scopes = []
     for base_url in proxy_base_urls:
         if not base_url:
             continue
@@ -147,16 +148,24 @@ def proxy_auth_middlewares(
         if parsed.hostname in {"api.telegram.org", "www.tikwm.com", "tikwm.com"}:
             continue
         scopes.append((parsed.hostname, port, parsed.path.rstrip("/")))
+        # Чтение страниц живёт на том же origin отдельным маршрутом /read:
+        # без этой записи middleware вырезал секрет и прокси отвечал 401
+        # (аудит 16.11.2026 — фича была мертва целиком).
+        read_scopes.append((parsed.hostname, port))
     if scopes and (not proxy_secret or len(proxy_secret) < 32 or any(not 33 <= ord(c) <= 126 for c in proxy_secret)):
         raise ValueError("LUMEN_PROXY_SECRET is required for configured proxies (min 32 printable ASCII chars without spaces)")
 
     async def authenticate(request: aiohttp.ClientRequest, handler):
         request.headers.popall(PROXY_AUTH_HEADER, None)
         url = request.url
-        authenticated = url.scheme == "https" and any(
-            url.host == host and url.port == port
-            and (url.path == path or url.path.startswith(path + "/"))
-            for host, port, path in scopes
+        authenticated = url.scheme == "https" and (
+            any(
+                url.host == host and url.port == port
+                and (url.path == path or url.path.startswith(path + "/"))
+                for host, port, path in scopes
+            )
+            or (url.path == "/read" and any(
+                url.host == host and url.port == port for host, port in read_scopes))
         )
         if authenticated:
             request.headers[PROXY_AUTH_HEADER] = proxy_secret
@@ -221,12 +230,14 @@ async def get_telegram_session(
     через env конфигурации bot.py, а не константа этого модуля."""
     global _telegram_session, _telegram_session_auth
     auth = (proxy_secret, tuple(proxy_base_urls))
-    middlewares = proxy_auth_middlewares(
-        proxy_secret=proxy_secret, proxy_base_urls=auth[1],
-    )
     if _telegram_session is not None and not _telegram_session.closed and _telegram_session_auth != auth:
         await _telegram_session.close()
     if _telegram_session is None or _telegram_session.closed:
+        # Собираем только при создании: при переиспользовании кэша это была
+        # лишняя работа на каждый вызов (ревью 17.11.2026).
+        middlewares = proxy_auth_middlewares(
+            proxy_secret=proxy_secret, proxy_base_urls=auth[1],
+        )
         _telegram_session = aiohttp.ClientSession(
             connector=_build_telegram_connector(limit=10),
             timeout=aiohttp.ClientTimeout(total=request_timeout + 10.0, connect=10.0),

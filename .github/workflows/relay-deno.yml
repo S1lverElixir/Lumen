@@ -1,0 +1,29 @@
+name: Relay secret (Deno)
+on:
+  workflow_dispatch:
+# Только чтение репозитория: секрет обновляется по DENO_DEPLOY_TOKEN, не по OIDC.
+permissions:
+  contents: read
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
+        with:
+          deno-version: v2.x
+      - name: Update relay secret
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          NEW_SECRET: ${{ secrets.LUMEN_PROXY_SECRET }}
+        run: |
+          deno deploy env update-value LUMEN_PROXY_SECRET "$NEW_SECRET" \
+            --org silverelixir --app lumen-proxy --token "$DENO_DEPLOY_TOKEN" \
+            --json --non-interactive
+      - name: Update backup relay secret
+        env:
+          DENO_DEPLOY_TOKEN: ${{ secrets.DENO_DEPLOY_TOKEN }}
+          NEW_SECRET: ${{ secrets.LUMEN_PROXY_SECRET }}
+        run: |
+          deno deploy env update-value LUMEN_PROXY_SECRET "$NEW_SECRET" \
+            --org silverelixir --app lumen-proxy-backup --token "$DENO_DEPLOY_TOKEN" \
+            --json --non-interactive

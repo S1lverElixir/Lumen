@@ -179,7 +179,11 @@ TIKWM_JSON_MAX_BYTES = 1 * 1024 * 1024
 def _log_safe_url(url: str) -> str:
     """URL без query/fragment: в ?url= лежит ссылка пользователя, её нельзя писать в общий лог."""
     parts = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    path = parts.path
+    if "@" in path:
+        # Ссылка пользователя: @аккаунт в пути — это его приватность, не диагностика.
+        path = "/<user>"
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 async def _read_capped_body(resp: aiohttp.ClientResponse, url: str, *, cap_bytes: int | None = None) -> bytes | None:
@@ -270,7 +274,7 @@ async def _fetch_tikwm_media_data(
     if any_attempt_made and all_attempts_403_empty:
         log.warning(
             "[tikwm][diag] ALL attempts (both mirrors, with throttling and a retry round) returned HTTP 403 with an EMPTY body — url=%s. The URL resolved correctly and requests were spaced out over time — this doesn't look like an ordinary transient error. Looks like this server's outbound IP is being blocked at a proxy/WAF level in front of TikWM (see README for a similar documented case with YouTube), which timing/URL tweaks on our side can't work around. To test the hypothesis: the same request to TikWM from a DIFFERENT IP (not HF Spaces).",
-            resolved_url,
+            _log_safe_url(resolved_url),
         )
     return None
 
@@ -655,7 +659,7 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
     }
     # Стартовый URL от пользователя: внутренний адрес режем до первого запроса.
     if not await asyncio.to_thread(_host_resolves_to_public, urllib.parse.urlsplit(url).hostname):
-        log.warning("[tiktok] Refusing to resolve non-public start URL %r.", url)
+        log.warning("[tiktok] Refusing to resolve non-public start URL %s.", _log_safe_url(url))
         return url
     # Редиректы разбираем вручную через _checked_redirect_url: aiohttp
     # с allow_redirects=True сходил бы на следующий хоп до проверки хоста.
@@ -694,7 +698,7 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
                 if not _looks_like_resolved_tiktok_url(resolved):
                     # Битый URL после GET тоже логируем — иначе остаётся только малопонятный 403 уже на стороне TikWM.
                     log.warning(
-                        "[tiktok] Resolving short link %s didn't yield anything that looks like a post URL via either HEAD or GET (result: %s) — passing it through as-is, TikWM may reject it.", url, resolved,
+                        "[tiktok] Resolving short link %s didn't yield anything that looks like a post URL via either HEAD or GET (result: %s) — passing it through as-is, TikWM may reject it.", _log_safe_url(url), _log_safe_url(resolved),
                     )
                 return resolved
     except Exception as e:
@@ -709,6 +713,14 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
 # Это единственный доступный способ узнать трек для лицензированной музыки:
 # music_info у TikWM для таких звуков содержит только "original sound - хендл".
 _DSP_TRACK_CACHE: dict[str, dict[str, str] | None] = {}
+_DSP_TRACK_CACHE_MAX = 500
+
+
+def _cache_dsp_track(sound_id: str, value: dict[str, str] | None) -> None:
+    """Кэш с капом: без него словарь рос до рестарта (ревью 17.11.2026)."""
+    _DSP_TRACK_CACHE[sound_id] = value
+    while len(_DSP_TRACK_CACHE) > _DSP_TRACK_CACHE_MAX:
+        _DSP_TRACK_CACHE.pop(next(iter(_DSP_TRACK_CACHE)))
 _DSP_DISABLED_UNTIL = 0.0
 _DSP_PAGE_TIMEOUT_SEC = 6.0
 _DSP_PAGE_UAS = (
@@ -766,7 +778,13 @@ async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, uni
             ) as resp:
                 if resp.status != 200:
                     continue
-                html = await resp.text(errors="ignore")
+                # Страница TikTok и ответ iTunes читаются с капом, как и TikWM:
+                # без него скомпрометированный апстрим льёт в память без края
+                # (ревью 17.11.2026).
+                raw_html = await _read_capped_body(resp, url, cap_bytes=2 * 1024 * 1024)
+                if raw_html is None:
+                    continue
+                html = raw_html.decode("utf-8", errors="ignore")
             if '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"' in html:
                 hydration_seen = True
             song_id = _extract_tt2dsp_song_id(html)
@@ -785,31 +803,41 @@ async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, uni
     return None
 
 
-async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> dict[str, str] | None:
+async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> tuple[dict[str, str] | None, bool]:
+    """(метаданные, был ли сбой временным). Временный сбой не кэшируем: иначе
+    один таймаут iTunes навсегда лишал трек точных полей (аудит 16.11.2026)."""
     try:
         async with session.get(
             "https://itunes.apple.com/lookup",
             params={"id": song_id, "entity": "song"},
             timeout=aiohttp.ClientTimeout(total=6.0),
         ) as resp:
+            if resp.status == 404:
+                # Песня реально не найдена — это окончательный ответ.
+                return None, False
             if resp.status != 200:
-                return None
-            payload = json.loads(await resp.text(errors="ignore"))
+                # 429/5xx — временный сбой: не кэшируем отрицательный итог.
+                return None, True
+            raw_json = await _read_capped_body(
+                resp, "https://itunes.apple.com/lookup", cap_bytes=1024 * 1024)
+            if raw_json is None:
+                return None, True
+            payload = json.loads(raw_json.decode("utf-8", errors="ignore"))
     except Exception as exc:
         log.info("[tiktok-music] iTunes lookup failed: %s", exc)
-        return None
+        return None, True
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list) or not results:
-        return None
+        return None, False
     track = results[0]
     title = (track.get("trackName") or "").strip()
     artist = (track.get("artistName") or "").strip()
     if not title or not artist:
-        return None
+        return None, False
     artwork = track.get("artworkUrl600") or track.get("artworkUrl100") or ""
     if artwork:
         artwork = re.sub(r"/\d+x\d+bb\.", "/600x600bb.", artwork)
-    return {"title": title, "artist": artist, "cover": artwork}
+    return {"title": title, "artist": artist, "cover": artwork}, False
 
 
 async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: dict) -> dict[str, str] | None:
@@ -822,14 +850,18 @@ async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: 
     unique_id = (media_data.get("author") or {}).get("unique_id") or ""
     if not video_id or not unique_id:
         return None
+    # None кэшируем только когда страница реально прочитана и DSP-трека в ней нет.
+    # Кулдаун/недоступность — не приговор звуку: иначе один антибот навсегда
+    # отправлял трек к полям TikWM до рестарта (внешний аудит 16.11.2026).
+    was_paused = time.monotonic() < _DSP_DISABLED_UNTIL
     song_id = await _tiktok_dsp_song_id(session, video_id, unique_id)
     if not song_id:
-        if sound_id:
-            _DSP_TRACK_CACHE[sound_id] = None
+        if sound_id and not was_paused and time.monotonic() >= _DSP_DISABLED_UNTIL:
+            _cache_dsp_track(sound_id, None)
         return None
-    track = await _itunes_track(session, song_id)
-    if sound_id:
-        _DSP_TRACK_CACHE[sound_id] = track
+    track, transient = await _itunes_track(session, song_id)
+    if sound_id and not transient:
+        _cache_dsp_track(sound_id, track)
     if track:
         log.info(
             "[tiktok-music] DSP metadata: sound_id=%s song_id=%s title=%r artist=%r has_cover=%s",

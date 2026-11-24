@@ -731,6 +731,18 @@ def test_md_to_html_link_with_underscores_in_url_not_corrupted_by_italic():
     assert "<i>" not in result
 
 
+def test_md_to_html_link_with_parenthesized_url_survives():
+    # Ревью 15.11.2026: вики-URL обязаны содержать скобки («Doom_(1993_video_game)»),
+    # прежний регекс `[^\s()]+` не брал их, ссылка оставалась сырым текстом, а italic
+    # дописывал <i> внутрь. Скобки уровня одной пары в URL допустимы, закрывающая
+    # скобка markdown-ссылки не съедается.
+    result = lumen_formatting._md_to_html("[Doom](https://en.wikipedia.org/wiki/Doom_(1993_video_game))")
+    assert result == '<a href="https://en.wikipedia.org/wiki/Doom_(1993_video_game)">Doom</a>'
+    result = lumen_formatting._md_to_html("[TOP](https://minecraft.fandom.com/wiki/The_One_Probe_(mod))")
+    assert 'href="https://minecraft.fandom.com/wiki/The_One_Probe_(mod)"' in result
+    assert "<i>" not in result
+
+
 def test_md_to_html_link_text_markdown_not_processed_intentionally():
     # Текст ссылки вырезается плейсхолдером в Phase 1 (см. комментарий в коде) —
     # markdown внутри него намеренно не поддерживается (не запрашивалось), выходит
@@ -770,6 +782,46 @@ def test_bare_url_does_not_consume_table_cell_separator():
     assert "https://example.com" in html
     assert "значение" in html
     assert "|" not in html
+def test_rich_wide_table_splits_into_narrow_blocks():
+    # Прод 24.11.2026: сравнение четырёх сервисов уезжало за правый край
+    # Telegram Desktop. Первую колонку повторяем, чтобы куски оставались
+    # осмысленными, и не показываем больше трёх колонок за раз.
+    result = lumen_formatting._md_to_rich_html(
+        "| Критерий | Obsidian | Notion | Apple Notes |\n"
+        "|---|---|---|---|\n"
+        "| Связи | backlinks | базы | заметки |"
+    )
+    assert result.count("<table bordered compact>") == 2
+    assert result.count("<th>Критерий</th>") == 2
+    assert "<th>Obsidian</th>" in result and "<th>Notion</th>" in result
+    assert "<th>Apple Notes</th>" in result
+    assert result.count("<td>Связи</td>") == 2
+    assert result.count("<td>backlinks</td>") == 1
+    assert result.count("<td>базы</td>") == 1
+    assert result.count("<td>заметки</td>") == 1
+    assert all(table.count("<th>") <= 3 for table in result.split("</table>")[:-1])
+
+
+def test_rich_wide_table_keeps_one_block_when_split_would_break_limits():
+    # Повтор первой колонки не должен упираться в лимит 4096 или 500 блоков:
+    # для больших таблиц оставляем один compact-блок, иначе rich-путь теряется.
+    rows = "\n".join(f"| row{i} | a{i} | b{i} | c{i} |" for i in range(60))
+    many_rows = lumen_formatting._md_to_rich_html(
+        "| key | a | b | c |\n|---|---|---|---|\n" + rows
+    )
+    assert many_rows.count("<table bordered compact>") == 1
+    assert many_rows.count("<tr>") == 61
+
+    header = "| key |" + "".join(f" c{i} |" for i in range(19))
+    separator = "|" + "---|" * 20
+    wide_rows = "\n".join(
+        "| row" + str(i) + " |" + "".join(f" v{i}_{j} |" for j in range(19)) + " |"
+        for i in range(50)
+    )
+    many_columns = lumen_formatting._md_to_rich_html(header + "\n" + separator + "\n" + wide_rows)
+    assert many_columns.count("<table bordered compact>") == 1
+    assert many_columns.count("<th>") == 20
+    assert many_columns.count("<tr>") == 51
 
 
 def test_rich_table_cells_support_inline_markup_and_escape():
@@ -908,3 +960,102 @@ def test_rich_heading_keeps_scrubbed_latex():
     out = lumen_formatting._md_to_rich_html("## Коэффициент \\alpha и \\int_0^1")
     assert "\\alpha" not in out and "\\int" not in out
     assert "α" in out and "∫" in out
+
+
+def test_split_does_not_leave_a_heading_at_the_end_of_a_chunk():
+    # Живой ответ 11.11.2026: пузырь закончился строкой «III. Итоги», а текст
+    # раздела уехал в следующий — у Claude заголовок не остаётся висеть один.
+    import lumen_formatting as F
+    chunks = [
+        "Первый раздел кончается здесь.\n\nIII. Итоги",
+        "Потери: около десяти миллионов погибших.",
+    ]
+    out = F._pull_dangling_headings(chunks, 4096)
+    assert out[0].endswith("здесь.")
+    assert out[1].startswith("III. Итоги")
+    assert "Потери" in out[1]
+
+
+def test_split_moves_bold_heading_and_keeps_limit():
+    import lumen_formatting as F
+    out = F._pull_dangling_headings(["Абзац. \n\n**Итоги**", "Текст итогов."], 4096)
+    assert out[0] == "Абзац."
+    assert out[1].startswith("**Итоги**")
+    # Под лимит заголовок уезжает вместе с первым абзацем: если следующий кусок
+    # уже полный, он перерезается, но пузырь из одного заголовка не появляется.
+    tight = F._pull_dangling_headings(["Абзац.\n\n**Итоги**", "x" * 60], 64)
+    assert tight[0] == "Абзац."
+    assert any(part.startswith("**Итоги**") for part in tight[1:])
+    assert all(len(part) <= 64 for part in tight), [len(p) for p in tight]
+
+
+def test_split_text_chunks_never_ends_a_chunk_on_a_heading():
+    import lumen_formatting as F
+    body = ("Это длинный абзац про причины и ход событий, он занимает место. " * 6)
+    text = body + "\n\n## Итоги\n\n" + body
+    chunks = F._split_text_chunks(text, 260)
+    assert len(chunks) > 1
+    for chunk in chunks[:-1]:
+        assert not chunk.rstrip().endswith("## Итоги"), chunk[-60:]
+
+
+def test_inline_markup_keeps_word_underscores_and_nests_triple():
+    # Внешний аудит 16.11.2026: "_" внутри имени файла и URL резались курсивом,
+    # а "***x***" давал пересечённые теги и терял разметку всего чанка.
+    from lumen_formatting import _md_to_html
+    html = _md_to_html("файл my_file_name.txt и https://example.com/a_b_c")
+    assert "my_file_name.txt" in html
+    assert "https://example.com/a_b_c" in html
+    assert _md_to_html("***важно***") == "<b><i>важно</i></b>"
+    assert _md_to_html("This is __important__") == "This is <b>important</b>"
+    assert _md_to_html("|a| = |b|") == "|a| = |b|"
+    assert _md_to_html("| sort -u | uniq -c |") == "| sort -u | uniq -c |"
+    assert _md_to_html("```") == "```"
+
+
+def test_long_table_never_splits_into_raw_pipes():
+    # Внешний аудит 16.11.2026: 120-строчная таблица резалась на чанки, и
+    # хвостовые куски без шапки уходили человеку сырыми "|".
+    from lumen_formatting import _md_to_html, _split_text_chunks
+    rows = ["| Модель | Описание |", "|---|---|"] + [f"| M{i} | текст {i} |" for i in range(120)]
+    chunks = _split_text_chunks(chr(10).join(rows), 3000)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert "|" not in _md_to_html(chunk)
+
+
+def test_unclosed_code_fence_is_closed_in_final_html():
+    # Внешний аудит 16.11.2026: оборванный ответ с незакрытым ``` показывал
+    # человеку буквальный забор, хотя стрим хвост закрывал.
+    from lumen_formatting import _md_to_html
+    html = _md_to_html("код:" + chr(10) + "```python" + chr(10) + "x = 1")
+    assert "```" not in html
+    assert "x = 1" in html
+
+
+def test_bare_urls_are_not_touched_by_inline_markup():
+    # Проверка правок 16.11.2026: "__b__" в пути ссылки становилось жирным.
+    from lumen_formatting import _md_to_html, _md_to_rich_html
+    url = "https://x.dev/a/__b__/c"
+    assert url in _md_to_html("см. " + url)
+    assert url in _md_to_rich_html("см. " + url)
+    # Жирное двойным подчёркиванием по-прежнему работает, но не через перенос строки.
+    assert _md_to_html("This is __important__") == "This is <b>important</b>"
+    assert _md_to_html("Имя: __" + chr(10) + "Дата: __").count("<b>") == 0
+
+
+def test_emphasis_glued_to_a_bare_url_still_works():
+    # Проверка правок 16.11.2026: выемка ссылки забирала хвостовые ** и *.
+    from lumen_formatting import _md_to_html, _md_to_rich_html
+    assert _md_to_html("**см. https://x.com/a**") == "<b>см. https://x.com/a</b>"
+    assert _md_to_html("*https://x.com/a*") == "<i>https://x.com/a</i>"
+    assert "https://x.com/a" in _md_to_rich_html("**см. https://x.com/a**")
+
+
+def test_underscores_inside_bold_and_pipe_after_url():
+    # Финальный проверяющий 16.11.2026: "__total_cost__" перестал жирниться,
+    # а ссылка в ячейке таблицы без пробелов забирала разделитель "|".
+    from lumen_formatting import _md_to_html, _md_to_rich_html
+    assert _md_to_html("__total_cost__") == "<b>total_cost</b>"
+    table = "| a | b |" + chr(10) + "|---|---|" + chr(10) + "| https://x.com/a|z |"
+    assert _md_to_rich_html(table).count("<td>") == 2

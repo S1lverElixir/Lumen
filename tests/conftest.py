@@ -16,6 +16,12 @@ import tempfile
 os.environ.setdefault("BOT_LOG_PATH", os.path.join(tempfile.gettempdir(), "lumen_test_bot.log"))
 os.environ.setdefault("BOT_TOKEN", "test-token-not-real")
 os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
+# Wake-word группы: фиксируем дефолты, иначе шелл владельца переключал бы тесты (ревью 18.11.2026).
+os.environ.setdefault("GROUP_WAKE_ENABLED", "1")
+os.environ.setdefault("GROUP_WAKE_WORDS", "люмен,lumen")
+# Stop-контроль включается отдельно в своих тестах; общий suite не должен
+# получать лишние control-сообщения из переменной владельца.
+os.environ["STOP_BUTTON_ENABLED"] = "0"
 # Провайдерские ключи — только пустые: иначе bot.py ниже подхватит .env
 # разработчика и тест сходит в живой API (сеть, чужая квота, нестабильность).
 # MUNITO_ENABLED/MUNITO_KEEP_FALLBACKS гасятся вместе с ключом: режим эксперимента
@@ -24,7 +30,9 @@ os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
 # .env иначе уводил бы тесты на живой Workers AI (сеть, чужая квота, нестабильность).
 for _provider_key in ("GROQ_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY", "SENTRY_DSN",
                       "MUNITO_API_KEY", "MUNITO_ENABLED", "MUNITO_KEEP_FALLBACKS", "MUNITO_REASONING_EFFORT",
-                      "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"):
+                      "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID",
+                      # Ключи агентского поиска: с локальным .env тест ушёл бы в платный API.
+                      "TAVILY_API_KEY", "BRAVE_API_KEY", "EXA_API_KEY", "SEARCH_API_PROVIDER"):
     os.environ[_provider_key] = ""
 
 import copy
@@ -33,6 +41,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import bot
+# Production всегда показывает Stop; общий suite не должен получать лишние
+# control-сообщения, их включают отдельные тесты.
+bot.STOP_BUTTON_ENABLED = False
 import lumen_limits
 import lumen_router_config
 
@@ -61,6 +72,7 @@ def _bot_global_state_guard():
     накоплением сложности "на будущее", а не решением подтверждённой проблемы."""
     import bot as _bot_module
     import lumen_commands as _commands_module
+    import lumen_typing_pace as _pace_module
     chat_state_snapshot = copy.deepcopy(_bot_module.chat_state)
     quota_snapshot = copy.deepcopy(_bot_module.GLOBAL_QUOTA)
     quarantine_snapshot = copy.deepcopy(lumen_router_config._QUARANTINE)
@@ -70,6 +82,7 @@ def _bot_global_state_guard():
     # блокировал следующий тест на «already in flight», а tripped down_until
     # превращал отправку фото в None (мутант-прогон ревью 10.11.2026).
     inflight_snapshot = set(_commands_module._draw_inflight)
+    speed_ema_snapshot = dict(_pace_module._speed_ema)
     breaker_snapshot = dict(_bot_module._tg_proxy_breaker.__dict__)
     yield
     _bot_module.chat_state.clear()
@@ -82,6 +95,8 @@ def _bot_global_state_guard():
     _bot_module.bot = bot_snapshot
     _commands_module._draw_inflight.clear()
     _commands_module._draw_inflight.update(inflight_snapshot)
+    _pace_module._speed_ema.clear()
+    _pace_module._speed_ema.update(speed_ema_snapshot)
     _bot_module._tg_proxy_breaker.__dict__.clear()
     _bot_module._tg_proxy_breaker.__dict__.update(breaker_snapshot)
 
@@ -147,3 +162,17 @@ def rate_guard_setup(monkeypatch):
             from_user=SimpleNamespace(id=456), reply=AsyncMock(), reply_to_message=None,
         )
     return _setup
+
+
+@pytest.fixture(autouse=True)
+def _fresh_tiktok_semaphores():
+    """Модульные семафоры TikTok живут с первого event loop: второй asyncio.run
+    падал с «bound to a different event loop» (ревью 17.11.2026)."""
+    import asyncio as _asyncio
+    original_probe = bot._tiktok_probe_semaphore
+    original_download = bot._tiktok_slide_download_semaphore
+    bot._tiktok_probe_semaphore = _asyncio.Semaphore(bot.TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
+    bot._tiktok_slide_download_semaphore = _asyncio.Semaphore(bot.TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
+    yield
+    bot._tiktok_probe_semaphore = original_probe
+    bot._tiktok_slide_download_semaphore = original_download

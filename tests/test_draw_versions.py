@@ -270,7 +270,8 @@ def test_redo_without_undo_stack_answers_no_versions(revert_env):
     state = _versions_state(2)
     assert asyncio.run(bot.revert_draw_version(message, state, redo=True)) is False
     assert not sent
-    assert bot._safe_reply.await_args is not None
+    # Именно ключ «версий нет», а не соседний отказ (ревью 17.11.2026).
+    assert bot._safe_reply.await_args.args[1] == bot._t(999500, "draw_no_versions")
 
 
 def test_failed_redo_send_keeps_the_lists(revert_env, monkeypatch):

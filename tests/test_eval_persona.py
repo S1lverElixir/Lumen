@@ -11,6 +11,7 @@
 с самой Gemma из маршрута: боевой функции, с которой сверялась копия, больше нет.
 """
 
+import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -25,3 +26,80 @@ def test_persona_questions_cover_eval_rubric():
     assert ids == list(range(1, 26))
     for question in data["questions"]:
         assert question.get("expect"), f"вопрос {question['id']} без ожидания"
+
+
+def test_multilingual_questions_cover_every_supported_language():
+    # Ветка замера «каждый ответ как у Claude» на всех языках: без сверки
+    # язык тихо выпадает из проверки, а владелец считает его проверенным.
+    import json
+
+    import lumen_lang
+
+    data = json.loads((REPO / "eval" / "persona_questions_multilingual.json").read_text(encoding="utf-8"))
+    ids = sorted(q["id"] for q in data["questions"])
+    assert ids == list(range(1, len(data["questions"]) + 1))
+    assert {q["lang"] for q in data["questions"]} == set(lumen_lang.SUPPORTED_LANGS), \
+        sorted({q["lang"] for q in data["questions"]} ^ set(lumen_lang.SUPPORTED_LANGS))
+    for question in data["questions"]:
+        assert question.get("expect"), f"вопрос {question['id']} без ожидания"
+        assert question.get("turns"), f"вопрос {question['id']} без текста"
+def test_answer_script_check_follows_the_question_language(monkeypatch):
+    # Детерминированная сверка языка ответа (замер 12.11.2026 по всем
+    # SUPPORTED_LANGS): ответ не на языке человека — это провал паритета,
+    # и судья его ловит не всегда. Отдельная проверка имени бота: «Нет, я
+    # Lumen.» — русский ответ, а не смешение алфавитов.
+    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    monkeypatch.syspath_prepend(str(REPO / "eval"))
+    import persona_models
+
+    assert persona_models.answer_script_ok("ru", "Нет, я Lumen.") is True
+    assert persona_models.answer_script_ok("ru", "No, I am Lumen.") is False
+    assert persona_models.answer_script_ok("th", "กรุงเทพฯ เป็นเมืองหลวงของไทย") is True
+    assert persona_models.answer_script_ok("th", "Bangkok is the capital of Thailand") is False
+    assert persona_models.answer_script_ok("ar", "العاصمة هي كانبيرا") is True
+    assert persona_models.answer_script_ok("hi", "नई दिल्ली भारत की राजधानी है") is True
+    assert persona_models.answer_script_ok("hi", "New Delhi is the capital") is False
+    assert persona_models.answer_script_ok("vi", "Thủ đô của Úc là Canberra.") is True
+    assert persona_models.answer_script_ok("pl", "Stolicą Australii jest Canberra.") is True
+    assert persona_models.answer_script_ok("kk", "Австралияның астанасы — Канберра.") is True
+    assert persona_models.answer_script_ok("en", "The capital of Australia is Canberra.") is True
+    assert persona_models.answer_script_ok("ru", "") is False
+def test_sanitize_no_proxy_drops_bracketed_ipv6_only(monkeypatch):
+    # Глобальный NO_PROXY владельца с «[::1]» ломает любой httpx-вызов замера
+    # (судья Gemini падал с InvalidURL: Invalid port, 12.11.2026). Чистка
+    # обязана снять только скобочные записи и оставить обычные правила.
+    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    monkeypatch.syspath_prepend(str(REPO / "eval"))
+    import persona_models
+
+    # monkeypatch сохраняет исходное значение и вернёт его на teardown (F-167).
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,[::1],.example.com")
+    touched = persona_models.sanitize_no_proxy()
+    assert touched == ["NO_PROXY"]
+    assert os.environ["NO_PROXY"] == "localhost,127.0.0.1,.example.com"
+    assert persona_models.sanitize_no_proxy() == []
+def test_style_flags_catches_the_real_manner_defects(monkeypatch):
+    # Дешёвая детерминированная сетка на ответ: маркер протокола в тексте,
+    # гирлянда эмодзи вместо 1-2 по просьбе, список там, где просили прозу,
+    # съеденный полировкой термин. Это ловит то, что судья пропускает.
+    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    monkeypatch.syspath_prepend(str(REPO / "eval"))
+    import persona_models
+
+    assert persona_models.style_flags({"id": 11, "style": {"keep_terms": ["for", "while"]}},
+                                      "الفرق بين for و while واضح") == []
+    assert "term-lost:while" in persona_models.style_flags(
+        {"id": 11, "style": {"keep_terms": ["for", "while"]}}, "разница в for")
+    assert "search-marker" in persona_models.style_flags({"id": 1}, "[[SEARCH]]")
+    assert "emoji-4>2" in persona_models.style_flags({"id": 5}, "С днём 🎉🎂✨🎈 рождения")
+    assert "emoji-0<asked" in persona_models.style_flags(
+        {"id": 5, "style": {"emoji_min": 1}}, "С днём рождения")
+    assert "bullets-6" in persona_models.style_flags(
+        {"id": 3, "style": {"bullets_max": 2}}, "\n".join("- пункт %d" % i for i in range(6)))
+    assert "no-table" in persona_models.style_flags({"id": 8, "style": {"table": True}}, "обычный текст")
+    assert persona_models.style_flags({"id": 13, "style": {"table": True}}, "| a | b |\n|---|---|") == []
+    assert "no-math" in persona_models.style_flags({"id": 15, "style": {"math": True}}, "площадь равна пи r в квадрате")
+    assert persona_models.style_flags({"id": 15, "style": {"math": True}}, "S = $\\pi r^2$, \u221a3 \u2248 1,73") == []
+    assert "questions-0<asked" in persona_models.style_flags({"id": 17, "style": {"questions_min": 1}}, "Вот скрипт.")
+    assert any(f.startswith("len-") for f in persona_models.style_flags({"id": 6, "style": {"chars_max": 5}}, "длинный ответ"))
+    assert "empty" in persona_models.style_flags({"id": 2}, "   ")

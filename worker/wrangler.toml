@@ -1,0 +1,9 @@
+name = "lumen-proxy"
+main = "worker.ts"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+# Логи запросов видны в дашборде Cloudflare; секрет LUMEN_PROXY_SECRET ставится
+# `wrangler secret put` из workflow, в файле его нет.
+[observability]
+enabled = true

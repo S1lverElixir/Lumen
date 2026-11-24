@@ -6,10 +6,11 @@ import contextlib
 import html
 import time
 
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, Message
 
 from lumen_formatting import _is_table_separator, _md_to_html
 from lumen_lang import t as _lang_t
+from lumen_typing_pace import take_edit_slot
 
 # Индикатор Claude: три точки в треугольнике, вращающиеся вокруг центра.
 # Одиночные глифы вместо ASCII-рисунка — не разъезжаются на пропорциональном
@@ -25,6 +26,24 @@ def _spinner_glyph(frame_idx: int) -> str:
 # Страховка от утечки тикера, если обработчик упал между созданием статуса и
 # маршрутом: дольше этого статус сам себя останавливает.
 _STATUS_MAX_LIFETIME_SEC = 300.0
+# Закрытый этап в Claude стоит в прошедшем времени, а живая фаза — в
+# настоящем: у этапов медиа и ссылки есть отдельные ключи, иначе в трейсе
+# висело «✓ Смотрю изображение» (ревью 11.11.2026).
+_DONE_KEY_BY_PHASE = {
+    "progress_viewing_image": "progress_image_done",
+    "progress_watching_video": "progress_video_done",
+    "progress_reading_link": "progress_link_done",
+    "progress_searching": "progress_search_done",
+}
+
+
+def thought_line_html(lang: str, sec: int) -> str:
+    """Одна курсивная строка «✻ Thought for Ns» — как в Claude. Пустая строка при
+    sec < 1: быстрый ответ без размышления activity-строку не получает
+    (ревью 11.11.2026). Общая для финала и для шапки первой правки стрима."""
+    if sec < 1:
+        return ""
+    return "<i>✻ " + html.escape(_lang_t(lang, "progress_thought_for", sec=sec)) + "</i>"
 
 
 async def _send_status_message(reply_to: Message, text: str) -> Message | None:
@@ -73,9 +92,11 @@ class StatusMessage:
     def __init__(self, message: Message, lang: str):
         self.message = message
         self.lang = lang
+        self.reply_markup = None
         self._done: list[str] = []
         self._sources: list[str] = []
         self._phrase_key = ""
+        self._phrase_kwargs: dict[str, object] = {}
         self._literal = ""
         self._literal_timed = False
         self._timed = False
@@ -86,12 +107,21 @@ class StatusMessage:
         self._task: asyncio.Task | None = None
         self._stopped = False
         self._deleted = False
+        # Одна правка пузырька за раз: поздний кадр старой фазы иначе затирал
+        # новую после доставки через прокси (ревью 17.11.2026).
+        self._edit_lock = asyncio.Lock()
+
+    def _reply_markup_kwargs(self) -> dict:
+        # Кнопка остановки живёт на том же пузыре; любая правка тикера обязана
+        # нести её явно, иначе Telegram снимает клавиатуру (prod 24.11.2026).
+        return {"reply_markup": self.reply_markup} if self.reply_markup is not None else {}
 
     @classmethod
-    async def start(cls, reply_to: Message, lang: str, key: str, *, timed: bool = False) -> "StatusMessage | None":
+    async def start(cls, reply_to: Message, lang: str, key: str, *, timed: bool = False,
+                    **kwargs: object) -> "StatusMessage | None":
         """Отправляет первую строку статуса; None — Telegram не принял сообщение."""
         status = cls(message=reply_to, lang=lang)
-        status._set_phrase(key, timed=timed)
+        status._set_phrase(key, timed=timed, **kwargs)
         sent = await _send_status_message(reply_to, status._render(0))
         if sent is None:
             return None
@@ -117,12 +147,20 @@ class StatusMessage:
                 break
         self._sources = unique
 
-    async def set_phase(self, key: str, *, timed: bool = False) -> None:
-        """Смена текущей фразы с немедленной правкой, не дожидаясь тика."""
+    async def set_phase(self, key: str, *, timed: bool = False, **kwargs: object) -> None:
+        """Смена текущей фразы с немедленной правкой, не дожидаясь тика. kwargs —
+        подстановка в строку этапа: у Claude живой шаг называет то, что модель
+        делает сейчас, а не только род работы («Ищу в интернете: курс рубля»)."""
         import bot
-        self._set_phrase(key, timed=timed)
-        with contextlib.suppress(Exception):
-            await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+        self._set_phrase(key, timed=timed, **kwargs)
+        # Немедленная правка обязана учесться в общем бюджете чата (force).
+        take_edit_slot(self._chat_id(), force=True)
+        async with self._edit_lock:
+            with contextlib.suppress(Exception):
+                await bot._tg_call(
+                    self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0,
+                    **self._reply_markup_kwargs(),
+                )
 
     @classmethod
     async def start_action(cls, reply_to: Message, lang: str, text: str) -> "StatusMessage | None":
@@ -143,11 +181,28 @@ class StatusMessage:
         import bot
         self._literal = text
         self._literal_timed = timed
-        with contextlib.suppress(Exception):
-            await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+        take_edit_slot(self._chat_id(), force=True)
+        # Под тем же замком, что тик и set_phase: поздний кадр не должен
+        # вернуть старую фразу после этой правки (F-070, проход №5).
+        async with self._edit_lock:
+            with contextlib.suppress(Exception):
+                await bot._tg_call(
+                    self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0,
+                    **self._reply_markup_kwargs(),
+                )
 
     async def set_action_key(self, key: str) -> None:
         await self.set_action(_lang_t(self.lang, key), timed=self._literal_timed)
+
+    @classmethod
+    def from_message(cls, message: Message, lang: str, key: str, **kwargs: object) -> "StatusMessage":
+        """Статус поверх пузыря, который УЖЕ в чате (плейсхолдер стрима): новой
+        отправки нет, иначе рядом встанут два «Думаю…» (замер 11.11.2026)."""
+        status = cls(message=message, lang=lang)
+        status.reply_markup = getattr(message, "reply_markup", None)
+        status._set_phrase(key, timed=False, **kwargs)
+        status._task = asyncio.create_task(status._tick())
+        return status
 
     async def finish(self) -> None:
         """Фиксирует длительность ожидания и останавливает анимацию."""
@@ -155,13 +210,19 @@ class StatusMessage:
             self._thought_seconds = self._elapsed_seconds()
         await self.stop()
 
+    def note_extra_thought(self, sec: float) -> None:
+        """Не даём финальному блоку занизить ожидание: первый кусок мог прийти
+        раньше, чем на экране появился текст (маляр, catch-up)."""
+        cur = self._thought_seconds or 0
+        self._thought_seconds = max(cur, max(0, int(sec)))
+
     async def mark_stage_done(self) -> None:
         """Ранний этап (файл уже скачан) закрываем галочкой и включаем живой
         таймер размышления: иначе фото/видео висели статичной фразой без
         секунд, пока модель отвечает (ревью 28.10.2026)."""
         if self._phrase_key and not self._timed and self._phrase_key not in (
                 "progress_thinking", "progress_retry"):
-            self.add_done(self._phrase_key)
+            self.add_done(_DONE_KEY_BY_PHASE.get(self._phrase_key, self._phrase_key))
             await self.set_phase("progress_thinking", timed=True)
 
     def _elapsed_seconds(self) -> int:
@@ -178,13 +239,17 @@ class StatusMessage:
             not self._phrase_key or self._timed
             or self._phrase_key in ("progress_thinking", "progress_retry"))
         if only_thought:
+            line_html = thought_line_html(self.lang, thought)
+            if not line_html:
+                # <1 с: строки активности нет вовсе, как в Claude (ревью 11.11.2026).
+                return "", ""
             line = "✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)
-            return "<i>" + html.escape(line) + "</i>", line
-        lines = ["✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)]
+            return line_html, line
+        lines = [] if thought < 1 else ["✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought)]
         lines.extend(self._done)
         if (self._phrase_key and not self._timed
                 and self._phrase_key not in ("progress_thinking", "progress_retry")):
-            lines.append("✓ " + _lang_t(self.lang, self._phrase_key))
+            lines.append("✓ " + _lang_t(self.lang, self._phrase_key, **self._phrase_kwargs))
         if self._sources:
             lines.extend("· " + host for host in self._sources)
         plain = "\n".join(lines)
@@ -201,10 +266,20 @@ class StatusMessage:
             return None, answer_md
         return html_block + "\n\n" + _md_to_html(answer_md), plain_block + "\n\n" + answer_md
 
-    def _set_phrase(self, key: str, *, timed: bool) -> None:
+    def paint_header_md(self) -> str:
+        """Короткая activity-строка над телом во время стрима (markdown, одна
+        строка): у Claude она есть с первой буквы и не исчезает (ревью 11.11.2026),
+        при sec < 1 её нет вовсе. Полный блок с этапами ставится только в финале."""
+        thought = self._thought_seconds if self._thought_seconds is not None else self._elapsed_seconds()
+        if thought < 1:
+            return ""
+        return "*✻ " + _lang_t(self.lang, "progress_thought_for", sec=thought) + "*"
+
+    def _set_phrase(self, key: str, *, timed: bool, **kwargs: object) -> None:
         if key == "progress_thinking" and self._thinking_started is None:
             self._thinking_started = time.monotonic()
         self._phrase_key = key
+        self._phrase_kwargs = kwargs
         self._literal = ""
         self._timed = timed
         self._phase_started = time.monotonic()
@@ -216,13 +291,16 @@ class StatusMessage:
             line = glyph + " " + self._literal
             if self._literal_timed:
                 elapsed = max(0, int(time.monotonic() - self._created))
-                line += " · " + _lang_t(self.lang, "progress_seconds", sec=elapsed)
+                # При 0 с счётчик не показываем вовсе, как в Claude (smoke 11.11.2026).
+                if elapsed:
+                    line += " · " + _lang_t(self.lang, "progress_seconds", sec=elapsed)
             lines.append(line)
         elif self._timed:
             elapsed = max(0, int(time.monotonic() - self._phase_started))
-            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key, sec=elapsed))
+            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key, sec=elapsed,
+                                               **self._phrase_kwargs))
         else:
-            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key))
+            lines.append(glyph + " " + _lang_t(self.lang, self._phrase_key, **self._phrase_kwargs))
         return "\n".join(lines)
 
     async def _tick(self) -> None:
@@ -233,15 +311,45 @@ class StatusMessage:
             while not self._stopped:
                 if time.monotonic() - self._created > _STATUS_MAX_LIFETIME_SEC:
                     return
-                with contextlib.suppress(Exception):
-                    await bot._tg_call(
-                        self.message.edit_text, self._render(frame_idx),
-                        parse_mode=None, call_timeout=15.0,
-                    )
+                # Общий бюджет правок на чат: занятый слот — пропущенный кадр,
+                # не задержка анимации (ревью 11.11.2026).
+                if take_edit_slot(self._chat_id()):
+                    async with self._edit_lock:
+                        with contextlib.suppress(Exception):
+                            await bot._tg_call(
+                                self.message.edit_text, self._render(frame_idx),
+                                parse_mode=None, call_timeout=15.0,
+                                **self._reply_markup_kwargs(),
+                            )
                 frame_idx += 1
                 await bot._dots_sleep(bot._DOTS_TICK_SEC)
         except asyncio.CancelledError:
             raise
+
+    def _chat_id(self):
+        return getattr(getattr(self.message, "chat", None), "id", None)
+
+    def resume(self) -> None:
+        """Возобновляет тикер после reuse пузыря поисковым проходом."""
+        if self._deleted:
+            return
+        self._stopped = False
+        if self._task is None:
+            self._task = asyncio.create_task(self._tick())
+
+    async def clear_reply_markup(self) -> None:
+        """Снимает кнопку остановки с брошенного пузыря после поискового фолбэка."""
+        import bot
+        async with self._edit_lock:
+            self.reply_markup = None
+            self.message.reply_markup = None
+            edit = getattr(self.message, "edit_reply_markup", None)
+            if edit is not None:
+                with contextlib.suppress(Exception):
+                    await bot._tg_call(
+                        edit, reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                        call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                    )
 
     async def stop(self) -> None:
         """Останавливает анимацию; само сообщение остаётся для ответа."""

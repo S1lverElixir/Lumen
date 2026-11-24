@@ -127,6 +127,10 @@ NOT_DRAW_INTENTS = [
 
 
 def _intent(text):
+    """Ожидание матрицы: порядок двух матчеров, а не проводка ядра.
+
+    Матрица сторожит сами матчеры (F-170, 17.11.2026); сквозную проводку
+    через _handle_message_core проверяют тесты ниже в этом файле."""
     low = text.lower().strip()
     if _match_trigger_with_fillers(low, DRAW_TRIGGER_PREFIXES)[0]:
         return "draw"
@@ -291,6 +295,17 @@ def test_scene_request_without_artifact_word_draws_resolved_text(rate_guard_setu
     assert bot.inline_draw.await_args.args[1] == _RESOLVED
 
 
+def test_scene_request_strips_variants_phrase_from_resolved_text(rate_guard_setup, monkeypatch):
+    # Тот же дефект F-169 на пути визуального сигнала: фраза количества из
+    # описания резолвера не должна уезжать в промпт второй ветки.
+    message = _ctx_env(monkeypatch, rate_guard_setup, "хочу увидеть кота на луне",
+                       "A ginger cat on the moon, 3 variants, photorealistic.")
+    asyncio.run(bot._handle_message_core(message))
+    bot.inline_draw.assert_awaited_once()
+    _prompt = bot.inline_draw.await_args.args[1]
+    assert _prompt.startswith("A ginger cat") and "variants" not in _prompt
+
+
 def test_scene_request_answered_none_stays_text(rate_guard_setup, monkeypatch):
     message = _ctx_env(monkeypatch, rate_guard_setup, "хочу увидеть кота на луне", "NONE")
     run_route = AsyncMock(return_value=("ok", False))
@@ -402,7 +417,10 @@ def test_core_variants_count_comes_from_human_phrase(rate_guard_setup, monkeypat
                        "A ginger cat on the moon, 3 variants, photorealistic.")
     asyncio.run(bot._handle_message_core(message))
     assert bot.inline_draw.await_count == 1, bot.inline_draw.await_args_list
-    assert bot.inline_draw.await_args.args[1].startswith("A ginger cat")
+    _prompt = bot.inline_draw.await_args.args[1]
+    assert _prompt.startswith("A ginger cat")
+    # «3 variants» из чужого текста не должно остаться в промпте (ревью 17.11.2026).
+    assert "3 variants" not in _prompt and "variants" not in _prompt
 
 
 def test_core_variants_count_survives_anaphora(rate_guard_setup, monkeypatch):
@@ -411,3 +429,20 @@ def test_core_variants_count_survives_anaphora(rate_guard_setup, monkeypatch):
                        "A ginger cat on the moon, photorealistic.")
     asyncio.run(bot._handle_message_core(message))
     assert bot.inline_draw.await_count == 3, bot.inline_draw.await_args_list
+
+
+def test_weak_english_draw_prefix_needs_a_visual_object():
+    # Внешний аудит 16.11.2026: «draw a table of the results» уходило в
+    # генерацию картинки и жгло личный слот. Русские триггеры не ограничены.
+    from lumen_message_parse import _draw_trigger_is_visual
+    assert _draw_trigger_is_visual("draw a", " table of the results") is False
+    assert _draw_trigger_is_visual("can you draw", " a table of the results") is False
+    assert _draw_trigger_is_visual("please draw", " a comparison of both") is False
+    assert _draw_trigger_is_visual("please draw", " a table of the results and a short conclusion") is False
+    assert _draw_trigger_is_visual("draw a", " table with the results") is False
+    assert _draw_trigger_is_visual("draw a", " comparison of both") is False
+    assert _draw_trigger_is_visual("paint", " the elevator scene") is True
+    assert _draw_trigger_is_visual("draw a", " cat in a hat") is True
+    assert _draw_trigger_is_visual("draw a", " summary card of the stats") is True
+    assert _draw_trigger_is_visual("нарисуй", " таблицу сравнения") is True
+    assert _draw_trigger_is_visual("sketch", " a list of ideas") is False

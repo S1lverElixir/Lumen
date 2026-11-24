@@ -57,6 +57,9 @@ def test_devtrace_endpoint_rejects_missing_or_wrong_key(monkeypatch):
     try:
         result = asyncio.run(bot.devtrace(_FakeAdminRequest(headers={"Authorization": "Bearer wrong"})))
         assert result.status_code == 401
+        # Отсутствующий заголовок — тоже 401, не только неверный (ревью 17.11.2026).
+        missing = asyncio.run(bot.devtrace(_FakeAdminRequest(headers={})))
+        assert missing.status_code == 401
     finally:
         bot.ADMIN_PANEL_KEY = original
 

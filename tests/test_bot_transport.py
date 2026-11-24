@@ -477,7 +477,13 @@ def test_tg_call_does_not_retry_client_errors(monkeypatch, exc_cls):
 
     saved = _save_breaker_state()
     try:
+        # Аудит 16.11.2026: валидный JSON от Telegram — признак живого прокси.
+        # Без сброса счётчика следующая единичная заминка прокси глушила все чаты.
+        bot._tg_proxy_breaker.note_failure()
+        bot._tg_proxy_breaker.note_failure()
+        assert bot._tg_proxy_breaker.consecutive_failures == 2
         assert asyncio.run(bot._tg_call(always_bad, retries=2)) is None
+        assert bot._tg_proxy_breaker.consecutive_failures == 0
     finally:
         _restore_breaker_state(saved)
     assert len(calls) == 1
@@ -601,3 +607,14 @@ def test_handle_message_sets_and_resets_message_deadline(monkeypatch):
     assert bot._msg_remaining_sec() is None
 
 
+def test_proxy_middleware_sends_secret_to_the_read_route():
+    # Аудит 16.11.2026: /read шёл без секрета, прокси отвечал 401, чтение страниц
+    # было мертво целиком. Секрет обязан доезжать до /read того же origin.
+    _, _, seen = _run_proxy_middleware(
+        "https://proxy.example/read?url=https%3A%2F%2Fexample.com%2F",
+    )
+    assert seen["sent"].get("X-Lumen-Proxy-Secret") == "proxy-secret-abc-0123456789abcdef"
+    _, _, seen = _run_proxy_middleware("https://other.example/read?url=https%3A%2F%2Fexample.com%2F")
+    assert "X-Lumen-Proxy-Secret" not in seen["sent"]
+    _, _, seen = _run_proxy_middleware("https://proxy.example/read/extra")
+    assert "X-Lumen-Proxy-Secret" not in seen["sent"]

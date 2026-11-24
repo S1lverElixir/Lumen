@@ -11,6 +11,7 @@ test_lumen_status.py — живой статус-плейсхолдер: стр�
 import asyncio
 
 import bot
+import lumen_status
 from lumen_status import StatusMessage, discard_status_start
 from tests.bot_test_helpers import _FakeIncomingMessage, _FakeSentMessage
 
@@ -19,28 +20,57 @@ async def _passthrough(method, *args, **kwargs):
     return await method(*args, **kwargs)
 
 
+
+
+class _FakeClock:
+    """Часы теста: sleep подменён на no-op, а «Думал N с» считается по
+    monotonic — без них любая проверка на секунды зависела бы от реальной
+    длительности прогона."""
+
+    def __init__(self, start: float = 1000.0):
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, sec: float) -> None:
+        self.now += sec
+
+
+def _fixed_clock(monkeypatch):
+    clock = _FakeClock()
+    monkeypatch.setattr(lumen_status, "time", clock)
+    return clock
+
 def test_status_message_renders_done_lines_and_timer(monkeypatch):
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999900)
 
+    clock = _fixed_clock(monkeypatch)
+
     async def scenario():
         status = await StatusMessage.start(incoming, "en", "progress_searching")
         assert status is not None
+        markup = object()
+        status.reply_markup = markup
         status.add_done("progress_search_done", count=5)
         status.set_sources(["example.com", "example.com", "second.example"])
         await status.set_phase("progress_thinking", timed=True)
+        clock.advance(3)
         await status.finish()
         return status
 
     status = asyncio.run(scenario())
     sent = incoming.sent[0]
     assert status.message is sent
+    assert all(kw.get("reply_markup") is status.reply_markup for kw in sent.edit_kwargs)
     text = sent.edits[-1][0]
     assert "✓ Searched the web · found 5" in text
-    assert "Thinking… 0s" in text
+    # При 0 с живая строка без числа (smoke 11.11.2026: было «Thinking… 0 seconds»).
+    assert "Thinking…" in text and "0 seconds" not in text
     html_block, plain_block = status.activity_prefix()
     assert html_block.startswith("<blockquote expandable>") and html_block.endswith("</blockquote>")
-    assert "Thought for 0s" in plain_block
+    assert "Thought for 3 seconds" in plain_block
     assert "✓ Searched the web · found 5" in plain_block
     assert plain_block.count("· example.com") == 1
     assert "· second.example" in plain_block
@@ -57,15 +87,18 @@ def test_simple_thought_activity_is_italic_not_quote(monkeypatch):
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999902)
 
+    clock = _fixed_clock(monkeypatch)
+
     async def scenario():
         status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
+        clock.advance(2)
         await status.finish()
         return status
 
     status = asyncio.run(scenario())
     html_block, plain = status.activity_prefix()
     assert html_block.startswith("<i>") and "blockquote" not in html_block
-    assert "Thought for" in plain
+    assert "Thought for 2 seconds" in plain
     bot.chat_state.pop(999902, None)
 
 
@@ -75,19 +108,22 @@ def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999903)
 
+    clock = _fixed_clock(monkeypatch)
+
     async def scenario():
         status = await StatusMessage.start(incoming, "en", "progress_viewing_image")
         await status.mark_stage_done()
+        clock.advance(2)
         await status.finish()
         return status
 
     status = asyncio.run(scenario())
     live = incoming.sent[0].edits[-1][0]
-    assert "✓ Looking at the image" in live
-    assert "Thinking… 0s" in live
+    assert "✓ Viewed the image" in live
+    assert "Thinking…" in live and "0 seconds" not in live
     _, plain = status.activity_prefix()
-    assert "✓ Looking at the image" in plain
-    assert "Thought for" in plain
+    assert "✓ Viewed the image" in plain
+    assert "Thought for 2 seconds" in plain
     bot.chat_state.pop(999903, None)
 
 
@@ -117,7 +153,9 @@ def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
     assert status.message is incoming.sent[0]
     live = incoming.sent[0].edits[-1][0]
     assert "Taking a little longer" in live
-    assert "0s" in live
+    # При 0 с счётчик действия убирается целиком, не печатая «· 0 seconds»
+    # (smoke 11.11.2026).
+    assert "0 seconds" not in live
     import lumen_status
     assert live[0] in lumen_status._TRIO_FRAMES
     bot.chat_state.pop(999904, None)
@@ -294,11 +332,173 @@ def test_retry_phase_is_not_a_completed_step(monkeypatch):
         await status.set_phase("progress_thinking", timed=True)
         await asyncio.sleep(0.01)
         await status.set_phase("progress_retry")
+        clock.advance(2)
+        await status.finish()
+        return status
+
+    clock = _fixed_clock(monkeypatch)
+    status = asyncio.run(scenario())
+    _, plain = status.activity_prefix()
+    assert "Trying again" not in plain
+    assert "Thought for 2 seconds" in plain
+    bot.chat_state.pop(999901, None)
+
+def test_progress_strings_plural_and_zero_across_languages():
+    # Регрессия smoke 11.11.2026: «Thought for 1 seconds» и живое
+    # «Thinking… 0 seconds». Склоняются только en и zu; ru остаётся с
+    # сокращением «с», компактные паки тест не трогает.
+    from lumen_lang import t
+    assert t("en", "progress_thought_for", sec=1) == "Thought for 1 second"
+    assert t("en", "progress_thought_for", sec=2) == "Thought for 2 seconds"
+    assert t("en", "progress_thought_for", sec=5) == "Thought for 5 seconds"
+    assert t("en", "progress_thinking", sec=1) == "Thinking… 1 second"
+    assert t("en", "progress_seconds", sec=1) == "1 second"
+    assert t("en", "progress_seconds", sec=5) == "5 seconds"
+    # Ноль: фраза без числа и в развёрнутом, и в компактном паке.
+    assert t("en", "progress_thinking", sec=0) == "Thinking…"
+    assert t("ru", "progress_thinking", sec=0) == "Думаю…"
+    assert t("ru", "progress_thinking", sec=1) == "Думаю… 1 с"
+    assert t("ru", "progress_thinking", sec=2) == "Думаю… 2 с"
+    assert t("ru", "progress_thought_for", sec=5) == "Думал 5 с"
+    assert t("zu", "progress_thought_for", sec=1) == "Ngicabange umzuzwana ongu-1"
+    assert t("zu", "progress_thought_for", sec=5) == "Ngicabange imizuzwana engu-5"
+    assert t("uz", "progress_thinking", sec=0) == "O'ylayapman…"
+
+
+def test_live_thinking_line_no_number_at_zero_singular_at_one(monkeypatch):
+    # Тот же регресс на уровне живого статуса: кадры тикера при 0 и 1 с.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999906)
+    clock = _fixed_clock(monkeypatch)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
+        # _render — ровно то, что пишет тикер между правками; set_phase
+        # сбрасывает фазу на тех же часах и всегда даёт нулевой кадр.
+        zero = status._render(0)
+        clock.advance(1)
+        one = status._render(1)
+        await status.finish()
+        return zero, one
+
+    zero, one = asyncio.run(scenario())
+    assert zero.endswith("Thinking…") and "0" not in zero
+    assert one.endswith("Thinking… 1 second") and "1 seconds" not in one
+    bot.chat_state.pop(999906, None)
+
+
+def test_subsecond_answer_shows_no_thought_line(monkeypatch):
+    # Claude не пишет «Thought for 0 seconds». Ревью 11.11.2026: строка активности
+    # при <1 с должна исчезать целиком, а не печатать ноль.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999905)
+    _fixed_clock(monkeypatch)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
         await status.finish()
         return status
 
     status = asyncio.run(scenario())
-    _, plain = status.activity_prefix()
-    assert "Trying again" not in plain
-    assert "Thought for" in plain
-    bot.chat_state.pop(999901, None)
+    assert status.activity_prefix() == ("", "")
+    html_block, plain_block = status.compose_answer("ответ")
+    assert html_block is None and plain_block == "ответ"
+    bot.chat_state.pop(999905, None)
+def test_status_from_message_keeps_existing_stop_button():
+    from types import SimpleNamespace
+
+    markup = object()
+    message = SimpleNamespace(reply_markup=markup, chat=SimpleNamespace(id=999907))
+
+    async def scenario():
+        status = StatusMessage.from_message(message, "en", "progress_searching")
+        assert status.reply_markup is markup
+        await status.stop()
+
+    asyncio.run(scenario())
+
+
+def test_status_resume_restarts_stopped_ticker():
+    status = StatusMessage(message=object(), lang="en")
+    status._stopped = True
+
+    async def tick():
+        await asyncio.Future()
+
+    status._tick = tick
+
+    async def scenario():
+        status.resume()
+        assert status._stopped is False
+        assert status._task is not None
+        await status.stop()
+
+    asyncio.run(scenario())
+    assert status._task is None
+
+
+def test_status_clear_reply_markup_removes_keyboard(monkeypatch):
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999908)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
+        status.reply_markup = object()
+        await status.clear_reply_markup()
+        await status.stop()
+        return status
+
+    status = asyncio.run(scenario())
+    assert status.reply_markup is None
+    assert status.message.markup_edits[-1]["reply_markup"].inline_keyboard == []
+    bot.chat_state.pop(999908, None)
+
+
+def test_discard_status_start_deletes_unclaimed_status_once():
+    from lumen_status import discard_status_start
+
+    class FakeStatus:
+        delete_count = 0
+
+        async def delete(self):
+            self.delete_count += 1
+
+    status = FakeStatus()
+
+    async def start():
+        return status
+
+    async def scenario():
+        task = asyncio.create_task(start())
+        await asyncio.sleep(0)
+        await discard_status_start(task)
+
+    asyncio.run(scenario())
+    assert status.delete_count == 1
+
+
+def test_done_stage_phrase_is_past_tense_in_every_language():
+    # Ревью 11.11.2026: закрытый этап брал тот же ключ, что и живой, и в 25
+    # языках показывал «✓ Смотрю изображение» вместо сделанного действия.
+    import lumen_lang
+    pairs = {
+        "progress_viewing_image": "progress_image_done",
+        "progress_watching_video": "progress_video_done",
+        "progress_reading_link": "progress_link_done",
+    }
+    for live_key, done_key in pairs.items():
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            live = lumen_lang.t(lang, live_key)
+            done = lumen_lang.t(lang, done_key)
+            assert done != live, (lang, live_key, done)
+            assert done != done_key and live != live_key, (lang, done)
+
+
+def test_search_done_count_agrees_in_singular():
+    # Ревью 11.11.2026: «1 resultados», «1 trouvés», «1 trovati» — счётчик
+    # стоит существительным, и единственное число нужно языкам с флексией.
+    import lumen_lang
+    assert lumen_lang.t("es", "progress_search_done", count=1) == "Búsqueda en internet · 1 resultado"
+    assert lumen_lang.t("fr", "progress_search_done", count=1) == "Recherche web · 1 trouvé"
+    assert lumen_lang.t("it", "progress_search_done", count=1) == "Ricerca web · 1 trovato"
+    assert lumen_lang.t("en", "progress_search_done", count=1) == "Searched the web · found 1"

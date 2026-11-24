@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import html
 import logging
+import math
 import os
 import re
 import secrets
@@ -516,6 +517,9 @@ async def inline_draw(
         # Один или два референса (multi-image): список приходит из резолвера,
         # одиночный tuple поддерживается для совместимости вызовов.
         ref_items = reference if isinstance(reference, list) else ([reference] if reference else [])
+        # Вес попытки в бюджете провайдера: генерация — 1.0, правка — плюс 21 Neuron
+        # на мегапиксель входа (12 МП фото ≈ 3.4 юнита; аудит 16.11.2026).
+        charge_units = 1.0
         if ref_items:
             ref_bytes = [item[0] for item in ref_items[:2]]
             # Кадр правки повторяет ориентацию первого референса: 16:9 фото иначе
@@ -529,6 +533,8 @@ async def inline_draw(
                     _ref_dims[0] * _ref_dims[1] / 1e6, _ref_dims[0], _ref_dims[1],
                 )
             width, height = bot.size_for_reference(_ref_dims)
+            if _ref_dims:
+                charge_units = 1.0 + 0.2015 * (_ref_dims[0] * _ref_dims[1] / 1e6)
 
             async def _edit_call(session, text, timeout_sec=None, _w=width, _h=height):
                 return await bot._cloudflare_edit_to_image(
@@ -600,7 +606,7 @@ async def inline_draw(
                 # его 12 секунд иначе уходили бы сверх потолка (ревью 10.11.2026).
                 attempt_timeout = max(1.0, min(bot.IMAGE_ATTEMPT_TIMEOUT_SEC, deadline - time.monotonic()))
                 image_bytes = await call(session, text, timeout_sec=attempt_timeout)
-                bot._note_image_success(provider)
+                bot._note_image_success(provider, units=charge_units)
                 generated = True
                 break
             except ImageRateLimitedError as exc:
@@ -625,7 +631,7 @@ async def inline_draw(
                 # поэтому попытка идёт в общий дневной бюджет: без этого цикл из
                 # запрещённых описаний выжигал бы квоту провайдера у всего чата
                 # (ревью 10.11.2026).
-                bot._note_image_success(provider)
+                bot._note_image_success(provider, units=charge_units)
                 log.warning("[draw] Provider %s refused by content moderation — chain stopped.", provider)
                 break
             except Exception as exc:
@@ -685,7 +691,23 @@ async def inline_draw(
                 call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
             )
             if sent is None:
-                raise RuntimeError("Telegram send_photo failed: connection timeout or proxy unavailable")
+                # Фото больше 10 МБ Telegram не принимает, а провайдер отдаёт до
+                # IMAGE_MAX_BYTES: без второго пути человек терял уже оплаченную
+                # генерацию (аудит 16.11.2026).
+                _send_doc = getattr(bot.bot, "send_document", None)
+                if _send_doc is not None:
+                    sent = await bot._tg_call(
+                        _send_doc,
+                        chat_id=cid,
+                        document=BufferedInputFile(
+                            image_bytes, filename=image_filename(image_bytes) or "generated.jpg"),
+                        caption=caption,
+                        reply_markup=reply_markup,
+                        reply_to_message_id=message.message_id,
+                        call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+                    )
+            if sent is None:
+                raise RuntimeError("Telegram send_photo/send_document failed: connection timeout or proxy unavailable")
             # Как в ChatGPT: «повторить» есть только у последней картинки. Снимаем
             # клавиатуру с предыдущей уже после успешной отправки, иначе сбой отправки
             # оставлял чат без единой рабочей кнопки (ревью 10.11.2026). Клавиатура
@@ -1208,13 +1230,20 @@ async def inline_tts(message: Message, text: str) -> None:
             return
         return
     from lumen_status import StatusMessage
-    status_obj = await StatusMessage.start_action(
-        message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_voicing"),
-    )
+    try:
+        status_obj = await StatusMessage.start_action(
+            message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_voicing"),
+        )
+    except asyncio.CancelledError:
+        # Резерв уже списан: отмена на пузыре статуса не должна стоить слотов
+        # до полуночи за неполученную озвучку (ревью 17.11.2026).
+        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
+        raise
     status = status_obj.message if status_obj is not None else None
     # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
     deadline = time.monotonic() + bot.TTS_TOTAL_BUDGET_SEC
     shortened = False
+    voices: list = []
     try:
         # Весь синтез ДО отправки: упавший кусок — одна ошибка вместо рваного "пол-ответа + ошибка".
         voices = []
@@ -1232,10 +1261,19 @@ async def inline_tts(message: Message, text: str) -> None:
             # Даже первый кусок не уложился — честная ошибка, а не пустота.
             raise RuntimeError("TTS total budget exceeded before the first chunk")
     except asyncio.CancelledError:
+        # Возврат до stop(): отменённая задача не доходит до следующего await.
+        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         if status_obj is not None:
             await status_obj.stop()
         raise
     except Exception as exc:
+        # Возврат до любых await: отмена на правке статуса иначе съедала резерв.
+        # Сбой синтеза случается до цикла отправки: человек не получил ни одного
+        # файла, поэтому возвращаем все слоты. Провайдерский расход — не слот
+        # человека (проход №5, 17.11.2026).
+        refund = len(chunks)
+        if refund:
+            bot._refund_user_daily(uid, total=refund, tts=refund)
         log.exception("TTS synthesis failed:")
         # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
@@ -1250,29 +1288,38 @@ async def inline_tts(message: Message, text: str) -> None:
             await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
             await bot._safe_reply(message, user_err)
-        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
         return
-    if status_obj is not None:
-        await status_obj.delete()
-    else:
-        await bot._delete_message_quietly(status)
-    for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
-        # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
-        # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.
-        sent = await bot._tg_call(
-            bot.bot.send_voice,
-            chat_id=message.chat.id,
-            voice=BufferedInputFile(final_audio, filename=final_filename),
-            duration=voice_duration if voice_duration > 0 else None,
-            reply_to_message_id=message.message_id if i == 0 else None,
-            call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
-        )
-        if sent is None:
-            # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
-            bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
-            # Не оставляем пользователя без сообщения: статус уже удалён.
-            await bot._safe_reply(message, bot._t(message.chat.id, "tts_err_generic"))
-            return
+    sent_count = 0
+    try:
+        if status_obj is not None:
+            await status_obj.delete()
+        else:
+            await bot._delete_message_quietly(status)
+        for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
+            # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
+            # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.
+            sent = await bot._tg_call(
+                bot.bot.send_voice,
+                chat_id=message.chat.id,
+                voice=BufferedInputFile(final_audio, filename=final_filename),
+                duration=voice_duration if voice_duration > 0 else None,
+                reply_to_message_id=message.message_id if i == 0 else None,
+                call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
+            )
+            sent_count += 1
+            if sent is None:
+                # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
+                bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
+                # Не оставляем пользователя без сообщения: статус уже удалён.
+                await bot._safe_reply(message, bot._t(message.chat.id, "tts_err_generic"))
+                return
+    except asyncio.CancelledError:
+        # Отмена в цикле отправки: уже отданные чанки списаны, остальные — нет.
+        # Резерв покрывает все чанки, а синтезировано могло быть меньше (обрезка).
+        remaining = len(chunks) - sent_count
+        if remaining > 0:
+            bot._refund_user_daily(uid, total=remaining, tts=remaining)
+        raise
     unsent = len(chunks) - len(voices)
     if unsent > 0:
         # Обрезка по общему дедлайну: за несозданные чанки не списываем.
@@ -1296,6 +1343,40 @@ async def cmd_tts(message: Message) -> None:
     if await bot._reject_rate_limited_message(message):
         return
     await bot.inline_tts(message, text)
+
+
+async def handle_stop_callback(query: CallbackQuery) -> None:
+    """Кнопка «Остановить» под ответом: права и семантика те же, что у /stop —
+    автор вопроса или владелец; чужое нажатие молча не срабатывает."""
+    import bot
+    with contextlib.suppress(Exception):
+        await query.answer()
+    if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
+        return
+    if not bot.STOP_BUTTON_ENABLED:
+        return
+    chat_id = query.message.chat.id if getattr(query, "message", None) is not None and query.message.chat else 0
+    sender = query.from_user.id if getattr(query, "from_user", None) is not None else None
+    parts = str(getattr(query, "data", "")).split(":")
+    token = parts[2] if len(parts) > 2 else None
+    if chat_id:
+        # Старая кнопка без токена не должна гасить новый стрим того же чата.
+        if token is None and bot._stream_stop_token(chat_id) is not None:
+            return
+        bot._request_stream_stop(chat_id, sender, token=token)
+
+
+async def cmd_stop(message: Message) -> None:
+    """Остановка текущего ответа. В меню команды нет, как у /help: это аварийный
+    контроль, а не витрина. Молчаливо игнорирует чужого человека в группе и
+    вызов, когда стрима нет — лишнее сообщение в чат не пишем (аудит 16.11.2026)."""
+    import bot
+    if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
+        return
+    if not bot.STOP_COMMAND_ENABLED:
+        return
+    sender = message.from_user.id if getattr(message, "from_user", None) is not None else None
+    bot._request_stream_stop(message.chat.id, sender)
 
 
 async def cmd_reset(message: Message) -> None:
@@ -1356,7 +1437,7 @@ async def cmd_reset(message: Message) -> None:
         bot._t(message.chat.id, "reset_done")
     )
 
-# ── Язык системных сообщений (/lang) — ответы ИИ не трогает (см. RESPONSE LANGUAGE в system_prompt.py). Права как у /reset; кнопки без флагов/эмодзи, текущий — с ✓, меню по алфавиту кода.
+# ── Язык системных сообщений (/lang) — ответы ИИ не трогает (см. RESPONSE LANGUAGE в system_prompt.py). Права как у /reset; кнопки без флагов/эмодзи/галочек, текущий язык — в заголовке, меню по алфавиту кода.
 async def cmd_lang(message: Message) -> None:
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
@@ -1371,15 +1452,14 @@ async def cmd_lang(message: Message) -> None:
     for i in range(0, len(codes), 2):
         row = []
         for code in codes[i:i + 2]:
-            mark = " ✓" if code == lang else ""
             row.append(InlineKeyboardButton(
-                text=f"{LANG_NAMES[code]}{mark}",
+                text=LANG_NAMES[code],
                 callback_data=f"lang:{code}",
             ))
         rows.append(row)
     await bot._tg_call(
         message.reply,
-        bot._t(message.chat.id, "lang_title"),
+        bot._t(message.chat.id, "lang_title", current=LANG_NAMES[lang]),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
@@ -1407,6 +1487,12 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
         return
     chat = question_msg.chat
     requester_id = query.from_user.id if query.from_user else None
+    # Каждый тап — правка Telegram плюс запись чата: без окна спамер гонял бы
+    # edit_text на каждое нажатие (ревью 17.11.2026, тот же гейт, что у draw:more).
+    if bot._check_and_register_rate_limit(requester_id if requester_id is not None else chat.id):
+        with contextlib.suppress(Exception):
+            await query.answer(bot._t(chat.id, "rate_limited"), show_alert=False)
+        return
     if not await bot._is_privileged_in_chat(chat.type, chat.id, requester_id):
         with contextlib.suppress(Exception):
             await query.answer(bot._t(chat.id, "lang_deny"), show_alert=True)
@@ -1424,7 +1510,41 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
         )
 
+def chat_locked(handler):
+    """Слэш-команда, трогающая чат, идёт через тот же лок: кап ожидающих,
+    честное «занято» и дедлайн сообщения (ревью 17.11.2026)."""
+    async def _run(message):
+        import bot
+        await bot._run_under_chat_lock(message, lambda: handler(message))
+    _run.__name__ = getattr(handler, "__name__", "locked_handler")
+    return _run
+
+
 # выгрузка логов (только для владельца)
+
+def _build_logs_attachment() -> str | None:
+    """Блокирующая часть /logs: прочитать, вычистить токены, отдать путь файла."""
+    import bot
+    if not bot.LOG_FILE_PATH.exists():
+        return None
+    with open(bot.LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
+        log_content = f.read()
+    if not log_content.strip():
+        return None
+    for secret in bot._redactable_secrets():
+        log_content = log_content.replace(secret, "<REDACTED>")
+    fd, temp_log_path = tempfile.mkstemp(prefix="logs_", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
+            f.write(log_content)
+    except Exception:
+        try:
+            os.unlink(temp_log_path)
+        except Exception:
+            pass
+        raise
+    return temp_log_path
+
 
 async def cmd_logs(message: Message) -> None:
     import bot
@@ -1447,35 +1567,24 @@ async def cmd_logs(message: Message) -> None:
     except Exception:
         pass
 
+    temp_log_path = None
     try:
-        log_content = ""
-        if bot.LOG_FILE_PATH.exists():
-            with open(bot.LOG_FILE_PATH, "r", encoding="utf-8", errors="ignore") as f:
-                log_content = f.read()
-
-        if not log_content or len(log_content.strip()) == 0:
+        # Чтение, скраб и запись файла — блокирующая часть: лог растёт сутками,
+        # и весь этот объём раньше стопорил event loop (ревью 17.11.2026).
+        temp_log_path = await asyncio.to_thread(_build_logs_attachment)
+        if temp_log_path is None:
             await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_empty"))
             return
-
-        # вычищаем токены из логов перед отправкой — единый список, см. _redactable_secrets
-        for secret in bot._redactable_secrets():
-            log_content = log_content.replace(secret, "<REDACTED>")
-
-        # пишем во временный файл, чтобы не ловить блокировку на живом логе
-        fd, temp_log_path = tempfile.mkstemp(prefix="logs_", suffix=".txt")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", errors="ignore") as f:
-                f.write(log_content)
-
-            await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
-        finally:
+        await bot._tg_call(message.reply_document, FSInputFile(temp_log_path, filename="logs.txt"))
+    except Exception as exc:
+        log.exception("Error extracting or sending logs:")
+        await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
+    finally:
+        if temp_log_path:
             try:
                 os.unlink(temp_log_path)
             except Exception:
                 pass
-    except Exception as exc:
-        log.exception("Error extracting or sending logs:")
-        await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_send_error", error=exc))
 
 async def cmd_stats(message: Message) -> None:
     """Статистика (скрыта, только владелец — данные по всем чатам)."""
@@ -1554,13 +1663,19 @@ async def cmd_stats(message: Message) -> None:
         _state = {"budget": "бюджет выбран до завтра", "cooldown": "пауза после перегрузки"}.get(_blocked or "", "готов")
         _image_states.append(f"  • {_provider}: {_state}")
     image_block = (
-        f"<b>Картинки — {bot._image_usage_total()}/{bot.IMAGE_DAILY_LIMIT} за сутки:</b>\n"
+        f"<b>Картинки — {bot._image_usage_total()}/{bot.IMAGE_DAILY_LIMIT} за сутки ({bot._image_neurons_total():.0f}/{bot.IMAGE_DAILY_NEURONS} Neuron):</b>\n"
         + "\n".join(_image_states) + "\n\n"
     )
     _quarantined_now = bot._quarantine_status()
     if _quarantined_now:
+        import lumen_router_config
+
+        # Не «подряд до конца суток»: окно считается от первого плохого ответа,
+        # и это другое обещание человеку (ревью документов 12.11.2026).
         quarantine_text = "\n".join(
-            f"  • {provider}/{mid}: {bad} плохих подряд (до конца суток)" for provider, mid, bad in _quarantined_now
+            f"  • {provider}/{mid}: {bad} плохих ответа за окно "
+            f"{lumen_router_config.QUARANTINE_WINDOW_SEC} с"
+            for provider, mid, bad in _quarantined_now
         )
     else:
         quarantine_text = "  нет"
@@ -1572,13 +1687,19 @@ async def cmd_stats(message: Message) -> None:
 
     # Состояние прокси — из самого breaker'а (раньше команда лезла в четыре глобала напрямую).
     proxy_line = bot._tg_proxy_breaker.status_text()
+    import lumen_search
+    # Слой внешнего поиска: сколько обращений к источникам уже было сегодня и
+    # разрешён ли он вовсе — эту строку owner смотрит после деплоя цикла.
+    _search_calls = lumen_search.search_calls_today()
+    _search_limit = lumen_search.WEB_SEARCH_DAILY_LIMIT
+    _search_on = lumen_search.web_search_is_enabled()
 
     quota_day = bot.GLOBAL_QUOTA.get("quota_day") or "—"
     webhook_text = await _webhook_task
 
     text = (
         f"<b>Статистика Lumen</b>\n"
-        f"Сборка: {_build_version()}\n"
+        f"Сборка: {await asyncio.to_thread(_build_version)}\n"
         f"Активных чатов (24ч): {active_chats} (всего: {total_chats})\n"
         f"Аптайм процесса: {uptime_str}\n"
         f"Счётчики квоты за сутки: {quota_day} (America/Los_Angeles, сбрасываются автоматически)\n"
@@ -1588,7 +1709,9 @@ async def cmd_stats(message: Message) -> None:
         f"переключений на резерв: {_day_stats.get('fallbacks', 0)}, "
         f"отказов по лимиту: {_day_stats.get('daily_limit_denials', 0)}\n"
         f"Попыток к моделям: {_day_stats.get('model_attempts', 0)}, "
-        f"пустых: {_day_stats.get('model_failures', 0)}\n\n"
+        f"пустых: {_day_stats.get('model_failures', 0)}\n"
+        f"Внешний поиск: {_search_calls}/{_search_limit} обращений за сутки, "
+        f"свитч {'включён' if _search_on else 'выключен'}\n\n"
         f"<b>Gemini — запросов по моделям (лимит провайдера справочно):</b>\n{gemini_text}\n\n"
         f"{munito_block}"
         f"{image_block}"
@@ -1659,6 +1782,21 @@ async def cmd_selftest(message: Message) -> None:
         ok, detail, elapsed = await bot.selftest_llm_head("gemini", chat_id=message.chat.id)
         rows.append(_selftest_row("Gemini", ok, detail, elapsed))
         summary.append(f"gemini={'ok' if ok else 'FAIL'}/{elapsed:.1f}s")
+    # У слоя поиска своя пробы нет: важнее переключатели и остаток дневного
+    # бюджета обращений — по этой строке видно, активен ли цикл после рестарта.
+    import lumen_agent
+    import lumen_read_page
+    import lumen_search
+    rows.append(
+        f"Поиск: {'включён' if lumen_search.web_search_is_enabled() else 'выключен'}"
+        f" · цикл: {'включён' if lumen_agent.agent_turn_enabled() else 'выключен'}"
+        f" · обращений сегодня {lumen_search.search_calls_today()}"
+        f"/{lumen_search.WEB_SEARCH_DAILY_LIMIT}"
+        + (f" · по ключу {lumen_search.search_api_calls_today()}/{lumen_search._search_api_limit()}"
+           if lumen_search.search_api_provider() else "")
+        + (f" · страниц {lumen_read_page.read_page_calls_today()}/{lumen_read_page.read_page_daily_limit()}"
+           if lumen_read_page.proxy_origin() else "")
+    )
     try:
         session = await bot._get_http_session()
         token = bot.BOT_TOKEN or ""
@@ -1858,8 +1996,19 @@ def _storage_backend_text() -> str:
     import bot
     backend = "Upstash" if bot.USE_UPSTASH else "локальный диск"
     ts = bot._last_storage_write_ts()
-    if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
-        when = time.strftime("%d.%m %H:%M", time.localtime(ts))
+    try:
+        ts_value = float(ts)
+    except (TypeError, ValueError):
+        ts_value = 0.0
+    # time.localtime(inf) — OverflowError, и /stats умирал целиком.
+    # Конечный, но нереальный timestamp (1e300) тоже роняет localtime:
+    # OverflowError/OSError/ValueError не должны убивать /stats (проход №4).
+    if (isinstance(ts, (int, float)) and not isinstance(ts, bool)
+            and math.isfinite(ts_value) and 0 < ts_value < 4102444800.0):
+        try:
+            when = time.strftime("%d.%m %H:%M", time.localtime(ts_value))
+        except (OverflowError, OSError, ValueError):
+            return f"{backend}, записей пока не было"
         return f"{backend}, запись: {when}"
     return f"{backend}, записей пока не было"
 
@@ -1869,7 +2018,7 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
     token в callback_data короткий (лимит Telegram — 64 байта на всю строку)."""
     import bot
     _purge_expired_picks()
-    _enforce_pending_picks_cap()
+    _enforce_pending_picks_cap(pending_add=1)
     token = secrets.token_hex(8)
     lang = bot._chat_lang(message.chat.id)
     bot._pending_picks[token] = {
@@ -1948,7 +2097,7 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
             # Один ресенд: второй тап упрётся в rec None и честно покажет expired.
             bot._pending_picks.pop(token, None)
             _purge_expired_picks()
-            _enforce_pending_picks_cap()
+            _enforce_pending_picks_cap(pending_add=1)
             fresh = secrets.token_hex(8)
             bot._pending_picks[fresh] = {
                 "chat_id": rec.get("chat_id"),

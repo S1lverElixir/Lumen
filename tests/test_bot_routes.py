@@ -129,14 +129,14 @@ def test_or_error_msg_rate_limit():
     # а формулировка "резервного провайдера" тоже убрана — с автоматическим
     # роутером OpenRouter часто оказывается ПЕРВЫМ, а не резервным кандидатом.
     exc = _FakeStatusExc("rate limit exceeded", status_code=429)
-    msg = bot._or_error_msg(exc, "text")
+    msg = bot._or_error_msg(exc)
     assert "/provider" not in msg and "резервн" not in msg.lower()
     assert msg == bot._model_error_text("rate_limit")
 
 
 def test_or_error_msg_unavailable():
     exc = _FakeStatusExc("model not found", status_code=404)
-    msg = bot._or_error_msg(exc, "text")
+    msg = bot._or_error_msg(exc)
     assert "/provider" not in msg and "резервн" not in msg.lower()
     assert msg == bot._model_error_text("unavailable")
 
@@ -542,6 +542,45 @@ def test_chain_safety_label_only_response_moves_to_next_model(monkeypatch):
     assert (answer, used) == ("живой ответ", "probe/good")
 
 
+def test_chain_recomputes_reasoning_effort_after_model_fallback(monkeypatch):
+    # Замер 12.11.2026: google/gemma-4-12b отвечает 400 на reasoning_effort, а
+    # четыре текстовые головы его принимают. Поле, посчитанное один раз на весь
+    # маршрут, уезжал бы и туда, и туда: на gemma — гарантированный 400, на
+    # голову — ответ вовсе без усилия. Поэтому extras пересчитываются на модель
+    # попытки (extra_payload_fn), и этот тест фиксирует именно пересчёт.
+    import lumen_routes
+    from lumen_router_config import _munito_payload_extras
+
+    monkeypatch.delenv("MUNITO_REASONING_EFFORT", raising=False)
+    gemma = "google/gemma-4-12b"
+    head = "deepseek-ai/deepseek-v4.1-flash-1017"
+    seen: dict[str, dict] = {}
+
+    async def fake_request(payload, deadline):
+        seen[payload["model"]] = payload
+        if payload["model"] == gemma:
+            raise bot.MunitoAPIError("HTTP 400 'reasoning_effort' is not supported", status_code=400)
+        return {"choices": [{"message": {"content": "живой ответ"}}]}
+
+    try:
+        answer, used = asyncio.run(lumen_routes._chat_completion_chain(
+            [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+            [gemma, head], gemma, request_fn=fake_request, provider="munito",
+            extra_payload_fn=lambda model: _munito_payload_extras("medium", model),
+        ))
+    finally:
+        # Реальные id моделей в общем состоянии тестовой сессии не остаются.
+        lumen_router_config._QUARANTINE.pop(("munito", gemma), None)
+        lumen_router_config._QUARANTINE.pop(("munito", head), None)
+        bot.GLOBAL_QUOTA.setdefault("munito", {}).pop(gemma, None)
+        bot.GLOBAL_QUOTA.setdefault("munito", {}).pop(head, None)
+
+    assert (answer, used) == ("живой ответ", head)
+    assert set(seen) == {gemma, head}, "обе модели обязаны получить свой payload"
+    assert "reasoning_effort" not in seen[gemma], "gemma получила бы 400 на это поле"
+    assert seen[head]["reasoning_effort"] == "medium", "после откатa поле обязано пересчитаться"
+
+
 def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
     # Три пустых подряд в одну голову — карантин (реальная регрессия: мёртвая голова
     # жевала бы каждую попытку до конца суток вместо объезда после третьей).
@@ -798,8 +837,8 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
 
 
 def test_run_route_reuse_has_no_thought_block_in_private_chat(monkeypatch):
-    # Обычный текст после раннего сбоя стрима тоже остаётся без финальной
-    # строки «Думаю N c»: настоящий activity-блок нужен только для этапов.
+    # Простой ответ после раннего сбоя стрима тоже остаётся без синтетической
+    # строки «Думаю N c»; activity-блок нужен только реальным этапам.
     chat_id = 999322
     placeholder = _FakeSentMessage()
     incoming = _FakeIncomingMessage(chat_id)
@@ -808,6 +847,7 @@ def test_run_route_reuse_has_no_thought_block_in_private_chat(monkeypatch):
         return None, placeholder
 
     async def fake_text(cid, prompt, model_chain, deadline=None, **kwargs):
+        await asyncio.sleep(1.05)
         return "Ответ от резервной модели"
 
     monkeypatch.setattr(bot, "_try_munito_streaming", fake_stream_fail)
@@ -2035,6 +2075,40 @@ def test_run_route_counts_fallback_and_total_failure(monkeypatch):
     bot.chat_state.pop(chat_id, None)
 
 
+def test_answers_are_counted_once_per_update(monkeypatch):
+    # Аудит 16.11.2026: ретрай после [[SEARCH]], повтор за свежестью и
+    # автопродолжение входят в _run_route повторно, и каждый успешный проход
+    # добавлял +1 к суточному лимиту. 30 сообщений съедались за 15.
+    from types import SimpleNamespace
+
+    chat_id = 999308
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=777014)
+    monkeypatch.setattr(bot, "ask_munito_text", AsyncMock(return_value="ok"))
+    route = [("munito", "probe/m1")]
+    saved_stats = dict(bot.GLOBAL_QUOTA.get("stats") or {})
+
+    async def scenario() -> None:
+        # Оба прохода — в одной задаче, как в проде: contextvar живёт в контексте
+        # обработчика, а не в отдельном asyncio.run.
+        token = bot._ANSWER_COUNTED.set(False)
+        try:
+            await bot._run_route(chat_id, "раз", route, incoming)
+            await bot._run_route(chat_id, "два", route, incoming)
+        finally:
+            bot._ANSWER_COUNTED.reset(token)
+
+    try:
+        asyncio.run(scenario())
+        entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("777014") or {}
+        assert entry.get("total") == 1
+        assert (bot.GLOBAL_QUOTA.get("stats") or {}).get("answers_sent") == saved_stats.get("answers_sent", 0) + 1
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777014", None)
+        bot.GLOBAL_QUOTA["stats"] = saved_stats
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_daily_limit_denial_counted_and_refused(rate_guard_setup, monkeypatch):
     # Что защищает: счётчик отказов по дневному лимиту вместе с самим отказом.
     # Регрессия: отказ есть, а счётчик не растёт — /stats врёт. Старые тесты
@@ -2120,3 +2194,26 @@ def test_munito_success_logs_token_usage_when_api_returns_it(caplog, monkeypatch
         bot.chat_state.pop(chat_id, None)
         caplog.clear()
 
+
+def test_run_route_empty_stream_after_stop_does_not_spend_slot(monkeypatch):
+    # Аудит 16.11.2026: остановка до первого куска отдавала пустой ответ, но
+    # слот дневного лимита уже списывался.
+    chat_id = 999305
+    placeholder = _FakeSentMessage()
+    recorded = []
+
+    async def fake_stream(cid, prompt, message, model_id, **kwargs):
+        return "", placeholder
+
+    def fake_record(user_key, gemini=False):
+        recorded.append((user_key, gemini))
+
+    monkeypatch.setattr(bot, "_try_munito_streaming", fake_stream)
+    monkeypatch.setattr(bot, "_record_user_daily", fake_record)
+    try:
+        route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017")]
+        ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
+        assert ans == ""
+        assert recorded == []
+    finally:
+        bot.chat_state.pop(chat_id, None)

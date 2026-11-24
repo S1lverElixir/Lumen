@@ -70,10 +70,11 @@ def _purge_expired_picks(now: float | None = None) -> None:
         del _pending_picks[token]
 
 
-def _enforce_pending_picks_cap() -> None:
+def _enforce_pending_picks_cap(pending_add: int = 0) -> None:
     """Потолок памяти на кнопки-уточнения: сверх лимита сносим самые
-    близкие к протуханию (AUD-G-001)."""
-    overflow = len(_pending_picks) - MAX_PENDING_PICKS
+    близкие к протуханию (AUD-G-001). pending_add учитывает новый токен,
+    который будет вставлен сразу после (иначе максимум MAX+1)."""
+    overflow = len(_pending_picks) + pending_add - MAX_PENDING_PICKS
     if overflow <= 0:
         return
     oldest = sorted(_pending_picks, key=lambda t: _pending_picks[t]["expires"])[:overflow]

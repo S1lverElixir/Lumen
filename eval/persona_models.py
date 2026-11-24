@@ -6,8 +6,11 @@
 для Munito), отдаёт ответы LLM-судье по рубрике PROMPT_EVAL.md и печатает
 таблицу «модель → сумма баллов».
 
-Ключи провайдеров берутся из переменных окружения или из .env в корне репозитория
-(файл уже в .gitignore). Значения ключей нигде не печатаются и не пишутся в отчёт.
+Ключи провайдеров берутся из переменных окружения, из .env в корне репозитория, а если
+его там нет (worktree не получает файл из .gitignore) — из основного дерева: путь можно
+передать переменной LUMEN_ENV_DIR (тот же порядок, что в eval/agent_loop_probe.py).
+Интервал между вызовами — EVAL_CALL_GAP_SEC (по умолчанию 2 с). Значения ключей нигде
+не печатаются и не пишутся в отчёт.
 
     python eval/persona_models.py run --models "munito:deepseek-ai/deepseek-v4.1-flash-1017,gemini:gemini-2.5-flash"
     python eval/persona_models.py report --out <каталог с ответами>
@@ -21,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -37,6 +41,7 @@ sys.path.insert(0, str(REPO))
 
 from lumen_errors import get_system_prompt  # noqa: E402
 from lumen_router_config import _looks_like_heavy_query  # noqa: E402
+from lumen_security import _LATIN_LETTERS_RE, _polish_answer  # noqa: E402
 
 # Munito: тот же дефолт, что в bot.MUNITO_BASE_URL (значение берём из окружения/.env).
 MUNITO_BASE_URL = "https://api.munito.ai/inference/v1"
@@ -74,24 +79,108 @@ JUDGE_SYSTEM_PROMPT = (
 )
 
 
+# Ответ обязан приходить на языке человека: судья это оценивает «на вкус»,
+# а замер 12.11.2026 по всем 25 SUPPORTED_LANGS требует детерминированной
+# сверки по графике. Вьетнамский, узбекский, турецкий, филиппинский, зулу и
+# европейские паки пишут латиницей — для них латиница и есть свой алфавит,
+# а не утечка языка.
+_LATIN_SCRIPT_LANGS = frozenset({
+    "en", "de", "es", "fr", "it", "nl", "id", "ms", "pt", "fil", "tr", "uz",
+    "vi", "pl", "zu",
+})
+_SCRIPT_BLOCKS = {
+    "cyrillic": (0x0400, 0x04FF),
+    "arabic": (0x0600, 0x06FF),
+    "devanagari": (0x0900, 0x097F),
+    "bengali": (0x0980, 0x09FF),
+    "thai": (0x0E00, 0x0E7F),
+}
+_SCRIPT_BY_LANG = {
+    "ru": "cyrillic", "uk": "cyrillic", "be": "cyrillic", "kk": "cyrillic",
+    "ar": "arabic", "fa": "arabic", "ur": "arabic",
+    "hi": "devanagari", "bn": "bengali", "th": "thai",
+}
+
+
+def _script_share(text: str, block: str) -> float:
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return 0.0
+    lo, hi = _SCRIPT_BLOCKS[block]
+    return sum(1 for ch in letters if lo <= ord(ch) <= hi) / len(letters)
+
+
+def _latin_share(text: str) -> float:
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(len(_LATIN_LETTERS_RE.findall(ch)) for ch in letters) / len(letters)
+
+
+def answer_script_ok(lang: str | None, answer: str) -> bool:
+    """Своя ли графика у ответа: не меньше половины букв в алфавите языка.
+    Имя бота в латинице в знаменатель не входит — «Нет, я Lumen.» это русский
+    ответ, а не смешение языков (замер 12.11.2026)."""
+    if not lang or not answer.strip():
+        return False
+    text = re.sub(r"(?i)lumen", "", answer)
+    if not any(ch.isalpha() for ch in text):
+        return True
+    if lang in _LATIN_SCRIPT_LANGS:
+        return _latin_share(text) >= 0.6
+    block = _SCRIPT_BY_LANG.get(lang)
+    if block is None:
+        return True
+    return _script_share(text, block) >= 0.5
+
+
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def sanitize_no_proxy() -> list[str]:
+    """Глобальный NO_PROXY владельца содержит «[::1]», и любой httpx-клиент
+    (а через него — судебный вызов Gemini) падает на InvalidURL: Invalid port
+    (замер 12.11.2026: судья умер на первом же вопросе, ответы были собраны).
+    Записные адреса из скобок здесь useless, а прокси-правила остаются.
+    Возвращает список переменных, которые пришлось почистить."""
+    touched: list[str] = []
+    for name in ("NO_PROXY", "no_proxy"):
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        kept = [part for part in raw.split(",") if part.strip() and not part.strip().startswith("[")]
+        if kept != [part for part in raw.split(",")]:
+            os.environ[name] = ",".join(kept)
+            touched.append(name)
+    return touched
+
+
+def env_files() -> list[Path]:
+    """Где искать .env с ключами. В worktree-ах файла нет (он в .gitignore и живёт
+    в основном дереве), поэтому порядок тот же, что в eval/agent_loop_probe.py:
+    своё репозиторий-корень, затем LUMEN_ENV_DIR с дефолтом на основное дерево.
+    Значения отсюда нигде не печатаются."""
+    here = REPO / ".env"
+    outside = Path(os.getenv("LUMEN_ENV_DIR", "").strip()
+                   or r"C:/Users/egork/Documents/Default Project/Lumen") / ".env"
+    return [here] if here == outside else [here, outside]
+
+
 def load_env() -> None:
     """Читает .env репозитория в окружение. Значения не печатаются и не логируются."""
-    env_file = REPO / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    for env_file in env_files():
+        if not env_file.exists():
             continue
-        name, _, value = line.partition("=")
-        name = name.strip()
-        value = value.strip().strip('"').strip("'")
-        if name and value and not os.environ.get(name):
-            os.environ[name] = value
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip().lstrip("﻿")
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            name = name.strip()
+            value = value.strip().strip('"').strip("'")
+            if name and value and not os.environ.get(name):
+                os.environ[name] = value
 
 
 def load_questions(path: Path | None = None) -> dict:
@@ -170,22 +259,6 @@ def call_gemini(target: Target, history: list[dict], user_text: str, *, system_t
     return _gemini_stream(client, target.model_id, contents, config)
 
 
-def _openai_chat(url: str, headers: dict, payload: dict) -> str:
-    req = urllib.request.Request(
-        url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", **headers}, method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read().decode("utf-8", errors="replace"))
-    choices = data.get("choices") or []
-    if not choices:
-        return ""
-    content = (choices[0].get("message") or {}).get("content")
-    if isinstance(content, list):
-        return "".join(str(part.get("text") or "") for part in content if isinstance(part, dict)).strip()
-    return str(content or "").strip()
-
-
 def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, float, int]:
     """Стриминг chat/completions: (текст, время до первого токена, токенов по usage)."""
     body = {**payload, "stream": True}
@@ -258,15 +331,60 @@ def call_munito(target: Target, history: list[dict], user_text: str, *, system_t
         # Те же поля, что шлёт бот (reasoning_effort из lumen_router_config), чтобы
         # замер мерил боевой маршрут. Судья вызывается со своей системкой и остаётся
         # с размышлением включённым: low-effort судья сама снижает качество оценки.
-        from lumen_router_config import _munito_payload_extras
-        payload.update(_munito_payload_extras())
+        from lumen_router_config import _munito_payload_extras, pick_reasoning_effort
+        # Уровень усилия берём по тому же правилу, что и в боевом маршруте: без
+        # аргумента _munito_payload_extras отдаёт прежний плоский low, и замер
+        # мерил бы не автовыбор, а старое поведение (12.11.2026).
+        payload.update(_munito_payload_extras(
+            pick_reasoning_effort(user_text), target.model_id,
+        ))
     return _openai_chat_stream(url, headers, payload)
 
 
-def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
+def call_model_once(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     if target.provider == "gemini":
         return call_gemini(target, history, user_text, system_text=system_text)
     return call_munito(target, history, user_text, system_text=system_text)
+
+
+# Маркер «мне нужен поиск» из системного промпта: офлайн-замер обязан отрабатывать
+# его так же, как боевой маршрут, иначе служебная строка из 10 знаков уходит судье
+# и вопрос получает ноль (замер 11.11.2026: 43/50, вопросы 22-24).
+_SEARCH_MARKER = "[[SEARCH]]"
+# Копия должна совпадать с продом (`lumen_message_core._SEARCH_UNAVAILABLE_NOTE`),
+# иначе замер персоны судит не то поведение (ревью 17.11.2026).
+_NO_SEARCH_NOTE = (
+    "\n\n[No web search is available for this turn. Answer from what you already know, "
+    "in the user's language, and say in one plain line what you could not verify. "
+    "Do not ask for a search and do not refuse to answer. "
+    "This bracket is an instruction to you, not text to show: never quote, translate or "
+    "reproduce it, and never mix its language into the reply.]"
+)
+
+
+def _resolve_search_marker(target: Target, history: list[dict], user_text: str, system_text):
+    import asyncio
+
+    from lumen_search import fetch_web_snippets, format_snippets_for_prompt
+    try:
+        snippets = asyncio.run(fetch_web_snippets(user_text, timeout_sec=8.0)) or []
+    except Exception as exc:
+        log(f"    поиск в замере не удался: {type(exc).__name__}")
+        snippets = []
+    block = format_snippets_for_prompt(snippets) if snippets else _NO_SEARCH_NOTE
+    log(f"    модель попросила поиск — второй проход со сниппетами ({len(snippets)})")
+    return call_model_once(target, history, user_text + block, system_text=system_text)
+
+
+def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
+    text, ttft, tokens = call_model_once(target, history, user_text, system_text=system_text)
+    # Прод-детектор терпим к регистру, обёрткам и филлеру; строгий startswith
+    # смещал баллы относительно прода (ревью 17.11.2026).
+    from lumen_search import search_marker_requested
+    if search_marker_requested(text):
+        again, ttft2, tokens2 = _resolve_search_marker(target, history, user_text, system_text)
+        return again, ttft + ttft2, tokens + tokens2
+    return text, ttft, tokens
 
 
 def call_with_retry(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None,
@@ -330,6 +448,9 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
             time.sleep(gap)
             try:
                 last, ttft_last, tokens_seen = call_with_retry(target, history, turn)
+                # Судья видит ровно то, что человек: боевой маршрут прогоняет
+                # ответ через выходной фильтр, и в память ложится он же.
+                last = _polish_answer(last, source="persona-eval")
             except RuntimeError as exc:
                 failure = str(exc)[:200]
                 break
@@ -347,12 +468,77 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
                 "ttft": round(ttft_last, 2),
                 "chars": len(last),
                 "tokens": tokens_seen,
+                "script_ok": answer_script_ok(question.get("lang"), last),
+                "style_flags": style_flags(question, last),
             }
             log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., {tokens_seen} токенов, первый токен {ttft_last:.1f}с, всего {elapsed:.1f}с")
         # Пауза под фактический расход токенов: окно TPM у обеих голов считается по нему,
         # а не по оценке промпта.
         gap = call_gap(target, tokens_seen)
+    wrong = sorted((qid for qid, item in answers.items() if item.get("script_ok") is False), key=int)
+    if wrong:
+        log(f"  язык ответа не совпал с языком вопроса в вопросах: {', '.join(wrong)}")
+    flagged = sorted(((qid, item.get("style_flags")) for qid, item in answers.items() if item.get("style_flags")), key=lambda t: int(t[0]))
+    if flagged:
+        detail = "; ".join(f"{q}:{','.join(fs)}" for q, fs in flagged)
+        log(f"  стиль: флаги в {len(flagged)} вопрос(ах): {detail[:400]}")
     return answers
+
+
+_EMOJI_CHARS_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF]")
+_BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+", re.M)
+_HEAD_RE = re.compile(r"^\s*#{1,6}\s+\S.*$", re.M)
+_BOLD_LINE_RE = re.compile(r"^\s*\*\*[^*\n]+\*\*\s*$", re.M)
+
+
+def style_flags(question: dict, answer: str) -> list[str]:
+    """Дешёвая детерминированная сетка на ответ: то, что не требует судьи и
+    ловит настоящие провалы манеры Claude (служебный маркер в тексте, утечка
+    идентичности, гирлянда эмодзи, список там, где просили прозу, съеденный
+    термин). Подсказки вопроса — в поле style; без них действуют общие нормы.
+    Ревью 12.11.2026: судья не поймал то, что здесь считается строкой."""
+    from lumen_security import _leak_spans
+
+    style = question.get("style") or {}
+    text = answer or ""
+    flags: list[str] = []
+    if not text.strip():
+        return ["empty"]
+    if "[[search]]" in text.lower():
+        flags.append("search-marker")
+    if _leak_spans(text):
+        flags.append("identity-leak")
+    n_emoji = len(_EMOJI_CHARS_RE.findall(text))
+    max_emoji = style.get("emoji_max", 2)
+    if n_emoji > max_emoji:
+        flags.append(f"emoji-{n_emoji}>{max_emoji}")
+    if style.get("emoji_min") and n_emoji < style["emoji_min"]:
+        flags.append(f"emoji-{n_emoji}<asked")
+    bullets = len(_BULLET_RE.findall(text))
+    if bullets > style.get("bullets_max", 4):
+        flags.append(f"bullets-{bullets}")
+    heads = len(_HEAD_RE.findall(text)) + len(_BOLD_LINE_RE.findall(text))
+    if heads > style.get("heads_max", 2):
+        flags.append(f"headings-{heads}")
+    marks = text.count("?") + text.count("\u061f") + text.count("\uff1f")
+    # Считаем знаки, а не вопросы: персидский ответ на «что делать после
+    # увольнения» задал ОДИН вопрос дважды («сколько у тебя запас? то есть
+    # сколько месяцев ты продержишься без дохода?») — questions-2 там ложный
+    # (замер 12.11.2026 по собранному корпусу, язык fa).
+    if "questions_max" in style and marks > style["questions_max"]:
+        flags.append(f"questions-{marks}")
+    if "questions_min" in style and marks < style["questions_min"]:
+        flags.append(f"questions-{marks}<asked")
+    if style.get("math") and not any(ch in text for ch in ("$", "\u03c0", "\u2248", "\u221a", "^2", "2\u2070")):
+        flags.append("no-math")
+    if "chars_max" in style and len(text) > style["chars_max"]:
+        flags.append(f"len-{len(text)}>{style['chars_max']}")
+    if style.get("table") and "|---" not in text.replace(" ", ""):
+        flags.append("no-table")
+    for term in style.get("keep_terms") or []:
+        if term.lower() not in text.lower():
+            flags.append(f"term-lost:{term}")
+    return flags
 
 
 def judge_prompt(data: dict, question: dict, answers: dict[str, Any], checks: list[int]) -> str:
@@ -571,6 +757,7 @@ def main() -> int:
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
 
+    sanitize_no_proxy()
     args = parser.parse_args()
     return args.func(args)
 

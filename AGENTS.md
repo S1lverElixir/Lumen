@@ -7,7 +7,7 @@ Hugging Face egress. The Claude look is deliberate: when you change how the bot 
 reference's layout, its live status bubble and its plain tone.
 This file holds only what an agent cannot get from the code: the owner's rules, the commands, the
 traps; how any feature works is in `docs/`. Every fact below was checked against the repo and
-production on 10.11.2026, so change a fact and update this file in the same commit.
+production on 12.11.2026, so change a fact and update this file in the same commit.
 
 ## Owner and replies
 - The owner does not write code; the bot was built with AI help. Reply in Russian, in plain words,
@@ -98,17 +98,25 @@ production on 10.11.2026, so change a fact and update this file in the same comm
 ## Deploy
 - A green CI run on main is a deploy: `.github/workflows/sync-to-hf.yml` waits for CI, then pushes
   exactly the tested commit to the Space with a lease. A hotfix made directly on the Space makes the
-  sync fail loudly instead of being overwritten.
-- The proxy ships separately through `deploy-proxy.yml`, and it can miss a change silently: it
-  deploys only when the diff of the commit CI actually tested touches `proxy/`. Merges and squashes
-  are covered (the base is the merge base, or the whole squashed diff), but a rebase-style push of
-  several commits tests only the tip, whose base is `HEAD~1` — that is how the relay rule of
-  09.11.2026 stayed undeployed. After any proxy change, confirm both deploy steps finished as
-  success and not skipped; if they were skipped, the owner reruns the workflow from Actions (a
-  manual run always deploys and needs no token) or ships `deno deploy` by hand (recipe in
-  `docs/ARCHITECTURE.md`, "Deploy paths").
+  sync fail loudly instead of being overwritten. Batch work into one merge: every merged commit re-queues a Docker build, and while the build is queued the Space answers 503 and nobody gets an answer (measured 11.11.2026: three merges inside 12 minutes left the build queued for 15+ minutes).
+- The proxy ships separately through `deploy-proxy.yml`. Since the 16.11.2026 audit it deploys on
+  every green CI run on `main`, not only when the tip's diff touches `proxy/`: the old conditional
+  base was `HEAD~1` for a linear push, so a proxy change riding in a multi-commit push was invisible
+  and both Deno apps kept the previous revision (09.11.2026). The diff is still printed as a warning
+  for the log. Deploying the same code again is idempotent and costs half a minute. The relay still runs on the classic
+  Deno apps (`lumen-proxy`, `lumen-proxy-backup`), because the Space cannot reach
+  `*.workers.dev` (getMe fails with ClientConnectorError), even though the Workers port in
+  `worker/worker.ts` passes its own tests. Rotating `LUMEN_PROXY_SECRET` means updating the Space
+  secret AND both Deno apps: the manual `Relay secret (Deno)` workflow
+  (`relay-deno.yml`) does it from GitHub Secrets without printing values. The Deno deploy steps stay
+  gated by `DENO_PROXY_DEPLOY` and skipped; a skipped step never means a deployed relay. The Workers
+  port becomes usable only behind a host the Space can reach (a custom domain on a Cloudflare zone
+  or another host).
 - Container egress is blocked or hangs toward Telegram, TikWM and `api.cloudflare.com`: those hosts
-  are reachable only through the allowlist in `proxy/proxy.ts`. Adding a provider without an
+  are reachable only through the allowlist in `proxy/proxy.ts`. Public pages are a separate case:
+  since 16.11.2026 the proxy has a guarded `/read` route (any public https name, SSRF checks after
+  DNS resolution, no redirects, text only, 2 MB cap), and the bot only asks for a URL that already
+  appeared in the message, the search results or a page it read. Adding a provider without an
   allowlist entry times out in production while every local test passes: change the allowlist,
   deploy the proxy, then ask the owner to confirm with `/diag`. The relay itself has limits no
   local run shows: it kills an upstream at 60 s (`504`), refuses a request body over 100 MB
@@ -130,6 +138,9 @@ run); what was not verified; what the owner must check by hand (a smoke test aft
 or a routing change). If nothing is unverified or risky, say so in one line.
 
 ## Where things live
+- `lumen_agent.py` is the model-driven search loop and a producer of evidence only: the answering call
+  receives the gathered block as prompt text, never a tool transcript (measured 12.11.2026: both
+  Munito heads ignore `tool_calls`/`role:"tool"` messages sent without `tools`).
 - `bot.py` is the entry point and composition root (env, logging, Dispatcher, main) and imports
   hundreds of names from the `lumen_*.py` modules: a grep for a symbol hits `bot.py` first, the
   definition is in the module. `lumen_admin.py` holds the FastAPI app and the admin endpoints; the
@@ -140,6 +151,11 @@ or a routing change). If nothing is unverified or risky, say so in one line.
   `_t(chat_id, "key")`; buttons are assembled in `lumen_commands.py`. A new key must be filled in
   all 25 language packs, or `test_lang_table_covers_all_keys_in_all_languages` in
   `tests/test_bot_commands.py` fails.
+- The bot's Telegram profile (name, the "About" one-liner, the long description) is set by code, not
+  by BotFather: `_register_bot_profile` in `bot.py` sends the `profile_*` keys of `lumen_lang.py` for
+  the default locale plus `PROFILE_LANGS` on every startup, so a hand edit in BotFather is undone by
+  the next deploy. 64/120/500 characters are Telegram's caps, checked by
+  `test_profile_strings_fit_telegram_limits`.
 
 ## Providers, in one screen
 The backbone since 05.11.2026 is Munito AI (an OpenAI-compatible endpoint serving open models), and
@@ -151,9 +167,24 @@ Gemini is the unconditional reserve on every route where Munito answers.
   does both generation and edits, Pollinations (`sana`) is the reserve and only generates; the
   chain falls back by provider, not by model. A moderation refusal is terminal for the chain and
   still costs the person their personal slot.
-- Freshness: no Munito model has web search, so every provider also gets an external snippet block
-  built from DuckDuckGo, Bing and Google News; the order and merge rules are in
-  `docs/ARCHITECTURE.md`.
+- Freshness: no Munito model has a built-in search engine, so `lumen_agent.py` hands the Munito head a
+  client-side `web_search` tool and executes it: the model writes the queries, sees the results and may
+  refine them, and the gathered block then goes to every provider as prompt text. Evidence never
+  travels to the answering call as a tool transcript — measured 12.11.2026 the heads ignore a transcript
+  sent without `tools` and answer from memory. The block itself is built by
+  `lumen_search.py` from three layers — exact fact APIs (Wikipedia, crypto, FX, weather), dated news feeds and the general web (DuckDuckGo lite then its HTML endpoint, Bing RSS) — after the user's wording is cleaned into search forms; an optional keyed provider (Tavily/Brave/Exa) replaces the scraping layer. Without a key there is no reliable general engine: measured 11.11.2026, DuckDuckGo lite returned an anomaly page 8/8 and Brave/Ecosia/Qwant/Yandex/Startpage/SearxNG are all blocked. The order and merge rules are in
+  `docs/ARCHITECTURE.md`. A model unsure about a post-cutoff fact may instead answer with the bare
+  marker `[[SEARCH]]`: it is intercepted before anything is shown and buys one searched retry, which
+  goes through the same loop so the model writes those queries too, and that exception must never
+  reach the model-failure marks (mechanics in `docs/ARCHITECTURE.md`). Effort is derived per message
+  (`EFFORT_AUTO`, on by default) and also caps searches; non-empty `MUNITO_REASONING_EFFORT` pins it,
+  empty drops the field.
+- Since 16.11.2026 the text loop can also read a page (`read_page`): the model asks, the bot fetches
+  through the proxy's guarded `/read` route (public https only, after DNS checks, text, 2 MB cap), and
+  only a URL that already appeared in the message, in this turn's results or in an already read page is
+  fetched. The Gemini reserve has the same `web_search` loop behind `GEMINI_AGENT_TURN_ENABLED` (off by
+  default until a live run). `/stop` halts a streaming answer — the partial text stays and «продолжи»
+  continues it; the separate Stop control is always enabled in production.
 - Limits are derived, not picked: a daily cap sits under the provider's real free-tier budget with
   headroom, and per-user caps follow the existing family (one for messages, one per heavy feature).
   The global cap is what protects a shared provider, so a reflexively small number is not safety.
@@ -188,19 +219,26 @@ Gemini is the unconditional reserve on every route where Munito answers.
 - Any new path that touches a chat runs under `_run_under_chat_lock` (`lumen_message_core.py`): only
   it enforces the waiter cap (`_MAX_CHAT_LOCK_WAITERS`) and the honest busy reply, and it supplies
   the message deadline (`MESSAGE_TOTAL_BUDGET_SEC`) and the `chat=` log label when the caller did
-  not (ordinary messages get both from `handle_message` in `bot.py` before the lock). A handler may
-  be registered outside the lock and still take it around the work it starts (`/draw` did not, and
-  two people in one group each left a live button over one photo; fixed 10.11.2026).
+  not (ordinary messages get both from `handle_message` in `bot.py` before the lock). Passive group
+  background goes through the same helper with `background=True`: it never answers «busy», never
+  takes a people slot (`_MAX_CHAT_LOCK_BACKGROUND_WAITERS`) and exits silently when the chat is
+  busy, because a non-addressed «привет» must not receive the answer meant for someone else. A
+  handler may be registered outside the lock and still take it around the work it starts (`/draw`
+  did not, and two people in one group each left a live button over one photo; fixed 10.11.2026).
 - After a failed startup load `_state_load_failed` (`lumen_chat_state.py`) suppresses index and
   quota writes, so an Upstash outage cannot overwrite real history with empty in-memory state. Any
   new writer must honor that flag (audit A5-2, 28.10.2026).
 - `unittest.mock.patch` only replaces the name in the namespace that reads it: patch
   `lumen_router_config.X`, not `bot.X`.
-- With `core.autocrlf=true` and no `.gitattributes`, almost the whole working tree is CRLF
-  (two tracked files are not), so multi-line edits often fail to match because of the CR
+- With `core.autocrlf=true` and no `.gitattributes`, the working tree is CRLF throughout
+  (scanned 12.11.2026: no tracked file is LF-only), so multi-line edits often fail to match because of the CR
   character. Edit single lines, and never reflow a whole file to LF as a side effect. Source
   files are UTF-8 with Cyrillic, and `col_offset` in an AST is a byte offset: a script that
   patches by offset must work on bytes.
+  A patcher that splits on CRLF and rejoins on CRLF corrupts a file that an earlier
+  patch left with LF lines: the whole file then shows as changed. When that
+  happens, rebuild the file from `git show HEAD:<path>` and re-apply the one
+  intended insert; never fix it by converting endings.
 
 ## Code style
 - Targeted edits on existing files. Never rewrite a file from scratch unless a split was approved.
@@ -215,6 +253,11 @@ Gemini is the unconditional reserve on every route where Munito answers.
   what the module does, with no extraction history ("вынесено из bot.py").
 - Before writing new code, check whether the repo, the stdlib or an installed dependency already
   does it. New dependencies need approval.
+- Commit subjects and bodies are Cyrillic prose, so they get the same scan as comments: before push
+  or merge, `git log --format=%B` over your own commits for stray non-Cyrillic ideographs and for
+  Latin glued to a Cyrillic word (`部分`, `карантинexpire`, `шагли`). A rewrite of a published branch
+  needs the owner's explicit word, and once another session's merge (dependabot included) lands on
+  `main`, sanitizing there would drop it — so fix these on the branch before the branch is merged.
 
 ## Tests
 - State before adding a test: what behavior it protects, which real regression would make it fail,

@@ -511,11 +511,47 @@ def test_load_state_falls_back_to_legacy_blob_on_corrupt_index():
         try:
             bot.load_state_from_disk()
             assert bot.chat_state[4242]["history"] == [{"role": "user", "content": "привет"}]
+            # Битый индекс: блоб мог быть старше per-chat ключей, поэтому чат
+            # помечен как «снимок не восстановлен» и обратно не пишется.
+            assert 4242 in lumen_chat_state._chat_snapshot_unloaded
         finally:
             bot.chat_state.pop(4242, None)
+            lumen_chat_state._chat_snapshot_unloaded.discard(4242)
             bot._dirty_chat_ids.clear()
             bot._dirty_chat_ids.update(was_dirty)
             lumen_chat_state._index_dirty = False
+
+
+def test_load_state_does_not_rewrite_legacy_blob_when_index_read_fails():
+    # Аудит 16.11.2026: транзиентный сбой ЧТЕНИЯ индекса (429 на одном запросе)
+    # уводил загрузку в legacy-блоб, блоб помечался грязным, и первый флаш
+    # перезаписывал per-chat ключи старым снимком — потеря свежей истории.
+    import json
+    legacy = {"5151": {"history": [{"role": "user", "content": "старое"}], "lang": "ru"}}
+
+    def fake_read(key, path):
+        if "index" in str(key).lower() or str(path).endswith("index.json"):
+            raise RuntimeError("upstash 429")
+        if key == "lumen:chat_state":
+            return json.dumps(legacy)
+        return None
+
+    written = []
+    with patch("bot._storage_read_text", side_effect=fake_read), \
+         patch("bot._storage_write_text", side_effect=lambda *a, **k: written.append(a)):
+        was_dirty = set(bot._dirty_chat_ids)
+        try:
+            bot.load_state_from_disk()
+            assert bot.chat_state[5151]["history"][0]["content"] == "старое"
+            assert 5151 in lumen_chat_state._chat_snapshot_unloaded
+            assert 5151 not in bot._dirty_chat_ids
+            assert lumen_chat_state._save_chat_payload(5151, "{}") is False
+            assert written == []
+        finally:
+            bot.chat_state.pop(5151, None)
+            bot._dirty_chat_ids.clear()
+            bot._dirty_chat_ids.update(was_dirty)
+            lumen_chat_state._chat_snapshot_unloaded.discard(5151)
 
 
 def test_load_state_flags_failed_when_index_corrupt_and_no_legacy():
@@ -546,8 +582,78 @@ def test_load_state_clean_on_first_start_without_index_or_legacy():
             lumen_chat_state._state_load_failed = orig_failed
 
 
-def test_load_state_does_not_overwrite_chat_whose_snapshot_was_not_restored():
-    # Регрессия аудита run-2: транзиентный сбой чтения одного чата на старте оставлял
+def test_index_recovery_merges_remote_ids_instead_of_replacing(monkeypatch):
+    # Аудит 16.11.2026: после сбоя чтения индекса новый чат получал per-chat ключ,
+    # но в индекс не попадал и после рестарта оставался сиротой. Повторное чтение
+    # сливает удалённые id с нашими, а не заменяет их.
+    import json as _json
+    import lumen_chat_state as lcs
+
+    remote_id, new_id = 515151, 525252
+    written = {}
+
+    def fake_write(key, path, payload):
+        written["index"] = payload
+        return True
+
+    orig = (lcs._state_load_failed, set(lcs._index_extra_ids), lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._index_extra_ids.clear()
+    lcs._index_retry_last_ts = 0.0
+    bot.chat_state[new_id] = {"history": []}
+    try:
+        with patch("bot._storage_read_text", side_effect=lambda key, path: _json.dumps([remote_id])), \
+             patch("bot._storage_write_text", side_effect=fake_write):
+            assert lcs._recover_index_ids() is True
+            assert lcs._state_load_failed is False
+            assert remote_id in lcs._index_extra_ids
+            assert lcs._save_chat_index() is True
+        assert _json.loads(written["index"]) == sorted([remote_id, new_id])
+    finally:
+        lcs._state_load_failed, extra, retry = orig
+        lcs._index_extra_ids.clear()
+        lcs._index_extra_ids.update(extra)
+        lcs._index_retry_last_ts = retry
+        bot.chat_state.pop(new_id, None)
+
+
+def test_startup_chat_reads_run_in_parallel(monkeypatch):
+    # Аудит 16.11.2026: последовательный обход тысяч чатов по одному HTTPS-запросу
+    # давал минуты холодного старта и 503 на вебхуке. Чтения идут пулом, сборка
+    # состояния — по-прежнему в одном потоке.
+    import threading
+    import time as _time
+    import lumen_chat_state as lcs
+
+    lock = threading.Lock()
+    active = {"now": 0, "max": 0}
+    ids = [100 + i for i in range(6)]
+    payload = json.dumps({"history": [], "lang": "ru"})
+
+    def fake_read(key, path):
+        if "index" in str(key).lower():
+            return json.dumps(ids)
+        with lock:
+            active["now"] += 1
+            active["max"] = max(active["max"], active["now"])
+        _time.sleep(0.05)
+        with lock:
+            active["now"] -= 1
+        return payload
+
+    orig_failed = lcs._state_load_failed
+    try:
+        with patch("bot._storage_read_text", side_effect=fake_read), patch("bot.load_global_quota"):
+            bot.load_state_from_disk()
+        assert active["max"] > 1
+    finally:
+        lcs._state_load_failed = orig_failed
+        for cid in ids:
+            bot.chat_state.pop(cid, None)
+            lcs._chat_snapshot_unloaded.discard(cid)
+
+
+def test_load_state_does_not_overwrite_chat_whose_snapshot_was_not_restored():    # Регрессия аудита run-2: транзиентный сбой чтения одного чата на старте оставлял
     # его вне памяти, а первый же флаш после нового сообщения затирал полную удалённую
     # историю однострочным снимком — потеря была необратимой и молчаливой.
     good, broken = 999721, 999722
@@ -578,7 +684,9 @@ def test_load_state_does_not_overwrite_chat_whose_snapshot_was_not_restored():
         bot._dirty_chat_ids.clear()
         try:
             bot.load_state_from_disk()
-            assert lumen_chat_state._state_load_failed is True
+            # Один нечитаемый чат больше не блокирует индекс и квоту: он защищён
+            # пер-чат, а глобальный флаг остаётся чистым (аудит 16.11.2026).
+            assert lumen_chat_state._state_load_failed is False
             assert broken in lumen_chat_state._chat_snapshot_unloaded
             bot.get_state(broken)
             bot.mark_state_dirty(broken)
@@ -645,17 +753,18 @@ def test_startup_load_failure_blocks_quota_overwrite():
     real_quota = json.loads(json.dumps(bot.GLOBAL_QUOTA))
     orig_throttle = lq._last_quota_check_monotonic
     orig_quota_dirty = lcs._quota_dirty
-    lcs._state_load_failed = False
+    lcs._quota_load_failed = False
     try:
         bot.GLOBAL_QUOTA["quota_day"] = "2020-01-01"
         lq._last_quota_check_monotonic = time.monotonic() - bot._QUOTA_CHECK_THROTTLE_SEC - 10.0
         with patch("bot._storage_read_text", side_effect=RuntimeError("Upstash down")):
             bot.load_global_quota()
-        assert lcs._state_load_failed is True
+        assert lcs._quota_load_failed is True
         assert lcs._quota_dirty is True
         bot._dirty_chat_ids.clear()
         bot._pending_chat_deletions.clear()
         lcs._index_dirty = False
+        lcs._state_load_failed = False  # тест про квоту, не про индекс
         with patch("bot._save_quota_payload") as mock_quota, \
                 patch("bot._save_chat_index_payload") as mock_index:
             asyncio.run(bot._flush_dirty_state_once())
@@ -695,6 +804,7 @@ def test_startup_load_failure_blocks_index_overwrite_but_not_new_chats(caplog):
         with patch("bot._save_chat_payload", return_value=True) as mock_chat, \
                 patch("bot._save_chat_index_payload", return_value=True) as mock_index, \
                 patch("bot._save_quota_payload", return_value=True) as mock_quota, \
+                patch("bot._storage_read_text", side_effect=RuntimeError("Upstash down")), \
                 caplog.at_level(logging.WARNING, logger="bot"):
             asyncio.run(bot._flush_dirty_state_once())
             mock_index.assert_not_called()
@@ -2771,6 +2881,50 @@ def test_passive_group_message_does_not_consume_quota(rate_guard_setup, monkeypa
     bot._tg_call.assert_not_awaited()
 
 
+def test_group_wake_word_activates_like_a_mention(rate_guard_setup, monkeypatch):
+    # Просьба владельца 18.11.2026: в группах «Люмен, ...» работает как @упоминание,
+    # но только в начале фразы и с просьбой после имени.
+    message = rate_guard_setup()
+    message.chat.type = bot.ChatType.GROUP
+    message.text = "Люмен, сколько будет 2+2?"
+    record = AsyncMock()
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_record_passive_group_context", record)
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    record.assert_not_awaited()
+    assert run_route.await_count >= 1
+    prompt = run_route.await_args.args[1]
+    assert "Люмен," not in prompt and "2+2" in prompt
+
+
+def test_group_talking_about_lumen_stays_passive(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.chat.type = bot.ChatType.GROUP
+    message.text = "люмен это бот, он живёт в телеграме"
+    record = AsyncMock()
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_record_passive_group_context", record)
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    record.assert_awaited_once()
+    run_route.assert_not_awaited()
+
+
+def test_group_forwarded_wake_word_does_not_trigger(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.chat.type = bot.ChatType.GROUP
+    message.text = "Люмен, привет"
+    message.forward_origin = object()
+    record = AsyncMock()
+    run_route = AsyncMock(return_value=("ok", False))
+    monkeypatch.setattr(bot, "_record_passive_group_context", record)
+    monkeypatch.setattr(bot, "_run_route", run_route)
+    asyncio.run(bot._handle_message_core(message))
+    record.assert_awaited_once()
+    run_route.assert_not_awaited()
+
+
 def test_log_queue_handler_masks_secrets_in_args_and_traceback(monkeypatch):
     monkeypatch.setattr(bot, "LUMEN_PROXY_SECRET", "fake-proxy-secret-123", raising=False)
     try:
@@ -2837,9 +2991,19 @@ def test_module_alias_for_prod_entry():
     # Прод-инцидент: прод запускается как `python bot.py` (__main__), а десятки
     # отложенных `import bot` внутри функций без алиаса выполняли весь bot.py
     # вторым модулем — пустое состояние и вечный bot=None (все апдейты в 503).
-    # Тест-канарейка: алиас обязан оставаться в голове bot.py, проверяется текстом.
-    src = pathlib.Path(bot.__file__).read_text(encoding="utf-8")
-    assert 'sys.modules.setdefault("bot"' in src or "sys.modules.setdefault('bot'" in src
+    # Проверяем AST, а не текст: закомментированный алиас проходил строковую
+    # проверку и канарейка молчала (F-148, 17.11.2026).
+    import ast
+    tree = ast.parse(pathlib.Path(bot.__file__).read_text(encoding="utf-8"))
+    alias = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute) and node.func.attr == "setdefault"
+        and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "modules"
+        and len(node.args) >= 2
+        and isinstance(node.args[0], ast.Constant) and node.args[0].value == "bot"
+    ]
+    assert alias, "алиас sys.modules.setdefault(\"bot\", ...) пропал из bot.py"
 
 
 def test_guest_update_holds_per_chat_lock(monkeypatch):
@@ -3601,7 +3765,7 @@ def test_core_refuses_when_user_daily_total_exhausted(rate_guard_setup, monkeypa
     monkeypatch.setattr(bot, "_run_route", fail_route)
     try:
         asyncio.run(bot._handle_message_core(message))
-        assert len(replies) == 1 and "1/1" in replies[0]
+        assert len(replies) == 1 and "Daily message limit" in replies[0]
         # Отказ не считается: счётчик не вырос.
         assert bot._user_daily_entry(456)["total"] == 1
     finally:
@@ -3655,7 +3819,7 @@ def test_core_falls_back_without_gemini_and_marks_no_search(rate_guard_setup, mo
     captured = {}
     replies = []
 
-    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
         return []
 
     async def fake_route(chat_id, ai_prompt, route, msg, **kwargs):
@@ -3699,7 +3863,7 @@ def test_core_refuses_youtube_when_gemini_exhausted(rate_guard_setup, monkeypatc
     monkeypatch.setattr(bot, "_run_route", fail_route)
     try:
         asyncio.run(bot._handle_message_core(message))
-        assert len(replies) == 1 and "1/1" in replies[0]
+        assert len(replies) == 1 and "Daily limit for complex requests" in replies[0]
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
         bot.chat_state.pop(123, None)
@@ -3732,7 +3896,7 @@ def test_core_refuses_video_before_download_when_gemini_exhausted(rate_guard_set
     monkeypatch.setattr(bot, "_fetch_media", fail_download)
     try:
         asyncio.run(bot._handle_message_core(message))
-        assert len(replies) == 1 and "1/1" in replies[0]
+        assert len(replies) == 1 and "Daily limit for complex requests" in replies[0]
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
         bot.chat_state.pop(123, None)
@@ -3935,3 +4099,303 @@ def test_draw_context_restart_rejects_dirty_types(field, raw, expected):
         assert bot.chat_state[cid][field] == expected
     finally:
         bot.chat_state.pop(cid, None)
+
+
+def test_cut_stream_is_continued_automatically_once(rate_guard_setup, monkeypatch):
+    # Регрессия на прод 11.11.2026: «generation failed» и потолок бюджета резали
+    # ответ на середине фразы, человек видел «Соединение прервалось» и должен был
+    # сам писать «продолжи». Теперь бот договаривает сам, один раз.
+    message = rate_guard_setup()
+    message.text = "расскажи про устройство ФРС"
+    state = _continue_state()
+    state["stream_interrupted"] = True
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+
+    calls = []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        calls.append(ai_prompt)
+        partial = "Первая часть ответа. " * 20
+        if len(calls) == 1:
+            # Так ведёт себя оборванный стрим: lumen_streaming ставит пометку.
+            state["stream_interrupted"] = True
+            state["interrupted"] = True
+        return (partial if len(calls) == 1 else "вторая часть"), True
+
+    async def fake_edit(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+    monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit)
+    asyncio.run(bot._handle_message_core(message))
+
+    assert len(calls) == 2, [c[:60] for c in calls]
+    assert "места обрыва" in calls[1], calls[1][:120]
+    bot.chat_state.pop(123, None)
+
+
+def test_answer_cut_by_output_cap_is_continued_too(rate_guard_setup, monkeypatch):
+    # Потолок вывода провайдера: раньше оставался обрывок без объяснения, и
+    # добивка была возможна только по ручному «продолжи».
+    message = rate_guard_setup()
+    message.text = "составь подробный план похода в Карпаты на неделю"
+    state = _continue_state()
+    state.pop("interrupted", None)
+    monkeypatch.setattr(bot, "get_state", lambda cid: state)
+
+    calls = []
+
+    async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
+        calls.append(ai_prompt)
+        prov = kwargs.get("provenance")
+        if isinstance(prov, dict) and len(calls) == 1:
+            prov["finish_reason"] = "length"
+        return ("План. " * 80, True) if len(calls) == 1 else ("продолжение плана", True)
+
+    monkeypatch.setattr(bot, "_run_route", fake_run_route)
+    monkeypatch.setattr(bot, "_safe_reply", AsyncMock())
+    monkeypatch.setattr(bot, "_edit_message_quietly", AsyncMock(return_value=True))
+    asyncio.run(bot._handle_message_core(message))
+
+    assert len(calls) == 2, [c[:60] for c in calls]
+    assert "места обрыва" in calls[1]
+    bot.chat_state.pop(123, None)
+def test_daily_refusals_leave_a_log_line(monkeypatch, caplog):
+    # Прод 11.11.2026: смоук-чат получал отказ, и в логах Space не было ни строки
+    # — «бот не ответил» и «бот отказал по лимиту» нельзя было отличить. Логируем
+    # только счётчики: идентификаторов и текста человека в строке нет.
+    import lumen_message_core as core
+
+    def _calls(records, tag):
+        return [r.getMessage() for r in records if tag in r.getMessage()]
+
+    monkeypatch.setattr(bot, "_user_daily_total_exhausted", lambda uid, entry: True)
+    monkeypatch.setattr(bot, "_user_daily_reset_in", lambda: (3, 12))
+    monkeypatch.setattr(bot, "_user_daily_limit", lambda uid, kind, entry: 30)
+    monkeypatch.setattr(bot, "_t", lambda chat_id, key, **kw: "лимит исчерпан")
+    replies = []
+
+    async def fake_safe_reply(message, text, **kwargs):
+        replies.append(text)
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    with caplog.at_level(logging.INFO, logger="bot"):
+        incoming = _FakeIncomingMessage(999801)
+        assert asyncio.run(core._refuse_daily_total(incoming, 777, {"total": 30})) is True
+    assert replies == ["лимит исчерпан"]
+    assert _calls(caplog.records, "[quota] daily message limit reached"), caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(bot, "_user_daily_gemini_exhausted", lambda uid, entry: True)
+    with caplog.at_level(logging.INFO, logger="bot"):
+        assert asyncio.run(core._refuse_daily_gemini(_FakeIncomingMessage(999802), 777, {"gemini": 5})) is True
+    assert _calls(caplog.records, "[quota] daily heavy-model limit reached"), caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda key: True)
+    monkeypatch.setattr(bot, "_rate_limit_key_for_message", lambda message: 777)
+    monkeypatch.setattr(bot, "_t_no_create", lambda chat_id, key: "помедленнее")
+
+    async def fake_tg_call(fn, *args, **kwargs):
+        await fn(*args, **kwargs)
+        return object()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    with caplog.at_level(logging.INFO, logger="bot"):
+        slow = _FakeIncomingMessage(999803)
+        assert asyncio.run(core._reject_rate_limited_message(slow)) is True
+    assert slow.sent, "отказ обязан дойти до человека"
+    assert _calls(caplog.records, "[rate-limit] replied with the flood notice"), caplog.text
+
+
+def test_quota_failure_is_not_lifted_by_an_index_recovery():
+    # Аудит 16.11.2026: удачный ретрай индекса снимал общий флаг и открывал запись
+    # пустой квоты поверх банов и дневных счётчиков. Флаги обязаны быть раздельными.
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, lcs._quota_load_failed,
+            set(lcs._index_extra_ids), lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._quota_load_failed = True
+    lcs._index_extra_ids.clear()
+    lcs._index_retry_last_ts = 0.0
+    try:
+        with patch("bot._storage_read_text", side_effect=lambda key, path: json.dumps([777])):
+            assert lcs._recover_index_ids() is True
+        assert lcs._state_load_failed is False
+        assert lcs._quota_load_failed is True
+        assert 777 in lcs._chat_snapshot_unloaded
+    finally:
+        lcs._state_load_failed, lcs._quota_load_failed, extra, retry = orig
+        lcs._index_extra_ids.clear()
+        lcs._index_extra_ids.update(extra)
+        lcs._index_retry_last_ts = retry
+        lcs._chat_snapshot_unloaded.discard(777)
+
+
+def test_index_recovery_keeps_the_guard_when_the_read_returns_no_body():
+    # None — и «ключа нет», и «шлюз ответил без result». Пустым индексом это
+    # считать нельзя: снятие защиты потеряло бы чужие id (аудит 16.11.2026).
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, lcs._quota_load_failed, lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._quota_load_failed = False
+    lcs._index_retry_last_ts = 0.0
+    try:
+        with patch("bot._storage_read_text", return_value=None):
+            assert lcs._recover_index_ids() is False
+        assert lcs._state_load_failed is True
+    finally:
+        lcs._state_load_failed, lcs._quota_load_failed, lcs._index_retry_last_ts = orig
+
+
+def test_index_keeps_the_id_of_an_unreadable_chat():
+    # Второй проход аудита 16.11.2026: id недочитанного чата выпадал из индекса,
+    # и его пер-чат ключ оставался сиротой навсегда.
+    import lumen_chat_state as lcs
+
+    good, broken, new = 999731, 999732, 999733
+    remote = {
+        lcs.CHAT_INDEX_KEY: json.dumps([good, broken]),
+        f"lumen:chat:{good}": json.dumps({"history": []}),
+    }
+    payloads = {}
+
+    def fake_read(key, path):
+        if key == f"lumen:chat:{broken}":
+            raise OSError("Upstash 500 (transient)")
+        return remote.get(key)
+
+    def fake_write(key, path, payload):
+        payloads[key] = payload
+        return True
+
+    orig = (lcs._state_load_failed, set(lcs._chat_snapshot_unloaded), set(lcs._index_extra_ids))
+    try:
+        with patch("bot._storage_read_text", side_effect=fake_read),              patch("bot._storage_write_text", side_effect=fake_write),              patch("bot.load_global_quota"):
+            bot.load_state_from_disk()
+            bot.get_state(new)
+            asyncio.run(bot._flush_dirty_state_once())
+        assert broken in json.loads(payloads[lcs.CHAT_INDEX_KEY])
+    finally:
+        lcs._state_load_failed, frozen, extra_ids = orig
+        lcs._chat_snapshot_unloaded.clear()
+        lcs._chat_snapshot_unloaded.update(frozen)
+        lcs._index_extra_ids.clear()
+        lcs._index_extra_ids.update(extra_ids)
+        for cid in (good, broken, new):
+            bot.chat_state.pop(cid, None)
+
+
+def test_quota_none_body_keeps_the_write_guard():
+    # Аудит 16.11.2026 (второй проход): None — и «ключа нет», и «шлюз ответил без
+    # result». После сбоя флаг обязан остаться, иначе пустая квота затирает баны.
+    import lumen_chat_state as lcs
+
+    orig = lcs._quota_load_failed
+    lcs._quota_load_failed = True
+    try:
+        with patch("bot._storage_read_text", return_value=None):
+            bot.load_global_quota()
+        assert lcs._quota_load_failed is True
+        with patch("bot._storage_write_text") as writer:
+            bot.save_global_quota()
+        writer.assert_not_called()
+    finally:
+        lcs._quota_load_failed = orig
+
+
+def test_index_recovery_freezes_only_unread_chats():
+    # Второй проход аудита 16.11.2026: восстановление вешало вечный запрет записи
+    # на ВСЕ id из индекса, включая живые чаты с разговором в памяти.
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, set(lcs._index_extra_ids),
+            set(lcs._chat_snapshot_unloaded), lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._index_extra_ids.clear()
+    lcs._chat_snapshot_unloaded.clear()
+    lcs._index_retry_last_ts = 0.0
+    bot.chat_state[111] = {"history": []}
+    try:
+        with patch("bot._storage_read_text", side_effect=lambda key, path: json.dumps([111, 222])):
+            assert lcs._recover_index_ids() is True
+        assert 111 not in lcs._chat_snapshot_unloaded
+        assert 222 in lcs._chat_snapshot_unloaded
+        assert 222 in lcs._index_extra_ids
+    finally:
+        (lcs._state_load_failed, extra_ids, frozen, lcs._index_retry_last_ts) = orig
+        lcs._index_extra_ids.clear()
+        lcs._index_extra_ids.update(extra_ids)
+        lcs._chat_snapshot_unloaded.clear()
+        lcs._chat_snapshot_unloaded.update(frozen)
+        bot.chat_state.pop(111, None)
+
+
+def test_index_outage_blocks_all_chat_writes_until_recovery():
+    # Третий проход аудита 16.11.2026: при нечитаемом индексе первое сообщение в
+    # старый чат затирало историю раньше, чем ретрай перечислит id.
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, set(lcs._chat_snapshot_unloaded),
+            set(lcs._created_during_outage), lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    lcs._chat_snapshot_unloaded.clear()
+    lcs._created_during_outage.clear()
+    lcs._index_retry_last_ts = 0.0
+    try:
+        with patch("bot._storage_write_text") as writer:
+            assert lcs._save_chat_payload(424242, "{}") is False
+        writer.assert_not_called()
+        # Чат, созданный во время сбоя, после восстановления заморожен: его
+        # удалённой копии мы не видели.
+        bot.chat_state[424242] = {"history": []}
+        lcs._created_during_outage.add(424242)
+        with patch("bot._storage_read_text", return_value="[]"):
+            assert lcs._recover_index_ids() is True
+        assert 424242 in lcs._chat_snapshot_unloaded
+    finally:
+        (lcs._state_load_failed, frozen, created, lcs._index_retry_last_ts) = orig
+        lcs._chat_snapshot_unloaded.clear()
+        lcs._chat_snapshot_unloaded.update(frozen)
+        lcs._created_during_outage.clear()
+        lcs._created_during_outage.update(created)
+        bot.chat_state.pop(424242, None)
+
+
+def test_index_recovery_throttles_only_after_a_real_attempt():
+    # CI 16.11.2026: на свежем раннере monotonic() меньше минуты, и «ноль» читался
+    # как недавняя попытка — ретрай молчал. Ноль обязан значить «ещё не пробовали».
+    import lumen_chat_state as lcs
+
+    orig = (lcs._state_load_failed, lcs._index_retry_last_ts)
+    lcs._state_load_failed = True
+    try:
+        lcs._index_retry_last_ts = 0.0
+        with patch("bot._storage_read_text", return_value="[]"):
+            assert lcs._recover_index_ids() is True
+        lcs._state_load_failed = True
+        lcs._index_retry_last_ts = time.monotonic()
+        with patch("bot._storage_read_text", return_value="[]"):
+            assert lcs._recover_index_ids() is False
+    finally:
+        lcs._state_load_failed, lcs._index_retry_last_ts = orig
+
+
+def test_group_without_mention_is_passive_for_plain_text_only(monkeypatch):
+    # Критика полноты 16.11.2026: класс «группа без упоминания» был проверен
+    # только на альбоме, а правило шире: фон, кроме выбора кнопки и TikTok.
+    import lumen_message_core as M
+    msg = SimpleNamespace(_pick_resolved=False)
+    passive = lambda text, **kw: M._should_only_record_passively(
+        msg, text, **{"is_private": False, "is_guest": False, "mentioned": False, **kw})
+    assert passive("привет всем") is True
+    assert passive("привет", is_private=True) is False
+    assert passive("привет", is_guest=True) is False
+    assert passive("привет", mentioned=True) is False
+    monkeypatch.setattr(bot, "TIKTOK_GROUP_REQUIRE_MENTION", False)
+    assert passive("https://www.tiktok.com/@a/video/1") is False
+    monkeypatch.setattr(bot, "TIKTOK_GROUP_REQUIRE_MENTION", True)
+    assert passive("https://www.tiktok.com/@a/video/1") is True

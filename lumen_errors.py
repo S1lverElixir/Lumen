@@ -16,7 +16,9 @@ from system_prompt import SYSTEM_PROMPT
 # OpenAI-совместимые провайдеры отдают плейсхолдер вместо ответа: choices непустые,
 # текста нет. Прод 17.09.2026 лечил только пустой choices — литерал "Empty response"
 # продолжал уходить в чат (выборка бэкапа 05.11.2026: 7 таких в одном диалоге).
-_EMPTY_LIKE_TEXTS = frozenset({"empty response", "no response", "n/a", "none", "no answer"})
+# "none"/"n/a" из набора убраны: это законные короткие ответы (что вернёт функция
+# без return) — модель получала карантин, человек отказ (ревью 17.11.2026).
+_EMPTY_LIKE_TEXTS = frozenset({"empty response", "no response", "no answer"})
 
 
 def _is_empty_like(text: Any) -> bool:
@@ -56,9 +58,13 @@ def _error_status(e: Exception, text: str) -> int | None:
 
 def _classify_model_error(status: int | None, text: str) -> str:
     low = text.lower()
+    # Статус 402 важнее словарных токенов: «billing quota exceeded» уходил в
+    # rate_limit и маскировал исчерпанный платный тариф (ревью 17.11.2026).
+    if status == 402:
+        return "paid"
     if status == 429 or any(tok in low for tok in ("resource_exhausted", "too many requests", "rate limit", "quota", "лимит")):
         return "rate_limit"
-    if status == 402 or any(tok in low for tok in ("payment required", "paid tier", "requires paid", "billing", "кредит")):
+    if any(tok in low for tok in ("payment required", "paid tier", "requires paid", "billing", "кредит")):
         return "paid"
     if status in {401, 403} or any(tok in low for tok in ("unauthorized", "forbidden", "permission", "blocked")):
         return "forbidden"
@@ -79,7 +85,7 @@ def _model_error_text(kind: str, lang: str = DEFAULT_LANG) -> str:
     }.get(kind, "model_err_fallback")
     return _lang_t(lang, key)
 
-def _or_error_msg(e: Exception, kind: str, lang: str = DEFAULT_LANG) -> str:
+def _or_error_msg(e: Exception, lang: str = DEFAULT_LANG) -> str:
     # Без сырого текста API: там HTML/JSON и внутренности (то же в _gemini_error_msg).
     txt = _error_text(e).strip() or e.__class__.__name__
     status = _error_status(e, txt)

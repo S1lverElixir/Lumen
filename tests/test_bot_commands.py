@@ -6,6 +6,7 @@ test_bot_commands.py — Команды и триггеры: /draw//tts//reset//
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
+import re
 import bot
 import contextlib
 import lumen_chat_state
@@ -603,7 +604,7 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones(monkeypat
     (bot.ChatType.SUPERGROUP, True),
 ])
 def test_cmd_start_group_notice_only_in_groups(monkeypatch, chat_type, is_group):
-    # Пометка про фон группы (до 100 сообщений уходит провайдерам) терялась бы молча:
+    # Пометка про фон группы терялась бы молча:
     # старые тесты гоняли /start только в личке.
     captured = {}
 
@@ -622,7 +623,6 @@ def test_cmd_start_group_notice_only_in_groups(monkeypatch, chat_type, is_group)
         notice = _lang_t_direct("en", "group_history_notice")
         if is_group:
             assert notice in text
-            assert "100" in text
         else:
             assert notice not in text
     finally:
@@ -905,6 +905,7 @@ def test_inline_draw_global_budget_refuses_before_provider(monkeypatch):
     # человек бился бы в провайдера, у которого день кончился (аудит 09.11.2026).
     chat_id = 999437
     monkeypatch.setattr(bot, "IMAGE_DAILY_LIMIT", 2)
+    monkeypatch.setattr(bot, "IMAGE_DAILY_NEURONS", 208)
     bot._note_image_success("pollinations")
     bot._note_image_success("pollinations")
 
@@ -2130,7 +2131,7 @@ def test_pick_callback_second_tap_reports_expired(monkeypatch):
     fake_core = AsyncMock()
     monkeypatch.setattr(bot, "_handle_message_core", fake_core)
     asyncio.run(bot.handle_pick_callback(q))
-    assert any("expired" in (text or "").lower() for text, _ in q.answered)
+    assert any("aren't active" in (text or "").lower() or "не активны" in (text or "").lower() for text, _ in q.answered)
     fake_core.assert_not_awaited()
 
 
@@ -2213,10 +2214,10 @@ def test_pick_callback_expired_known_token_reissues_buttons_once(monkeypatch):
         asyncio.run(bot.handle_pick_callback(q2))
         assert "Триллер" in q2.message.edits[0][0]
         fake_core.assert_awaited_once()
-        # А вот теперь токен и правда сгорел — дальше честное expired.
+        # А вот теперь токен и правда сгорел — дальше честное «кнопки не активны».
         q3 = _make_pick_query(f"pick:{fresh}:0")
         asyncio.run(bot.handle_pick_callback(q3))
-        assert any("expired" in (text or "").lower() or "протух" in (text or "").lower() for text, _ in q3.answered)
+        assert any("aren't active" in (text or "").lower() or "не активны" in (text or "").lower() for text, _ in q3.answered)
         fake_core.assert_awaited_once()
     finally:
         bot._pending_picks.clear()
@@ -2346,20 +2347,193 @@ def test_lang_table_covers_all_keys_in_all_languages():
     # Байт-дубликат английского не перевод: такую строку удаляем, показ едет
     # фолбэком. Исключения с причиной — только здесь.
     allowed_en_duplicates = {("selftest_header", "fil")}
+    # Имя собственное: заголовок inline-ответа одинаков во всех языках.
+    allowed_en_duplicates |= {("inline_answer_title", lang)
+                              for lang in lumen_lang.SUPPORTED_LANGS if lang != "en"}
+    # Имя бота — бренд: во всех 25 паках одно и то же латиницей, дубликат en
+    # здесь и есть перевод (10.11.2026, профиль вместо BotFather).
+    allowed_en_duplicate_keys = {"profile_name"}
     for key, table in lumen_lang.STRINGS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
             explicit = lumen_lang.LANG_PACKS.get(lang, {}).get(key) or table.get(lang)
             # Фолбэк на английский скрывал пропуски в переводе; теперь каждый
             # ключ обязан иметь явный перевод во всех 25 языках (аудит 28.10.2026).
             assert explicit, f"missing translation {key}[{lang}]"
+            assert explicit != key, f"value equals key {key}[{lang}]"
+            assert "\u00ad" not in explicit, f"soft hyphen {key}[{lang}]"
+            if lang not in ("ru", "uk", "be", "kk"):
+                assert not re.search(r"[\u0400-\u04FF]", explicit), f"Cyrillic in {key}[{lang}]"
+            assert not re.search(r"[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]", explicit), f"CJK in {key}[{lang}]"
             if lang != "en" and explicit == table.get("en"):
-                assert (key, lang) in allowed_en_duplicates, (
+                allowed = (key, lang) in allowed_en_duplicates or key in allowed_en_duplicate_keys
+                assert allowed, (
                     f"untranslated duplicate {key}[{lang}]: delete it, English fallback covers display"
                 )
+    # Плейсхолдеры обязаны совпадать во всех паках: опечатка {current_x}
+    # уезжала в прод видимым литералом (ревью 17.11.2026).
+    import re as _re_ph
+
+    def _placeholders(value):
+        return set(_re_ph.findall(r"\{[a-zA-Z_][a-zA-Z0-9_]*\}", value or ""))
+
+    for key in lumen_lang.STRINGS:
+        expected_ph = _placeholders(lumen_lang.t("en", key))
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            explicit = (lumen_lang.LANG_PACKS.get(lang, {}).get(key)
+                        or lumen_lang.STRINGS[key].get(lang) or "")
+            assert _placeholders(explicit) == expected_ph, f"placeholder mismatch {key}[{lang}]"
     for lang in lumen_lang.SUPPORTED_LANGS:
         for scenario in ("film", "series", "music", "books", "games"):
             q, opts, tpl = lumen_lang.pick_texts(lang, scenario)
             assert q and len(opts) == 4 and "{original}" in tpl and "{choice}" in tpl
+
+
+# ── Claude-стиль фиксированных строк (аудит 11.11.2026) ──
+# Ключи, которые уходят только владельцу: им разрешено называть внутренности.
+_OWNER_ONLY_KEYS = ("owner_quota_notice", "selftest_", "stats_", "logs_")
+# Стоп-слова проверены на всех 25 паках: ложных вхождений нет.
+_PROVIDER_STOPWORDS = [
+    "gemini", "gemma", "munito", "groq", "whisper", "tikwm", "openai",
+    "claude", "chatgpt", "chat gpt", "google", "deepseek", "glm", "qwen",
+    "llama", "mistral", "nemotron", "hugging face", "huggingface",
+    "anthropic", "deepmind", "cloudflare", "pollinations", "openrouter",
+    "bot api", r"\bapi\b",
+    "провайдер", "provider", "пастаўшчык", "penyedia model", "fournisseur",
+    "anbieter", "aanbieder", "sağlayıcı", "مزوّدي", "فراہم", "প্রদানকারী",
+    "प्रदाता", "model provider",
+    "квот", "quota", "куот", "کواتا", "کوٹہ", "কোটা", "कोटा", "kuota",
+]
+_EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F\u2764]")
+
+
+def _string_value(lumen_lang, key, lang):
+    return (lumen_lang.LANG_PACKS.get(lang, {}).get(key)
+            or lumen_lang.STRINGS[key].get(lang) or "")
+
+
+def _is_user_facing(key):
+    return not (key.startswith(_OWNER_ONLY_KEYS) or key == "owner_quota_notice")
+
+
+def test_user_facing_strings_name_no_provider_or_model():
+    # Регрессия: внутренности в пользовательском тексте («провайдерам моделей»,
+    # «Bot API», «TikWM», «поисковая квота») — ровно то, что аудит вычищал
+    # вручную во всех 25 паках. Без теста утечка вернётся с любым новым ключом.
+    import lumen_lang
+    for key in lumen_lang.STRINGS:
+        if not _is_user_facing(key):
+            continue
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            low = v.lower()
+            hits = [term for term in _PROVIDER_STOPWORDS if re.search(term, low)]
+            assert not hits, (key, lang, hits, v[:120])
+            assert not _EMOJI_RE.search(v), (key, lang, v[:120])
+    # Строка примеров в /start — часть того же пользовательского текста.
+    for lang in lumen_lang.SUPPORTED_LANGS:
+        assert not _EMOJI_RE.search(lumen_lang._START_EXAMPLES[lang])
+        for cb in lumen_lang.PICK_TABLE[lang].values():
+            assert not _EMOJI_RE.search(cb["q"])
+
+
+# Отказ на служебные команды (logs_deny/stats_deny) читает человек без прав.
+# Старая форма «No access to this command.» подтверждала, что команда существует
+# и что у бота есть владелец, — то есть что бот не Claude (решение владельца
+# 11.11.2026). Стоп-слова взяты из всех 25 прежних формулировок, поэтому тест
+# падает на любом возврате к ним.
+_DENY_KEYS = ("logs_deny", "stats_deny")
+_DENY_LEAK_WORDS = [
+    # доступ / права
+    r"\bacces", r"accès", r"\bdost", r"\bдост", r"toegang", r"erişim",
+    r"akses", r"สิทธิ์", r"पहुंच", r"প্রবেশাধিকার", r"رسائی", r"دسترسی",
+    r"kirish", r"ilungelo", r"صلاحية", r"қолжетімділік", r"\bправ", r"quyền",
+    # команда
+    r"\bcommand", r"\bcomand", r"\bkomand", r"\bкоманд", r"\bкаманд",
+    r"befehl", r"komut", r"perintah", r"คำสั่ง", r"कमांड", r"কমান্ড", r"کمانڈ",
+    r"دستور", r"buyruq", r"myalo", r"الأمر", r"lệnh",
+    # владелец / админ: отказ не должен указывать, кому принадлежит команда
+    r"\bowner", r"\badmin", r"админ", r"владели", r"власник", r"ўладальнік",
+]
+
+
+def test_service_command_deny_reveals_no_internals():
+    import lumen_lang
+    for key in _DENY_KEYS:
+        en = _string_value(lumen_lang, key, "en")
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            hits = [w for w in _DENY_LEAK_WORDS if re.search(w, v, re.IGNORECASE)]
+            assert not hits, (key, lang, hits, v)
+            # Калька с английского — не перевод: форма обязана быть своей.
+            if lang != "en":
+                assert v != en, (key, lang, v)
+
+
+def test_tiktok_processing_phase_matches_the_live_status_family():
+    # Ревью 11.11.2026: этот ключ живёт в спиннере так же, как status_* и
+    # progress_*, но скачивание TikTok не носило многоточия — в одном блоке
+    # активности phases выглядели по-разному во всех 25 языках.
+    import lumen_lang
+    for lang in lumen_lang.SUPPORTED_LANGS:
+        v = (lumen_lang.LANG_PACKS.get(lang, {}).get("tiktok_processing")
+             or lumen_lang.STRINGS["tiktok_processing"][lang])
+        assert "…" in v, (lang, v)
+        assert not v.rstrip().endswith((".", "।", "۔", "。")), (lang, v)
+
+
+def test_status_and_progress_punctuation_is_consistent():
+    # Регрессия: «Слушаю.» с точкой и фазы без многоточия ломают вид статусного
+    # блока Claude. Живые media/поиск-фазы вне правила: lumen_status ставит им
+    # впереди «✓» как завершённым этапам, многоточие попало бы в строку галочки.
+    import lumen_lang
+    live = {"status_listening", "status_generating_image", "status_voicing",
+            "status_taking_longer", "progress_thinking", "progress_retry"}
+    for key in lumen_lang.STRINGS:
+        if not (key.startswith("status_") or key.startswith("progress_")):
+            continue
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            assert not v.rstrip().endswith((".", "।", "۔", "。")), (key, lang, v)
+            if key in live:
+                assert "…" in v, (key, lang, v)
+
+
+def test_placeholders_match_across_all_languages():
+    # Регрессия: потерянный в одном паке {hours} молча съедается — t() глотает
+    # KeyError, пользователь видит обрубленное предложение. Набор фигурных
+    # скобок теперь сверяется между всеми 25 языками на каждом ключе.
+    import lumen_lang
+    for key in lumen_lang.STRINGS:
+        found = {lang: frozenset(re.findall(r"\{([a-z_]+)\}", _string_value(lumen_lang, key, lang)))
+                 for lang in lumen_lang.SUPPORTED_LANGS}
+        base = found["en"]
+        bad = {lang: ph for lang, ph in found.items() if ph != base}
+        assert not bad, (key, bad)
+
+
+def test_timed_one_forms_keep_placeholders_and_supported_langs():
+    # Формы единственного числа (smoke 11.11.2026) живут вне STRINGS, общий
+    # тест плейсхолдеров их не видит: потерянный {sec} или чужой код языка
+    # молча отдали бы обрезанную строку при sec == 1.
+    import lumen_lang
+    for key, forms in lumen_lang._TIMED_ONE_FORMS.items():
+        assert key in lumen_lang.STRINGS, key
+        for lang, one in forms.items():
+            assert lang in lumen_lang.SUPPORTED_LANGS, (key, lang)
+            base = _string_value(lumen_lang, key, lang)
+            assert re.findall(r"\{([a-z_]+)\}", one) == re.findall(r"\{([a-z_]+)\}", base), (key, lang, one)
+
+
+def test_cmd_descriptions_are_short_and_filled():
+    # Регрессия: пустой cmd_desc ломает setMyCommands языка, а длинный или
+    # с точкой раздувает список команд — читаемость важнее лимита Telegram в 256.
+    import lumen_lang
+    for key in lumen_lang.STRINGS:
+        if not key.startswith("cmd_desc_"):
+            continue
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            v = _string_value(lumen_lang, key, lang)
+            assert v and len(v) <= 40 and not v.endswith("."), (key, lang, v)
 
 
 def test_lang_callback_sets_language_and_confirms_in_new_language():
@@ -2409,7 +2583,10 @@ def test_lang_menu_lists_languages_alphabetically(monkeypatch):
     codes = [cb.callback_data.split(":")[1] for row in markup.inline_keyboard for cb in row]
     assert codes == list(lumen_lang.SUPPORTED_LANGS)
     texts = [cb.text for row in markup.inline_keyboard for cb in row]
-    assert texts == [f"{lumen_lang.LANG_NAMES[c]}{' ✓' if c == 'ru' else ''}" for c in codes]
+    assert texts == [lumen_lang.LANG_NAMES[c] for c in codes]
+    # Текущий язык — в заголовке, не на кнопке (галочка в UI не нужна, аудит 11.11.2026).
+    title = bot._tg_call.await_args[0][1]
+    assert title == lumen_lang.t("ru", "lang_title", current="Русский")
 
 
 def test_command_locales_excludes_filipino_without_iso_639_1_code():
@@ -2419,15 +2596,148 @@ def test_command_locales_excludes_filipino_without_iso_639_1_code():
     assert set(bot.COMMAND_LOCALES) == (set(bot.SUPPORTED_LANGS) - {bot.DEFAULT_LANG, "fil"})
 
 
+# Лимиты Bot API на поля профиля и разбор method -> (ключ, аргумент).
+_PROFILE_LIMITS = {"profile_name": 64, "profile_short": 120, "profile_description": 500}
+_PROFILE_ARG_BY_METHOD = {
+    "set_my_name": ("profile_name", "name"),
+    "set_my_short_description": ("profile_short", "short_description"),
+    "set_my_description": ("profile_description", "description"),
+}
+# Политика репо: пользовательский текст не называет провайдера и модель.
+_PROFILE_STOPWORDS = (
+    "gemini", "gemma", "openai", "claude", "anthropic", "munito", "groq",
+    "pollinations", "cloudflare", "chatgpt", "gpt", "llama", "qwen", "deepseek",
+    "glm", "openrouter", "mistral", "hermes", "nemotron", "google",
+)
+# Эмодзи ловим диапазоном Unicode, а не списком знаков: список устаревает.
+_PROFILE_EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF), (0xFE0F, 0xFE0F))
+
+
+def _has_emoji(text: str) -> bool:
+    return any(lo <= ord(ch) <= hi for ch in text for lo, hi in _PROFILE_EMOJI_RANGES)
+
+
+def test_profile_strings_fit_telegram_limits():
+    # Что сторожим: жёсткие лимиты setMyName/setMyShortDescription/
+    # setMyDescription. При превышении Telegram отвечает 400, и «О себе» молча
+    # остаётся старым — ни один другой тест строки профиля не читает.
+    import lumen_lang
+    for key, cap in _PROFILE_LIMITS.items():
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            text = lumen_lang.t(lang, key)
+            assert text and text != key, f"missing {key}[{lang}]"
+            assert len(text) <= cap, f"{key}[{lang}] = {len(text)} > {cap}"
+            assert not _has_emoji(text), f"{key}[{lang}]: {text}"
+            assert "!" not in text and "！" not in text, f"{key}[{lang}]: {text}"
+
+
+def test_profile_texts_never_name_a_provider_or_model():
+    # То же требование, что к текстам ошибок, но к профилю: его видит каждый, кто
+    # открывает бота, ещё до /start.
+    import lumen_lang
+    for key in _PROFILE_LIMITS:
+        for lang in lumen_lang.SUPPORTED_LANGS:
+            text = lumen_lang.t(lang, key).lower()
+            for word in _PROFILE_STOPWORDS:
+                assert not re.search(rf"(?<![a-z]){word}(?![a-z])", text), f"{key}[{lang}] names {word}"
+
+
+def test_profile_locales_are_iso_639_1_codes():
+    # Прод-инцидент setMyCommands с "fil": Bot API принимает только двухбуквенные
+    # коды, а language_code из трёх букв дал бы 400 на всех трёх вызовах профиля.
+    import lumen_lang
+    assert len(set(bot.PROFILE_LANGS)) == len(bot.PROFILE_LANGS)
+    assert bot.DEFAULT_LANG in bot.PROFILE_LANGS
+    for code in bot.PROFILE_LANGS:
+        assert len(code) == 2 and code in lumen_lang.SUPPORTED_LANGS
+
+
+def test_profile_locales_match_command_locales():
+    # РЕГРЕССИЯ на 11.11.2026: профиль заводили за десять «ходовых» локалей, а
+    # меню команд — за все 23. Тайец, урду и зулу видели английское «О себе»
+    # при описаниях команд на своём языке.
+    assert set(bot.PROFILE_LANGS) == set(bot.COMMAND_LOCALES) | {bot.DEFAULT_LANG}
+
+
+async def _no_sleep(_sec: float) -> None:
+    # Пауза между вызовами профиля — шов уровня модуля; в тесте она не нужна.
+    return None
+
+
+def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
+    # Без этих вызовов «О себе» живёт только в BotFather и расходится с
+    # lumen_lang (10.11.2026).
+    from collections import Counter
+    import lumen_lang
+    calls = []
+
+    def _spy(method_name):
+        async def _method(**kwargs):
+            calls.append((method_name, kwargs))
+            return True
+        return _method
+
+    async def fake_tg_call(method, *args, call_timeout=None, retries=None, **kwargs):
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _spy(m) for m in _PROFILE_ARG_BY_METHOD}))
+    bot._profile_queue.clear()
+    # Имя одинаковое во всех паках, значит set_my_name уходит один раз: SetMyName
+    # лимитирован сильнее всех, а 19 повторов той же строки стоили штрафа на ~20 ч.
+    expected = {
+        "set_my_name": 1,
+        "set_my_short_description": len(bot.PROFILE_LANGS),
+        "set_my_description": len(bot.PROFILE_LANGS),
+    }
+    assert asyncio.run(bot._register_bot_profile()) == sum(expected.values())
+    assert Counter(name for name, _ in calls) == Counter(expected)
+    for name, kwargs in calls:
+        key, arg = _PROFILE_ARG_BY_METHOD[name]
+        lang = kwargs.get("language_code") or bot.DEFAULT_LANG
+        assert set(kwargs) - {"language_code"} == {arg}, (name, kwargs)
+        assert kwargs[arg] == lumen_lang.t(lang, key), (name, lang)
+    assert {kw.get("language_code") for _, kw in calls} == (set(bot.PROFILE_LANGS) - {bot.DEFAULT_LANG}) | {None}
+    # Дефолт (без language_code) — ровно по одному полю: он же только один.
+    assert sorted(name for name, kw in calls if "language_code" not in kw) == sorted(_PROFILE_ARG_BY_METHOD)
+
+
+def test_register_bot_profile_survives_dead_telegram(monkeypatch, caplog):
+    # _tg_call при недоступном прокси отдаёт None вместо исключения: профиль не
+    # критичен, старт из-за него падать не вправе, а лог обязан быть честным.
+    import logging
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=None))
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: AsyncMock() for m in _PROFILE_ARG_BY_METHOD}))
+    bot._profile_queue.clear()
+    with caplog.at_level(logging.INFO, logger="bot"):
+        assert asyncio.run(bot._register_bot_profile()) == 0
+    assert "Bot profile was not set" in caplog.text
+    assert "Bot profile set" not in caplog.text
+
+
+def test_register_bot_profile_survives_missing_method(monkeypatch):
+    # Старый aiogram без set_my_name давал бы AttributeError внутри стартапа.
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=True))
+    monkeypatch.setattr(bot, "bot", SimpleNamespace())
+    bot._profile_queue.clear()
+    assert asyncio.run(bot._register_bot_profile()) == 0
+
+
 def test_ru_system_messages_use_informal_ty():
-    # Стиль бота — на "ты" везде: формальное "вы" в русских строках — баг стиля.
+    # Стиль бота — на "ты" везде: вежливые формы в русских строках — баг стиля
+    # (аудит 11.11.2026: в tiktok-подсказках проскакивали "Попробуйте/Пришлите").
+    import re
     import lumen_lang
     too_big = lumen_lang.STRINGS["tiktok_too_big"]["ru"]
-    assert "Попробуй скачать" in too_big
-    assert "Попробуйте" not in too_big
+    assert "попробуй скачать" in too_big
     no_sep = lumen_lang.STRINGS["tiktok_sound_no_separate"]["ru"]
-    assert "Пришли, пожалуйста" in no_sep
-    assert "Пришлите" not in no_sep
+    assert "пришли ссылку" in no_sep
+    for key, table in lumen_lang.STRINGS.items():
+        ru = table.get("ru")
+        if not ru or key.startswith(("owner_", "selftest_", "stats_", "logs_")):
+            continue
+        assert not re.search(r"\b(Попробуйте|Пришлите|Выберите|Дождитесь|Подождите|Попросите)\b", ru), key
 
 
 def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
@@ -2471,7 +2781,7 @@ def test_inline_draw_send_failure_reports_service_error(monkeypatch):
         return b"\x89PNG fake bytes"
 
     async def fake_tg_call(method, *args, **kwargs):
-        if "photo" in kwargs:
+        if "photo" in kwargs or "document" in kwargs:
             return None
         return await method(*args, **kwargs)
 
@@ -2614,6 +2924,18 @@ def test_cmd_selftest_group_only_for_owner(monkeypatch):
         assert mid not in fake_tg_call.text
 
 
+def test_cmd_selftest_reports_the_search_layer(monkeypatch):
+    # Строка состояния слоя поиска: после рестарта Space по ней видно, включён ли
+    # цикл и сколько обращений к источникам уже израсходовано. Без неё владелец
+    # проверял бы переключатели вслепую.
+    monkeypatch.setattr(bot, "OWNER_ID", 444002)
+    calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
+    asyncio.run(bot.cmd_selftest(_make_selftest_message(999713, 444002)))
+    text = fake_tg_call.text
+    assert "Поиск:" in text and "цикл:" in text
+    assert "обращений сегодня" in text
+
+
 def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
     # Без паузы владелец случайно выжигал бы квоту повторными тапами.
     monkeypatch.setattr(bot, "OWNER_ID", 444001)
@@ -2716,7 +3038,7 @@ def test_selftest_llm_head_munito_success_targets_head_without_quota_write(monke
     assert ok is True and detail == "" and elapsed >= 0
     assert seen["model"] == head
     # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
-    assert (bot.GLOBAL_QUOTA.get("munito") or {}).get(head) in (None, marks)
+    # Сама запись проверена до очистки в finally: здесь она всегда None.
 
 
 def test_selftest_llm_head_munito_error_returns_false_without_quota(monkeypatch):
@@ -2900,6 +3222,8 @@ def test_answer_sender_skips_reply_quote_in_private(monkeypatch):
     group = _FakeIncomingMessage(999808)
     group.chat.type = bot.ChatType.GROUP
     assert bot._answer_sender(group) == group.reply
+    # Реальная сессия aiogram: закрываем, иначе «Unclosed client session» (ревью 17.11.2026).
+    asyncio.run(real_bot.session.close())
 
 
 def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
@@ -2977,6 +3301,39 @@ def test_banned_user_commands_send_nothing(monkeypatch):
         bot._unban_user(banned_id)
 
 
+def test_help_command_opens_the_start_screen(rate_guard_setup):
+    # Регресс: без алиаса /help уходил в catch-all и уезжал в модель как текст,
+    # а человек, печатающий /help по привычке, получал выдуманный ответ.
+    import datetime
+    from aiogram import Bot
+    from aiogram.types import Chat as TgChat
+    from aiogram.types import Message as TgMessage
+    real_bot = Bot(token="123456:" + "x" * 35)
+
+    def resolved(text):
+        # Матчит сам реестр dp и aiogram, а не копия правил Command.
+        message = TgMessage(
+            message_id=1, date=datetime.datetime.now(),
+            chat=TgChat(id=999812, type="private"), text=text,
+        )
+        for handler in bot.dp.message.handlers:
+            if asyncio.run(handler.check(message, bot=real_bot))[0]:
+                return handler.callback
+        return None
+
+    assert resolved("/help") is resolved("/start") is bot.cmd_start
+    sent = []
+    for text in ("/start", "/help"):
+        incoming = rate_guard_setup()
+        incoming.text = text
+        asyncio.run(bot.cmd_start(incoming))
+        # фикстура ставит свой AsyncMock на каждый вызов — смотрим его аргументы
+        sent.append(bot._tg_call.await_args.args[1])
+    assert sent[0] == sent[1] == bot._t(123, "start_text")
+    asyncio.run(real_bot.session.close())
+
+
+
 def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(monkeypatch):
     # Проба Gemini: исход в счётчик карантина сбрасывается, но квота и EMA латентности
     # не двигаются — это служебный пинг, а не ответ пользователю.
@@ -3010,7 +3367,7 @@ def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(mo
     assert ok is True and detail == "" and elapsed >= 0
     assert fake_models.calls == [head]
     # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
-    assert (bot.GLOBAL_QUOTA.get("gemini") or {}).get(head) in (None, marks)
+    # Сама запись проверена до очистки в finally: здесь она всегда None.
     assert bot._is_quarantined("gemini", head) is False
 
 
@@ -4023,3 +4380,197 @@ def test_reserve_translation_memo_skips_failed_translation(monkeypatch):
     asyncio.run(lumen_commands._translate_for_reserve("рыжий кот на луне", deadline))
     asyncio.run(lumen_commands._translate_for_reserve("рыжий кот на луне", deadline))
     assert translate.await_count == 2
+
+
+def test_profile_pass_pauses_on_flood_control_and_resumes_later(monkeypatch):
+    # РЕГРЕССИЯ на прод 11.11.2026 17:44-17:47: 72 вызова профиля подряд поймали
+    # «Flood control exceeded ... Retry in 79522 seconds», и в эти минуты у живых
+    # людей рвались ответы. Теперь один отказ = пауза, поле остаётся в очереди,
+    # часовой проход продолжает с того же места.
+    bot._profile_queue.clear()
+    total = len(bot._profile_payloads())
+    seen = []
+
+    def _flaky(method_name):
+        async def _method(**kwargs):
+            seen.append((method_name, kwargs))
+            if len(seen) == 5:
+                raise RuntimeError("Telegram server says - Flood control exceeded. Retry in 18 seconds")
+            return True
+        return _method
+
+    async def fake_tg_call(method, *args, call_timeout=None, retries=None, **kwargs):
+        assert retries == 0, "профиль не должен ретраить flood control"
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _flaky(m) for m in _PROFILE_ARG_BY_METHOD}))
+
+    assert asyncio.run(bot._register_bot_profile(limit=20)) == 4
+    assert len(bot._profile_queue) == total - 4
+    fifth = bot._profile_queue[0]
+    assert fifth in seen, "неудавшееся поле обязано остаться первым в очереди"
+
+    # Второй проход (часовой цикл) продолжает с того же поля и добирает остаток.
+    def _calm(method_name):
+        async def _method(**kwargs):
+            return True
+        return _method
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _calm(m) for m in _PROFILE_ARG_BY_METHOD}))
+    assert asyncio.run(bot._register_bot_profile()) == total - 4
+    assert bot._profile_queue == []
+
+def _profile_value(kwargs: dict) -> str:
+    return next(v for k, v in kwargs.items() if k != "language_code")
+
+
+def test_profile_payloads_sends_the_shared_name_only_once():
+    # Локализованное поле с тем же текстом, что в языке по умолчанию, Telegram
+    # покажет из дефолта; отдельная запись только съедает лимит метода.
+    import lumen_lang
+    payloads = bot._profile_payloads()
+    names = [kw for method, kw in payloads if method == "set_my_name"]
+    assert len(names) == 1 and "language_code" not in names[0]
+    shared = lumen_lang.t(bot.DEFAULT_LANG, "profile_name")
+    assert all(lumen_lang.t(lang, "profile_name") == shared for lang in bot.PROFILE_LANGS)
+    # Описания различаются по языкам — их очередь обязана нести целиком.
+    assert sum(1 for method, _ in payloads if method == "set_my_description") == len(bot.PROFILE_LANGS)
+
+
+def test_register_bot_profile_skips_fields_telegram_already_has(monkeypatch):
+    # Каждый редиплой писал все поля заново и ловил Flood control на ~20 часов
+    # (прод 11.11.2026: SetMyName лимитирован сильнее всех). Перед записью сверяем
+    # get*: в чат и в профиль уходит только то, чего там ещё нет.
+    payloads = bot._profile_payloads()
+    current: dict[tuple[str, str], str] = {}
+    for method_name, kwargs in payloads:
+        attr = bot._PROFILE_READ_METHODS[method_name][1]
+        current[(kwargs.get("language_code", bot.DEFAULT_LANG), attr)] = _profile_value(kwargs)
+    stale_key = sorted(current)[0]
+    current[stale_key] = "устаревший текст"
+
+    writes: list[tuple[str, dict]] = []
+
+    def _setter(method_name: str):
+        async def _call(**kwargs):
+            writes.append((method_name, kwargs))
+            return True
+        return _call
+
+    def _getter(attr: str):
+        async def _call(language_code=None):
+            return SimpleNamespace(**{attr: current.get((language_code or bot.DEFAULT_LANG, attr), "")})
+        return _call
+
+    methods = {}
+    for method_name, (getter_name, attr) in bot._PROFILE_READ_METHODS.items():
+        methods[method_name] = _setter(method_name)
+        methods[getter_name] = _getter(attr)
+
+    async def passthrough_tg_call(method, *args, call_timeout=None, retries=None, **kwargs):
+        return await method(**kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", passthrough_tg_call)
+    monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(**methods))
+    bot._profile_queue.clear()
+
+    assert asyncio.run(bot._register_bot_profile()) == 1
+    written = {(kw.get("language_code", bot.DEFAULT_LANG), bot._PROFILE_READ_METHODS[name][1])
+               for name, kw in writes}
+    assert written == {stale_key}, (written, stale_key)
+
+
+def test_register_bot_profile_writes_everything_when_reads_are_unavailable(monkeypatch):
+    # Старый aiogram без getMyName: отсутствие чтения не должно молча оставить
+    # профиль незаписанным.
+    calls = []
+
+    def _setter(method_name):
+        async def _call(**kwargs):
+            calls.append(method_name)
+            return True
+        return _call
+
+    async def passthrough_tg_call(method, *args, call_timeout=None, retries=None, **kwargs):
+        return await method(**kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", passthrough_tg_call)
+    monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(
+        **{m: _setter(m) for m in ("set_my_name", "set_my_short_description", "set_my_description")}))
+    bot._profile_queue.clear()
+    assert asyncio.run(bot._register_bot_profile()) == len(bot._profile_payloads())
+    assert len(calls) == len(bot._profile_payloads())
+
+def test_image_budget_counts_neurons_not_only_pictures():
+    # Аудит 16.11.2026: тяжёлая правка 12 МП списывает около трети бесплатного
+    # бюджета, оставаясь «одной из 80». Бюджет считается в Neuron; штуки остаются
+    # для /stats и лимита человека. Старый снапшот без веса не обнуляет бюджет.
+    import json as _json
+    import lumen_quotas as lq
+
+    real_quota = _json.loads(_json.dumps(bot.GLOBAL_QUOTA))
+    real_limit = bot.IMAGE_DAILY_NEURONS
+    try:
+        bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+        bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER] = {}
+        bot._note_image_success("cloudflare")
+        assert bot._image_usage_total() == 1
+        assert abs(bot._image_neurons_total() - lq.IMAGE_UNIT_NEURONS) < 0.01
+        assert bot._image_budget_exhausted() is False
+
+        bot._note_image_success("cloudflare", units=3.4)
+        assert bot._image_usage_total() == 2
+        bot.IMAGE_DAILY_NEURONS = int(lq.IMAGE_UNIT_NEURONS * 4)
+        assert len(bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER]) == 1
+        assert bot._image_budget_exhausted() is True
+
+        bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER] = {"cloudflare": {"used": 80}}
+        bot.IMAGE_DAILY_NEURONS = int(lq.IMAGE_UNIT_NEURONS * 80)
+        assert bot._image_budget_exhausted() is True
+    finally:
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.IMAGE_DAILY_NEURONS = real_limit
+
+
+def test_inline_draw_falls_back_to_document_when_photo_is_rejected(monkeypatch):
+    # Telegram не принимает фото больше 10 МБ, а провайдер может вернуть до 30 МБ:
+    # без фолбэка картинка терялась уже после списания бюджета (аудит 16.11.2026).
+    chat_id = 999438
+    sent = {"document": 0}
+
+    async def fake_image(session, prompt, timeout_sec=None, **_):
+        return b"PNG fake bytes"
+
+    class _FakePhotoBot:
+        async def send_photo(self, **kwargs):
+            return None
+
+        async def send_document(self, **kwargs):
+            sent["document"] += 1
+            return SimpleNamespace()
+
+    _one_image_provider(monkeypatch, fake_image)
+    monkeypatch.setattr(bot, "bot", _FakePhotoBot())
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    try:
+        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        assert sent["document"] == 1
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_bare_read_trigger_does_not_swallow_explain_requests():
+    # Внешний аудит 16.11.2026: «прочти инструкцию и объясни, что делать»
+    # озвучивалось вместо ответа. Голые «прочти/зачитай» остаются TTS только
+    # без глагола пересказа.
+    from lumen_message_parse import _tts_trigger_is_speech
+    assert _tts_trigger_is_speech("прочти", " инструкцию и объясни, что делать") is False
+    assert _tts_trigger_is_speech("прочтите", " текст и перескажите кратко") is False
+    assert _tts_trigger_is_speech("зачитай", " этот абзац") is True
+    assert _tts_trigger_is_speech("прочти вслух", " мою историю") is True
+    assert _tts_trigger_is_speech("озвучь", " инструкцию и объясни") is True
