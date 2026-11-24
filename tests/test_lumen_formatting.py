@@ -294,8 +294,8 @@ def test_scrub_latex_does_not_confuse_currency_with_math_delimiters():
 
 
 def test_scrub_latex_plain_fallback_renders_pythagoras_without_raw_markup():
-    # Прод 23.11.2026: финал со thought-строкой шёл через HTML и показывал
-    # "$c$", "text{см}" и "^2". Fallback обязан оставаться читаемым.
+    # Прод 23.11.2026: rich-сообщение не отобразилось у клиента, и финал показал
+    # "$c$", "text{см}" и "^2". HTML/plain fallback обязан оставаться читаемым.
     source = (
         "Формула $c^2 = a^2 + b^2$, площадь "
         r"$S = \frac{ab}{2} = 6\text{ см}^2$ и матрица $\begin{matrix}a & b\end{matrix}$; цена $100."
@@ -304,16 +304,68 @@ def test_scrub_latex_plain_fallback_renders_pythagoras_without_raw_markup():
     assert result == "Формула c² = a² + b², площадь S = ab/2 = 6 см² и матрица a b; цена $100."
 
 
+def test_strip_markdown_scrubs_math_but_protects_code_and_urls():
+    source = r"Формула $x^2$, код `C:\tmp\$x$` и ссылка https://example.com/$x$"
+    result = lumen_formatting._strip_markdown(source)
+    assert result == r"Формула x², код C:\tmp\$x$ и ссылка https://example.com/$x$"
+
+
+
 def test_rich_math_keeps_currency_and_escaped_dollars():
     assert lumen_formatting._md_to_rich_html("$100/$50") == "$100/$50"
     assert lumen_formatting._md_to_rich_html("$100–$50") == "$100–$50"
     assert lumen_formatting._md_to_rich_html(r"\$100\$ и $x$") == r"\$100\$ и <tg-math>x</tg-math>"
 
 
-def test_strip_markdown_scrubs_math_but_protects_code_and_urls():
-    source = r"Формула $x^2$, код `C:\tmp\$x$` и ссылка https://example.com/$x$"
-    result = lumen_formatting._strip_markdown(source)
-    assert result == r"Формула x², код C:\tmp\$x$ и ссылка https://example.com/$x$"
+def test_bare_url_with_dollars_survives_html_and_rich_scrub():
+    url = "https://example.com/$x$?a=1&b=2"
+    assert lumen_formatting._md_to_html(url) == "https://example.com/$x$?a=1&amp;b=2"
+    assert lumen_formatting._md_to_rich_html(url) == "https://example.com/$x$?a=1&amp;b=2"
+
+
+def test_bare_url_does_not_eat_markdown_emphasis():
+    url = "https://example.com"
+    assert lumen_formatting._md_to_html(f"**{url}**") == f"<b>{url}</b>"
+    assert lumen_formatting._md_to_rich_html(f"**{url}**") == f"<b>{url}</b>"
+    assert lumen_formatting._md_to_html(f"*{url}*") == f"<i>{url}</i>"
+    assert lumen_formatting._md_to_rich_html(f"~~{url}~~") == f"<s>{url}</s>"
+    assert lumen_formatting._strip_markdown(f"**{url}**") == url
+
+
+@pytest.mark.parametrize(("source", "html_expected", "plain_expected"), [
+    ("**https://example.com**.", "<b>https://example.com</b>.", "https://example.com."),
+    ("*https://example.com*.", "<i>https://example.com</i>.", "https://example.com."),
+    ("~~https://example.com~~;", "<s>https://example.com</s>;", "https://example.com;"),
+    ("**https://example.com**…", "<b>https://example.com</b>…", "https://example.com…"),
+    ("**https://example.com**»", "<b>https://example.com</b>»", "https://example.com»"),
+    ('"**https://example.com**.', '"<b>https://example.com</b>.', '"https://example.com.'),
+])
+def test_bare_url_keeps_emphasis_before_sentence_punctuation(source, html_expected, plain_expected):
+    assert lumen_formatting._md_to_html(source) == html_expected
+    assert lumen_formatting._md_to_rich_html(source) == html_expected
+    assert lumen_formatting._strip_markdown(source) == plain_expected
+
+
+def test_inline_math_has_no_arbitrary_length_limit():
+    formula = "x" * 250
+    source = f"${formula}$"
+    assert lumen_formatting._scrub_latex(source) == formula
+    assert lumen_formatting._md_to_rich_html(source) == f"<tg-math>{formula}</tg-math>"
+
+
+@pytest.mark.parametrize(("source", "plain", "rich"), [
+    ("$-$", "-", "<tg-math>-</tg-math>"),
+    ("$x-$", "x-", "<tg-math>x-</tg-math>"),
+    ("$x$2", "x2", "<tg-math>x</tg-math>2"),
+])
+def test_currency_heuristic_does_not_hide_real_inline_math(source, plain, rich):
+    assert lumen_formatting._scrub_latex(source) == plain
+    assert lumen_formatting._md_to_rich_html(source) == rich
+
+
+def test_inline_math_asterisks_are_not_markdown_emphasis():
+    assert lumen_formatting._md_to_html("$2*3*4$") == "2∗3∗4"
+    assert lumen_formatting._strip_markdown("$2*3*4$") == "2∗3∗4"
 
 
 def test_scrub_latex_order_sensitive_replacements_dont_corrupt_each_other():
@@ -720,6 +772,16 @@ def test_rich_table_renders_bordered_table():
     assert result == "<table bordered><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
 
 
+def test_bare_url_does_not_consume_table_cell_separator():
+    source = "| A | B |\n|---|---|\n| https://example.com|значение |"
+    assert lumen_formatting._md_to_rich_html(source) == (
+        "<table bordered><tr><th>A</th><th>B</th></tr>"
+        "<tr><td>https://example.com</td><td>значение</td></tr></table>"
+    )
+    html = lumen_formatting._md_to_html(source)
+    assert "https://example.com" in html
+    assert "значение" in html
+    assert "|" not in html
 def test_rich_wide_table_splits_into_narrow_blocks():
     # Прод 24.11.2026: сравнение четырёх сервисов уезжало за правый край
     # Telegram Desktop. Первую колонку повторяем, чтобы куски оставались

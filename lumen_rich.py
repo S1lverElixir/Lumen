@@ -3,7 +3,6 @@ lumen_rich.py — отправка сообщений: гости, Rich Messages
 """
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import logging
 from typing import Any
@@ -194,11 +193,14 @@ async def _safe_reply(message: Message, text: str, parse_html: bool = True, **kw
     import bot
     await bot._send_text(message, text, parse_html=parse_html, **kwargs)
 
-async def _delete_message_quietly(msg: Message | None) -> None:
+async def _delete_message_quietly(msg: Message | None) -> bool:
     if msg is None:
-        return
-    with contextlib.suppress(Exception):
+        return False
+    try:
         await msg.delete()
+        return True
+    except Exception:
+        return False
 
 async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -> bool:
     import bot

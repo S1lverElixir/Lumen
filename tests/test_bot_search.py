@@ -226,6 +226,36 @@ def test_fresh_query_status_shows_search_then_thinking(rate_guard_setup, monkeyp
     bot.chat_state.pop(123, None)
 
 
+def test_status_start_is_deleted_when_pre_route_setup_raises(rate_guard_setup, monkeypatch):
+    # Прод 23.11.2026: статус ссылки пережил свой запрос и тикал поверх следующих.
+    # Startup-task создаётся до основного try; сбой сборки промпта не должен
+    # оставлять ни задачу, ни пузырь в чате.
+    message = rate_guard_setup()
+    message.text = "погугли что происходит с ДЦ Яндекса"
+    fake_status = _FakeStatus()
+    delete_calls = []
+    original_delete = fake_status.delete
+
+    async def counted_delete():
+        delete_calls.append(True)
+        await original_delete()
+
+    fake_status.delete = counted_delete
+
+    async def fake_start(reply_to, lang, key, *, timed=False):
+        return fake_status
+
+    def broken_tagged_prompt(*args, **kwargs):
+        raise RuntimeError("prompt assembly failed")
+
+    monkeypatch.setattr("lumen_message_core.StatusMessage", SimpleNamespace(start=fake_start))
+    monkeypatch.setattr(bot, "_tagged_prompt", broken_tagged_prompt)
+    asyncio.run(bot._handle_message_core(message))
+    assert fake_status.deleted is True
+    assert len(delete_calls) == 1
+    bot.chat_state.pop(123, None)
+
+
 def test_empty_external_search_with_grounded_answer_has_no_note(rate_guard_setup, monkeypatch):
     # Прод 28.10.2026: внешний поиск пуст, но ответила Gemini со встроенным
     # поиском — пометка «без поиска» была бы ложью.

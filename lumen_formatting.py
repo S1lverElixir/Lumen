@@ -162,7 +162,7 @@ def _table_block_line_indexes(lines: list[str]) -> set[int]:
 # страхуем детерминированной пост-обработкой в юникод.
 _LATEX_SUPERSCRIPT_MAP = {"0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "n": "ⁿ"}
 _LATEX_SUBSCRIPT_MAP = {"0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉"}
-_INLINE_MATH_DOLLAR_RE = re.compile(r"(?<![\\$])\$(?!\$)([^\s$][^$\n]{0,200}?)(?<![\\\s])\$(?!\$)")
+_INLINE_MATH_DOLLAR_RE = re.compile(r"(?<![\\$])\$(?!\$)([^\s$][^$\n]*?)(?<![\\\s])\$(?!\$)")
 _LATEX_TEXT_RE = re.compile(r"\\(?:text|mathrm|mathbf|operatorname)\{([^{}]*)\}")
 _LATEX_ENV_RE = re.compile(r"\\(?:begin|end)\{[^{}]+\}")
 _CURRENCY_MATH_RE = re.compile(r"\d[\d\s.,]*")
@@ -284,23 +284,34 @@ def _latex_subscript(m: re.Match) -> str:
 
 def _is_currency_math_match(match: re.Match) -> bool:
     body = match.group(1)
-    if _CURRENCY_MATH_RE.fullmatch(body) or body.endswith(("/", "-", "–", "—")):
+    if _CURRENCY_MATH_RE.fullmatch(body):
         return True
+    # Диапазон "$100/$50" регулярка видит как "$100/$": числовое тело с
+    # разделителем и цифрой сразу после закрывающего доллара — валюта, не формула.
     text = match.string
-    return match.end() < len(text) and text[match.end()].isdigit()
+    return (
+        body[:1].isdigit()
+        and body[-1:] in ("/", "-", "–", "—")
+        and match.end() < len(text)
+        and text[match.end()].isdigit()
+    )
 
 
 def _scrub_inline_math(match: re.Match) -> str:
+    # "$100" и "$50 до $100" — деньги, а не парная формула. Пустая парная
+    # сумма "$100$" тоже остаётся как есть: терять знак валюты нельзя.
     if _is_currency_math_match(match):
         return match.group(0)
-    return re.sub(r"\s+", " ", match.group(1).replace("&", " ")).strip()
+    # Звёздочка внутри формулы — оператор умножения, а не Markdown-курсив.
+    return re.sub(r"\s+", " ", match.group(1).replace("&", " ").replace("*", "∗")).strip()
 
 
 def _scrub_latex(text: str) -> str:
     """Сырой LaTeX в юникод. Вызывать только после вырезки кода, иначе портятся слэши в regex/путях Windows."""
     if "\\" not in text and "$" not in text:
         return text
-    # Тесная пара "$...$" — формула; числовое содержимое остаётся валютой.
+    # Инлайн-математика снимается только по тесной паре "$...$"; числовое
+    # содержимое остаётся валютой. Так "$100, а формула $x^2$" не склеивается.
     text = _LATEX_TEXT_RE.sub(r"\1", text)
     text = _LATEX_ENV_RE.sub("", text)
     text = re.sub(r"\\\\", " ", text)
@@ -930,7 +941,7 @@ def _strip_markdown(text: str) -> str:
     text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", _save_code, text, flags=re.DOTALL)
     text = re.sub(r"`([^`\n]+)`", _save_code, text)
     text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", r"\1", text)
-    text = re.sub(r"https?://[^\s()<>]+", _save_url, text)
+    text = re.sub(r"https?://[^\s<>\"'`*~|]+", _save_url, text)
     text = _scrub_latex(text)
     text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text, flags=re.DOTALL)
     # Одиночное "_" только вне слова: my_file_name и имена файлов не трогаем.

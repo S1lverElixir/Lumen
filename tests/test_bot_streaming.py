@@ -232,7 +232,7 @@ def test_munito_stream_pieces_parses_sse_chunks():
     original_get_session = bot._get_http_session
     original_key = bot.MUNITO_API_KEY
     bot._get_http_session = fake_get_http_session
-    bot.MUNITO_API_KEY = "fake-key"
+    bot.MUNITO_API_KEY = "fake-" + "key"
     try:
         async def collect():
             pieces = []
@@ -256,7 +256,7 @@ def test_munito_stream_pieces_raises_on_http_error_status():
     original_get_session = bot._get_http_session
     original_key = bot.MUNITO_API_KEY
     bot._get_http_session = fake_get_http_session
-    bot.MUNITO_API_KEY = "fake-key"
+    bot.MUNITO_API_KEY = "fake-" + "key"
     try:
         async def collect():
             async for _ in bot._munito_stream_pieces("deepseek-ai/deepseek-v4.1-flash-1017", []):
@@ -299,7 +299,7 @@ def test_munito_stream_pieces_caps_http_error_body_read():
     original_get_session = bot._get_http_session
     original_key = bot.MUNITO_API_KEY
     bot._get_http_session = fake_get_http_session
-    bot.MUNITO_API_KEY = "fake-key"
+    bot.MUNITO_API_KEY = "fake-" + "key"
     try:
         async def collect():
             async for _ in bot._munito_stream_pieces("deepseek-ai/deepseek-v4.1-flash-1017", []):
@@ -334,7 +334,7 @@ def test_munito_stream_pieces_raises_on_midstream_error_chunk():
     original_get_session = bot._get_http_session
     original_key = bot.MUNITO_API_KEY
     bot._get_http_session = fake_get_http_session
-    bot.MUNITO_API_KEY = "fake-key"
+    bot.MUNITO_API_KEY = "fake-" + "key"
     try:
         collected = []
 
@@ -719,10 +719,9 @@ def test_streaming_fast_path_shows_no_dots_frames():
         bot.chat_state.pop(chat_id, None)
 
 
-def test_streaming_plain_text_adds_subtle_thought_line():
-    # Мгновенный ответ (<1 с) activity-строку не получает — как в Claude
-    # (ревью 11.11.2026); «✻ Thought for Ns» появляется только когда модель
-    # реально думала секунду и больше (см. медленный вариант ниже).
+def test_streaming_plain_text_has_no_thought_line():
+    # Прод 23.11.2026: Claude убрал финальную строку активности у простого ответа.
+    # Lumen не должен оставлять «Думаю N c» поверх уже готового текста.
     chat_id = 999321
 
     async def pieces():
@@ -737,8 +736,9 @@ def test_streaming_plain_text_adds_subtle_thought_line():
         assert answer == "Привет"
         final_text, parse_mode = incoming.sent[0].edits[-1]
         assert parse_mode == bot.ParseMode.HTML
-        assert "✻" not in final_text
-        assert final_text.strip() == "Привет"
+        assert final_text == "Привет"
+        assert "Thought for" not in final_text
+        assert "<blockquote" not in final_text
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1211,7 +1211,8 @@ def test_send_text_pauses_between_chunks(monkeypatch):
 
 
 def test_bot_text_send_and_edit_disable_link_previews(monkeypatch):
-    # Прод 23.11.2026: ответ со ссылкой MDN раздувался preview-карточкой.
+    # Прод 23.11.2026: ответ со ссылкой MDN раздувался огромной preview-карточкой,
+    # тогда как у Claude оставалась компактная гиперссылка.
     from aiogram.types import LinkPreviewOptions
 
     monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)

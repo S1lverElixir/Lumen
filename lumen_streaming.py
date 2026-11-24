@@ -799,7 +799,7 @@ async def _run_streaming_reply(
                         _stream_editor(sent_messages[idx], reply_markup=_active_markup(sent_messages[idx])),
                         _final_chunk_html(chunk_text, idx),
                         parse_mode=ParseMode.HTML, call_timeout=15.0,
-                    link_preview_options=NO_LINK_PREVIEW,
+                        link_preview_options=NO_LINK_PREVIEW,
                     )
                     # Серия неуспешных правок подряд — сообщение снесли посреди стрима:
                     # дальше не правим, в финале досылаем ответ новым сообщением.
