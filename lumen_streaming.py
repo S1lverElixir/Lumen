@@ -548,7 +548,7 @@ async def _run_streaming_reply(
             if _stop_markup is None or message is None:
                 return None
             return await bot._tg_call(
-                bot._answer_sender(message), _spinner_glyph(2), parse_mode=None,
+                bot._answer_sender(message), bot._t(message.chat.id, "stop_button"), parse_mode=None,
                 reply_markup=_stop_markup, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
                 retries=0, link_preview_options=NO_LINK_PREVIEW,
             )
