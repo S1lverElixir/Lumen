@@ -51,6 +51,8 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     async def scenario():
         status = await StatusMessage.start(incoming, "en", "progress_searching")
         assert status is not None
+        markup = object()
+        status.reply_markup = markup
         status.add_done("progress_search_done", count=5)
         status.set_sources(["example.com", "example.com", "second.example"])
         await status.set_phase("progress_thinking", timed=True)
@@ -61,6 +63,7 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     status = asyncio.run(scenario())
     sent = incoming.sent[0]
     assert status.message is sent
+    assert all(kw.get("reply_markup") is status.reply_markup for kw in sent.edit_kwargs)
     text = sent.edits[-1][0]
     assert "✓ Searched the web · found 5" in text
     # При 0 с живая строка без числа (smoke 11.11.2026: было «Thinking… 0 seconds»).
@@ -241,6 +244,56 @@ def test_subsecond_answer_shows_no_thought_line(monkeypatch):
     html_block, plain_block = status.compose_answer("ответ")
     assert html_block is None and plain_block == "ответ"
     bot.chat_state.pop(999905, None)
+def test_status_from_message_keeps_existing_stop_button():
+    from types import SimpleNamespace
+
+    markup = object()
+    message = SimpleNamespace(reply_markup=markup, chat=SimpleNamespace(id=999907))
+
+    async def scenario():
+        status = StatusMessage.from_message(message, "en", "progress_searching")
+        assert status.reply_markup is markup
+        await status.stop()
+
+    asyncio.run(scenario())
+
+
+def test_status_resume_restarts_stopped_ticker():
+    status = StatusMessage(message=object(), lang="en")
+    status._stopped = True
+
+    async def tick():
+        await asyncio.Future()
+
+    status._tick = tick
+
+    async def scenario():
+        status.resume()
+        assert status._stopped is False
+        assert status._task is not None
+        await status.stop()
+
+    asyncio.run(scenario())
+    assert status._task is None
+
+
+def test_status_clear_reply_markup_removes_keyboard(monkeypatch):
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999908)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
+        status.reply_markup = object()
+        await status.clear_reply_markup()
+        await status.stop()
+        return status
+
+    status = asyncio.run(scenario())
+    assert status.reply_markup is None
+    assert status.message.markup_edits[-1]["reply_markup"].inline_keyboard == []
+    bot.chat_state.pop(999908, None)
+
+
 def test_status_delete_is_idempotent_across_route_and_handler_cleanup(monkeypatch):
     # Маршрут и внешний обработчик оба чистят статус при ошибке/отмене. Второй
     # вызов не должен снова удалять сообщение и ронять задачу.

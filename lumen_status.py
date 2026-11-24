@@ -6,7 +6,7 @@ import contextlib
 import html
 import time
 
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, Message
 
 from lumen_formatting import _is_table_separator, _md_to_html
 from lumen_lang import t as _lang_t
@@ -85,6 +85,7 @@ class StatusMessage:
     def __init__(self, message: Message, lang: str):
         self.message = message
         self.lang = lang
+        self.reply_markup = None
         self._done: list[str] = []
         self._sources: list[str] = []
         self._phrase_key = ""
@@ -102,6 +103,11 @@ class StatusMessage:
         # Одна правка пузырька за раз: поздний кадр старой фазы иначе затирал
         # новую после доставки через прокси (ревью 17.11.2026).
         self._edit_lock = asyncio.Lock()
+
+    def _reply_markup_kwargs(self) -> dict:
+        # Кнопка остановки живёт на том же пузыре; любая правка тикера обязана
+        # нести её явно, иначе Telegram снимает клавиатуру (prod 24.11.2026).
+        return {"reply_markup": self.reply_markup} if self.reply_markup is not None else {}
 
     @classmethod
     async def start(cls, reply_to: Message, lang: str, key: str, *, timed: bool = False,
@@ -148,7 +154,10 @@ class StatusMessage:
         take_edit_slot(self._chat_id(), force=True)
         async with self._edit_lock:
             with contextlib.suppress(Exception):
-                await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+                await bot._tg_call(
+                    self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0,
+                    **self._reply_markup_kwargs(),
+                )
 
     @classmethod
     async def start_action(cls, reply_to: Message, lang: str, text: str) -> "StatusMessage | None":
@@ -178,7 +187,10 @@ class StatusMessage:
         # вернуть старую фразу после этой правки (F-070, проход №5).
         async with self._edit_lock:
             with contextlib.suppress(Exception):
-                await bot._tg_call(self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0)
+                await bot._tg_call(
+                    self.message.edit_text, self._render(0), parse_mode=None, call_timeout=15.0,
+                    **self._reply_markup_kwargs(),
+                )
 
     async def set_action_key(self, key: str) -> None:
         await self.set_action(_lang_t(self.lang, key), timed=self._literal_timed)
@@ -188,6 +200,7 @@ class StatusMessage:
         """Статус поверх пузыря, который УЖЕ в чате (плейсхолдер стрима): новой
         отправки нет, иначе рядом встанут два «Думаю…» (замер 11.11.2026)."""
         status = cls(message=message, lang=lang)
+        status.reply_markup = getattr(message, "reply_markup", None)
         status._set_phrase(key, timed=False, **kwargs)
         status._task = asyncio.create_task(status._tick())
         return status
@@ -307,6 +320,7 @@ class StatusMessage:
                             await bot._tg_call(
                                 self.message.edit_text, self._render(frame_idx),
                                 parse_mode=None, call_timeout=15.0,
+                                **self._reply_markup_kwargs(),
                             )
                 frame_idx += 1
                 await bot._dots_sleep(bot._DOTS_TICK_SEC)
@@ -315,6 +329,28 @@ class StatusMessage:
 
     def _chat_id(self):
         return getattr(getattr(self.message, "chat", None), "id", None)
+
+    def resume(self) -> None:
+        """Возобновляет тикер после reuse пузыря поисковым проходом."""
+        if self._deleted:
+            return
+        self._stopped = False
+        if self._task is None:
+            self._task = asyncio.create_task(self._tick())
+
+    async def clear_reply_markup(self) -> None:
+        """Снимает кнопку остановки с брошенного пузыря после поискового фолбэка."""
+        import bot
+        async with self._edit_lock:
+            self.reply_markup = None
+            self.message.reply_markup = None
+            edit = getattr(self.message, "edit_reply_markup", None)
+            if edit is not None:
+                with contextlib.suppress(Exception):
+                    await bot._tg_call(
+                        edit, reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                        call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                    )
 
     async def stop(self) -> None:
         """Останавливает анимацию; само сообщение остаётся для ответа."""

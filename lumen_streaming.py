@@ -115,7 +115,7 @@ def _stream_reveal_html(md_text: str, limit: int) -> str:
     return html_text
 
 
-def _stream_editor(message: Message):
+def _stream_editor(message: Message, *, reply_markup=None):
     """edit_text для показанных стримом сообщений. _tg_call возвращает голую None
     и для сетевого сбоя, и для «message is not modified» — валидного ответа API,
     где содержимое уже на экране. Транспорт не трогаем (чужой scope), различие
@@ -125,6 +125,8 @@ def _stream_editor(message: Message):
     внутренних ретраев _tg_call (настоящая сеть) — он, как и раньше, считается
     сбоем серии."""
     async def edit_text(text, **kwargs):
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
         try:
             return await message.edit_text(text, **kwargs)
         except Exception as exc:
@@ -134,7 +136,7 @@ def _stream_editor(message: Message):
     return edit_text
 
 
-async def _tick_waiting_dots(placeholder: Message, *, started: float | None = None) -> None:
+async def _tick_waiting_dots(placeholder: Message, *, started: float | None = None, reply_markup=None) -> None:
     """Фраза ожидания до первого куска (как в Claude): «Думаю…» с анимацией, не голые точки. Первый кадр после паузы (быстрые модели анимации не видят), дальше кадр по тику. Правки через _tg_call с глотанием ошибок, отмена — штатная остановка."""
     import bot
     # started — общий старт ожидания маршрута: после сбоя одной модели таймер
@@ -147,6 +149,7 @@ async def _tick_waiting_dots(placeholder: Message, *, started: float | None = No
         # Первый кадр (∴) уже стоит в отправленном плейсхолдере: начинаем со
         # второго, иначе 0.5с спустя индикатор «замирает» на том же символе.
         frame_idx = 1
+        markup_kwargs = {"reply_markup": reply_markup} if reply_markup is not None else {}
         while True:
             elapsed = max(0, int(time.monotonic() - started))
             glyph = _spinner_glyph(frame_idx)
@@ -157,6 +160,7 @@ async def _tick_waiting_dots(placeholder: Message, *, started: float | None = No
                     await bot._tg_call(
                         placeholder.edit_text, glyph + " " + _lang_t(lang, "progress_thinking", sec=elapsed),
                         parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW,
+                        **markup_kwargs,
                     )
             frame_idx += 1
             await bot._dots_sleep(bot._DOTS_TICK_SEC)
@@ -164,7 +168,7 @@ async def _tick_waiting_dots(placeholder: Message, *, started: float | None = No
         raise
 
 
-async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, first_chunk_limit: float, first_task=None, status=None, wait_started: float | None = None):
+async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, first_chunk_limit: float, first_task=None, status=None, wait_started: float | None = None, reply_markup=None):
     """Генератор + ожидание первого куска: адаптивный предел (зависшая попытка — TimeoutError, плейсхолдер уйдёт следующей модели) и живой статус строго до первого yield. Пустой стрим — просто конец.
 
     status — живой статус из lumen_status.StatusMessage: его тикер уже рисует
@@ -174,7 +178,7 @@ async def _pieces_with_waiting_feedback(piece_agen, placeholder: Message, *, fir
     first_task — уже запущенный запрос первого куска (см. _run_streaming_reply):
     он стартует параллельно с отправкой плейсхолдера."""
     dots_task = None if status is not None else asyncio.create_task(
-        _tick_waiting_dots(placeholder, started=wait_started)
+        _tick_waiting_dots(placeholder, started=wait_started, reply_markup=reply_markup)
     )
     try:
         try:
@@ -385,7 +389,9 @@ async def _run_streaming_reply(
     # Инициализация ДО try: early-return (плейсхолдер не отправился) обязан видеть
     # эти имена в finally.
     stop_button_on = False
+    keep_placeholder_live = False
     _markup_edit = None
+    _stop_markup = None
 
     sent_messages: list[Message] = []
     full_text = ""
@@ -431,6 +437,25 @@ async def _run_streaming_reply(
     paint_interval = bot.STREAM_PAINT_TICK_GROUP_SEC if is_group else bot.STREAM_PAINT_TICK_SEC
     gate_interval = bot.STREAM_EDIT_MIN_INTERVAL_GROUP_SEC if is_group else bot.STREAM_EDIT_MIN_INTERVAL_SEC
 
+    def _active_markup(msg: Message):
+        # Кнопка живёт на первом пузыре; continuation-сообщения её не дублируют.
+        return _stop_markup if stop_button_on and sent_messages and msg is sent_messages[0] else None
+
+    def _markup_kwargs(msg: Message) -> dict:
+        markup = _active_markup(msg)
+        return {"reply_markup": markup} if markup is not None else {}
+
+    @contextlib.asynccontextmanager
+    async def _status_edit_lock():
+        # Тикер статуса и кнопка делят один edit_lock: иначе поздний кадр без
+        # клавиатуры может снять её сразу после прикрепления (prod 24.11.2026).
+        lock = getattr(status, "_edit_lock", None)
+        if lock is None:
+            yield
+        else:
+            async with lock:
+                yield
+
     def _header_html() -> str:
         return _md_to_html(header_md) if header_md else ""
 
@@ -473,7 +498,10 @@ async def _run_streaming_reply(
             parse_mode, payload = None, slice_md
         else:
             parse_mode, payload = ParseMode.HTML, html_out
-        edit_ok = await bot._tg_call(_stream_editor(sent_messages[-1]), payload, parse_mode=parse_mode, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+        edit_ok = await bot._tg_call(
+            _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])),
+            payload, parse_mode=parse_mode, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW,
+        )
         if edit_ok is not None:
             edit_fail_streak = 0
             paint_frames += 1
@@ -513,6 +541,10 @@ async def _run_streaming_reply(
         if placeholder is None:
             return None, None
         sent_messages.append(placeholder)
+        if reuse_placeholder is not None and status is not None:
+            resume = getattr(status, "resume", None)
+            if resume is not None:
+                resume()
         # Попытка к модели состоялась (запрос уже ушёл в генератор кусков);
         # пустой считают только ранний обрыв до показа — частичный ответ показан.
         bot._record_stats_event("model_attempts")
@@ -521,9 +553,15 @@ async def _run_streaming_reply(
         _markup_edit = getattr(placeholder, "edit_reply_markup", None)
         _stop_markup = _stop_button_markup(chat_id)
         if _stop_markup is not None and _markup_edit is not None:
-            await bot._tg_call(_markup_edit, reply_markup=_stop_markup,
-                               call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT, link_preview_options=NO_LINK_PREVIEW)
+            # Выставляем до await: если отмена пришла после принятия клавиатуры,
+            # finally всё равно должен её снять (review 24.11.2026).
             stop_button_on = True
+            async with _status_edit_lock():
+                if status is not None:
+                    status.reply_markup = _stop_markup
+                await bot._tg_call(_markup_edit, reply_markup=_stop_markup,
+                                   call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT, link_preview_options=NO_LINK_PREVIEW)
+                placeholder.reply_markup = _stop_markup
 
         first_chunk_limit = _model_first_chunk_limit(_model_speed_key(provider, model_id), bot.FIRST_CHUNK_TIMEOUT_SEC)
         if deadline is not None:
@@ -536,6 +574,7 @@ async def _run_streaming_reply(
             first_task=first_task,
             status=status,
             wait_started=wait_started,
+            reply_markup=_stop_markup if stop_button_on else None,
         )
         # Цикл мотает read_task с таймаутом до следующего кадра: кусок пришёл —
         # обрабатываем, таймер истёк — рисуем из буфера. Одна последовательная
@@ -655,7 +694,10 @@ async def _run_streaming_reply(
                     with contextlib.suppress(Exception):
                         await aclose()
                 final_answer = _IDENTITY_LEAK_FALLBACK if leak_kind == "identity" else _INJECTED_PAYLOAD_ECHO_FALLBACK
-                await bot._tg_call(sent_messages[-1].edit_text, final_answer, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+                await bot._tg_call(
+                    _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])),
+                    final_answer, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW,
+                )
                 await _remember_turn(state, history_text, user_text, final_answer, history_meta)
                 bot._record_quota_usage(provider, model_id)
                 return final_answer, None
@@ -701,7 +743,11 @@ async def _run_streaming_reply(
                     note = bot._t(message.chat.id, "stream_note_send_fail")
                     with contextlib.suppress(Exception):
                         # Пометка важнее хвоста куска (см. _append_note_fit).
-                        await bot._tg_call(sent_messages[idx].edit_text, _append_note_fit(chunk_text, note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+                        await bot._tg_call(
+                            _stream_editor(sent_messages[idx], reply_markup=_active_markup(sent_messages[idx])),
+                            _append_note_fit(chunk_text, note, bot.TG_MAX_LEN),
+                            parse_mode=ParseMode.HTML, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW,
+                        )
                     final_answer = _history_safe_answer(full_text.strip())
                     await _remember_turn(state, history_text, user_text, final_answer, history_meta)
                     bot._record_quota_usage(provider, model_id)
@@ -710,7 +756,8 @@ async def _run_streaming_reply(
                     # Финализация — обязательная правка: границу заморозили, текст
                     # обязан догнать её сразу (force берёт слот).
                     edit_ok = await bot._tg_call(
-                        _stream_editor(sent_messages[idx]), _final_chunk_html(chunk_text, idx),
+                        _stream_editor(sent_messages[idx], reply_markup=_active_markup(sent_messages[idx])),
+                        _final_chunk_html(chunk_text, idx),
                         parse_mode=ParseMode.HTML, call_timeout=15.0,
                     link_preview_options=NO_LINK_PREVIEW,
                     )
@@ -744,6 +791,7 @@ async def _run_streaming_reply(
         full_text = _strip_provider_artifacts(full_text)
         if _is_empty_like(full_text):
             # Пустой стрим — неудача, но плейсхолдер отдаём вызывающему коду (см. докстринг).
+            keep_placeholder_live = True
             return None, sent_messages[-1]
 
         # Замеры — ДО довывода (пауза не должна искажать оценку), catch-up паузы в total модели — сознательно (важна видимая задержка).
@@ -781,7 +829,8 @@ async def _run_streaming_reply(
             while len(final_chunks) > len(sent_messages):
                 idx = len(sent_messages) - 1
                 edit_ok = await bot._tg_call(
-                    _stream_editor(sent_messages[idx]), _final_chunk_html(final_chunks[idx], idx),
+                    _stream_editor(sent_messages[idx], reply_markup=_active_markup(sent_messages[idx])),
+                    _final_chunk_html(final_chunks[idx], idx),
                     parse_mode=ParseMode.HTML, call_timeout=15.0,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
@@ -859,10 +908,13 @@ async def _run_streaming_reply(
                 # Таблицы и прочий rich-контент: обычный путь без блока активности —
                 # но нарисованную во время стрима activity-строку терять нельзя.
                 body = header_md + "\n\n" + final_text if header_md else final_text
-                await bot._edit_message_quietly(sent_messages[-1], body, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+                await bot._edit_message_quietly(
+                    sent_messages[-1], body, call_timeout=15.0,
+                    link_preview_options=NO_LINK_PREVIEW, **_markup_kwargs(sent_messages[-1]),
+                )
             else:
                 edited = await bot._tg_call(
-                    sent_messages[-1].edit_text, html_text,
+                    _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])), html_text,
                     parse_mode=ParseMode.HTML, call_timeout=15.0,
                     link_preview_options=NO_LINK_PREVIEW,
                 )
@@ -871,15 +923,18 @@ async def _run_streaming_reply(
                     # разметки всему ответу (прод 17.11.2026: ** оставались сырыми).
                     await asyncio.sleep(0.7)
                     edited = await bot._tg_call(
-                        sent_messages[-1].edit_text, html_text,
+                        _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])), html_text,
                         parse_mode=ParseMode.HTML, call_timeout=15.0,
                         link_preview_options=NO_LINK_PREVIEW,
                     )
                 if edited is None:
                     # Последний рубеж — голый текст без markdown-синтаксиса.
                     from lumen_rich import _strip_markdown
-                    await bot._tg_call(sent_messages[-1].edit_text, _strip_markdown(plain_text),
-                                       parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+                    await bot._tg_call(
+                        _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])),
+                        _strip_markdown(plain_text), parse_mode=None, call_timeout=15.0,
+                        link_preview_options=NO_LINK_PREVIEW,
+                    )
         else:
             if not tail_already_final:
                 # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
@@ -888,7 +943,10 @@ async def _run_streaming_reply(
                 body = final_text
                 if header_md and len(final_chunks) == 1:
                     body = header_md + "\n\n" + final_text
-                await bot._edit_message_quietly(sent_messages[-1], body, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+                await bot._edit_message_quietly(
+                    sent_messages[-1], body, call_timeout=15.0,
+                    link_preview_options=NO_LINK_PREVIEW, **_markup_kwargs(sent_messages[-1]),
+                )
 
     except _StoppedByUser:
         # Остановка человеком: частичный текст остаётся на экране и ложится в
@@ -902,11 +960,15 @@ async def _run_streaming_reply(
             with contextlib.suppress(Exception):
                 tail_text = full_text[covered_len:] if frozen or covered_len else full_text
                 note = bot._t(message.chat.id, "stream_note_stopped")
-                await bot._tg_call(sent_messages[-1].edit_text,
-                                   _append_note_fit(tail_text, note, bot.TG_MAX_LEN),
-                                   parse_mode=ParseMode.HTML, call_timeout=15.0,
-                                   link_preview_options=NO_LINK_PREVIEW)
+                await bot._tg_call(
+                    _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])),
+                    _append_note_fit(tail_text, note, bot.TG_MAX_LEN),
+                    parse_mode=ParseMode.HTML, call_timeout=15.0,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
     except _SearchRequested:
+        # Следующий поисковый проход переиспользует пузырёк и статус.
+        keep_placeholder_live = True
         # Не сбой модели: остывка, карантин и model_failures тут ни при чём.
         # Но вызов провайдера уже стоил денег провайдера: расход пишем, лимит
         # человека — нет (его спишет настоящий ответ; аудит 16.11.2026).
@@ -938,6 +1000,7 @@ async def _run_streaming_reply(
             # Плейсхолдер НЕ удаляем — возвращаем для переиспользования (см. докстринг).
             log.warning('[stream] Stream %s/%s failed before showing any content, falling back to a regular call: %s', provider, model_id, exc)
             bot._record_stats_event("model_failures")
+            keep_placeholder_live = True
             return None, (sent_messages[-1] if sent_messages else None)
         log.warning('[stream] Stream %s/%s failed after partially showing the response, finishing as-is: %s', provider, model_id, exc)
         if _detect_identity_leak(full_text):
@@ -945,12 +1008,20 @@ async def _run_streaming_reply(
             log.warning('[identity-leak] Leak caught by the fallback guard (%s_stream_exception_path): %r', provider, full_text[:500])
             full_text = _IDENTITY_LEAK_FALLBACK
             with contextlib.suppress(Exception):
-                await bot._tg_call(sent_messages[-1].edit_text, _IDENTITY_LEAK_FALLBACK, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+                await bot._tg_call(
+                    _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])),
+                    _IDENTITY_LEAK_FALLBACK, parse_mode=None, call_timeout=15.0,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
         elif _detect_injected_payload_echo(full_text):
             log.warning('[injection-echo] Injected-instruction echo caught by the fallback guard (%s_stream_exception_path): %r', provider, full_text[:500])
             full_text = _INJECTED_PAYLOAD_ECHO_FALLBACK
             with contextlib.suppress(Exception):
-                await bot._tg_call(sent_messages[-1].edit_text, _INJECTED_PAYLOAD_ECHO_FALLBACK, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+                await bot._tg_call(
+                    _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])),
+                    _INJECTED_PAYLOAD_ECHO_FALLBACK, parse_mode=None, call_timeout=15.0,
+                    link_preview_options=NO_LINK_PREVIEW,
+                )
         else:
             with contextlib.suppress(Exception):
                 # Пометку ставим на ХВОСТ от замороженной границы: полный пересчёт
@@ -958,7 +1029,11 @@ async def _run_streaming_reply(
                 # (пункт 5; раньше хвост пересобранного разбиения затирал показанное).
                 tail_text = full_text[covered_len:] if frozen or covered_len else full_text
                 note = bot._t(message.chat.id, "stream_note_interrupted")
-                await bot._tg_call(sent_messages[-1].edit_text, _append_note_fit(tail_text, note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
+                await bot._tg_call(
+                    _stream_editor(sent_messages[-1], reply_markup=_active_markup(sent_messages[-1])),
+                    _append_note_fit(tail_text, note, bot.TG_MAX_LEN),
+                    parse_mode=ParseMode.HTML, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW,
+                )
             # Частичный ответ уже показан и ляжет в историю ниже — запоминаем, что
             # его оборвало: слово «продолжи» добьёт с места обрыва (_continue_after_interrupt).
             # stream_interrupted переживает успешный возврат: иначе _handle_message_core
@@ -968,20 +1043,13 @@ async def _run_streaming_reply(
             bot.mark_state_dirty(chat_id)
     finally:
         bot._end_stream_stop_scope(chat_id)
-        if stop_button_on and _markup_edit is not None:
-            # Кнопка не имеет права пережить ответ: снимаем её тем же сообщением.
-            with contextlib.suppress(Exception):
-                await bot._tg_call(_markup_edit, reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
-                                   call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT, link_preview_options=NO_LINK_PREVIEW)
-        # Ранний выход (плейсхолдер не отправился) оставляет запрос первого куска
-        # висеть: гасим, иначе он живёт до таймаута провайдера. Висящий read_task
-        # следующего куска гасим тем же образом до aclose генератора.
+        # Сначала гасим всех, кто ещё может править пузырёк. cleanup кнопки должен
+        # быть последней Telegram-правкой, иначе опоздавший кадр вернёт её (review
+        # 24.11.2026: воспроизведено управляемым двойником Telegram).
         if read_task is not None and not read_task.done():
             read_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await read_task
-        # Кадр, ушедший в сеть до раннего выхода, ждём или гасим здесь: иначе он
-        # правил бы пузырёк уже после того, как ответ дописан другим путём.
         if paint_task is not None and not paint_task.done():
             paint_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -994,6 +1062,20 @@ async def _run_streaming_reply(
         if aclose is not None:
             with contextlib.suppress(Exception):
                 await aclose()
+        if not keep_placeholder_live:
+            if status is not None:
+                with contextlib.suppress(Exception):
+                    await status.stop()
+                if getattr(status, "reply_markup", None) is not None:
+                    await status.clear_reply_markup()
+            # При fallback status.message и reuse_placeholder могут быть разными:
+            # чистим оба, иначе на исходном пузыре остаётся вечная Stop-кнопка.
+            if (stop_button_on and _markup_edit is not None and sent_messages
+                    and (status is None or sent_messages[0] is not status.message)):
+                with contextlib.suppress(Exception):
+                    await bot._tg_call(_markup_edit, reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                                       call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT, link_preview_options=NO_LINK_PREVIEW)
+                    sent_messages[0].reply_markup = None
 
     # Пустой full_text сюда не доходит — ветки "Empty response" нет.
     # Скраб уже применён до финальной правки (см. выше).

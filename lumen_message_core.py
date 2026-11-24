@@ -1989,6 +1989,8 @@ async def _handle_message_core(
                     await status.delete()
                 else:
                     await status.stop()
+                    if getattr(status, "reply_markup", None) is not None:
+                        await status.clear_reply_markup()
 
 
 async def _process_raw_update(raw_update: dict) -> None:

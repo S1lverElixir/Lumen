@@ -197,10 +197,17 @@ class _FakeGeminiResponse:
 class _FakeSentMessage:
     def __init__(self):
         self.edits = []
+        self.edit_kwargs = []
+        self.markup_edits = []
         self.deleted = False
 
     async def edit_text(self, text, **kwargs):
         self.edits.append((text, kwargs.get("parse_mode")))
+        self.edit_kwargs.append(kwargs)
+        return self
+
+    async def edit_reply_markup(self, **kwargs):
+        self.markup_edits.append(kwargs)
         return self
 
     async def delete(self):

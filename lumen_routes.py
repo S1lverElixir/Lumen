@@ -15,7 +15,7 @@ from typing import Any
 
 import aiohttp
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, Message
 from google.genai import types
 
 from lumen_errors import _is_empty_like
@@ -1063,6 +1063,21 @@ async def _run_route(
                         _count_user_answer(provider)
                         _note_answered(provider, stream_model)
                     return streamed, True
+        if reusable_placeholder is not None and getattr(reusable_placeholder, "reply_markup", None):
+            # Нестримовый фолбэк не умеет реагировать на Stop: убираем кнопку,
+            # чтобы она не выглядела рабочей во время обычного запроса (review
+            # 24.11.2026).
+            clear = getattr(status, "clear_reply_markup", None) if status is not None else None
+            if clear is not None and getattr(status, "reply_markup", None) is not None:
+                await clear()
+            else:
+                edit = getattr(reusable_placeholder, "edit_reply_markup", None)
+                if edit is not None:
+                    await bot._tg_call(
+                        edit, reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                        call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                    )
+            reusable_placeholder.reply_markup = None
         try:
             if provider == "gemini":
                 ans = await bot.ask_gemini(chat_id, ai_prompt, media=media, youtube_url=youtube_url, model_chain=ids, deadline=deadline, provenance=provenance, history_text=history_text, history_meta=history_meta, effort=effort)
