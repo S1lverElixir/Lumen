@@ -19,6 +19,9 @@ os.environ.setdefault("GEMINI_API_KEY", "test-key-not-real")
 # Wake-word группы: фиксируем дефолты, иначе шелл владельца переключал бы тесты (ревью 18.11.2026).
 os.environ.setdefault("GROUP_WAKE_ENABLED", "1")
 os.environ.setdefault("GROUP_WAKE_WORDS", "люмен,lumen")
+# Stop-контроль включается отдельно в своих тестах; общий suite не должен
+# получать лишние control-сообщения из переменной владельца.
+os.environ["STOP_BUTTON_ENABLED"] = "0"
 # Провайдерские ключи — только пустые: иначе bot.py ниже подхватит .env
 # разработчика и тест сходит в живой API (сеть, чужая квота, нестабильность).
 # MUNITO_ENABLED/MUNITO_KEEP_FALLBACKS гасятся вместе с ключом: режим эксперимента
