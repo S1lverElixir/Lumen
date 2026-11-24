@@ -640,9 +640,9 @@ FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
 STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10, max_value=59)
 # Остановка ответа командой /stop: выключатель, как у остальных новых слоёв.
 STOP_COMMAND_ENABLED = (os.getenv("STOP_COMMAND_ENABLED", "1") or "").strip().lower() not in ("0", "false", "off")
-# Stop-контроль включён по умолчанию: отдельный маленький пузырь не раздувает
-# правки ответа и остаётся доступным даже у длинного сообщения.
-STOP_BUTTON_ENABLED = (os.getenv("STOP_BUTTON_ENABLED", "1") or "").strip().lower() in ("1", "true", "on")
+# Stop-контроль включён всегда: отдельная reply-кнопка не раздувает правки
+# ответа и остаётся доступной даже у длинного сообщения.
+STOP_BUTTON_ENABLED = True
 STREAM_ROUTE_STALL_GRACE_SEC = _env_number("STREAM_ROUTE_STALL_GRACE_SEC", 20, min_value=2)
 # Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
 # дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).

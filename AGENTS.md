@@ -184,7 +184,7 @@ Gemini is the unconditional reserve on every route where Munito answers.
   only a URL that already appeared in the message, in this turn's results or in an already read page is
   fetched. The Gemini reserve has the same `web_search` loop behind `GEMINI_AGENT_TURN_ENABLED` (off by
   default until a live run). `/stop` halts a streaming answer — the partial text stays and «продолжи»
-  continues it; the separate Stop control is `STOP_BUTTON_ENABLED`, on by default.
+  continues it; the separate Stop control is always enabled in production.
 - Limits are derived, not picked: a daily cap sits under the provider's real free-tier budget with
   headroom, and per-user caps follow the existing family (one for messages, one per heavy feature).
   The global cap is what protects a shared provider, so a reflexively small number is not safety.

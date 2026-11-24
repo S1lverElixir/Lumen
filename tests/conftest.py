@@ -41,6 +41,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import bot
+# Production всегда показывает Stop; общий suite не должен получать лишние
+# control-сообщения, их включают отдельные тесты.
+bot.STOP_BUTTON_ENABLED = False
 import lumen_limits
 import lumen_router_config
 
