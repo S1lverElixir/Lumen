@@ -797,9 +797,9 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
         bot.ask_munito_text = original_munito_text
 
 
-def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
-    # Обычный текст после раннего сбоя стрима не должен терять «Thought for Ns»:
-    # статуса в этом пути нет, блок строим по времени маршрута.
+def test_run_route_reuse_has_no_thought_block_in_private_chat(monkeypatch):
+    # Обычный текст после раннего сбоя стрима тоже остаётся без финальной
+    # строки «Думаю N c»: настоящий activity-блок нужен только для этапов.
     chat_id = 999322
     placeholder = _FakeSentMessage()
     incoming = _FakeIncomingMessage(chat_id)
@@ -818,8 +818,8 @@ def test_run_route_reuse_adds_thought_block_in_private_chat(monkeypatch):
     assert ans == "Ответ от резервной модели"
     assert sent is True
     final_text = placeholder.edits[-1][0]
-    assert final_text.startswith("<i>✻ Thought for")
-    assert "Ответ от резервной модели" in final_text
+    assert final_text == "Ответ от резервной модели"
+    assert "Thought for" not in final_text
     bot.chat_state.pop(chat_id, None)
 
 

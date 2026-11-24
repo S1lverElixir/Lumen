@@ -5,6 +5,7 @@ lumen_formatting.py — markdown Lumen в Telegram HTML.
 
 from __future__ import annotations
 
+import html
 import re
 from urllib.parse import urlparse
 
@@ -149,11 +150,63 @@ def _latex_superscript(m: re.Match) -> str:
 def _latex_subscript(m: re.Match) -> str:
     return "".join(_LATEX_SUBSCRIPT_MAP.get(ch, ch) for ch in m.group(1))
 
+_INLINE_MATH_DOLLAR_RE = re.compile(r"(?<![\\$])\$(?!\$)([^\s$][^$\n]*?)(?<![\\\s])\$(?!\$)")
+_LATEX_TEXT_RE = re.compile(r"\\(?:text|mathrm|mathbf|operatorname)\{([^{}]*)\}")
+_LATEX_ENV_RE = re.compile(r"\\(?:begin|end)\{[^{}]+\}")
+_CURRENCY_MATH_RE = re.compile(r"\d[\d\s.,]*")
+
+
+def _is_currency_math_match(match: re.Match) -> bool:
+    body = match.group(1)
+    if _CURRENCY_MATH_RE.fullmatch(body):
+        return True
+    # Диапазон "$100/$50" регулярка видит как "$100/$": числовое тело с
+    # разделителем и цифрой сразу после закрывающего доллара — валюта, не формула.
+    text = match.string
+    return (
+        body[:1].isdigit()
+        and body[-1:] in ("/", "-", "–", "—")
+        and match.end() < len(text)
+        and text[match.end()].isdigit()
+    )
+
+
+def _scrub_inline_math(match: re.Match) -> str:
+    # "$100" и "$50 до $100" — деньги, а не парная формула. Пустая парная
+    # сумма "$100$" тоже остаётся как есть: терять знак валюты нельзя.
+    if _is_currency_math_match(match):
+        return match.group(0)
+    # Звёздочка внутри формулы — оператор умножения, а не Markdown-курсив.
+    return re.sub(r"\s+", " ", match.group(1).replace("&", " ").replace("*", "∗")).strip()
+
+
+def _split_bare_url_markdown(match: re.Match) -> tuple[str, str]:
+    raw = match.group(0)
+    previous = match.string[match.start() - 1] if match.start() else ""
+    # Regex URL захватывает и закрывающий Markdown, и точку после него. Сначала
+    # отделяем пунктуацию, затем маркер; иначе `**url**.` становится сырой строкой.
+    core = raw
+    suffix = ""
+    while core and core[-1] in ".,;:!?…»”’":
+        suffix = core[-1] + suffix
+        core = core[:-1]
+    for marker in ("**", "__", "~~", "*", "_"):
+        if previous == marker[0] and core.endswith(marker) and len(core) > len(marker):
+            return core[:-len(marker)], marker + suffix
+    return raw, ""
+
+
 def _scrub_latex(text: str) -> str:
     """Сырой LaTeX в юникод. Вызывать только после вырезки кода, иначе портятся слэши в regex/путях Windows."""
     if "\\" not in text and "$" not in text:
         return text
-    # Снимаем только $$/\[..\]/\(..\): одиночный $ не трогаем, иначе сумма "$100" спарится с формулой и испортит оба.
+    # Инлайн-математика снимается только по тесной паре "$...$"; числовое
+    # содержимое остаётся валютой. Так "$100, а формула $x^2$" не склеивается.
+    text = _LATEX_TEXT_RE.sub(r"\1", text)
+    text = _LATEX_ENV_RE.sub("", text)
+    text = re.sub(r"\\\\", " ", text)
+    text = re.sub(r"\\(?:quad|qquad)\b", " ", text)
+    text = _INLINE_MATH_DOLLAR_RE.sub(_scrub_inline_math, text)
     text = re.sub(r"\\\[(.*?)\\\]", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"\\\((.*?)\\\)", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"\$\$(.*?)\$\$", r"\1", text, flags=re.DOTALL)
@@ -378,7 +431,15 @@ def _md_to_html(text: str) -> str:
 
     # ── Фаза 1: вырезаем код до обработки ────────────────
     _saved: dict[str, str] = {}
+    _urls: dict[str, str] = {}
     _counter = [0]
+
+    def _save_bare_url(m: re.Match) -> str:
+        url, suffix = _split_bare_url_markdown(m)
+        key = f"\x00URL{_counter[0]}\x00"
+        _counter[0] += 1
+        _urls[key] = url
+        return key + suffix
 
     def _save_block(m: re.Match) -> str:
         key = f"\x00CB{_counter[0]}\x00"
@@ -390,6 +451,7 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r"`[^`\n]+`", _save_block, text)
     # Ссылки вырезаем как код: "_" в URL ломает italic/bold. Markdown внутри label не поддерживаем.
     text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", _save_block, text)
+    text = re.sub(r"https?://[^\s()<>|\"']+", _save_bare_url, text)
 
     # ── Phase 1.3: сырой LaTeX → юникод (см. _scrub_latex выше) — код уже
     # вынесен на предыдущем шаге, поэтому обратные слэши в реальном коде
@@ -477,6 +539,9 @@ def _md_to_html(text: str) -> str:
     # <b>/<i> в коде выше; код-примеры с буквальным <br> редки.
     text = text.replace("\x00BR\x00", "\n")
 
+    for key, url in _urls.items():
+        text = text.replace(key, html.escape(url, quote=True))
+
     return text
 
 
@@ -539,6 +604,7 @@ def _md_to_rich_html(text: str) -> str:
     _math: dict[str, tuple[str, bool]] = {}
     _tables: dict[str, tuple[list[str], list[list[str]]]] = {}
     _heads: dict[str, tuple[int, str]] = {}
+    _urls: dict[str, str] = {}
     _counter = [0]
 
     def _take(store: dict, prefix: str, value) -> str:
@@ -547,14 +613,24 @@ def _md_to_rich_html(text: str) -> str:
         store[key] = value
         return key
 
+    def _save_bare_url(m: re.Match) -> str:
+        url, suffix = _split_bare_url_markdown(m)
+        return _take(_urls, "URL", url) + suffix
+
     text = re.sub(r"```[a-zA-Z0-9]*\n.*?\n```", lambda m: _take(_code, "CB", m.group(0)), text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]+`", lambda m: _take(_code, "CB", m.group(0)), text)
     text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", lambda m: _take(_links, "CB", m.group(0)), text)
+    text = re.sub(r"https?://[^\s()<>|\"']+", _save_bare_url, text)
     text = re.sub(r"\$\$([\s\S]+?)\$\$", lambda m: _take(_math, "MM", (m.group(1), True)), text)
     # Инлайн-форма требует содержимого без пробелов по краям (как в GFM): иначе
     # цены вида "$50 до $100" превратились бы в "формулу". Одиночные "$80 000"
     # без закрывающего знака и так не матчатся.
-    text = re.sub(r"(?<!\$)\$(?!\$)([^\s$][^$\n]*?)(?<!\s)\$(?!\$)", lambda m: _take(_math, "MM", (m.group(1), False)), text)
+    def _take_inline_math(m: re.Match) -> str:
+        if _is_currency_math_match(m):
+            return m.group(0)
+        return _take(_math, "MM", (m.group(1), False))
+
+    text = _INLINE_MATH_DOLLAR_RE.sub(_take_inline_math, text)
     # Скобочные формы LaTeX (реальный кейс nemotron — \[ S = \pi r^{2} \]): тот же
     # смысл, что $/$$ выше, извлекаются раньше них, чтобы $ внутри не разобрали.
     text = re.sub(r"\\\[([\s\S]+?)\\\]", lambda m: _take(_math, "MM", (m.group(1), True)), text)
@@ -650,6 +726,9 @@ def _md_to_rich_html(text: str) -> str:
             replacement = f"<code>{inner}</code>"
         text = text.replace(key, replacement)
 
+    for key, url in _urls.items():
+        text = text.replace(key, html.escape(url, quote=True))
+
     text = text.replace("\x00BR\x00", "<br/>")
 
     return text
@@ -664,20 +743,29 @@ def _strip_markdown(text: str) -> str:
         return ""
     # Голые URL прячем до чистки: "_" внутри них не выделение.
     _urls: dict[str, str] = {}
+    _code: dict[str, str] = {}
     def _save_url(m: re.Match) -> str:
+        url, suffix = _split_bare_url_markdown(m)
         key = f"\x00U{len(_urls)}\x00"
-        _urls[key] = m.group(0)
+        _urls[key] = url
+        return key + suffix
+    def _save_code(m: re.Match) -> str:
+        key = f"\x00C{len(_code)}\x00"
+        _code[key] = m.group(1)
         return key
-    text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", _save_code, text, flags=re.DOTALL)
+    text = re.sub(r"`([^`\n]+)`", _save_code, text)
     text = re.sub(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)", r"\1", text)
-    text = re.sub(r"https?://[^\s()<>]+", _save_url, text)
+    text = re.sub(r"https?://[^\s()<>|\"']+", _save_url, text)
+    text = _scrub_latex(text)
     text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text, flags=re.DOTALL)
     # Одиночное "_" только вне слова: my_file_name и имена файлов не трогаем.
     text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"\1", text)
     text = re.sub(r"\*(.*?)\*", r"\1", text)
     text = re.sub(r"~~(.*?)~~", r"\1", text)
-    text = re.sub(r"`([^`\n]+)`", r"\1", text)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    for key, code in _code.items():
+        text = text.replace(key, code)
     for key, url in _urls.items():
         text = text.replace(key, url)
     return text

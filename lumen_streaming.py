@@ -10,14 +10,15 @@ import logging
 import time
 from typing import Any
 import aiohttp
-from aiogram.enums import ChatType, ParseMode
+from aiogram.enums import ParseMode
 from aiogram.types import Message
 
 from lumen_errors import _is_empty_like
 from lumen_formatting import _md_to_html, _split_text_chunks, _strip_provider_artifacts, _truncate_html_to_fit
 from lumen_lang import t as _lang_t
-from lumen_status import _spinner_glyph, thought_block
+from lumen_status import _spinner_glyph
 from lumen_message_parse import _history_user_text
+from lumen_rich import NO_LINK_PREVIEW
 import lumen_memory
 from lumen_model_speed import (
     speed_key as _model_speed_key,
@@ -72,7 +73,7 @@ async def _tick_waiting_dots(placeholder: Message, *, started: float | None = No
             with contextlib.suppress(Exception):
                 await bot._tg_call(
                     placeholder.edit_text, glyph + " " + _lang_t(lang, "progress_thinking", sec=elapsed),
-                    parse_mode=None, call_timeout=15.0,
+                    parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW,
                 )
             frame_idx += 1
             await bot._dots_sleep(bot._DOTS_TICK_SEC)
@@ -290,6 +291,7 @@ async def _run_streaming_reply(
             edit_ok = await bot._tg_call(
                 sent_messages[idx].edit_text, _md_to_html(new_chunks[idx]),
                 parse_mode=ParseMode.HTML, call_timeout=15.0,
+                link_preview_options=NO_LINK_PREVIEW,
             )
             edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
             edits_dead = edit_fail_streak >= 3
@@ -366,7 +368,7 @@ async def _run_streaming_reply(
                     with contextlib.suppress(Exception):
                         await aclose()
                 final_answer = _IDENTITY_LEAK_FALLBACK if leak_kind == "identity" else _INJECTED_PAYLOAD_ECHO_FALLBACK
-                await bot._tg_call(sent_messages[-1].edit_text, final_answer, parse_mode=None, call_timeout=15.0)
+                await bot._tg_call(sent_messages[-1].edit_text, final_answer, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
                 await _remember_turn(state, history_text, user_text, final_answer, history_meta)
                 bot._record_quota_usage(provider, model_id)
                 return final_answer, None
@@ -380,19 +382,19 @@ async def _run_streaming_reply(
                 idx = len(sent_messages) - 1
                 # Continuation открываем ПЕРВЫМ и финализируем одним вызовом — раньше было два edit_text при отказе (лишний HTTP-запрос).
                 # bot.bot — инстанс aiogram Bot (имя bot занято модулем).
-                new_msg = await bot._tg_call(bot.bot.send_message, chat_id=message.chat.id, text="…", call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
+                new_msg = await bot._tg_call(bot.bot.send_message, chat_id=message.chat.id, text="…", call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT, link_preview_options=NO_LINK_PREVIEW)
                 if new_msg is None:
                     # idx ещё НЕ финализирован — не даём общему except перезаписать показанный текст чужим (там инвариант "sent[-1] == chunks[-1]" уже неверен).
                     note = bot._t(message.chat.id, "stream_note_send_fail")
                     with contextlib.suppress(Exception):
                         # Пометка важнее хвоста куска (см. _append_note_fit).
-                        await bot._tg_call(sent_messages[idx].edit_text, _append_note_fit(chunks[idx], note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0)
+                        await bot._tg_call(sent_messages[idx].edit_text, _append_note_fit(chunks[idx], note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
                     final_answer = full_text.strip()
                     await _remember_turn(state, history_text, user_text, final_answer, history_meta)
                     bot._record_quota_usage(provider, model_id)
                     return final_answer, None
                 if not edits_dead:
-                    edit_ok = await bot._tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]), parse_mode=ParseMode.HTML, call_timeout=15.0)
+                    edit_ok = await bot._tg_call(sent_messages[idx].edit_text, _md_to_html(chunks[idx]), parse_mode=ParseMode.HTML, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
                     # Серия неуспешных правок подряд — сообщение снесли посреди стрима:
                     # дальше не правим, в финале досылаем ответ новым сообщением.
                     edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
@@ -411,7 +413,7 @@ async def _run_streaming_reply(
             reveal_len = min(len(target_full), max(0, int((now - (reveal_base_ts or now)) * typing_speed)))
             current_chunk_text = target_full[:reveal_len]
             if not edits_dead and now - last_edit_ts >= bot.STREAM_EDIT_MIN_INTERVAL_SEC and current_chunk_text != last_edited_plain:
-                edit_ok = await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0)
+                edit_ok = await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
                 edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
                 edits_dead = edit_fail_streak >= 3
                 last_edited_plain = current_chunk_text
@@ -448,6 +450,7 @@ async def _run_streaming_reply(
                 edit_ok = await bot._tg_call(
                     sent_messages[idx].edit_text, _md_to_html(final_chunks[idx]),
                     parse_mode=ParseMode.HTML, call_timeout=15.0,
+                    link_preview_options=NO_LINK_PREVIEW,
                 )
                 committed[idx] = final_chunks[idx]
                 if bot.bot is None:
@@ -466,6 +469,7 @@ async def _run_streaming_reply(
                     bot.bot.send_message, chat_id=message.chat.id,
                     text=_md_to_html(next_chunk),
                     parse_mode=ParseMode.HTML, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                    link_preview_options=NO_LINK_PREVIEW,
                 )
                 if new_msg is None:
                     edits_dead = True
@@ -488,7 +492,7 @@ async def _run_streaming_reply(
                 # короче интервала правок, иначе серия быстро ловти 429.
                 now = time.monotonic()
                 if current_chunk_text != last_edited_plain and now - last_edit_ts >= bot.STREAM_EDIT_MIN_INTERVAL_SEC:
-                    await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0)
+                    await bot._tg_call(sent_messages[-1].edit_text, current_chunk_text, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
                     last_edited_plain = current_chunk_text
                     last_edit_ts = now
 
@@ -499,34 +503,27 @@ async def _run_streaming_reply(
             # досылаем новым сообщением (_send_text внутри режет на части сам),
             # иначе пользователь его не увидит.
             await bot._safe_reply(message, full_text.strip())
-        elif len(final_chunks) == 1 and (
-            status is not None or getattr(getattr(message, "chat", None), "type", None) == ChatType.PRIVATE
-        ):
-            # Одно сообщение: сверху добавляем свёрнутый блок активности,
-            # как «Thought for Ns» в Claude. Длинный ответ не трогаем: заголовок
-            # не влез бы в лимит первого сообщения. Без раннего статуса (обычный
-            # текст) строим минимальный блок по времени до первого куска.
-            if status is not None:
-                html_text, plain_text = status.compose_answer(final_text)
-            else:
-                thought_sec = int(max(0.0, (first_piece_ts or overall_start_ts) - overall_start_ts))
-                html_text, plain_text = thought_block(bot._chat_lang(message.chat.id), thought_sec, final_text)
+        elif len(final_chunks) == 1 and status is not None:
+            # Блок активности остаётся только там, где были реальные этапы
+            # (поиск/медиа/ссылка). Простой ответ Claude сейчас показывает без него.
+            html_text, plain_text = status.compose_answer(final_text)
             if html_text is None:
                 # Таблицы и прочий rich-контент: обычный путь без блока активности.
-                await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
+                await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
             else:
                 edited = await bot._tg_call(
                     sent_messages[-1].edit_text, html_text,
                     parse_mode=ParseMode.HTML, call_timeout=15.0,
+                    link_preview_options=NO_LINK_PREVIEW,
                 )
                 if edited is None:
-                    await bot._tg_call(sent_messages[-1].edit_text, plain_text, parse_mode=None, call_timeout=15.0)
+                    await bot._tg_call(sent_messages[-1].edit_text, plain_text, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
         else:
             if not tail_already_final:
                 # HTML->plain fallback — внутри _edit_message_quietly (раньше дублировался здесь вручную).
                 # Досланный хвост уже содержит финальный HTML: повторная правка
                 # получила бы "not modified" и срезала ссылки/разметку (аудит 28.10.2026).
-                await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0)
+                await bot._edit_message_quietly(sent_messages[-1], final_text, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
 
     except Exception as exc:
         if _is_empty_like(full_text):
@@ -561,18 +558,18 @@ async def _run_streaming_reply(
             log.warning('[identity-leak] Leak caught by the fallback guard (%s_stream_exception_path): %r', provider, full_text[:500])
             full_text = _IDENTITY_LEAK_FALLBACK
             with contextlib.suppress(Exception):
-                await bot._tg_call(sent_messages[-1].edit_text, _IDENTITY_LEAK_FALLBACK, parse_mode=None, call_timeout=15.0)
+                await bot._tg_call(sent_messages[-1].edit_text, _IDENTITY_LEAK_FALLBACK, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
         elif _detect_injected_payload_echo(full_text):
             log.warning('[injection-echo] Injected-instruction echo caught by the fallback guard (%s_stream_exception_path): %r', provider, full_text[:500])
             full_text = _INJECTED_PAYLOAD_ECHO_FALLBACK
             with contextlib.suppress(Exception):
-                await bot._tg_call(sent_messages[-1].edit_text, _INJECTED_PAYLOAD_ECHO_FALLBACK, parse_mode=None, call_timeout=15.0)
+                await bot._tg_call(sent_messages[-1].edit_text, _INJECTED_PAYLOAD_ECHO_FALLBACK, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
         else:
             with contextlib.suppress(Exception):
                 chunks = _split_text_chunks(full_text, bot.TG_MAX_LEN)
                 final_text = chunks[-1] if chunks else full_text
                 note = bot._t(message.chat.id, "stream_note_interrupted")
-                await bot._tg_call(sent_messages[-1].edit_text, _append_note_fit(final_text, note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0)
+                await bot._tg_call(sent_messages[-1].edit_text, _append_note_fit(final_text, note, bot.TG_MAX_LEN), parse_mode=ParseMode.HTML, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
             # Частичный ответ уже показан и ляжет в историю ниже — запоминаем, что
             # его оборвало: слово «продолжи» добьёт с места обрыва (_continue_after_interrupt).
             # stream_interrupted переживает успешный возврат: иначе _handle_message_core

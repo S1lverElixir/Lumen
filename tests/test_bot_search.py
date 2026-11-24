@@ -120,6 +120,7 @@ class _FakeStatus:
         self.sources = []
         self.stopped = False
         self.deleted = False
+        self.delete_count = 0
 
     def add_done(self, key, **kwargs):
         self.done.append((key, kwargs))
@@ -135,6 +136,7 @@ class _FakeStatus:
 
     async def delete(self):
         self.deleted = True
+        self.delete_count += 1
 
 
 def test_fresh_query_status_shows_search_then_thinking(rate_guard_setup, monkeypatch):
@@ -166,6 +168,33 @@ def test_fresh_query_status_shows_search_then_thinking(rate_guard_setup, monkeyp
     assert fake_status.phases == [("progress_thinking", True)]
     assert captured["status"] is fake_status
     assert fake_status.stopped is True
+    bot.chat_state.pop(123, None)
+
+
+def test_status_start_is_deleted_when_pre_route_setup_raises(rate_guard_setup, monkeypatch):
+    # Прод 23.11.2026: статус ссылки пережил свой запрос и тикал поверх следующих.
+    # Startup-task создаётся до основного try; сбой сборки промпта не должен
+    # оставлять ни задачу, ни пузырь в чате.
+    message = rate_guard_setup()
+    message.text = "погугли что происходит с ДЦ Яндекса"
+    fake_status = _FakeStatus()
+
+    async def fake_start(reply_to, lang, key, *, timed=False):
+        return fake_status
+
+    async def fake_fetch(query, *, timeout_sec=None, max_results=None):
+        await asyncio.sleep(0)
+        return [{"title": "T", "url": "https://example.com/1", "snippet": "S"}]
+
+    def broken_prompt(snippets):
+        raise RuntimeError("prompt assembly failed")
+
+    monkeypatch.setattr("lumen_message_core.StatusMessage", SimpleNamespace(start=fake_start))
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
+    monkeypatch.setattr("lumen_message_core.format_snippets_for_prompt", broken_prompt)
+    asyncio.run(bot._handle_message_core(message))
+    assert fake_status.deleted is True
+    assert fake_status.delete_count == 1
     bot.chat_state.pop(123, None)
 
 

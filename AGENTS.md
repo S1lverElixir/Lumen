@@ -253,9 +253,10 @@ not committed, it drifts, and `docs/` stays the truth.
   it replays real fix-commits through an agent and judges by the repo gate. Eval data is part of
   the suite: `tests/test_eval_persona.py` fails when the question ids in
   `eval/persona_questions.json` stop being exactly 1..25 or a question loses its expectation.
-- Sentry: organization `silverelixir`. `find_organizations`, then `search_issues` with
-  `organizationSlug=silverelixir`, then `get_sentry_resource` with `resourceType=issue` for one
-  issue. Library docs (aiogram, FastAPI, google-genai, Deno): context7, `resolve-library-id` then
+- Sentry (organization `silverelixir`): its remote MCP was removed 2026-11-23 (endpoint returns
+  403 from this network), so there is no `find_organizations`/`search_issues` tool here — triage
+  issues through the Sentry web UI via the browser stack, or rely on `devtrace` and
+  `hf spaces logs`. Library docs (aiogram, FastAPI, google-genai, Deno): context7, `resolve-library-id` then
   `query-docs` — configured as a user-level connector in Qoder (the app has no per-project scope
   for custom connectors) and as an MCP server in `opencode.json`. A connector added mid-session
   appears only in a new chat; if the tools are missing here, say so instead of reciting

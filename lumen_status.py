@@ -27,16 +27,43 @@ def _spinner_glyph(frame_idx: int) -> str:
 _STATUS_MAX_LIFETIME_SEC = 300.0
 
 
-def thought_block(lang: str, sec: int, answer_md: str) -> tuple[str | None, str]:
-    """Свёрнутый блок «✻ Thought for Ns» над ответом: (HTML, простой текст).
-    Таблицы возвращают None — их показываем обычным rich-путём без блока."""
-    if any(_is_table_separator(line) for line in answer_md.splitlines()):
-        return None, answer_md
-    # Обычный ответ без поиска: одна курсивная строка, как «Thought for Ns»
-    # в Claude. Цитата с рамкой тут выглядела тяжело (ревью 28.10.2026).
-    line = "✻ " + _lang_t(lang, "progress_thought_for", sec=max(0, int(sec)))
-    html_block = "<i>" + html.escape(line) + "</i>\n\n" + _md_to_html(answer_md)
-    return html_block, line + "\n\n" + answer_md
+async def _send_status_message(reply_to: Message, text: str) -> Message | None:
+    """Отправить статус так, чтобы отмена не теряла уже принятое Telegram сообщение."""
+    import bot
+    send_task = asyncio.create_task(bot._tg_call(
+        bot._answer_sender(reply_to), text, parse_mode=None,
+        call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+    ))
+    try:
+        return await asyncio.shield(send_task)
+    except asyncio.CancelledError:
+        # Отмена не должна отменять уже отправленный запрос: дожидаемся его
+        # ограниченного _tg_call и удаляем полученный message_id.
+        sent = None
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            sent = await send_task
+        if sent is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await bot._delete_message_quietly(sent)
+        raise
+
+
+async def discard_status_start(task: asyncio.Task | None) -> None:
+    """Завершить незакреплённый startup-статус и убрать его пузырь.
+
+    Задача создаётся параллельно поиску. Если сборка промпта упадёт до того,
+    как вызывающий код получит StatusMessage, его тикер иначе переживёт запрос
+    и продолжит менять старое сообщение поверх следующих (прод 23.11.2026).
+    """
+    if task is None:
+        return
+    # StatusMessage.start сам очищает отправку при отмене, поэтому здесь можно
+    # дождаться задачи без риска потерять уже отправленный message_id.
+    status = None
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        status = await task
+    if status is not None:
+        await status.delete()
 
 
 class StatusMessage:
@@ -58,17 +85,14 @@ class StatusMessage:
         self._thought_seconds: int | None = None
         self._task: asyncio.Task | None = None
         self._stopped = False
+        self._deleted = False
 
     @classmethod
     async def start(cls, reply_to: Message, lang: str, key: str, *, timed: bool = False) -> "StatusMessage | None":
         """Отправляет первую строку статуса; None — Telegram не принял сообщение."""
-        import bot
         status = cls(message=reply_to, lang=lang)
         status._set_phrase(key, timed=timed)
-        sent = await bot._tg_call(
-            bot._answer_sender(reply_to), status._render(0), parse_mode=None,
-            call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
-        )
+        sent = await _send_status_message(reply_to, status._render(0))
         if sent is None:
             return None
         status.message = sent
@@ -104,14 +128,10 @@ class StatusMessage:
     async def start_action(cls, reply_to: Message, lang: str, text: str) -> "StatusMessage | None":
         """Статус действия (скачивание/генерация/озвучка): индикатор, фраза и живой
         счётчик секунд, как у инструментов в Claude."""
-        import bot
         status = cls(message=reply_to, lang=lang)
         status._literal = text
         status._literal_timed = True
-        sent = await bot._tg_call(
-            bot._answer_sender(reply_to), status._render(0), parse_mode=None,
-            call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
-        )
+        sent = await _send_status_message(reply_to, status._render(0))
         if sent is None:
             return None
         status.message = sent
@@ -234,6 +254,12 @@ class StatusMessage:
 
     async def delete(self) -> None:
         """Останавливает анимацию и убирает сообщение (провал маршрута, отмена)."""
+        if self._deleted:
+            return
         import bot
         await self.stop()
-        await bot._delete_message_quietly(self.message)
+        deleted = await bot._delete_message_quietly(self.message)
+        # Неудачный Telegram delete — не завершение: внешний cleanup должен
+        # иметь право повторить попытку, иначе временный сбой оставит пузырь.
+        if deleted:
+            self._deleted = True

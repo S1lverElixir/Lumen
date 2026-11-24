@@ -14,7 +14,7 @@ import time
 from typing import Any
 
 import aiohttp
-from aiogram.enums import ChatType, ParseMode
+from aiogram.enums import ParseMode
 from aiogram.types import Message
 from google.genai import types
 
@@ -35,7 +35,7 @@ from lumen_router_config import (
     _looks_like_heavy_query,
 )
 from lumen_security import _scrub_identity_leak, _detect_garbled_mix, _is_garbled_echo
-from lumen_status import thought_block
+from lumen_rich import NO_LINK_PREVIEW
 
 # Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
 _TRANSCRIPT_MAX_CHARS = 4000
@@ -881,7 +881,6 @@ async def _run_route(
     import bot
     if not route:
         raise RuntimeError("Empty route — no model to choose from.")
-    route_started = time.monotonic()
     # В историю пишем чистый запрос пользователя, а не ai_prompt со сниппетами
     # и датой: чужой текст не должен переживать ход (аудит 28.10.2026).
     # Пустая строка — законный текст фото без подписи, поэтому None, а не or.
@@ -995,24 +994,20 @@ async def _run_route(
                 if fits_one_message:
                     if status is not None:
                         html_text, plain_text = status.compose_answer(ans)
-                    elif getattr(getattr(message, "chat", None), "type", None) == ChatType.PRIVATE:
-                        # Обычный текст после раннего сбоя стрима: статуса нет,
-                        # но «Thought for Ns» над ответом всё равно показываем.
-                        html_text, plain_text = thought_block(
-                            bot._chat_lang(chat_id), int(time.monotonic() - route_started), ans,
-                        )
                     else:
                         html_text, plain_text = None, ans
                     if html_text is not None:
                         edited = await bot._tg_call(
                             reusable_placeholder.edit_text, html_text,
                             parse_mode=ParseMode.HTML, call_timeout=15.0,
+                            link_preview_options=NO_LINK_PREVIEW,
                         )
                         reused = edited is not None
                         if not reused:
                             edited = await bot._tg_call(
                                 reusable_placeholder.edit_text, plain_text,
                                 parse_mode=None, call_timeout=15.0,
+                                link_preview_options=NO_LINK_PREVIEW,
                             )
                             reused = edited is not None
                     else:

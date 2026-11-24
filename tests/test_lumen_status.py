@@ -11,8 +11,8 @@ test_lumen_status.py — живой статус-плейсхолдер: стр�
 import asyncio
 
 import bot
-from lumen_status import StatusMessage
-from tests.bot_test_helpers import _FakeIncomingMessage
+from lumen_status import StatusMessage, discard_status_start
+from tests.bot_test_helpers import _FakeIncomingMessage, _FakeSentMessage
 
 
 async def _passthrough(method, *args, **kwargs):
@@ -121,6 +121,166 @@ def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
     import lumen_status
     assert live[0] in lumen_status._TRIO_FRAMES
     bot.chat_state.pop(999904, None)
+
+
+def test_status_delete_is_idempotent_across_route_and_handler_cleanup(monkeypatch):
+    # Маршрут и внешний обработчик оба чистят статус при ошибке/отмене. Второй
+    # вызов не должен снова удалять сообщение и не должен ронять задачу.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999905)
+    deleted = []
+
+    async def count_delete(msg):
+        deleted.append(msg)
+        return True
+
+    monkeypatch.setattr(bot, "_delete_message_quietly", count_delete)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_searching")
+        await status.delete()
+        await status.delete()
+        return status
+
+    status = asyncio.run(scenario())
+    assert deleted == [status.message]
+    bot.chat_state.pop(999905, None)
+
+
+def test_discard_status_start_waits_for_inflight_send(monkeypatch):
+    # Отмена после отправки, но до возврата Message теряет message_id и оставляет
+    # пузырь навсегда. Cleanup должен дождаться ограниченного _tg_call.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999906)
+    deleted = []
+
+    async def count_delete(msg):
+        deleted.append(msg)
+        return True
+
+    monkeypatch.setattr(bot, "_delete_message_quietly", count_delete)
+    status = StatusMessage(incoming, "en")
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_start(reply_to, lang, key, *, timed=False):
+            started.set()
+            await release.wait()
+            return status
+
+        task = asyncio.create_task(fake_start(incoming, "en", "progress_searching"))
+        await started.wait()
+        cleanup = asyncio.create_task(discard_status_start(task))
+        await asyncio.sleep(0)
+        assert cleanup.done() is False
+        release.set()
+        await cleanup
+        return task
+
+    task = asyncio.run(scenario())
+    assert task.cancelled() is False
+    assert deleted == [status.message]
+    bot.chat_state.pop(999906, None)
+
+
+def test_status_start_cancellation_deletes_already_sent_message(monkeypatch):
+    # Отмена во время прямого await status_task не должна терять message_id:
+    # сама отправка дожидается _tg_call и удаляет уже принятое Telegram сообщение.
+    incoming = _FakeIncomingMessage(999908)
+    sent = _FakeSentMessage()
+    deleted = []
+
+    async def count_delete(msg):
+        deleted.append(msg)
+        return True
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_send(method, *args, **kwargs):
+            started.set()
+            await release.wait()
+            return sent
+
+        monkeypatch.setattr(bot, "_tg_call", blocked_send)
+        monkeypatch.setattr(bot, "_delete_message_quietly", count_delete)
+        task = asyncio.create_task(StatusMessage.start(incoming, "en", "progress_searching"))
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("StatusMessage.start was expected to be cancelled")
+
+    asyncio.run(scenario())
+    assert deleted == [sent]
+    bot.chat_state.pop(999908, None)
+
+
+def test_status_delete_can_retry_after_cancellation(monkeypatch):
+    # Флаг завершения до await делает повторное удаление невозможным, если cleanup
+    # отменили между остановкой тикера и удалением сообщения.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999907)
+    deleted = []
+    attempts = 0
+
+    async def flaky_delete(msg):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise asyncio.CancelledError
+        deleted.append(msg)
+        return True
+
+    monkeypatch.setattr(bot, "_delete_message_quietly", flaky_delete)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_searching")
+        try:
+            await status.delete()
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the first cleanup was expected to be cancelled")
+        await status.delete()
+        return status
+
+    status = asyncio.run(scenario())
+    assert deleted == [status.message]
+    bot.chat_state.pop(999907, None)
+
+
+def test_status_delete_retries_after_telegram_failure(monkeypatch):
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999909)
+    attempts = 0
+
+    async def flaky_delete(msg):
+        nonlocal attempts
+        attempts += 1
+        return attempts > 1
+
+    monkeypatch.setattr(bot, "_delete_message_quietly", flaky_delete)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_searching")
+        await status.delete()
+        assert status._deleted is False
+        await status.delete()
+        return status
+
+    status = asyncio.run(scenario())
+    assert attempts == 2
+    assert status._deleted is True
+    bot.chat_state.pop(999909, None)
 
 
 def test_retry_phase_is_not_a_completed_step(monkeypatch):
