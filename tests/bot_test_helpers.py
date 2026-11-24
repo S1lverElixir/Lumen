@@ -228,6 +228,7 @@ class _FakeIncomingMessage:
 
     async def reply(self, text, **kwargs):
         msg = _FakeSentMessage()
+        msg.send_kwargs = kwargs
         self.sent.append(msg)
         return msg
 

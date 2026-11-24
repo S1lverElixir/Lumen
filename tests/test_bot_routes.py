@@ -811,7 +811,6 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
     # переиспользоваться (редактироваться) финальным ответом резервной модели.
     chat_id = 999307
     placeholder = _FakeSentMessage()
-    placeholder.reply_markup = object()
 
     async def fake_munito_stream_fail_with_placeholder(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
         return None, placeholder
@@ -831,7 +830,6 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
         # а не через отдельный новый _safe_reply в _handle_message_core.
         assert sent is True
         assert placeholder.deleted is False
-        assert placeholder.markup_edits[-1]["reply_markup"].inline_keyboard == []
         assert placeholder.edits[-1][0] == "Ответ от резервной модели"
     finally:
         bot._try_munito_streaming = original_stream

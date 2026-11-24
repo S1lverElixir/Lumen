@@ -112,7 +112,8 @@ def _begin_stream_stop_scope(chat_id: int, user_id: int | None) -> None:
     во время фазы поиска), внутренняя — на стрим. Флаг переживает вложенную область."""
     entry = _STREAM_STOPS.get(chat_id)
     if entry is None:
-        entry = {"event": asyncio.Event(), "user_id": user_id, "depth": 0}
+        entry = {"event": asyncio.Event(), "user_id": user_id, "depth": 0,
+                 "token": secrets.token_hex(4)}
         _STREAM_STOPS[chat_id] = entry
     if user_id is not None and entry.get("user_id") is None:
         entry["user_id"] = user_id
@@ -126,6 +127,11 @@ def _end_stream_stop_scope(chat_id: int) -> None:
     entry["depth"] = int(entry.get("depth") or 0) - 1
     if entry["depth"] <= 0:
         _STREAM_STOPS.pop(chat_id, None)
+
+
+def _stream_stop_token(chat_id: int) -> str | None:
+    entry = _STREAM_STOPS.get(chat_id)
+    return str(entry.get("token")) if entry and entry.get("token") else None
 
 
 def _stream_stop_requested(chat_id: int) -> bool:
@@ -146,10 +152,13 @@ def _consume_stream_stop(chat_id: int) -> None:
     entry["user_id"] = None
 
 
-def _request_stream_stop(chat_id: int, user_id: int | None = None) -> bool:
-    """True — флаг поставлен. Чужой человек в группе остановить ответ не может."""
+def _request_stream_stop(chat_id: int, user_id: int | None = None, *, token: str | None = None) -> bool:
+    """True — флаг поставлен. Чужой человек в группе остановить ответ не может.
+    token защищает от запоздалого нажатия кнопки прошлого ответа."""
     entry = _STREAM_STOPS.get(chat_id)
     if not entry:
+        return False
+    if token is not None and entry.get("token") != token:
         return False
     owner = entry.get("user_id")
     if owner is not None and user_id is not None and user_id != owner and user_id != OWNER_ID:

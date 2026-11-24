@@ -1752,9 +1752,8 @@ def test_stop_button_is_off_by_default_and_wired_when_on(monkeypatch):
 
 
 def test_stop_button_stays_attached_during_all_stream_edits(monkeypatch):
-    # Прод 24.11.2026: кнопка появлялась на старте, но первая же edit_text без
-    # reply_markup снимала её; пользователь не успевал нажать. Пока ответ идёт,
-    # каждая правка текста обязана нести ту же клавиатуру, снятие — только finally.
+    # Прод 24.11.2026: inline-кнопка под растущим ответом уезжала за экран.
+    # Теперь Stop живёт в отдельном маленьком пузыре и не зависит от edit_text.
     from types import SimpleNamespace
 
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
@@ -1768,14 +1767,9 @@ def test_stop_button_stays_attached_during_all_stream_edits(monkeypatch):
             self.chat = incoming.chat
             self.message_id = 1
             self.text_edits = []
-            self.markup_edits = []
 
         async def edit_text(self, text, **kwargs):
             self.text_edits.append(kwargs)
-            return self
-
-        async def edit_reply_markup(self, **kwargs):
-            self.markup_edits.append(kwargs)
             return self
 
     async def pieces():
@@ -1788,21 +1782,72 @@ def test_stop_button_stays_attached_during_all_stream_edits(monkeypatch):
             piece_agen=pieces(), reuse_placeholder=placeholder,
         ))
         assert answer == "Привет"
-        attached = [kw["reply_markup"] for kw in placeholder.markup_edits
-                    if kw.get("reply_markup") and kw["reply_markup"].inline_keyboard]
-        assert len(attached) == 1
-        assert placeholder.text_edits
-        assert all(kw.get("reply_markup") is attached[0] for kw in placeholder.text_edits)
-        assert placeholder.markup_edits[-1]["reply_markup"].inline_keyboard == []
+        assert len(incoming.sent) == 1
+        control = incoming.sent[0]
+        assert control.send_kwargs["reply_markup"].inline_keyboard
+        assert all("reply_markup" not in kw for kw in placeholder.text_edits)
+        assert control.deleted is True
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
+def test_stop_control_moves_below_each_continuation(monkeypatch):
+    # Длинный ответ создаёт continuation-пузыри. Stop должен оставаться последним
+    # сообщением, иначе новый пузырь снова выталкивает кнопку за экран.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    chat_id = 999407
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=77)
+    events = []
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            msg = _FakeSentMessage()
+            msg.chat = incoming.chat
+            msg.message_id = len(events) + 10
+            events.append(("answer", msg))
+            return msg
+
+    async def reply(text, **kwargs):
+        msg = _FakeSentMessage()
+        msg.send_kwargs = kwargs
+        events.append(("control", msg))
+        return msg
+
+    original_bot = bot.bot
+    bot.bot = _Bot()
+    incoming.reply = reply
+    placeholder = _FakeSentMessage()
+    placeholder.chat = incoming.chat
+    placeholder.message_id = 1
+
+    async def pieces():
+        yield "a" * 5000
+
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "длинный ответ", incoming, provider="munito", model_id="probe-stop-continuation",
+            piece_agen=pieces(), reuse_placeholder=placeholder,
+        ))
+        assert answer == "a" * 5000
+        controls = [msg for kind, msg in events if kind == "control"]
+        answers = [msg for kind, msg in events if kind == "answer"]
+        assert len(answers) >= 1
+        assert len(controls) == len(answers) + 1
+        assert events[-1][0] == "control"
+        assert all(msg.deleted for msg in controls[:-1])
+        assert controls[-1].deleted is True
+    finally:
+        bot.bot = original_bot
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_stop_button_cleanup_waits_for_status_ticker(monkeypatch):
-    # Ревью 24.11.2026: если снять кнопку до остановки тикера, уже отправленная
-    # правка статуса может вернуть её после cleanup. При явном stop порядок
-    # обязан быть: attach → stop ticker → remove keyboard.
-    from aiogram.types import InlineKeyboardMarkup
+    # При явном stop тикер останавливается раньше, чем удаляется отдельный
+    # control-пузырь; поздних правок, которые могли бы вернуть кнопку, нет.
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
     monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
     chat_id = 999405
@@ -1810,21 +1855,32 @@ def test_stop_button_cleanup_waits_for_status_ticker(monkeypatch):
     incoming.from_user = SimpleNamespace(id=77)
     events = []
 
+    class _Control(_FakeSentMessage):
+        async def delete(self):
+            events.append("control_delete")
+            await super().delete()
+
+    control = _Control()
+
+    async def reply(text, **kwargs):
+        events.append("control_sent")
+        control.send_kwargs = kwargs
+        return control
+
+    incoming.reply = reply
+
     class _Placeholder:
         def __init__(self):
             self.chat = incoming.chat
             self.message_id = 1
-            self.reply_markup = None
 
-        async def edit_reply_markup(self, **kwargs):
-            events.append("attach" if kwargs["reply_markup"].inline_keyboard else "cleanup")
+        async def edit_text(self, text, **kwargs):
             return self
 
     class _Status:
         def __init__(self, placeholder):
             self.message = placeholder
             self.reply_markup = None
-            self._edit_lock = asyncio.Lock()
 
         async def finish(self):
             pass
@@ -1832,44 +1888,32 @@ def test_stop_button_cleanup_waits_for_status_ticker(monkeypatch):
         async def stop(self):
             events.append("status_stop")
 
-        async def clear_reply_markup(self):
-            self.reply_markup = None
-            self.message.reply_markup = None
-            await self.message.edit_reply_markup(
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
-            )
-
     async def stop_before_first_piece():
         assert bot._request_stream_stop(chat_id, 77)
         yield "Привет"
 
     placeholder = _Placeholder()
-    original_bubble = _Placeholder()
-    status = _Status(original_bubble)
+    status = _Status(placeholder)
     try:
         answer, _ = asyncio.run(bot._run_streaming_reply(
             chat_id, "Привет!", incoming, provider="munito", model_id="probe-stop-cleanup",
             piece_agen=stop_before_first_piece(), reuse_placeholder=placeholder, status=status,
         ))
         assert answer == ""
-        assert events == ["attach", "status_stop", "cleanup", "cleanup"]
-        assert placeholder.reply_markup is None
-        assert original_bubble.reply_markup is None
+        assert events == ["control_sent", "status_stop", "control_delete"]
+        assert control.deleted is True
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
-def test_stop_button_stays_live_when_placeholder_is_reused(monkeypatch):
-    # Ранний таймаут отдаёт пузырёк следующей попытке: тикер и кнопка должны
-    # остаться живыми, иначе следующий ответ начинается с замороженного статуса.
-    import lumen_streaming
-
+def test_stop_control_is_removed_when_placeholder_is_reused(monkeypatch):
+    # Ранний таймаут отдаёт пузырёк следующей попытке, но отдельный Stop-control
+    # удаляется: следующая попытка создаст свой и не оставит два Control в чате.
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
     monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
     monkeypatch.setattr(lumen_streaming, "_model_first_chunk_limit", lambda key, floor: 0.01)
     chat_id = 999406
     incoming = _FakeIncomingMessage(chat_id)
-    events = []
 
     class _Placeholder:
         def __init__(self):
@@ -1877,15 +1921,10 @@ def test_stop_button_stays_live_when_placeholder_is_reused(monkeypatch):
             self.message_id = 1
             self.reply_markup = None
 
-        async def edit_reply_markup(self, **kwargs):
-            events.append("attach" if kwargs["reply_markup"].inline_keyboard else "cleanup")
-            return self
-
     class _Status:
         def __init__(self, placeholder):
             self.message = placeholder
             self.reply_markup = None
-            self._edit_lock = asyncio.Lock()
             self.stopped = False
 
         async def stop(self):
@@ -1904,12 +1943,43 @@ def test_stop_button_stays_live_when_placeholder_is_reused(monkeypatch):
             piece_agen=hanging(), reuse_placeholder=placeholder, status=status,
         ))
         assert answer is None and reused is placeholder
-        assert events == ["attach"]
+        assert len(incoming.sent) == 1
+        assert incoming.sent[0].send_kwargs["reply_markup"].inline_keyboard
+        assert incoming.sent[0].deleted is True
         assert status.stopped is False
-        assert status.reply_markup is not None
-        assert placeholder.reply_markup is status.reply_markup
+        assert placeholder.reply_markup is None
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def test_stop_callback_rejects_stale_button_token(monkeypatch):
+    from types import SimpleNamespace
+    import lumen_commands
+
+    bot._STREAM_STOPS.clear()
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    bot._begin_stream_stop_scope(77, 5)
+    token = bot._stream_stop_token(77)
+
+    async def answer(*args, **kwargs):
+        pass
+
+    stale = SimpleNamespace(
+        data="stop:77:stale", from_user=SimpleNamespace(id=5),
+        message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
+    )
+    try:
+        asyncio.run(lumen_commands.handle_stop_callback(stale))
+        assert bot._stream_stop_requested(77) is False
+        fresh = SimpleNamespace(
+            data=f"stop:77:{token}", from_user=SimpleNamespace(id=5),
+            message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
+        )
+        asyncio.run(lumen_commands.handle_stop_callback(fresh))
+        assert bot._stream_stop_requested(77) is True
+    finally:
+        bot._end_stream_stop_scope(77)
+        bot._STREAM_STOPS.clear()
 
 
 def test_stop_callback_stops_only_for_the_author(monkeypatch):

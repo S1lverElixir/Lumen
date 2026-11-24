@@ -370,8 +370,10 @@ def _stop_button_markup(chat_id: int):
     import bot
     if not getattr(bot, "STOP_BUTTON_ENABLED", False):
         return None
+    token = bot._stream_stop_token(chat_id)
+    callback = f"stop:{chat_id}:{token}" if token else f"stop:{chat_id}"
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=bot._t(chat_id, "stop_button"), callback_data=f"stop:{chat_id}"),
+        InlineKeyboardButton(text=bot._t(chat_id, "stop_button"), callback_data=callback),
     ]])
 
 
@@ -388,9 +390,8 @@ async def _run_streaming_reply(
     bot._begin_stream_stop_scope(chat_id, getattr(getattr(message, "from_user", None), "id", None))
     # Инициализация ДО try: early-return (плейсхолдер не отправился) обязан видеть
     # эти имена в finally.
-    stop_button_on = False
     keep_placeholder_live = False
-    _markup_edit = None
+    _stop_control = None
     _stop_markup = None
 
     sent_messages: list[Message] = []
@@ -438,23 +439,13 @@ async def _run_streaming_reply(
     gate_interval = bot.STREAM_EDIT_MIN_INTERVAL_GROUP_SEC if is_group else bot.STREAM_EDIT_MIN_INTERVAL_SEC
 
     def _active_markup(msg: Message):
-        # Кнопка живёт на первом пузыре; continuation-сообщения её не дублируют.
-        return _stop_markup if stop_button_on and sent_messages and msg is sent_messages[0] else None
+        # Stop живёт в отдельном маленьком пузыре, чтобы длинный ответ не унёс
+        # клавиатуру за нижний край экрана (prod 24.11.2026).
+        return None
 
     def _markup_kwargs(msg: Message) -> dict:
         markup = _active_markup(msg)
         return {"reply_markup": markup} if markup is not None else {}
-
-    @contextlib.asynccontextmanager
-    async def _status_edit_lock():
-        # Тикер статуса и кнопка делят один edit_lock: иначе поздний кадр без
-        # клавиатуры может снять её сразу после прикрепления (prod 24.11.2026).
-        lock = getattr(status, "_edit_lock", None)
-        if lock is None:
-            yield
-        else:
-            async with lock:
-                yield
 
     def _header_html() -> str:
         return _md_to_html(header_md) if header_md else ""
@@ -549,19 +540,49 @@ async def _run_streaming_reply(
         # пустой считают только ранний обрыв до показа — частичный ответ показан.
         bot._record_stats_event("model_attempts")
 
-        # Кнопка «Остановить» под пузырём: одна правка на старте, снимается в finally.
-        _markup_edit = getattr(placeholder, "edit_reply_markup", None)
+        # Stop держим отдельным маленьким пузырём над полем ввода. Inline-кнопка
+        # под растущим ответом уезжает за экран, даже когда reply_markup сохранён.
         _stop_markup = _stop_button_markup(chat_id)
-        if _stop_markup is not None and _markup_edit is not None:
-            # Выставляем до await: если отмена пришла после принятия клавиатуры,
-            # finally всё равно должен её снять (review 24.11.2026).
-            stop_button_on = True
-            async with _status_edit_lock():
-                if status is not None:
-                    status.reply_markup = _stop_markup
-                await bot._tg_call(_markup_edit, reply_markup=_stop_markup,
-                                   call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT, link_preview_options=NO_LINK_PREVIEW)
-                placeholder.reply_markup = _stop_markup
+
+        async def _send_stop_control():
+            if _stop_markup is None or message is None:
+                return None
+            return await bot._tg_call(
+                bot._answer_sender(message), _spinner_glyph(2), parse_mode=None,
+                reply_markup=_stop_markup, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                retries=0, link_preview_options=NO_LINK_PREVIEW,
+            )
+
+        async def _move_stop_control() -> None:
+            nonlocal _stop_control
+            send_task = asyncio.create_task(_send_stop_control())
+            try:
+                new_control = await asyncio.shield(send_task)
+            except asyncio.CancelledError:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    new_control = await send_task
+                if new_control is not None:
+                    old_control, _stop_control = _stop_control, new_control
+                    if old_control is not None:
+                        with contextlib.suppress(Exception):
+                            await bot._tg_call(old_control.delete, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
+                raise
+            if new_control is None:
+                return
+            old_control, _stop_control = _stop_control, new_control
+            if old_control is not None:
+                with contextlib.suppress(Exception):
+                    await bot._tg_call(old_control.delete, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
+
+        send_task = asyncio.create_task(_send_stop_control())
+        try:
+            _stop_control = await asyncio.shield(send_task)
+        except asyncio.CancelledError:
+            # Отмена не должна потерять message_id уже принятого Telegram
+            # control-пузыря: дожидаемся результата, затем finally его удалит.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                _stop_control = await send_task
+            raise
 
         first_chunk_limit = _model_first_chunk_limit(_model_speed_key(provider, model_id), bot.FIRST_CHUNK_TIMEOUT_SEC)
         if deadline is not None:
@@ -574,7 +595,6 @@ async def _run_streaming_reply(
             first_task=first_task,
             status=status,
             wait_started=wait_started,
-            reply_markup=_stop_markup if stop_button_on else None,
         )
         # Цикл мотает read_task с таймаутом до следующего кадра: кусок пришёл —
         # обрабатываем, таймер истёк — рисуем из буфера. Одна последовательная
@@ -766,6 +786,7 @@ async def _run_streaming_reply(
                     edit_fail_streak = 0 if edit_ok is not None else edit_fail_streak + 1
                     edits_dead = edit_fail_streak >= 3
                 sent_messages.append(new_msg)
+                await _move_stop_control()
                 # Новое сообщение уже открыто первым срезом: повторная правка не нужна.
                 last_painted_plain = open_md
                 last_painted_html = open_html
@@ -855,6 +876,7 @@ async def _run_streaming_reply(
                     edits_dead = True
                     break
                 sent_messages.append(new_msg)
+                await _move_stop_control()
                 # Новое сообщение уже содержит полный кусок: catch-up для него не нужен.
                 last_painted_plain = next_chunk
                 last_painted_html = _md_to_html(next_chunk)
@@ -1062,20 +1084,16 @@ async def _run_streaming_reply(
         if aclose is not None:
             with contextlib.suppress(Exception):
                 await aclose()
-        if not keep_placeholder_live:
-            if status is not None:
-                with contextlib.suppress(Exception):
-                    await status.stop()
-                if getattr(status, "reply_markup", None) is not None:
-                    await status.clear_reply_markup()
-            # При fallback status.message и reuse_placeholder могут быть разными:
-            # чистим оба, иначе на исходном пузыре остаётся вечная Stop-кнопка.
-            if (stop_button_on and _markup_edit is not None and sent_messages
-                    and (status is None or sent_messages[0] is not status.message)):
-                with contextlib.suppress(Exception):
-                    await bot._tg_call(_markup_edit, reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
-                                       call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT, link_preview_options=NO_LINK_PREVIEW)
-                    sent_messages[0].reply_markup = None
+        if not keep_placeholder_live and status is not None:
+            with contextlib.suppress(Exception):
+                await status.stop()
+            if getattr(status, "reply_markup", None) is not None:
+                await status.clear_reply_markup()
+        # Control-пузырь не переиспользуется: удаляем и при успехе, и при раннем
+        # фолбэке, чтобы кнопка не осталась висеть рядом с будущим ответом.
+        if _stop_control is not None:
+            with contextlib.suppress(Exception):
+                await bot._tg_call(_stop_control.delete, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
 
     # Пустой full_text сюда не доходит — ветки "Empty response" нет.
     # Скраб уже применён до финальной правки (см. выше).

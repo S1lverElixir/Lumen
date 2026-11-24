@@ -1357,8 +1357,10 @@ async def handle_stop_callback(query: CallbackQuery) -> None:
         return
     chat_id = query.message.chat.id if getattr(query, "message", None) is not None and query.message.chat else 0
     sender = query.from_user.id if getattr(query, "from_user", None) is not None else None
+    parts = str(getattr(query, "data", "")).split(":")
+    token = parts[2] if len(parts) > 2 else None
     if chat_id:
-        bot._request_stream_stop(chat_id, sender)
+        bot._request_stream_stop(chat_id, sender, token=token)
 
 
 async def cmd_stop(message: Message) -> None:
