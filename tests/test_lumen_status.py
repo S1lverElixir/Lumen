@@ -241,6 +241,52 @@ def test_subsecond_answer_shows_no_thought_line(monkeypatch):
     html_block, plain_block = status.compose_answer("ответ")
     assert html_block is None and plain_block == "ответ"
     bot.chat_state.pop(999905, None)
+def test_status_delete_is_idempotent_across_route_and_handler_cleanup(monkeypatch):
+    # Маршрут и внешний обработчик оба чистят статус при ошибке/отмене. Второй
+    # вызов не должен снова удалять сообщение и ронять задачу.
+    monkeypatch.setattr(bot, "_tg_call", _passthrough)
+    incoming = _FakeIncomingMessage(999907)
+    deleted = []
+
+    async def count_delete(msg):
+        deleted.append(msg)
+
+    monkeypatch.setattr(bot, "_delete_message_quietly", count_delete)
+
+    async def scenario():
+        status = await StatusMessage.start(incoming, "en", "progress_searching")
+        await status.delete()
+        await status.delete()
+        return status
+
+    status = asyncio.run(scenario())
+    assert deleted == [status.message]
+    bot.chat_state.pop(999907, None)
+
+
+def test_discard_status_start_deletes_unclaimed_status_once():
+    from lumen_status import discard_status_start
+
+    class FakeStatus:
+        delete_count = 0
+
+        async def delete(self):
+            self.delete_count += 1
+
+    status = FakeStatus()
+
+    async def start():
+        return status
+
+    async def scenario():
+        task = asyncio.create_task(start())
+        await asyncio.sleep(0)
+        await discard_status_start(task)
+
+    asyncio.run(scenario())
+    assert status.delete_count == 1
+
+
 def test_done_stage_phrase_is_past_tense_in_every_language():
     # Ревью 11.11.2026: закрытый этап брал тот же ключ, что и живой, и в 25
     # языках показывал «✓ Смотрю изображение» вместо сделанного действия.

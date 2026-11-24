@@ -283,14 +283,37 @@ def test_scrub_latex_does_not_confuse_currency_with_math_delimiters():
     # встречались и сумма в долларах, и настоящая формула ("цена $100, а формула
     # $x^2$ рядом"), первый "$" суммы ошибочно спаривался с первым "$" формулы —
     # результат был ХУЖЕ исходного: обрезанные суммы плюс осиротевший "$" в хвосте
-    # ("цена 100, а формула x²$ рядом"). Одиночный "$" теперь не обрабатывается
-    # вообще — только "$$...$$". Сами доллары остаются нетронутыми в обоих случаях;
-    # "x^2" внутри всё равно аккуратно превращается в "x²" — это отдельная, не
-    # завязанная на "$"-разделители замена (см. test_scrub_latex_exact_replacements),
-    # она безвредна и здесь, и вне контекста "$".
-    assert lumen_formatting._scrub_latex("цена $100, а формула $x^2$ рядом") == "цена $100, а формула $x²$ рядом"
+    # ("цена 100, а формула x²$ рядом"). Тесная пара "$...$" снимается только
+    # вокруг формулы; числовое содержимое остаётся валютой.
+    assert lumen_formatting._scrub_latex("цена $100, а формула $x^2$ рядом") == "цена $100, а формула x² рядом"
     assert lumen_formatting._scrub_latex("первый вариант — $50, второй — $100") == "первый вариант — $50, второй — $100"
     assert lumen_formatting._scrub_latex("стоимость: $100. Итого: $200.") == "стоимость: $100. Итого: $200."
+    assert lumen_formatting._scrub_latex("$100/$50") == "$100/$50"
+    assert lumen_formatting._scrub_latex("$100–$50") == "$100–$50"
+    assert lumen_formatting._scrub_latex(r"\$100\$ и $x$") == r"\$100\$ и x"
+
+
+def test_scrub_latex_plain_fallback_renders_pythagoras_without_raw_markup():
+    # Прод 23.11.2026: финал со thought-строкой шёл через HTML и показывал
+    # "$c$", "text{см}" и "^2". Fallback обязан оставаться читаемым.
+    source = (
+        "Формула $c^2 = a^2 + b^2$, площадь "
+        r"$S = \frac{ab}{2} = 6\text{ см}^2$ и матрица $\begin{matrix}a & b\end{matrix}$; цена $100."
+    )
+    result = lumen_formatting._scrub_latex(source)
+    assert result == "Формула c² = a² + b², площадь S = ab/2 = 6 см² и матрица a b; цена $100."
+
+
+def test_rich_math_keeps_currency_and_escaped_dollars():
+    assert lumen_formatting._md_to_rich_html("$100/$50") == "$100/$50"
+    assert lumen_formatting._md_to_rich_html("$100–$50") == "$100–$50"
+    assert lumen_formatting._md_to_rich_html(r"\$100\$ и $x$") == r"\$100\$ и <tg-math>x</tg-math>"
+
+
+def test_strip_markdown_scrubs_math_but_protects_code_and_urls():
+    source = r"Формула $x^2$, код `C:\tmp\$x$` и ссылка https://example.com/$x$"
+    result = lumen_formatting._strip_markdown(source)
+    assert result == r"Формула x², код C:\tmp\$x$ и ссылка https://example.com/$x$"
 
 
 def test_scrub_latex_order_sensitive_replacements_dont_corrupt_each_other():

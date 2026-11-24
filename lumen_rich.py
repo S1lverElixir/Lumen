@@ -14,6 +14,7 @@ from aiogram.types import (
     InlineQueryResultArticle,
     InputRichMessage,
     InputTextMessageContent,
+    LinkPreviewOptions,
     Message,
     ReplyParameters,
 )
@@ -28,6 +29,10 @@ from lumen_formatting import (
 )
 
 log = logging.getLogger("bot")
+
+# Ответы со ссылками должны оставаться компактными, как в Claude: Telegram
+# иначе раздувает их preview-карточкой во весь блок (прод 23.11.2026).
+NO_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 def is_guest_message(message: Message | dict) -> bool:
     if isinstance(message, dict):
@@ -84,6 +89,7 @@ async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bo
     if sender is None or message is None:
         return None
     kwargs.pop("parse_mode", None)
+    kwargs.pop("link_preview_options", None)
     reply_parameters = kwargs.pop("reply_parameters", None)
     is_private = getattr(getattr(message, "chat", None), "type", None) == ChatType.PRIVATE
     if (reply_parameters is None and is_first_chunk and not is_private
@@ -124,6 +130,7 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
         return
 
     chunks = _split_text_chunks(text, bot.TG_MAX_LEN)
+    kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     sender = _answer_sender(message)
     for i, chunk in enumerate(chunks):
         chunk_kwargs = kwargs if i == len(chunks) - 1 else {k: v for k, v in kwargs.items() if k != "reply_markup"}
@@ -187,6 +194,7 @@ async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -
     import bot
     if msg is None:
         return False
+    kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     try:
         # Порядок: рич → HTML → голый текст; таблицы видны только через рич.
         if bot.RICH_MESSAGES_ENABLED and await bot._try_edit_rich(msg, _md_to_rich_html(text), **kwargs):

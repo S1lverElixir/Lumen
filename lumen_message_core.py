@@ -81,7 +81,8 @@ from lumen_search import (
     web_search_timeout_sec,
 )
 from lumen_security import _looks_like_injection_probe
-from lumen_status import StatusMessage
+from lumen_status import StatusMessage, discard_status_start
+from lumen_rich import NO_LINK_PREVIEW
 import lumen_devtrace
 import lumen_memory
 
@@ -1502,194 +1503,197 @@ async def _handle_message_core(
     # поиску пришли скриншотами из группы, и без пузыря там не видно ровно того, ради
     # чего цикл и делался. Гостям тишина: их ответ уходит через answerGuestQuery, где
     # правок не делают. Ранний этап обязателен: обычный текст пузырём не тормозим.
-    status: StatusMessage | None = None
-    status_task: asyncio.Task | None = None
-    early_status = search_will_run or bool(media_mime) or needs_website or needs_youtube
-    if not is_guest and early_status:
-        status_key, status_timed = _initial_status(needs_youtube, needs_website, media_mime, search_will_run)
-        status_task = asyncio.create_task(
-            StatusMessage.start(message, bot._chat_lang(message.chat.id), status_key, timed=status_timed)
-        )
-
-    # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
-    ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
-    # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
-    # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Зоне 2 она
-    # нужда ещё важнее: модель решает «устарело ли моё знание», не зная какого
-    # числа сегодня (ревью 16.11.2026). Инъекция до промпта — попадает и в
-    # пост-хок ретрай, он переиспользует этот ai_prompt.
-    if needs_freshness or agent_zone2:
-        ai_prompt += "\n\n" + _fresh_date_context()
-    web_search_failed = False
-    snippets_injected = False
-    # Закрытый этап поиска: одна галочка на сообщение, даже если поиск был
-    # попыткой №2 после [[SEARCH]] (ревью 12.11.2026).
-    search_step_reported = False
-    agent_used = False
-    agent_steps = 0
-    agent_planning_ms = 0
-    if search_will_run or agent_zone2:
-        # Сниппеты едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
-        # Сбор идёт до старта бюджета маршрута и берёт собственный бюджет: 22 с на один
-        # поиск при medium и 44 с при high/xhigh (evidence_phase_budget_sec), урезанные
-        # остатком MESSAGE_TOTAL_BUDGET_SEC (параллельный вопрос получит "занято").
-        # Статус-пузырь создаётся до первого этапа,
-        # чтобы строки цикла правили уже живой пузырь, а не висели в очереди.
-        # В зоне 2 раннего пузыря нет (freshness=False): цикл идёт молча, и его
-        # отказ искать — норма, а не «без live-поиска».
-        status = await status_task if status_task is not None else None
-        snippets, model_queries, agent_used, agent_stats = await _gather_web_evidence(
-            chat_id=message.chat.id, user_prompt=ai_prompt, clean_prompt=clean_prompt,
-            previous=_previous_user_text(state), route=route, effort=effort, status=status,
-            # history_meta здесь ещё не собран (его строят ниже, с медиа-ссылками):
-            # прошлые фото цикл не тянет — attach_past выключен внутри.
-            deadline=route_deadline, history_meta=None,
-            allow_fallback_fetch=search_will_run, zone2=agent_zone2,
-        )
-        # Метрики цикла в след и лог: офлайн иначе не отличить ветку цикла от
-        # прежнего поиска (ревью 12.11.2026).
-        agent_steps = int(agent_stats.get("steps") or 0)
-        agent_planning_ms = int(agent_stats.get("planning_ms") or 0)
-        agent_pages = list(agent_stats.get("pages") or [])
-        if snippets or agent_pages:
-            if snippets:
-                ai_prompt += format_snippets_for_prompt(snippets)
-            if agent_pages:
-                # Прочитанные страницы — тот же недоверенный текст, но полнее
-                # сниппета: идут отдельным блоком после выдачи (аудит 16.11.2026).
-                from lumen_read_page import format_pages_for_prompt
-                ai_prompt += format_pages_for_prompt(agent_pages)
-            ai_prompt += evidence_trace(model_queries)
-            snippets_injected = True
-        else:
-            # Пометка «без live-поиска» честна только для свежих вопросов: в зоне 2
-            # отказ модели искать — норма, и пометка была бы ложью.
-            web_search_failed = search_will_run
-        # Чем принесены источники — циклом или прежним fetch: по этой строке в проде
-        # видно, работает ли надстройка и не ест ли она бюджет молча.
-        log.info("[web-search] chat=%s sources=%d agent=%s effort=%s",
-                 message.chat.id, len(snippets), agent_used, effort or "auto-off")
-        if bot._stream_stop_requested(message.chat.id):
-            # Остановка во время поиска: отвечать уже нечего, но пузырь этапа
-            # обязан закрыться пометкой, а не висеть «Ищу…» до таймаута.
-            log.info("[stop] stopped by the user during the evidence phase")
-            # Остановка в фазе поиска тоже ход: в devtrace иначе её нет вовсе,
-            # и разбор «почему ответа не было» упирается в пустоту (аудит 16.11.2026).
-            lumen_devtrace.record_failure(
-                message.chat.id, user_text=clean_prompt,
-                error="stopped during the evidence phase",
-            )
-            bot._consume_stream_stop(message.chat.id)
-            if status is not None:
-                with contextlib.suppress(Exception):
-                    await status.stop()
-                await bot._edit_message_quietly(
-                    status.message, bot._t(message.chat.id, "stream_note_stopped").strip())
-            bot.mark_state_dirty(message.chat.id)
-            return
-        if status is not None:
-            # Один закрытый этап на ВЁС ответ: два «поискал · нашёл N» в трейсе
-            # читались как ложь, а «нашёл 1» рядом с «ничего не нашёл» — хуже
-            # молчания (ревью 12.11.2026). Пузырь не имеет права уронить ответ:
-            # все его правки под suppress, как в самом цикле.
-            with contextlib.suppress(Exception):
-                if snippets and not search_step_reported:
-                    status.add_done("progress_search_done", count=len(snippets))
-                    # Прочитанные страницы — тоже источники в пузыре: модель может
-                    # сослаться на URL, которого человек не видел (аудит 16.11.2026).
-                    _src_items = list(snippets) + [
-                        {"url": page.get("url") or "", "publisher": ""} for page in agent_pages]
-                    status.set_sources([clean_publisher(item) for item in _src_items if clean_publisher(item)])
-                    search_step_reported = True
-                elif not snippets and not search_step_reported:
-                    status.add_done("progress_search_empty")
-                    search_step_reported = True
-                await status.set_phase("progress_thinking", timed=True)
-    elif need_external_search:
-        web_search_failed = True
-    if status is None and status_task is not None:
-        status = await status_task
-    if status is not None and not search_will_run and (media_tuple or extra_media):
-        # Файл уже скачан: этап просмотра закрываем галочкой и показываем
-        # живой таймер размышления, как в Claude (ревью 28.10.2026). Правка
-        # пузыря не имеет права стоить ответа (ревью 12.11.2026).
-        with contextlib.suppress(Exception):
-            await status.mark_stage_done()
-    # Пометка «без поиска» — только если поиск реально не дал результатов: при
-    # исчерпанном лимите Gemini сниппеты едут дешёвым моделям, а не отключаются.
-    no_search_note = user_gemini_limited and needs_freshness and not snippets_injected
-    if no_search_note:
-        web_search_failed = False
-    if (
-        media_tuple is None
-        and not extra_media
-        and youtube_url_to_analyze is None
-        and _media_reference_category(clean_prompt) is not None
-    ):
-        # Прод-кейс 17.09.2026: без файла модель выдумывала фото. Дописываем _NO_MEDIA_NOTE, историю не режем.
-        ai_prompt += _NO_MEDIA_NOTE
-    gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
-    gemini_media_list = gemini_media_list or None
-    # Что записать в общий лог: подпись вместо служебного промпта, ссылки на медиа
-    # и флаг «приложить прошлые фото». Байты в память не идут, только file_id.
-    direct_source = _msg_media_source(message)
-    reply_source = _msg_media_source(message.reply_to_message) if message.reply_to_message else None
-    media_refs = [
-        ref for ref in (
-            lumen_memory.media_ref(src)
-            for src in ([direct_source] if direct_source is not None else [])
-            + list(extra_media_sources or [])
-        ) if ref
-    ]
-    if direct_source is None and reply_source is not None and media_tuple is not None:
-        reply_ref = lumen_memory.media_ref(reply_source)
-        if reply_ref:
-            media_refs.append(reply_ref)
-    skip_file_ids = [ref["file_id"] for ref in media_refs]
-    # Медиа найдено по слову «фото» в истории: оно уже едет как текущее, дубль не нужен.
-    attach_past = not (
-        media_tuple is not None and direct_source is None and reply_source is None
-    )
-    history_text = clean_prompt
-    if direct_source is not None and media_tuple is not None:
-        # Подпись (уже без @упоминания) — в память; служебное «опиши подробно» и
-        # ждущая просьба остаются только в промпте текущего хода.
-        history_text = clean_prompt if (message.caption or "").strip() else ""
-    _sender = message.from_user
-    history_meta = {
-        "sender": _flatten_untrusted(bot._note_sender(
-            state,
-            _sender.id if _sender is not None else None,
-            getattr(_sender, "username", None) if _sender is not None else None,
-            getattr(_sender, "first_name", None) if _sender is not None else None,
-        ), 80),
-        "sender_id": _sender.id if _sender is not None else None,
-        "ts": _message_ts(message),
-        "media": media_refs,
-        "addressed": True,
-        "skip_file_ids": skip_file_ids,
-        "attach_past": attach_past,
-    }
-    # Стриминг ("живой" эффект печати) имеет смысл только для простого
-    # текстового обмена без вложений/YouTube — см. _run_route. При пометке
-    # "без поиска" стрим гасим: она дописывается к готовому ответу.
-    # Свежий ответ без сниппетов и без grounding-головы не стримим: иначе он
-    # уйдёт до пост-проверки и ретрай уже невозможен (прод 12.10.2026).
-    head_has_live_search = (not route) or route_has_live_search(route[:1])
-    allow_stream = (
-        not gemini_media_list
-        and not youtube_url_to_analyze
-        and not no_search_note
-        and not is_guest
-        and (not needs_freshness or head_has_live_search or snippets_injected)
-    )
-    if route_deadline is None:
-        # Один дедлайн на первый проход и пост-хок ретрай: раньше ретрай
-        # получал свежие 40с и суммарно выходил за потолок сообщения.
-        route_deadline = bot._deadline_within_message(bot.ROUTE_TOTAL_BUDGET_SEC)
-    # Маркер обрыва прошлого сообщения не должен влиять на это.
-    state.pop("stream_interrupted", None)
+    status_failed = False
     try:
+        status: StatusMessage | None = None
+        status_task: asyncio.Task | None = None
+        early_status = search_will_run or bool(media_mime) or needs_website or needs_youtube
+        if not is_guest and early_status:
+            status_key, status_timed = _initial_status(needs_youtube, needs_website, media_mime, search_will_run)
+            status_task = asyncio.create_task(
+                StatusMessage.start(message, bot._chat_lang(message.chat.id), status_key, timed=status_timed)
+            )
+
+        # Автор и реплай в промпте: модель знает кто спрашивает и на что отвечает.
+        ai_prompt = bot._tagged_prompt(state, message, clean_prompt)
+        # Дата нужна свежим вопросам: без неё «завтра» модель строит по догадке
+        # (eval 22.10.2026: flash-lite «вспомнила» вымышленное расписание). Зоне 2 она
+        # нужда ещё важнее: модель решает «устарело ли моё знание», не зная какого
+        # числа сегодня (ревью 16.11.2026). Инъекция до промпта — попадает и в
+        # пост-хок ретрай, он переиспользует этот ai_prompt.
+        if needs_freshness or agent_zone2:
+            ai_prompt += "\n\n" + _fresh_date_context()
+        web_search_failed = False
+        snippets_injected = False
+        # Закрытый этап поиска: одна галочка на сообщение, даже если поиск был
+        # попыткой №2 после [[SEARCH]] (ревью 12.11.2026).
+        search_step_reported = False
+        agent_used = False
+        agent_steps = 0
+        agent_planning_ms = 0
+        if search_will_run or agent_zone2:
+            # Сниппеты едут любому провайдеру, иначе ответ был бы по памяти (прод 11.10.2026).
+            # Сбор идёт до старта бюджета маршрута и берёт собственный бюджет: 22 с на один
+            # поиск при medium и 44 с при high/xhigh (evidence_phase_budget_sec), урезанные
+            # остатком MESSAGE_TOTAL_BUDGET_SEC (параллельный вопрос получит "занято").
+            # Статус-пузырь создаётся до первого этапа,
+            # чтобы строки цикла правили уже живой пузырь, а не висели в очереди.
+            # В зоне 2 раннего пузыря нет (freshness=False): цикл идёт молча, и его
+            # отказ искать — норма, а не «без live-поиска».
+            status = await status_task if status_task is not None else None
+            status_task = None
+            snippets, model_queries, agent_used, agent_stats = await _gather_web_evidence(
+                chat_id=message.chat.id, user_prompt=ai_prompt, clean_prompt=clean_prompt,
+                previous=_previous_user_text(state), route=route, effort=effort, status=status,
+                # history_meta здесь ещё не собран (его строят ниже, с медиа-ссылками):
+                # прошлые фото цикл не тянет — attach_past выключен внутри.
+                deadline=route_deadline, history_meta=None,
+                allow_fallback_fetch=search_will_run, zone2=agent_zone2,
+            )
+            # Метрики цикла в след и лог: офлайн иначе не отличить ветку цикла от
+            # прежнего поиска (ревью 12.11.2026).
+            agent_steps = int(agent_stats.get("steps") or 0)
+            agent_planning_ms = int(agent_stats.get("planning_ms") or 0)
+            agent_pages = list(agent_stats.get("pages") or [])
+            if snippets or agent_pages:
+                if snippets:
+                    ai_prompt += format_snippets_for_prompt(snippets)
+                if agent_pages:
+                    # Прочитанные страницы — тот же недоверенный текст, но полнее
+                    # сниппета: идут отдельным блоком после выдачи (аудит 16.11.2026).
+                    from lumen_read_page import format_pages_for_prompt
+                    ai_prompt += format_pages_for_prompt(agent_pages)
+                ai_prompt += evidence_trace(model_queries)
+                snippets_injected = True
+            else:
+                # Пометка «без live-поиска» честна только для свежих вопросов: в зоне 2
+                # отказ модели искать — норма, и пометка была бы ложью.
+                web_search_failed = search_will_run
+            # Чем принесены источники — циклом или прежним fetch: по этой строке в проде
+            # видно, работает ли надстройка и не ест ли она бюджет молча.
+            log.info("[web-search] chat=%s sources=%d agent=%s effort=%s",
+                     message.chat.id, len(snippets), agent_used, effort or "auto-off")
+            if bot._stream_stop_requested(message.chat.id):
+                # Остановка во время поиска: отвечать уже нечего, но пузырь этапа
+                # обязан закрыться пометкой, а не висеть «Ищу…» до таймаута.
+                log.info("[stop] stopped by the user during the evidence phase")
+                # Остановка в фазе поиска тоже ход: в devtrace иначе её нет вовсе,
+                # и разбор «почему ответа не было» упирается в пустоту (аудит 16.11.2026).
+                lumen_devtrace.record_failure(
+                    message.chat.id, user_text=clean_prompt,
+                    error="stopped during the evidence phase",
+                )
+                bot._consume_stream_stop(message.chat.id)
+                if status is not None:
+                    with contextlib.suppress(Exception):
+                        await status.stop()
+                    await bot._edit_message_quietly(
+                        status.message, bot._t(message.chat.id, "stream_note_stopped").strip())
+                bot.mark_state_dirty(message.chat.id)
+                return
+            if status is not None:
+                # Один закрытый этап на ВЁС ответ: два «поискал · нашёл N» в трейсе
+                # читались как ложь, а «нашёл 1» рядом с «ничего не нашёл» — хуже
+                # молчания (ревью 12.11.2026). Пузырь не имеет права уронить ответ:
+                # все его правки под suppress, как в самом цикле.
+                with contextlib.suppress(Exception):
+                    if snippets and not search_step_reported:
+                        status.add_done("progress_search_done", count=len(snippets))
+                        # Прочитанные страницы — тоже источники в пузыре: модель может
+                        # сослаться на URL, которого человек не видел (аудит 16.11.2026).
+                        _src_items = list(snippets) + [
+                            {"url": page.get("url") or "", "publisher": ""} for page in agent_pages]
+                        status.set_sources([clean_publisher(item) for item in _src_items if clean_publisher(item)])
+                        search_step_reported = True
+                    elif not snippets and not search_step_reported:
+                        status.add_done("progress_search_empty")
+                        search_step_reported = True
+                    await status.set_phase("progress_thinking", timed=True)
+        elif need_external_search:
+            web_search_failed = True
+        if status is None and status_task is not None:
+            status = await status_task
+            status_task = None
+        if status is not None and not search_will_run and (media_tuple or extra_media):
+            # Файл уже скачан: этап просмотра закрываем галочкой и показываем
+            # живой таймер размышления, как в Claude (ревью 28.10.2026). Правка
+            # пузыря не имеет права стоить ответа (ревью 12.11.2026).
+            with contextlib.suppress(Exception):
+                await status.mark_stage_done()
+        # Пометка «без поиска» — только если поиск реально не дал результатов: при
+        # исчерпанном лимите Gemini сниппеты едут дешёвым моделям, а не отключаются.
+        no_search_note = user_gemini_limited and needs_freshness and not snippets_injected
+        if no_search_note:
+            web_search_failed = False
+        if (
+            media_tuple is None
+            and not extra_media
+            and youtube_url_to_analyze is None
+            and _media_reference_category(clean_prompt) is not None
+        ):
+            # Прод-кейс 17.09.2026: без файла модель выдумывала фото. Дописываем _NO_MEDIA_NOTE, историю не режем.
+            ai_prompt += _NO_MEDIA_NOTE
+        gemini_media_list = ([media_tuple] if media_tuple else []) + list(extra_media or [])
+        gemini_media_list = gemini_media_list or None
+        # Что записать в общий лог: подпись вместо служебного промпта, ссылки на медиа
+        # и флаг «приложить прошлые фото». Байты в память не идут, только file_id.
+        direct_source = _msg_media_source(message)
+        reply_source = _msg_media_source(message.reply_to_message) if message.reply_to_message else None
+        media_refs = [
+            ref for ref in (
+                lumen_memory.media_ref(src)
+                for src in ([direct_source] if direct_source is not None else [])
+                + list(extra_media_sources or [])
+            ) if ref
+        ]
+        if direct_source is None and reply_source is not None and media_tuple is not None:
+            reply_ref = lumen_memory.media_ref(reply_source)
+            if reply_ref:
+                media_refs.append(reply_ref)
+        skip_file_ids = [ref["file_id"] for ref in media_refs]
+        # Медиа найдено по слову «фото» в истории: оно уже едет как текущее, дубль не нужен.
+        attach_past = not (
+            media_tuple is not None and direct_source is None and reply_source is None
+        )
+        history_text = clean_prompt
+        if direct_source is not None and media_tuple is not None:
+            # Подпись (уже без @упоминания) — в память; служебное «опиши подробно» и
+            # ждущая просьба остаются только в промпте текущего хода.
+            history_text = clean_prompt if (message.caption or "").strip() else ""
+        _sender = message.from_user
+        history_meta = {
+            "sender": _flatten_untrusted(bot._note_sender(
+                state,
+                _sender.id if _sender is not None else None,
+                getattr(_sender, "username", None) if _sender is not None else None,
+                getattr(_sender, "first_name", None) if _sender is not None else None,
+            ), 80),
+            "sender_id": _sender.id if _sender is not None else None,
+            "ts": _message_ts(message),
+            "media": media_refs,
+            "addressed": True,
+            "skip_file_ids": skip_file_ids,
+            "attach_past": attach_past,
+        }
+        # Стриминг ("живой" эффект печати) имеет смысл только для простого
+        # текстового обмена без вложений/YouTube — см. _run_route. При пометке
+        # "без поиска" стрим гасим: она дописывается к готовому ответу.
+        # Свежий ответ без сниппетов и без grounding-головы не стримим: иначе он
+        # уйдёт до пост-проверки и ретрай уже невозможен (прод 12.10.2026).
+        head_has_live_search = (not route) or route_has_live_search(route[:1])
+        allow_stream = (
+            not gemini_media_list
+            and not youtube_url_to_analyze
+            and not no_search_note
+            and not is_guest
+            and (not needs_freshness or head_has_live_search or snippets_injected)
+        )
+        if route_deadline is None:
+            # Один дедлайн на первый проход и пост-хок ретрай: раньше ретрай
+            # получал свежие 40с и суммарно выходил за потолок сообщения.
+            route_deadline = bot._deadline_within_message(bot.ROUTE_TOTAL_BUDGET_SEC)
+        # Маркер обрыва прошлого сообщения не должен влиять на это.
+        state.pop("stream_interrupted", None)
         provenance: dict = {}
         ans = ""
         reply_already_sent = False
@@ -1900,9 +1904,10 @@ async def _handle_message_core(
                     edited = await bot._tg_call(
                         status.message.edit_text, html_text,
                         parse_mode=ParseMode.HTML, call_timeout=15.0,
+                        link_preview_options=NO_LINK_PREVIEW,
                     )
                     if edited is None:
-                        await bot._tg_call(status.message.edit_text, plain_text, parse_mode=None, call_timeout=15.0)
+                        await bot._tg_call(status.message.edit_text, plain_text, parse_mode=None, call_timeout=15.0, link_preview_options=NO_LINK_PREVIEW)
                 else:
                     await bot._edit_message_quietly(status.message, ans)
         # Ответ упёрся в потолок вывода провайдера: без пометки обрезка приходила
@@ -1945,7 +1950,11 @@ async def _handle_message_core(
                    "effort": effort or "auto-off", "agent": bool(agent_used),
                    "agent_steps": agent_steps, "agent_planning_ms": agent_planning_ms},
         )
+    except asyncio.CancelledError:
+        status_failed = True
+        raise
     except Exception as exc:
+        status_failed = True
         lumen_devtrace.record_failure(
             message.chat.id, user_text=clean_prompt, route=route,
             error=f"{type(exc).__name__}: {exc}",
@@ -1966,14 +1975,20 @@ async def _handle_message_core(
             # который пишется сразу после (ревью 12.11.2026).
             with contextlib.suppress(Exception):
                 await status.delete()
+            status = None
         await bot._safe_reply(message, bot._route_error_reply_text(exc, head_model, youtube_url_to_analyze=youtube_url_to_analyze, lang=bot._chat_lang(message.chat.id)))
     finally:
+        if status is None and status_task is not None:
+            await discard_status_start(status_task)
         if status is not None:
             # Индикатор «печатает» снимается в finally: исключение отсюда
             # вылетело бы из обработчика уже после того, как ответ отправлен
-            # (ревью 12.11.2026).
+            # (ревью 12.11.2026). Осознанный stop оставляет пометку и не удаляется.
             with contextlib.suppress(Exception):
-                await status.stop()
+                if status_failed:
+                    await status.delete()
+                else:
+                    await status.stop()
 
 
 async def _process_raw_update(raw_update: dict) -> None:

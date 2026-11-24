@@ -739,11 +739,9 @@ def test_streaming_plain_text_adds_subtle_thought_line():
         bot.chat_state.pop(chat_id, None)
 
 
-def test_streaming_slow_first_chunk_puts_thought_line_on_first_edit():
-    # Регрессия на п.8/п.11 ревью 11.11.2026: заголовок «✻ Thought for Ns»
-    # обязан стоять с ПЕРВОЙ правки текста и не появляться только в последней
-    # (так же живёт activity-строка у Claude). Старый код ставил его лишь в
-    # финальной правке — здесь первый content-edit не имел заголовка.
+def test_streaming_slow_first_chunk_has_no_synthetic_thought_line():
+    # Прод 23.11.2026: Claude убрал финальную строку активности у простого
+    # ответа. Медленный первый кусок не должен возвращать синтетический заголовок.
     chat_id = 999322
 
     async def pieces():
@@ -757,15 +755,8 @@ def test_streaming_slow_first_chunk_puts_thought_line_on_first_edit():
             piece_agen=pieces(),
         ))
         assert answer == "Привет"
-        # Кадр 0 с заголовком — первая HTML-правка: до неё в пузыре только
-        # тикер «Думаю…», который текст ещё не показывал.
-        html_edits = [t for t, pm in incoming.sent[0].edits if pm == bot.ParseMode.HTML]
-        # Два HTML-кадра: промежуточный с заголовком (маляр) и финальный compose.
-        # Старый код давал единственный HTML-кадр — финал, заголовок только в нём.
-        assert len(html_edits) >= 2
-        assert html_edits[0].startswith("<i>✻ Thought for")
-        assert "Привет" in html_edits[0]
-        assert incoming.sent[0].edits[-1][0].startswith("<i>✻ Thought for")
+        assert all("✻" not in text for text, _ in incoming.sent[0].edits)
+        assert incoming.sent[0].edits[-1][0].strip() == "Привет"
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -790,7 +781,7 @@ def test_streaming_final_split_sends_missing_continuation(monkeypatch):
     async def pieces():
         for _ in range(4):
             yield "а" * 1000
-        yield "б" * 200
+        yield "б" * 180 + " https://example.com"
 
     incoming = _FakeIncomingMessage(chat_id)
     try:
@@ -798,12 +789,14 @@ def test_streaming_final_split_sends_missing_continuation(monkeypatch):
             chat_id, "длинный", incoming, provider="munito", model_id="probe-y",
             piece_agen=pieces(),
         ))
-        assert answer and answer.startswith("а" * 1000) and answer.endswith("б" * 200)
+        assert answer and answer.startswith("а" * 1000) and answer.endswith("https://example.com")
         assert len(fake_bot.sent) == 1
         first_edit = incoming.sent[0].edits[-1][0]
         tail_text = fake_bot.sent[0][0]["text"]
         assert first_edit.startswith("а")
-        assert tail_text.endswith("б")
+        assert tail_text.endswith("https://example.com")
+        from aiogram.types import LinkPreviewOptions
+        assert fake_bot.sent[0][0]["link_preview_options"] == LinkPreviewOptions(is_disabled=True)
         # Оба сообщения вместе покрывают весь ответ, а не только хвост.
         assert len(first_edit) + len(tail_text) == len(answer)
         # Досланный хвост уже финальный: повторная правка получила бы
@@ -1213,6 +1206,35 @@ def test_send_text_pauses_between_chunks(monkeypatch):
         bot.chat_state.pop(999114, None)
 
 
+def test_bot_text_send_and_edit_disable_link_previews(monkeypatch):
+    # Прод 23.11.2026: ответ со ссылкой MDN раздувался preview-карточкой.
+    from aiogram.types import LinkPreviewOptions
+
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    reply_calls: list[dict] = []
+    incoming = _FakeIncomingMessage(999117)
+
+    async def capture_reply(text, **kwargs):
+        reply_calls.append(kwargs)
+        return _FakeSentMessage()
+
+    incoming.reply = capture_reply
+    asyncio.run(bot._send_text(incoming, "https://developer.mozilla.org/ru/"))
+    assert reply_calls[0]["link_preview_options"] == LinkPreviewOptions(is_disabled=True)
+
+    edit_calls: list[dict] = []
+    msg = _FakeSentMessage()
+
+    async def capture_tg_call(func, *args, **kwargs):
+        edit_calls.append(kwargs)
+        return msg
+
+    monkeypatch.setattr(bot, "_tg_call", capture_tg_call)
+    assert asyncio.run(bot._edit_message_quietly(msg, "https://developer.mozilla.org/ru/")) is True
+    assert edit_calls[0]["link_preview_options"] == LinkPreviewOptions(is_disabled=True)
+    bot.chat_state.pop(999117, None)
+
+
 def test_send_text_keeps_reply_markup_only_on_last_chunk(monkeypatch):
     # Клавиатура должна уйти один раз, с последним куском: reply_markup на
     # каждом чанке дублирует кнопку в чате, поэтому из всех кусков, кроме
@@ -1319,6 +1341,7 @@ def test_rich_disabled_flag_uses_legacy_path(monkeypatch):
 
 
 def test_rich_edit_used_for_final_message_edit():
+    from aiogram.types import LinkPreviewOptions
     msg = _FakeRichMessage()
     original_bot = bot.bot
     bot.bot = _FakeRichBot()
@@ -1326,6 +1349,7 @@ def test_rich_edit_used_for_final_message_edit():
         assert asyncio.run(bot._edit_message_quietly(msg, "## Заголовок")) is True
         assert len(bot.bot.rich_edited) == 1
         assert bot.bot.rich_edited[0]["rich_message"].html == "<h3>Заголовок</h3>"
+        assert bot.bot.rich_edited[0]["link_preview_options"] == LinkPreviewOptions(is_disabled=True)
         assert msg.edits == []
     finally:
         bot.bot = original_bot

@@ -162,6 +162,10 @@ def _table_block_line_indexes(lines: list[str]) -> set[int]:
 # страхуем детерминированной пост-обработкой в юникод.
 _LATEX_SUPERSCRIPT_MAP = {"0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "+": "⁺", "-": "⁻", "n": "ⁿ"}
 _LATEX_SUBSCRIPT_MAP = {"0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉"}
+_INLINE_MATH_DOLLAR_RE = re.compile(r"(?<![\\$])\$(?!\$)([^\s$][^$\n]{0,200}?)(?<![\\\s])\$(?!\$)")
+_LATEX_TEXT_RE = re.compile(r"\\(?:text|mathrm|mathbf|operatorname)\{([^{}]*)\}")
+_LATEX_ENV_RE = re.compile(r"\\(?:begin|end)\{[^{}]+\}")
+_CURRENCY_MATH_RE = re.compile(r"\d[\d\s.,]*")
 # Порядок важен: многобуквенные команды (\times, \infty...) должны замениться
 # ДО одиночного \t/\i и т.п., иначе оставшийся общий "\команда -> без бэкслеша"
 # в конце срежет их раньше времени. dict сохраняет порядок вставки в Python 3.7+.
@@ -278,11 +282,30 @@ def _latex_superscript(m: re.Match) -> str:
 def _latex_subscript(m: re.Match) -> str:
     return "".join(_LATEX_SUBSCRIPT_MAP.get(ch, ch) for ch in m.group(1))
 
+def _is_currency_math_match(match: re.Match) -> bool:
+    body = match.group(1)
+    if _CURRENCY_MATH_RE.fullmatch(body) or body.endswith(("/", "-", "–", "—")):
+        return True
+    text = match.string
+    return match.end() < len(text) and text[match.end()].isdigit()
+
+
+def _scrub_inline_math(match: re.Match) -> str:
+    if _is_currency_math_match(match):
+        return match.group(0)
+    return re.sub(r"\s+", " ", match.group(1).replace("&", " ")).strip()
+
+
 def _scrub_latex(text: str) -> str:
     """Сырой LaTeX в юникод. Вызывать только после вырезки кода, иначе портятся слэши в regex/путях Windows."""
     if "\\" not in text and "$" not in text:
         return text
-    # Снимаем только $$/\[..\]/\(..\): одиночный $ не трогаем, иначе сумма "$100" спарится с формулой и испортит оба.
+    # Тесная пара "$...$" — формула; числовое содержимое остаётся валютой.
+    text = _LATEX_TEXT_RE.sub(r"\1", text)
+    text = _LATEX_ENV_RE.sub("", text)
+    text = re.sub(r"\\\\", " ", text)
+    text = re.sub(r"\\(?:quad|qquad)\b", " ", text)
+    text = _INLINE_MATH_DOLLAR_RE.sub(_scrub_inline_math, text)
     text = _replace_delimited(text, "\\[", "\\]", lambda s: s)
     text = _replace_delimited(text, "\\(", "\\)", lambda s: s, allow_newlines=False)
     text = re.sub(r"\$\$(.*?)\$\$", r"\1", text, flags=re.DOTALL)
@@ -750,7 +773,12 @@ def _md_to_rich_html(text: str) -> str:
     # Инлайн-форма требует содержимого без пробелов по краям (как в GFM): иначе
     # цены вида "$50 до $100" превратились бы в "формулу". Одиночные "$80 000"
     # без закрывающего знака и так не матчатся.
-    text = re.sub(r"(?<!\$)\$(?!\$)([^\s$][^$\n]*?)(?<!\s)\$(?!\$)", lambda m: _take(_math, "MM", (m.group(1), False)), text)
+    def _take_inline_math(m: re.Match) -> str:
+        if _is_currency_math_match(m):
+            return m.group(0)
+        return _take(_math, "MM", (m.group(1), False))
+
+    text = _INLINE_MATH_DOLLAR_RE.sub(_take_inline_math, text)
     # Скобочные формы LaTeX (реальный кейс nemotron — \[ S = \pi r^{2} \]): тот же
     # смысл, что $/$$ выше, извлекаются раньше них, чтобы $ внутри не разобрали.
     text = _replace_delimited(text, "\\[", "\\]", lambda s: _take(_math, "MM", (s, True)), min_len=1)
@@ -871,21 +899,29 @@ def _strip_markdown(text: str) -> str:
         return ""
     # Голые URL прячем до чистки: "_" внутри них не выделение.
     _urls: dict[str, str] = {}
+    _code: dict[str, str] = {}
     def _save_url(m: re.Match) -> str:
         clean, tail = _split_bare_url(m.group(0))
         key = f"\x00U{len(_urls)}\x00"
         _urls[key] = clean
         return key + tail
-    text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", r"\1", text, flags=re.DOTALL)
+    def _save_code(m: re.Match) -> str:
+        key = f"\x00C{len(_code)}\x00"
+        _code[key] = m.group(1)
+        return key
+    text = re.sub(r"```[a-zA-Z0-9]*\n(.*?)\n```", _save_code, text, flags=re.DOTALL)
+    text = re.sub(r"`([^`\n]+)`", _save_code, text)
     text = re.sub(r"\[([^\[\]]+)\]\((https?://(?:[^\s()]|\([^()\s]*\))+)\)", r"\1", text)
     text = re.sub(r"https?://[^\s()<>]+", _save_url, text)
+    text = _scrub_latex(text)
     text = re.sub(r"(\*\*|__)(.*?)\1", r"\2", text, flags=re.DOTALL)
     # Одиночное "_" только вне слова: my_file_name и имена файлов не трогаем.
     text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"\1", text)
     text = re.sub(r"\*(.*?)\*", r"\1", text)
     text = re.sub(r"~~(.*?)~~", r"\1", text)
-    text = re.sub(r"`([^`\n]+)`", r"\1", text)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    for key, code in _code.items():
+        text = text.replace(key, code)
     for key, url in _urls.items():
         text = text.replace(key, url)
     return text

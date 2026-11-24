@@ -61,6 +61,23 @@ def thought_block(lang: str, sec: int, answer_md: str) -> tuple[str | None, str]
     return html_block, line + "\n\n" + answer_md
 
 
+async def discard_status_start(task: asyncio.Task | None) -> None:
+    """Завершить незакреплённый startup-статус и убрать его пузырь.
+
+    Задача создаётся параллельно поиску. Сбой до передачи статуса обработчику
+    иначе оставляет тикер менять старое сообщение поверх следующих запросов.
+    """
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    status = None
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        status = await task
+    if status is not None:
+        await status.delete()
+
+
 class StatusMessage:
     """Сообщение-статус: завершённые этапы + текущая фраза с анимированным индикатором и таймером.
     Все правки глотают ошибки: удалённое сообщение не должно ломать ответ."""
@@ -81,6 +98,7 @@ class StatusMessage:
         self._thought_seconds: int | None = None
         self._task: asyncio.Task | None = None
         self._stopped = False
+        self._deleted = False
         # Одна правка пузырька за раз: поздний кадр старой фазы иначе затирал
         # новую после доставки через прокси (ревью 17.11.2026).
         self._edit_lock = asyncio.Lock()
@@ -309,6 +327,9 @@ class StatusMessage:
 
     async def delete(self) -> None:
         """Останавливает анимацию и убирает сообщение (провал маршрута, отмена)."""
+        if self._deleted:
+            return
+        self._deleted = True
         import bot
         await self.stop()
         await bot._delete_message_quietly(self.message)
