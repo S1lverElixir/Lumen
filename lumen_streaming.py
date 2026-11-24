@@ -1111,7 +1111,7 @@ async def _run_streaming_reply(
         # В личке убираем reply-клавиатуру отдельным служебным сообщением:
         # editMessageReplyMarkup принимает только inline-клавиатуры.
         if (message is not None and getattr(message.chat, "type", None) == ChatType.PRIVATE
-                and _stop_control is not None):
+                and bot.STOP_BUTTON_ENABLED):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 remove = await bot._tg_call(
                     bot._answer_sender(message), "\u200b", parse_mode=None,

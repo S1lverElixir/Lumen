@@ -1360,6 +1360,9 @@ async def handle_stop_callback(query: CallbackQuery) -> None:
     parts = str(getattr(query, "data", "")).split(":")
     token = parts[2] if len(parts) > 2 else None
     if chat_id:
+        # Старая кнопка без токена не должна гасить новый стрим того же чата.
+        if token is None and bot._stream_stop_token(chat_id) is not None:
+            return
         bot._request_stream_stop(chat_id, sender, token=token)
 
 

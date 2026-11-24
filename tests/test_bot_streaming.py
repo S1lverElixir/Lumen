@@ -1989,6 +1989,12 @@ def test_stop_callback_rejects_stale_button_token(monkeypatch):
     try:
         asyncio.run(lumen_commands.handle_stop_callback(stale))
         assert bot._stream_stop_requested(77) is False
+        legacy = SimpleNamespace(
+            data="stop:77", from_user=SimpleNamespace(id=5),
+            message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
+        )
+        asyncio.run(lumen_commands.handle_stop_callback(legacy))
+        assert bot._stream_stop_requested(77) is False
         fresh = SimpleNamespace(
             data=f"stop:77:{token}", from_user=SimpleNamespace(id=5),
             message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
@@ -2011,11 +2017,12 @@ def test_stop_callback_stops_only_for_the_author(monkeypatch):
     async def answer(*args, **kwargs):
         answered.append(True)
 
+    bot._begin_stream_stop_scope(77, 5)
+    token = bot._stream_stop_token(77)
     q = SimpleNamespace(
-        data="stop:77", from_user=SimpleNamespace(id=5),
+        data=f"stop:77:{token}", from_user=SimpleNamespace(id=5),
         message=SimpleNamespace(chat=SimpleNamespace(id=77)), answer=answer,
     )
-    bot._begin_stream_stop_scope(77, 5)
     try:
         asyncio.run(lumen_commands.handle_stop_callback(q))
         assert bot._stream_stop_requested(77) is True
