@@ -402,7 +402,8 @@ async def _run_streaming_reply(
     import bot
     state = bot.get_state(chat_id)
     # Флаг остановки живёт на чат: /stop его выставляет, цикл читает на каждом куске.
-    bot._begin_stream_stop_scope(chat_id, getattr(getattr(message, "from_user", None), "id", None))
+    bot._begin_stream_stop_scope(
+        chat_id, getattr(getattr(message, "from_user", None), "id", None), stream=True)
     # Инициализация ДО try: early-return (плейсхолдер не отправился) обязан видеть
     # эти имена в finally.
     keep_placeholder_live = False
@@ -1083,6 +1084,8 @@ async def _run_streaming_reply(
             state["stream_interrupted"] = True
             bot.mark_state_dirty(chat_id)
     finally:
+        if not keep_placeholder_live:
+            bot._consume_stream_stop(chat_id)
         bot._end_stream_stop_scope(chat_id)
         # Сначала гасим всех, кто ещё может править пузырёк. cleanup кнопки должен
         # быть последней Telegram-правкой, иначе опоздавший кадр вернёт её (review

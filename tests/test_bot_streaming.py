@@ -1970,6 +1970,28 @@ def test_private_stop_keyboard_uses_prelock_stop_command(monkeypatch):
     assert keyboard.keyboard[0][0].text == "/stop"
 
 
+def test_stop_token_rotates_for_next_queued_stream():
+    bot._STREAM_STOPS.clear()
+    bot._begin_stream_stop_scope(77, 5)
+    outer_token = bot._stream_stop_token(77)
+    bot._begin_stream_stop_scope(77, 5, stream=True)
+    first_token = bot._stream_stop_token(77)
+    bot._begin_stream_stop_scope(77, 5)  # следующий запрос уже ждёт лок
+    assert bot._stream_stop_token(77) == first_token
+    bot._end_stream_stop_scope(77)
+    bot._end_stream_stop_scope(77)
+    bot._begin_stream_stop_scope(77, 5, stream=True)
+    second_token = bot._stream_stop_token(77)
+    try:
+        assert outer_token and first_token and second_token
+        assert first_token != outer_token
+        assert second_token not in (outer_token, first_token)
+    finally:
+        bot._end_stream_stop_scope(77)
+        bot._end_stream_stop_scope(77)
+        bot._STREAM_STOPS.clear()
+
+
 def test_stop_callback_rejects_stale_button_token(monkeypatch):
     from types import SimpleNamespace
     import lumen_commands

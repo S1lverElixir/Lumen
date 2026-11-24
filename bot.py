@@ -107,7 +107,7 @@ _ANSWER_COUNTED: contextvars.ContextVar[bool] = contextvars.ContextVar("answer_c
 _STREAM_STOPS: dict[int, dict[str, object]] = {}
 
 
-def _begin_stream_stop_scope(chat_id: int, user_id: int | None) -> None:
+def _begin_stream_stop_scope(chat_id: int, user_id: int | None, *, stream: bool = False) -> None:
     """Область с глубиной: внешняя ставится на весь апдейт (чтобы /stop работал и
     во время фазы поиска), внутренняя — на стрим. Флаг переживает вложенную область."""
     entry = _STREAM_STOPS.get(chat_id)
@@ -117,7 +117,14 @@ def _begin_stream_stop_scope(chat_id: int, user_id: int | None) -> None:
         _STREAM_STOPS[chat_id] = entry
     if user_id is not None and entry.get("user_id") is None:
         entry["user_id"] = user_id
-    entry["depth"] = int(entry.get("depth") or 0) + 1
+    depth = int(entry.get("depth") or 0)
+    # Очередь может открыть внешнюю область следующего сообщения до завершения
+    # текущего. Токен меняем только при входе в новый стрим, чтобы кнопка
+    # прошлого ответа не гасила следующий (review 24.11.2026).
+    if stream and depth == 1:
+        entry["token"] = secrets.token_hex(4)
+        entry["user_id"] = user_id
+    entry["depth"] = depth + 1
 
 
 def _end_stream_stop_scope(chat_id: int) -> None:
@@ -1628,16 +1635,9 @@ async def handle_message(message: Message) -> None:
     dtoken = _MSG_DEADLINE.set(time.monotonic() + MESSAGE_TOTAL_BUDGET_SEC)
     # Сброс на входе: значение не имеет права утечь в следующий апдейт.
     ctoken = _ANSWER_COUNTED.set(False)
-    # /stop обязан приниматься с первой секунды, включая фазу поиска (аудит 16.11.2026).
-    _stop_chat = message.chat.id if getattr(message, "chat", None) is not None else None
-    if _stop_chat is not None:
-        _begin_stream_stop_scope(
-            _stop_chat, message.from_user.id if getattr(message, "from_user", None) else None)
     try:
         await _handle_message(message)
     finally:
-        if _stop_chat is not None:
-            _end_stream_stop_scope(_stop_chat)
         _LOG_CHAT.reset(token)
         _LOG_USER.reset(utoken)
         _ANSWER_COUNTED.reset(ctoken)

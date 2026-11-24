@@ -389,6 +389,7 @@ async def _run_under_chat_lock(
         # Пассивный фон не занимает слоты очереди людей: иначе три реплики в
         # занятом чате заполняли кап, и адресованный вопрос отшивался «занято»,
         # которое к тому же уходило не ему (прод 18.11.2026).
+        stop_scope_opened = False
         counters = bot._chat_lock_background_waiters if background else bot._chat_lock_waiters
         cap = bot._MAX_CHAT_LOCK_BACKGROUND_WAITERS if background else bot._MAX_CHAT_LOCK_WAITERS
         waiters = counters.get(chat_id, 0)
@@ -400,11 +401,6 @@ async def _run_under_chat_lock(
             with contextlib.suppress(Exception):
                 await bot._tg_call(bot._answer_sender(message), bot._t_no_create(chat_id, "lock_busy"))
             return
-        # Область /stop открываем только принятому запросу: отшитый «занято»
-        # раньше оставался владельцем области (ревью 17.11.2026); фону стоп не нужен.
-        if _stop_scope is not None and not background:
-            bot._begin_stream_stop_scope(
-                _stop_scope, getattr(getattr(message, "from_user", None), "id", None))
         # Ответ без создания чата: обычный _t через get_state завёл бы запись даже
         # тому, кого отшили «занято» (та же причина, что у лимита).
         counters[chat_id] = waiters + 1
@@ -424,6 +420,12 @@ async def _run_under_chat_lock(
                 counters[chat_id] = left
             else:
                 counters.pop(chat_id, None)
+        # Stop-область создаётся только после взятия лока: очередь не делит
+        # одно событие между сообщениями, а /stop работает во время поиска.
+        if _stop_scope is not None and not background:
+            bot._begin_stream_stop_scope(
+                _stop_scope, getattr(getattr(message, "from_user", None), "id", None))
+            stop_scope_opened = True
         try:
             await run()
         finally:
@@ -437,7 +439,7 @@ async def _run_under_chat_lock(
         if utoken is not None:
             bot._LOG_USER.reset(utoken)
         _lumen_search.reset_search_actor(_actor_token)
-        if _stop_scope is not None:
+        if stop_scope_opened:
             bot._end_stream_stop_scope(_stop_scope)
 
 
