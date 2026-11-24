@@ -1751,10 +1751,11 @@ def test_stop_button_is_off_by_default_and_wired_when_on(monkeypatch):
     assert btn.text == bot._t(424242, "stop_button")
 
 
-def test_stop_button_stays_attached_during_all_stream_edits(monkeypatch):
+def test_private_stop_keyboard_survives_stream_edits(monkeypatch):
     # Прод 24.11.2026: inline-кнопка под растущим ответом уезжала за экран.
-    # Теперь Stop живёт в отдельном маленьком пузыре и не зависит от edit_text.
+    # В личке Stop живёт в reply-клавиатуре над композером.
     from types import SimpleNamespace
+    from aiogram.types import ReplyKeyboardRemove
 
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
     monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
@@ -1782,11 +1783,12 @@ def test_stop_button_stays_attached_during_all_stream_edits(monkeypatch):
             piece_agen=pieces(), reuse_placeholder=placeholder,
         ))
         assert answer == "Привет"
-        assert len(incoming.sent) == 1
-        control = incoming.sent[0]
-        assert control.send_kwargs["reply_markup"].inline_keyboard
+        assert len(incoming.sent) == 2
+        control, remover = incoming.sent
+        assert control.send_kwargs["reply_markup"].keyboard[0][0].text == "/stop"
+        assert isinstance(remover.send_kwargs["reply_markup"], ReplyKeyboardRemove)
         assert all("reply_markup" not in kw for kw in placeholder.text_edits)
-        assert control.deleted is True
+        assert control.deleted is True and remover.deleted is True
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1836,10 +1838,10 @@ def test_stop_control_moves_below_each_continuation(monkeypatch):
         controls = [msg for kind, msg in events if kind == "control"]
         answers = [msg for kind, msg in events if kind == "answer"]
         assert len(answers) >= 1
-        assert len(controls) == len(answers) + 1
-        assert events[-1][0] == "control"
-        assert all(msg.deleted for msg in controls[:-1])
-        assert controls[-1].deleted is True
+        # В личке reply-клавиатура не пересоздаётся для continuation; второй
+        # control — служебное сообщение с ReplyKeyboardRemove.
+        assert len(controls) == 2
+        assert all(msg.deleted for msg in controls)
     finally:
         bot.bot = original_bot
         bot.chat_state.pop(chat_id, None)
@@ -1861,8 +1863,13 @@ def test_stop_button_cleanup_waits_for_status_ticker(monkeypatch):
             await super().delete()
 
     control = _Control()
+    remover = _FakeSentMessage()
 
     async def reply(text, **kwargs):
+        if kwargs["reply_markup"].__class__.__name__ == "ReplyKeyboardRemove":
+            events.append("keyboard_remove")
+            remover.send_kwargs = kwargs
+            return remover
         events.append("control_sent")
         control.send_kwargs = kwargs
         return control
@@ -1900,8 +1907,8 @@ def test_stop_button_cleanup_waits_for_status_ticker(monkeypatch):
             piece_agen=stop_before_first_piece(), reuse_placeholder=placeholder, status=status,
         ))
         assert answer == ""
-        assert events == ["control_sent", "status_stop", "control_delete"]
-        assert control.deleted is True
+        assert events == ["control_sent", "status_stop", "keyboard_remove", "control_delete"]
+        assert control.deleted is True and remover.deleted is True
     finally:
         bot.chat_state.pop(chat_id, None)
 
@@ -1943,13 +1950,24 @@ def test_stop_control_is_removed_when_placeholder_is_reused(monkeypatch):
             piece_agen=hanging(), reuse_placeholder=placeholder, status=status,
         ))
         assert answer is None and reused is placeholder
-        assert len(incoming.sent) == 1
-        assert incoming.sent[0].send_kwargs["reply_markup"].inline_keyboard
-        assert incoming.sent[0].deleted is True
+        assert len(incoming.sent) == 2
+        assert incoming.sent[0].send_kwargs["reply_markup"].keyboard
+        assert incoming.sent[1].send_kwargs["reply_markup"].__class__.__name__ == "ReplyKeyboardRemove"
+        assert all(msg.deleted for msg in incoming.sent)
         assert status.stopped is False
         assert placeholder.reply_markup is None
     finally:
         bot.chat_state.pop(chat_id, None)
+
+
+def test_private_stop_keyboard_uses_prelock_stop_command(monkeypatch):
+    # /stop обрабатывается командным хендлером до chat-lock, поэтому кнопка
+    # действительно прерывает текущий стрим, а не ждёт его завершения.
+    import lumen_streaming
+
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    keyboard = lumen_streaming._stop_reply_keyboard(999408)
+    assert keyboard.keyboard[0][0].text == "/stop"
 
 
 def test_stop_callback_rejects_stale_button_token(monkeypatch):

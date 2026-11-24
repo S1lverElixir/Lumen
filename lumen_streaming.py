@@ -12,7 +12,14 @@ import time
 from typing import Any
 import aiohttp
 from aiogram.enums import ChatType, ParseMode
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
 from lumen_errors import _is_empty_like
 from lumen_formatting import _md_to_html, _split_text_chunks, _strip_provider_artifacts, _tg_len, _truncate_html_to_fit
@@ -365,8 +372,7 @@ class _StoppedByUser(Exception):
 
 
 def _stop_button_markup(chat_id: int):
-    """Клавиатура «Остановить» или None. Выключено по умолчанию: кнопка добавляет
-    две правки на каждый ответ, а бюджет правок в группе общий (аудит 16.11.2026)."""
+    """Inline-вариант для групп: у личной кнопки выше нет привязки к пузырю."""
     import bot
     if not getattr(bot, "STOP_BUTTON_ENABLED", False):
         return None
@@ -375,6 +381,15 @@ def _stop_button_markup(chat_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=bot._t(chat_id, "stop_button"), callback_data=callback),
     ]])
+
+
+def _stop_reply_keyboard(chat_id: int):
+    """В личке кнопка живёт над композером и не уезжает вместе с ответом."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="/stop")]],
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 async def _run_streaming_reply(
@@ -547,14 +562,18 @@ async def _run_streaming_reply(
         async def _send_stop_control():
             if _stop_markup is None or message is None:
                 return None
+            private = getattr(message.chat, "type", None) == ChatType.PRIVATE
+            markup = _stop_reply_keyboard(message.chat.id) if private else _stop_markup
             return await bot._tg_call(
                 bot._answer_sender(message), bot._t(message.chat.id, "stop_button"), parse_mode=None,
-                reply_markup=_stop_markup, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                reply_markup=markup, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
                 retries=0, link_preview_options=NO_LINK_PREVIEW,
             )
 
         async def _move_stop_control() -> None:
             nonlocal _stop_control
+            if getattr(message.chat, "type", None) == ChatType.PRIVATE:
+                return
             send_task = asyncio.create_task(_send_stop_control())
             try:
                 new_control = await asyncio.shield(send_task)
@@ -1089,6 +1108,18 @@ async def _run_streaming_reply(
                 await status.stop()
             if getattr(status, "reply_markup", None) is not None:
                 await status.clear_reply_markup()
+        # В личке убираем reply-клавиатуру отдельным служебным сообщением:
+        # editMessageReplyMarkup принимает только inline-клавиатуры.
+        if (message is not None and getattr(message.chat, "type", None) == ChatType.PRIVATE
+                and _stop_control is not None):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                remove = await bot._tg_call(
+                    bot._answer_sender(message), "\u200b", parse_mode=None,
+                    reply_markup=ReplyKeyboardRemove(), call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                    retries=1,
+                )
+                if remove is not None:
+                    await bot._tg_call(remove.delete, call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT)
         # Control-пузырь не переиспользуется: удаляем и при успехе, и при раннем
         # фолбэке, чтобы кнопка не осталась висеть рядом с будущим ответом.
         if _stop_control is not None:
