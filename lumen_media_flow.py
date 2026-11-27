@@ -1,5 +1,4 @@
-"""
-lumen_media_flow.py — скачивание вложений из Telegram и учёт медиа-истории.
+"""lumen_media_flow.py — downloads Telegram attachments and tracks media history.
 """
 from __future__ import annotations
 
@@ -19,15 +18,15 @@ from lumen_media import (
 log = logging.getLogger("bot")
 
 class _MediaTooLargeError(RuntimeError):
-    """Файл больше капа скачивания: вызывающий код отвечает пользователю
-    понятным текстом вместо слепого анализа (аудит D1, 30.09.2026)."""
+    """The file exceeds the download cap: the caller responds to the user
+    with clear text instead of blindly analyzing it (audit D1, 30.09.2026)."""
     def __init__(self, size_bytes: int, cap_bytes: int):
         self.size_bytes = size_bytes
         self.cap_bytes = cap_bytes
         super().__init__(f"file size {size_bytes} exceeds the {cap_bytes} byte download cap")
 
 async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None = None, retries: int = 1) -> tuple[bytes, str]:
-    # Один ретрай getFile/скачивания: единичный сбой прокси иначе слепил бота ("NOT_FOUND" в логах).
+    # One getFile/download retry: a single proxy failure otherwise blinded the bot ("NOT_FOUND" in logs).
     import bot
     last_exc: Exception | None = None
     for attempt in range(retries + 1):
@@ -38,7 +37,7 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
                 raise RuntimeError("File path is empty")
             declared_size = getattr(file, "file_size", None)
             if isinstance(declared_size, int) and declared_size > bot.TELEGRAM_DOWNLOAD_MAX_BYTES:
-                # Заранее большой размер — без скачивания, с честным отказом выше.
+                # An up-front large size: no download, with an honest refusal above.
                 raise _MediaTooLargeError(declared_size, bot.TELEGRAM_DOWNLOAD_MAX_BYTES)
             session = await bot._get_telegram_session()
             url = f"{bot.TELEGRAM_API_BASE_URL}/file/bot{bot.BOT_TOKEN}/{file_path}"
@@ -50,7 +49,7 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
             real_mime = _sanitize_mime_type(file_path, mime)
             return data, real_mime
         except _MediaTooLargeError:
-            # Кап — не сеть: ретрай бессмыслен, пробрасываем сразу.
+            # A cap is not a network error: retrying is pointless, so re-raise immediately.
             raise
         except Exception as exc:
             last_exc = exc
@@ -66,12 +65,13 @@ async def _download_telegram_file_bytes(file_id: str, *, timeout: float | None =
     raise RuntimeError(f"Network error in download_telegram_file_bytes: {exc_str}") from None
 
 async def _read_capped_telegram_body(resp: Any, url: str) -> bytes:
-    """Тело ответа Telegram с капом: Content-Length врёт/отсутствует —
-    та же проверка потоково по факту (см. кап TikWM-скачиваний)."""
+    """Telegram response body with a cap: Content-Length lies or is absent —
+    perform the same check while streaming (see the TikWM download cap)."""
     import bot
-    # Какой именно файл не влез — иначе в альбоме из 10 файлов отказ нечем
-    # локализовать. Ссылка Telegram содержит токен в пути, поэтому только с
-    # заменённым токеном (тот же приём, что в тексте ошибок выше).
+    # Identify which file did not fit; otherwise, for an album of 10 files there is
+    # no way to explain the refusal
+    # localize. A Telegram link contains the token in its path, so only with
+    # the replaced token (the same trick as in the error texts above).
     safe_url = url.replace(bot.BOT_TOKEN, "<TOKEN>") if bot.BOT_TOKEN else url
     content_length = resp.headers.get("Content-Length")
     if content_length is not None:
@@ -101,7 +101,7 @@ def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | No
         state["recent_media_ids"] = buckets
     key = str(user_id)
     if key in buckets:
-        # Поднимаем активный бакет в хвост: вытеснение ниже бьёт по давно неактивным.
+        # Move the active bucket to the tail: eviction below then targets long-inactive buckets.
         buckets[key] = buckets.pop(key)
     elif len(buckets) >= MAX_MEDIA_BUCKETS_PER_CHAT:
         buckets.pop(next(iter(buckets)))
@@ -113,8 +113,8 @@ def _save_media_to_history(source: Any, state: dict[str, Any], user_id: int | No
         recent.append((file_id, mime or "application/octet-stream"))
 
 def _fresh_generation_ref(state: dict[str, Any], sender_id: int | None) -> bool:
-    """Своя генерация не старше окна: только тогда слабый глагол ("добавь") —
-    правка, иначе "сделай мне кофе" рисовало бы поверх древнего фото."""
+    """Own generation is no older than the window: only then is a weak verb ("add") an
+    edit; otherwise "make me coffee" would draw over an ancient photo."""
     import bot
     if not isinstance(state, dict):
         return False
@@ -130,9 +130,9 @@ def _fresh_generation_ref(state: dict[str, Any], sender_id: int | None) -> bool:
 async def _resolve_edit_references(
     message: Any, state: dict[str, Any], *, is_private: bool, implicit: bool,
 ) -> list[tuple[bytes, str]]:
-    """Референсы правки: вложение, реплай, затем (если других нет) свежая своя
-    генерация; для сильных глаголов — свежее фото автора. До двух картинок:
-    «совмести это с этим» у klein работает как multi-image (замер 10.11.2026)."""
+    """Edit references: an attachment, then a reply, then (if there are no others) a recent
+    own generation; for strong edit verbs, a recent photo from the author. Up to two images:
+    "combine this with this" works with klein as multi-image (measurement 10.11.2026)."""
     import bot
     import lumen_memory
     from lumen_media import _media_file_id_and_mime, _msg_media_source
@@ -167,21 +167,21 @@ async def _resolve_edit_references(
                 try:
                     fetched = await bot._fetch_media(fid, mime)
                 except _MediaTooLargeError:
-                    # Второй референс не влез — правим по уже собранному первому,
-                    # а не отменяем всю правку (ревью 10.11.2026).
+                    # The second reference did not fit — edit using the first one already assembled,
+                    # rather than canceling the entire edit (review 10.11.2026).
                     fetched = None
                 if fetched:
                     collected.append(fetched)
-                    # Корзина владельца фото, а не ответившего: иначе позже «добавь
-                    # звезду» без реплая правит чужой снимок (ревью 10.11.2026).
+                    # The photo owner's basket, not the responder's: otherwise a later "add
+                    # star" without a reply edits someone else's snapshot (review 10.11.2026).
                     _reply_owner = getattr(reply, "from_user", None)
                     bot._save_media_to_history(
                         reply_src, state,
                         _reply_owner.id if _reply_owner is not None else sender_id,
                     )
 
-    # Неявный контекст подключаем только когда явных референсов нет: иначе
-    # «совмести эти два» тянул бы ещё и старую картинку из истории.
+    # Include implicit context only when there are no explicit references: otherwise
+    # 'combine these two' would also pull an old picture from history.
     if not collected and _fresh_generation_ref(state, sender_id):
         from lumen_message_parse import _find_recent_media_by_category
 
@@ -223,9 +223,9 @@ async def _resolve_edit_references(
 async def _resolve_edit_reference(
     message: Any, state: dict[str, Any], *, is_private: bool, implicit: bool,
 ) -> tuple[bytes, str] | None:
-    """Первый референс правки. Оставлено для одиночных вызовов и тестов;
-    многокартиночный путь обязан идти через _resolve_edit_references, иначе
-    второй референс молча теряется (ревью 10.11.2026)."""
+    """The first edit reference. Kept for single calls and tests;
+    the multi-image path must go through _resolve_edit_references, otherwise
+    the second reference is silently lost (review 10.11.2026)."""
     refs = await _resolve_edit_references(
         message, state, is_private=is_private, implicit=implicit,
     )
@@ -233,8 +233,8 @@ async def _resolve_edit_reference(
 
 
 async def _download_message_attachment(source: Any) -> tuple[bytes, str, str] | None:
-    """Байты вложения сразу в память: временный файл на диске (запись и обратное
-    чтение до 20МБ) был лишним кругом на каждое вложение."""
+    """Attachment bytes go straight into memory: a temporary disk file (writing and reading
+back up to 20 MB) was an unnecessary round trip for every attachment."""
     import bot
     file_id, mime, filename = _media_file_id_and_mime(source)
     if not file_id:
@@ -258,7 +258,7 @@ async def _fetch_media(file_id: str, mime: str) -> tuple[bytes, str] | None:
             final_mime = _sanitize_mime_type(None, real_mime)
         return data, final_mime
     except _MediaTooLargeError:
-        # Честный отказ выше по стеку, а не тихое None.
+        # An honest refusal higher up the stack, not a silent None.
         raise
     except Exception as exc:
         log.warning("[media] Download media failed for file_id %s: %s", file_id, exc)

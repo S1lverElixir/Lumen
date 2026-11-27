@@ -1,7 +1,6 @@
-"""
-test_bot_commands.py — Команды и триггеры: /draw//tts//reset//lang, inline_draw, кнопки-уточнения, rate-guard.
+"""test_bot_commands.py — Commands and triggers: /draw//tts//reset//lang, inline_draw, clarification buttons, rate guard.
 
-Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
+Split out of test_bot.py (P2 audit); shared fakes are in bot_test_helpers.py.
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -17,6 +16,7 @@ import pytest
 import time
 from tests.bot_test_helpers import (
     _FakeIncomingMessage,
+    _FakeQueryMessage,
     _make_lang_query,
     _make_pick_query,
 )
@@ -24,9 +24,9 @@ from tests.bot_test_helpers import (
 
 @pytest.fixture(autouse=True)
 def _stub_http_session(monkeypatch):
-    # Команды берут общую aiohttp-сессию бота. В юните она не нужна, а без
-    # закрытия живёт до выхода интерпретатора и печатает в stderr
-    # "Unclosed client session" — из-за этого прогон выглядит упавшим.
+    # Commands use the bot's shared aiohttp session. Unit tests do not need it, but without
+    # this stub the real session survives until interpreter exit and prints to stderr
+    # "Unclosed client session" — this made the run look failed.
     async def fake_get_http_session():
         return SimpleNamespace()
 
@@ -34,11 +34,11 @@ def _stub_http_session(monkeypatch):
 
 
 def test_cmd_logs_flushes_the_listeners_real_handlers_not_root():
-    # РЕГРЕССИЯ (аудит логирования): cmd_logs раньше флашил
-    # logging.getLogger().handlers — после перехода на QueueHandler/QueueListener
-    # там остаётся только сам QueueHandler (его flush() — no-op), реальные
-    # file_handler/console_handler живут внутри _LOG_LISTENER. Проверяем, что
-    # flush() реально доходит до обработчиков, зарегистрированных в _LOG_LISTENER.
+    # REGRESSION (logging audit): cmd_logs previously flushed
+    # logging.getLogger().handlers — after switching to QueueHandler/QueueListener
+    # only the QueueHandler itself remains there (its flush() is a no-op), the real
+    # file_handler/console_handler live inside _LOG_LISTENER. Verify that
+    # flush() actually reaches handlers registered in _LOG_LISTENER.
     original_owner = bot.OWNER_ID
     original_listener = bot._LOG_LISTENER
     bot.OWNER_ID = 555001
@@ -72,7 +72,8 @@ def test_cmd_logs_flushes_the_listeners_real_handlers_not_root():
 
 
 def test_cmd_logs_uses_unique_temp_file(monkeypatch):
-    # Предсказуемое имя в общем tmp — перезапись и чтение чужого.
+    # A predictable name in shared tmp means overwriting and reading someone
+    # else file.
     import os
     monkeypatch.setattr(bot, "OWNER_ID", 555002)
     prior = None
@@ -112,7 +113,7 @@ def test_cmd_logs_uses_unique_temp_file(monkeypatch):
 
 
 def test_cmd_stats_counts_only_recently_active_chats():
-    # "Активных" — с активностью за 24ч: молчащий год чат в счёт не идёт, но виден в "всего".
+    # "Active" means activity within 24 hours: a chat silent for a year does not count toward the total, but remains visible in "all".
     chat_id = 999812
     incoming = _FakeIncomingMessage(chat_id)
     incoming.from_user = SimpleNamespace(id=777002)
@@ -135,7 +136,7 @@ def test_cmd_stats_counts_only_recently_active_chats():
     bot.chat_state.update({
         111: {"history": [], "last_activity": now - 3600},
         222: {"history": [], "last_activity": now - 25 * 3600},
-        # Запись без метки (старый снимок) — неактивна, а не "только что".
+        # A record without a marker (an old snapshot) is inactive, not "just now".
         333: {"history": []},
     })
     try:
@@ -152,12 +153,13 @@ def test_cmd_stats_counts_only_recently_active_chats():
 
 @pytest.mark.parametrize("munito_limit", [250, 20])
 def test_cmd_stats_hides_idle_models_and_shows_totals(monkeypatch, munito_limit):
-    # Проф-вид /stats: нули по мёртвым моделям не мусорят, у провайдера — итог и
-    # остаток лимита. Лимит Munito живёт в env, а не в команде: смена тарифа без
-    # правки кода обязана менять и вывод.
+    # Pro view of /stats: zeros for dead models do not clutter it; a provider gets
+    # a total and
+    # remaining quota. The Munito limit lives in env, not in the command: changing plans without
+    # a code change must also change the output.
     monkeypatch.setattr(bot, "MUNITO_DAILY_LIMIT", munito_limit)
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
-    # Лимит Gemini — только где задан в env: одна модель с лимитом, вторая без.
+    # The Gemini limit applies only where set in env: one model has a limit, the other does not.
     monkeypatch.setattr(bot, "GEMINI_DAILY_LIMITS", {"gemini-3.6-flash": 20})
     chat_id = 999811
     incoming = _FakeIncomingMessage(chat_id)
@@ -209,9 +211,9 @@ def test_cmd_stats_hides_idle_models_and_shows_totals(monkeypatch, munito_limit)
 
 
 def test_cmd_stats_hides_munito_section_without_key(monkeypatch):
-    # Что защищает: секция Munito рисуется только при активном провайдере.
-    # Регрессия: секция без ключа — пустой блок в /stats, владелец видит
-    # «провайдера нет», хотя маршрут честно работает на Gemini.
+    # What it protects: the Munito section is drawn only when the provider is active.
+    # Regression: a section without a key is an empty block in /stats; the owner sees
+    # "provider unavailable", although the route is honestly running on Gemini.
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
     chat_id = 999812
     incoming = _FakeIncomingMessage(chat_id)
@@ -243,10 +245,10 @@ def test_cmd_stats_hides_munito_section_without_key(monkeypatch):
 
 
 def test_cmd_stats_shows_day_counters_webhook_memory_storage_and_fits_limit(monkeypatch):
-    # Что защищает: новый блок /stats (сутки/вебхук/память/хранилище) — без теста
-    # он молча протухает при рефакторинге команды, а нули в нём не отличить от
-    # "счётчики не считаются". Регрессия: счётчики есть в GLOBAL_QUOTA, но команда
-    # их не показывает. Старые тесты проверяют только модели и активные чаты.
+    # What it protects: the new /stats block (day/webhook/memory/storage)—without a test
+    # it silently becomes stale when a command is refactored, and zeros in it cannot be distinguished from
+    # "counters are not counted." Regression: counters exist in GLOBAL_QUOTA, but the command
+    # does not show them. Old tests check only models and active chats.
     import lumen_chat_state as lcs
     chat_id = 999810
     incoming = _FakeIncomingMessage(chat_id)
@@ -292,9 +294,9 @@ def test_cmd_stats_shows_day_counters_webhook_memory_storage_and_fits_limit(monk
 
 
 def test_cmd_stats_webhook_error_and_failure_paths(monkeypatch):
-    # Что защищает: строки вебхука при ошибке Telegram и при недоступности API —
-    # без теста сбой getWebhookInfo ронял бы всю команду исключением.
-    # Регрессия: необёрнутый await в команде. Старые тесты вебхук не трогают.
+    # What this protects: webhook lines on a Telegram error and when the API is unreachable —
+    # without a test, a getWebhookInfo failure would crash the entire command with an exception.
+    # Regression: an unawaited await in a command. The old tests do not touch the webhook.
     import lumen_chat_state as lcs
     chat_id = 999809
     sent = {}
@@ -338,9 +340,9 @@ def test_cmd_stats_webhook_error_and_failure_paths(monkeypatch):
 
 
 def test_cmd_stats_truncation_keeps_html_valid(monkeypatch):
-    # Защищает обрезку длинного /stats: рваный тег ронял бы отправку 400 при
-    # parse_mode=HTML. Регрессия — наивный срез по символам. Старый тест длины
-    # короткий вывод не ловит.
+    # Protects truncation of a long /stats: a broken tag would cause a 400 during sending when
+    # parse_mode=HTML. Regression — a naive character slice. The old length test on
+    # a short output will not catch it.
     import lumen_chat_state as lcs
     chat_id = 999808
     incoming = _FakeIncomingMessage(chat_id)
@@ -379,8 +381,8 @@ def test_cmd_stats_truncation_keeps_html_valid(monkeypatch):
 
 
 def test_build_version_caches_git_call(monkeypatch):
-    # Защищает кеш версии: git-вызов блокирует loop до 5с, без кеша каждый
-    # /stats стопает бота. Регрессия — прямой subprocess при каждом вызове.
+    # Protects the version cache: a git call blocks the loop for up to 5s; without caching, every
+    # /stats stops the bot. Regression: a direct subprocess on every call.
     import lumen_commands as lc
     monkeypatch.setattr(lc, "_BUILD_VERSION_CACHED", None)
     calls = []
@@ -407,20 +409,20 @@ def test_build_version_caches_git_call(monkeypatch):
     ("озвучь этот текст пожалуйста", bot.TTS_TRIGGER_PREFIXES, "озвучь"),
     ("преврати в аудио вот это сообщение", bot.TTS_TRIGGER_PREFIXES, "преврати в аудио"),
     ("сгенери картинку заката", bot.DRAW_TRIGGER_PREFIXES, "сгенери картинку"),
-    # Разговорные синонимы (сентябрь 2026).
+    # Conversational synonyms (September 2026).
     ("зачитай этот абзац", bot.TTS_TRIGGER_PREFIXES, "зачитай"),
     ("зачитай текст договора", bot.TTS_TRIGGER_PREFIXES, "зачитай текст"),
     ("прочти вслух мою историю", bot.TTS_TRIGGER_PREFIXES, "прочти вслух"),
     ("сгенерируй мне изображение замка", bot.DRAW_TRIGGER_PREFIXES, "сгенерируй мне изображение"),
     ("создай мне картинку с котом", bot.DRAW_TRIGGER_PREFIXES, "создай мне картинку"),
-    # Длинная фраза побеждает короткий префикс (порядок списка).
+    # A long phrase beats a short prefix (list order).
     ("прочти вслух", bot.TTS_TRIGGER_PREFIXES, "прочти вслух"),
-    # Граница слова и вежливые формы.
+    # Word boundary and polite forms.
     ("прочтите этот текст", bot.TTS_TRIGGER_PREFIXES, "прочтите"),
     ("прочтите вслух сказку", bot.TTS_TRIGGER_PREFIXES, "прочтите вслух"),
     ("озвучьте текст", bot.TTS_TRIGGER_PREFIXES, "озвучьте"),
     ("нарисуйте кота", bot.DRAW_TRIGGER_PREFIXES, "нарисуйте"),
-    # Английские триггеры из /start.
+    # English triggers from /start.
     ("draw a cat on the beach", bot.DRAW_TRIGGER_PREFIXES, "draw a"),
     ("generate an image of a castle", bot.DRAW_TRIGGER_PREFIXES, "generate an image"),
     ("read this out loud please", bot.TTS_TRIGGER_PREFIXES, "read this out loud"),
@@ -435,14 +437,15 @@ def test_match_trigger_prefix_finds_triggers(text, prefixes, expected):
     ("что значит слово озвучь на украинском", bot.TTS_TRIGGER_PREFIXES),
     ("привет, как дела?", bot.DRAW_TRIGGER_PREFIXES),
     ("привет, как дела?", bot.TTS_TRIGGER_PREFIXES),
-    # "хочу/сделай картинку" намеренно не триггеры: путаются с правкой присланного фото.
+    # "want/make a picture" are intentionally not triggers: they conflict with editing
+    #     a supplied photo.
     ("хочу картинку показать тебе", bot.DRAW_TRIGGER_PREFIXES),
     ("сделай картинку ярче", bot.DRAW_TRIGGER_PREFIXES),
-    # Граница слова: голый startswith давал мусор ("нарисуйка" — с "нарисуй").
+    # Word boundary: bare startswith produced junk ("drawcat" from "draw").
     ("нарисуйка", bot.DRAW_TRIGGER_PREFIXES),
     ("how are you", bot.DRAW_TRIGGER_PREFIXES),
     ("how are you", bot.TTS_TRIGGER_PREFIXES),
-    # Идиома "draw conclusions", а не просьба нарисовать.
+    # The idiom "draw conclusions," not a request to draw.
     ("draw some conclusions here", bot.DRAW_TRIGGER_PREFIXES),
 ])
 def test_match_trigger_prefix_rejects_non_triggers(text, prefixes):
@@ -450,22 +453,22 @@ def test_match_trigger_prefix_rejects_non_triggers(text, prefixes):
 
 
 def test_strip_reply_marker_treats_demonstratives_as_empty():
-    # "это"/"это сообщение" после триггера — указание на реплай, а не буквальный
-    # текст. Хвост после пустышки — уже содержание, идёт в работу как есть.
+    # "this"/"this message" after a trigger refers to the reply, not a literal
+    # text. A tail after the placeholder is already content and is processed as-is.
     assert bot._strip_reply_marker("это") == ""
     assert bot._strip_reply_marker("это сообщение") == ""
     assert bot._strip_reply_marker("этот текст пожалуйста") == "этот текст пожалуйста"
     assert bot._strip_reply_marker("кота на пляже") == "кота на пляже"
-    # Хвостовая пунктуация маркеру не помеха (найдено код-ревью): "озвучь это."
-    # обязано вести себя как "озвучь это", а не как буквальный текст "это.".
+    # Trailing punctuation does not prevent marker detection (found in code review): "voice this."
+    # behave like "voice this," not like the literal text "this.".
     assert bot._strip_reply_marker("это.") == ""
     assert bot._strip_reply_marker("это!") == ""
     assert bot._strip_reply_marker("этот текст, пожалуйста") == "этот текст, пожалуйста"
 
 
 def test_tts_trigger_this_with_reply_voices_replied_message(rate_guard_setup):
-    # Регрессия (сентябрь 2026): "озвучь это" в ответ на сообщение озвучивало
-    # само слово "это" — остаток после триггера считался содержанием.
+    # Regression (September 2026): 'read this aloud' in reply to a message read aloud
+    # the word "this" itself — the remainder after the trigger was treated as content.
     message = rate_guard_setup()
     message.text = "озвучь это"
     message.reply_to_message = SimpleNamespace(text="текст из реплая", caption=None)
@@ -474,7 +477,7 @@ def test_tts_trigger_this_with_reply_voices_replied_message(rate_guard_setup):
 
 
 def test_draw_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypatch):
-    # Внешний аудит: статус снесён до send_photo, правка после падения билась в пустоту.
+    # External audit: the status was removed before send_photo, so an edit after a failure hit nothing.
     message = rate_guard_setup()
     message.text = "/draw cat"
     replied = []
@@ -499,17 +502,17 @@ def test_draw_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypat
     monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
     monkeypatch.setattr(bot, "_pollinations_text_to_image", failing_generate)
     monkeypatch.setattr(bot, "_get_http_session", fake_get_http_session)
-    # Фикстура rate_guard_setup глушит пайплайны AsyncMock — возвращаем настоящий.
+    # The rate_guard_setup fixture silences AsyncMock pipelines — restore the real one.
     monkeypatch.setattr(bot, "inline_draw", lumen_commands.inline_draw)
     asyncio.run(bot.cmd_draw(message))
     assert len(replied) == 1
-    # Дефолтный язык чата — английский, сверяем смысл, а не конкретный текст.
+    # The default chat language is English; compare meaning, not exact text.
     assert "unavailable" in replied[0].lower() or "fail" in replied[0].lower()
     bot.chat_state.pop(123, None)
 
 
 def test_tts_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypatch):
-    # То же для озвучки: send_voice упал — пользователь всё равно видит ошибку.
+    # Same for voice output: if send_voice fails, the user still sees an error.
     message = rate_guard_setup()
     message.text = "/tts привет"
     replied = []
@@ -530,7 +533,7 @@ def test_tts_failure_replies_when_status_edit_fails(rate_guard_setup, monkeypatc
     monkeypatch.setattr(bot, "_edit_message_quietly", fake_edit_quietly)
     monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
     monkeypatch.setattr(bot, "_gemini_tts_bytes", failing_synth)
-    # Фикстура rate_guard_setup глушит пайплайны AsyncMock — возвращаем настоящий.
+    # The rate_guard_setup fixture silences pipelines with AsyncMock — restore the real one.
     monkeypatch.setattr(bot, "inline_tts", lumen_commands.inline_tts)
     asyncio.run(bot.cmd_tts(message))
     assert len(replied) == 1
@@ -548,8 +551,8 @@ def test_draw_trigger_this_with_reply_draws_replied_message(rate_guard_setup):
 
 
 def test_imgmodel_command_and_callback_removed():
-    # Регрессия на сам факт удаления команды — не должно остаться ни обработчика,
-    # ни клавиатуры, ни каталога, которые её обслуживали.
+    # Regression on the command's actual removal — no handler should remain,
+    # neither a keyboard nor a catalog to serve it.
     assert not hasattr(bot, "cmd_imgmodel")
     assert not hasattr(bot, "cb_imgmodel")
     assert not hasattr(bot, "_imgmodel_keyboard")
@@ -557,8 +560,8 @@ def test_imgmodel_command_and_callback_removed():
 
 
 def test_cmd_start_respects_rate_limit(monkeypatch):
-    # Регрессия (аудит 26.09.2026): /start шёл мимо лимита, потому что его хендлер
-    # стоит раньше общего catch-all — в группе спамер получал ответ на каждый вызов.
+    # Regression (audit 26.09.2026): /start bypassed the limit because its handler
+    # comes before the general catch-all — in a group, a spammer received a reply to every call.
     called = {}
 
     class _FakeStartMessage:
@@ -583,7 +586,7 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones(monkeypat
             captured["text"] = text
             return SimpleNamespace()
 
-    # /start теперь под лимитом (иначе спамер в группе гонял ответы без ограничения).
+    # /start is now rate-limited (otherwise a group spammer could trigger unlimited replies).
     monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
     asyncio.run(bot.cmd_start(_FakeStartMessage()))
     text = captured["text"]
@@ -592,7 +595,7 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones(monkeypat
     assert "/reset" in text
     assert "/lang" in text
     assert "/imgmodel" not in text
-    # Онбординг: живые примеры вместо голой простыни (чат 1 — дефолт en).
+    # Onboarding: live examples instead of a bare wall of text (chat 1 defaults to en).
     assert "Try right now" in text
     from lumen_lang import t as _lang_t_direct
     assert "Попробуй прямо сейчас" in _lang_t_direct("ru", "start_text")
@@ -604,8 +607,8 @@ def test_cmd_start_mentions_every_current_command_and_not_removed_ones(monkeypat
     (bot.ChatType.SUPERGROUP, True),
 ])
 def test_cmd_start_group_notice_only_in_groups(monkeypatch, chat_type, is_group):
-    # Пометка про фон группы терялась бы молча:
-    # старые тесты гоняли /start только в личке.
+    # The group-background note would otherwise be silently lost:
+    # the old tests ran /start only in private chats.
     captured = {}
 
     class _FakeStartMessage:
@@ -630,8 +633,9 @@ def test_cmd_start_group_notice_only_in_groups(monkeypatch, chat_type, is_group)
 
 
 def _one_image_provider(monkeypatch, call):
-    """Цепочка из одного провайдера: список читает конфигурацию lumen_images, а в
-    тестах ключей нет — полагаться на неё значит тестировать не то."""
+    """A chain with one provider: the list is read from the lumen_images
+    configuration, but tests have no keys; relying on it would test the wrong
+    thing."""
     monkeypatch.setattr(bot, "image_provider_names", lambda: ("pollinations",))
     monkeypatch.setattr(bot, "_pollinations_text_to_image", call)
 
@@ -643,7 +647,7 @@ def _two_image_providers(monkeypatch, cloudflare, pollinations):
 
 
 def test_inline_draw_does_not_touch_chat_state(monkeypatch):
-    # Состояние чата картинке не нужно вообще: ни ключ модели, ни что-то ещё.
+    # An image needs no chat state at all: neither a model key nor anything else.
     chat_id = 999430
 
     async def fake_pollinations_text_to_image(session, prompt, timeout_sec=None, **_):
@@ -668,8 +672,8 @@ def test_inline_draw_does_not_touch_chat_state(monkeypatch):
 
 
 def test_inline_draw_caps_single_attempt_timeout(monkeypatch):
-    # Аудит 29.10.2026: одна зависшая модель получала все 120 с бюджета и
-    # лишала шанса резервные. Таймаут одной попытки ограничен 40 с.
+    # Audit 29.10.2026: one hung model received all 120s of the budget and
+    # deprived the fallbacks of a chance. One attempt timeout is capped at 40 seconds.
     captured = {}
 
     async def fake_image(session, prompt, timeout_sec=None, **_):
@@ -689,17 +693,17 @@ def test_inline_draw_caps_single_attempt_timeout(monkeypatch):
     try:
         asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
         assert captured["timeout"] is not None
-        # Потолок попытки читается из env, а не зашит: висящий хост не должен
-        # стоить человеку весь DRAW_TOTAL_BUDGET_SEC (прод 09.11.2026).
+        # The attempt deadline is read from env, not hardcoded: a hung host must not
+        # cost the person the entire DRAW_TOTAL_BUDGET_SEC (prod 09.11.2026).
         assert captured["timeout"] <= 7
     finally:
         bot.chat_state.pop(999431, None)
 
 
 def test_inline_draw_parks_unreachable_provider(monkeypatch):
-    # Молча недоступный хост (Cloudflare из контейнера HF) после network-ошибки
-    # обязан уходить в паузу: без неё каждый следующий человек платил бы полный
-    # таймаут попытки до перехода на резерв.
+    # A silently unreachable host (Cloudflare from the HF container) after a network error
+    # must pause: without it, every next person would pay the full
+    # attempt timeout before switching to the reserve.
     chat_id = 999446
     attempts = []
 
@@ -733,13 +737,14 @@ def test_inline_draw_parks_unreachable_provider(monkeypatch):
 
 
 def test_inline_draw_refuses_when_user_total_limit_exhausted(monkeypatch):
-    # /draw без дневного лимита обходился: исчерпанный total — отказ до генерации.
+    # /draw without a daily limit was bypassed: exhausted total means refusal before generation.
     from types import SimpleNamespace
     incoming = _FakeIncomingMessage(999491)
     incoming.message_id = 1
     incoming.from_user = SimpleNamespace(id=777021)
     monkeypatch.setattr(bot, "OWNER_ID", 1)
     monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 2)
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, "quota_day", bot._current_quota_day())
     bot._record_user_daily(777021)
     bot._record_user_daily(777021)
 
@@ -763,7 +768,7 @@ def test_inline_draw_refuses_when_user_total_limit_exhausted(monkeypatch):
 
 
 def test_inline_draw_records_user_daily_on_success(monkeypatch):
-    # Успешная картинка растит total, как озвучка.
+    # A successful image increments total, just like speech.
     from types import SimpleNamespace
     incoming = _FakeIncomingMessage(999492)
     incoming.message_id = 1
@@ -788,16 +793,16 @@ def test_inline_draw_records_user_daily_on_success(monkeypatch):
 
 
 def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded(monkeypatch):
-    # Регрессия на находку код-ревью (28 августа 2026): без общего бюджета времени
-    # цепочка провайдеров тянулась минутами. Патчим DRAW_TOTAL_BUDGET_SEC на
-    # крошечное значение и делаем первую попытку заведомо дольше него — вторая
-    # попытка не должна начаться.
+    # Regression from a code-review finding (August 28, 2026): without a shared time budget
+    # the provider chain dragged on for minutes. Patch DRAW_TOTAL_BUDGET_SEC to
+    # a tiny value and make the first attempt deliberately longer than it, so the second
+    # attempt must not start.
     chat_id = 999432
     attempts = []
 
     async def slow_cloudflare(session, prompt, timeout_sec=None, **_):
         attempts.append("cloudflare")
-        await asyncio.sleep(0.05)  # дольше урезанного бюджета ниже
+        await asyncio.sleep(0.05)  # longer than the reduced budget below
         raise RuntimeError("503 Service Unavailable")
 
     async def never_pollinations(session, prompt, timeout_sec=None, **_):
@@ -809,15 +814,15 @@ def test_inline_draw_stops_fallback_chain_when_time_budget_exceeded(monkeypatch)
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
     asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
-    # Ровно ОДНА попытка: бюджет исчерпался до второго провайдера.
+    # Exactly ONE attempt: the budget ran out before the second provider.
     assert attempts == ["cloudflare"]
     assert "too long" in incoming.sent[0].edits[-1][0].lower()
 
 
 def test_inline_draw_falls_back_to_next_provider(monkeypatch):
-    # Фолбэк теперь по провайдерам: перебор пяти моделей ничего не выбирал
-    # (Pollinations игнорирует model, замер 09.11.2026), а Cloudflare и
-    # Pollinations — действительно разные сервисы.
+    # Fallback is now by provider: cycling through five models selected nothing
+    # (Pollinations ignores model, measurement 09.11.2026), while Cloudflare and
+    # Pollinations are genuinely different services.
     chat_id = 999431
     attempts = []
 
@@ -843,15 +848,15 @@ def test_inline_draw_falls_back_to_next_provider(monkeypatch):
     asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
     assert attempts == ["cloudflare", "pollinations"]
     assert captured_photo["photo"].data == b"\x89PNG fallback bytes"
-    # Имя файла по магическим байтам ответа, а не всегда .jpg.
+    # File name from the magic bytes of the response, not always .jpg.
     assert captured_photo["photo"].filename == "generated.png"
-    # Внутренняя реализация не раскрывается: на коротком промпте подписи нет.
+    # Internal implementation is not revealed: a short prompt has no signature.
     assert captured_photo.get("caption") is None
 
 
 def test_inline_draw_rate_limit_does_not_skip_other_provider(monkeypatch):
-    # Перегрузка одного провайдера больше не обрывает цепочку (так было, пока все
-    # пять моделей жили на одном сервисе): он уходит в паузу, второй пробуют.
+    # Overload of one provider no longer aborts the chain (as it did while all
+    # five models lived on one service): it goes into a pause, and the second is tried.
     chat_id = 999436
     attempts = []
 
@@ -875,16 +880,16 @@ def test_inline_draw_rate_limit_does_not_skip_other_provider(monkeypatch):
     monkeypatch.setattr(bot, "bot", _FakePhotoBot())
     asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
     assert attempts == ["cloudflare", "pollinations"]
-    # Пауза — на этого провайдера и не меньше его Retry-After.
+    # The pause is specific to that provider and no shorter than its Retry-After.
     assert bot._image_provider_ready("cloudflare") is False
     assert bot.GLOBAL_QUOTA["image"]["cloudflare"]["cooldown_until"] > time.time() + 30
     assert bot._image_provider_ready("pollinations") is True
 
 
 def test_inline_draw_service_rate_limit_says_overloaded(monkeypatch):
-    # Прод-инцидент 17.09.2026 и замер 09.11.2026 (Pollinations 402 FREE_LIMIT —
-    # раньше вообще не попадал ни в одну ветку): при перегрузке человек ждёт минуту,
-    # а не «переформулируй описание».
+    # Prod incident 17.09.2026 and measurement 09.11.2026 (Pollinations 402 FREE_LIMIT —
+    # previously reached no branch at all): under overload, the person waits a minute,
+    # rather than “rephrase the description”.
     chat_id = 999432
 
     async def always_limited(session, prompt, timeout_sec=None, **_):
@@ -894,15 +899,15 @@ def test_inline_draw_service_rate_limit_says_overloaded(monkeypatch):
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 2
     asyncio.run(bot.inline_draw(incoming, "космическая станция"))
-    # Финальный текст статуса — то, что реально увидит человек.
+    # The final status text is what the user will actually see.
     assert incoming.sent[0].edits[-1][0] == bot._t(chat_id, "draw_err_overloaded")
-    # Картинки нет — дневной слот возвращён.
+    # The image is missing, so the daily slot was returned.
     assert bot._user_daily_peek(chat_id)["draw"] == 0
 
 
 def test_inline_draw_global_budget_refuses_before_provider(monkeypatch):
-    # Общий дневной бюджет обязан остановить ДО сети: без счётчика каждый новый
-    # человек бился бы в провайдера, у которого день кончился (аудит 09.11.2026).
+    # The shared daily budget must stop this before the network: without a counter, every
+    # new person would be stuck with a provider whose day had ended (audit 09.11.2026).
     chat_id = 999437
     monkeypatch.setattr(bot, "IMAGE_DAILY_LIMIT", 2)
     monkeypatch.setattr(bot, "IMAGE_DAILY_NEURONS", 208)
@@ -923,13 +928,13 @@ def test_inline_draw_global_budget_refuses_before_provider(monkeypatch):
     incoming.message_id = 1
     asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
     assert replies == [bot._t(chat_id, "draw_day_over", limit=2)]
-    # Отказ не списал дневной слот пользователя.
+    # The refusal did not charge the user's daily slot.
     assert bot._user_daily_peek(chat_id) is None
 
 
 def test_inline_draw_user_draw_limit_refuses(monkeypatch):
-    # Отдельный лимит картинок: исчерпанный draw при живом total — отказ текстом про
-    # картинки, а не про сообщения.
+    # Separate image limit: an exhausted draw with live total gets a text refusal about
+    # images, not messages.
     chat_id = 999438
     uid = 777038
     monkeypatch.setattr(bot, "OWNER_ID", 1)
@@ -953,16 +958,48 @@ def test_inline_draw_user_draw_limit_refuses(monkeypatch):
     assert replies == [bot._t(chat_id, "user_daily_draw", used=1, limit=1)]
 
 
+def test_inline_draw_capacity_refusal_is_not_reported_as_personal_limit(monkeypatch):
+    import lumen_quotas as lq
+
+    chat_id = 999440
+    uid = 777040
+    monkeypatch.setattr(bot, "OWNER_ID", 1)
+    monkeypatch.setattr(lq, "MAX_USER_DAILY_KEYS", 2)
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, "quota_day", bot._current_quota_day())
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, lq.USER_DAILY_KEY, {
+        str(i): {"total": 1, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0}
+        for i in (777038, 777039)
+    })
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    async def never_called(*args, **kwargs):
+        raise AssertionError("generation must not run when the daily bucket is full")
+
+    _one_image_provider(monkeypatch, never_called)
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    assert asyncio.run(bot.inline_draw(incoming, "нарисуй кота")) is False
+    assert replies == [bot._model_error_text("fallback", bot._chat_lang(chat_id))]
+    assert bot._user_daily_peek(uid) is None
+
+
 def test_inline_draw_one_generation_at_a_time_per_user(monkeypatch):
-    # Rate limit 5/30с не мешал одному человеку держать пять висящих генераций по
-    # 30 МБ каждая (аудит 09.11.2026).
+    # The 5/30s rate limit did not stop one person from keeping five pending generations per
+    # 30 MB each (audit 09.11.2026).
     chat_id = 999439
     uid = 777039
     gate = asyncio.Event()
+    started = asyncio.Event()
     calls = []
 
     async def slow_generate(session, prompt, timeout_sec=None, **_):
         calls.append(prompt)
+        started.set()
         await gate.wait()
         return b"\x89PNG fake bytes"
 
@@ -987,7 +1024,9 @@ def test_inline_draw_one_generation_at_a_time_per_user(monkeypatch):
 
     async def scenario():
         task_first = asyncio.create_task(bot.inline_draw(first, "нарисуй кота"))
-        await asyncio.sleep(0)
+        # R7-15 (review 17.11.2026): sleep(0) relied on scheduler ordering;
+        # wait until the first generation actually takes a slot.
+        await asyncio.wait_for(started.wait(), 5.0)
         await bot.inline_draw(second, "нарисуй пса")
         gate.set()
         await task_first
@@ -995,13 +1034,13 @@ def test_inline_draw_one_generation_at_a_time_per_user(monkeypatch):
     asyncio.run(scenario())
     assert calls == ["нарисуй кота"]
     assert refused.await_args.args[1] == bot._t(chat_id, "draw_err_overloaded")
-    # Отказанная попытка не оставила лишнего слота в дневном лимите.
+    # The refused attempt did not leave an extra slot in the daily limit.
     assert bot._user_daily_entry(uid)["draw"] == 1
 
 
 def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
-    # Сгенерированная картинка обязана попадать в recent_media_ids: по слову
-    # «картинка» её ищёт _resolve_incoming_media, а не только по реплаю.
+    # A generated image must be added to recent_media_ids: the word
+    # "image" is found by _resolve_incoming_media, not only through a reply.
     from aiogram.types import PhotoSize
 
     chat_id = 999445
@@ -1030,25 +1069,25 @@ def test_inline_draw_records_generated_photo_in_media_history(monkeypatch):
     try:
         asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
         bucket = bot.get_state(chat_id)["recent_media_ids"][str(uid)]
-        # Mime берётся из PhotoSize, поэтому категория "photo" при поиске совпадёт.
+        # The MIME type comes from PhotoSize, so the "photo" category will match during search.
         assert list(bucket)[-1] == ("gen-file-id", "image/jpeg")
-        # Корзинка обязана уйти в хранилище: иначе после рестарта правка не найдёт фото.
+        # The cart must be persisted: otherwise, after a restart, an edit will not find the photo.
         assert chat_id in marked
-        # Метка свежей генерации: по ней слабые глаголы ("добавь") находят картинку.
+        # Fresh-generation marker: weak verbs ("add") use it to find the image.
         assert bot.get_state(chat_id)["last_drawn_at"] > 0
         assert bot.get_state(chat_id)["last_drawn_user"] == uid
-        # Описание сохранено для «ещё вариант».
+        # The description is preserved for "another option".
         assert bot.get_state(chat_id)["last_draw_prompt"] == "нарисуй кота"
-        # Кнопка висит под фото, поэтому и id хранится фото, а не сообщения
-        # человека: иначе страховка «тап не под последней картинкой» резала всё.
+        # The button sits below the photo, so its id is stored on the photo, not the message
+        # person: otherwise the 'tap is not under the latest picture' safeguard cut off everything.
         assert bot.get_state(chat_id)["last_drawn_message_id"] == 4242
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
 def test_inline_draw_marks_fresh_generation_even_if_media_history_raises(monkeypatch):
-    # Кнопка «Ещё вариант» и слабые глаголы правки читают метки, а не корзинку:
-    # сбой _save_media_to_history не имел права обнулять контекст свежей генерации.
+    # The "Another option" button and weak image-edit verbs read labels, not the basket:
+    # a failure in _save_media_to_history had no right to clear the context of a fresh generation.
     from aiogram.types import PhotoSize
 
     chat_id = 999446
@@ -1086,9 +1125,9 @@ def test_inline_draw_marks_fresh_generation_even_if_media_history_raises(monkeyp
 
 
 def test_inline_draw_send_failure_keeps_the_draw_slot(monkeypatch):
-    # Генерация уже списала общий дневной бюджет, а отправка упала: возвращать
-    # личный слот в этом случае значит дать одному человеку бесконечные бесплатные
-    # попытки за чужой счёт (ревью 09.11.2026).
+    # Generation already charged the shared daily budget, but sending failed: refund
+    # a personal slot in this case would give one person unlimited free
+    # attempts at someone else's expense (review 09.11.2026).
     chat_id = 999444
     uid = 777044
 
@@ -1114,13 +1153,15 @@ def test_inline_draw_send_failure_keeps_the_draw_slot(monkeypatch):
 
 
 def test_inline_draw_queue_wait_is_bounded(monkeypatch):
-    # Слоты генерации заняты другим чатом — второй не должен висеть в очереди весь
-    # DRAW_TOTAL_BUDGET_SEC, он честно получает «перегружен» через IMAGE_QUEUE_TIMEOUT_SEC.
+    # Generation slots are occupied by another chat — the second must not sit in the queue for the entire
+    # DRAW_TOTAL_BUDGET_SEC honestly reports "overloaded" via IMAGE_QUEUE_TIMEOUT_SEC.
     gate = asyncio.Event()
     started = []
+    started_evt = asyncio.Event()
 
     async def slow_generate(session, prompt, timeout_sec=None, **_):
         started.append(prompt)
+        started_evt.set()
         await gate.wait()
         return b"\x89PNG fake bytes"
 
@@ -1151,12 +1192,13 @@ def test_inline_draw_queue_wait_is_bounded(monkeypatch):
 
     async def scenario():
         task = asyncio.create_task(bot.inline_draw(first, "нарисуй кота"))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(started_evt.wait(), 5.0)
         await bot.inline_draw(second, "нарисуй пса")
         gate.set()
         await task
-        # Третий проходит только если слот реально освобождён в finally: безусловный
-        # release дал бы двойной пермит, а забытый — вечную «перегрузку».
+        # The third message passes only if finally releases the slot exactly once: an
+        # unconditional extra release would grant a double permit, while a forgotten release
+        # would cause permanent "overload".
         await bot.inline_draw(third, "нарисуй лису")
 
     asyncio.run(scenario())
@@ -1165,8 +1207,8 @@ def test_inline_draw_queue_wait_is_bounded(monkeypatch):
 
 
 def test_inline_draw_truncated_prompt_says_so(monkeypatch):
-    # Молчаливое обрезание промпта до лимита провайдера выглядело как «бот понял
-    # наоборот»: человек обязан увидеть, что описание укоротили.
+    # Silently truncating the prompt to the provider limit looked like "the bot understood
+    # the other way around": the user must see that the description was shortened.
     chat_id = 999440
     captured = {}
 
@@ -1187,8 +1229,8 @@ def test_inline_draw_truncated_prompt_says_so(monkeypatch):
 
 
 def test_translate_draw_prompt_translates_non_ascii(monkeypatch):
-    # Пруф 09.11.2026: sana превращает кириллицу в '?' при разборе URL и рисует
-    # случайное. Не-латинский промт обязан уйти переводом, латиница — без вызова.
+    # Proof 09.11.2026: sana turns Cyrillic into '?' when parsing the URL and draws
+    # not random. A non-Latin prompt must be sent translated; Latin text requires no call.
     calls = []
 
     async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
@@ -1204,8 +1246,8 @@ def test_translate_draw_prompt_translates_non_ascii(monkeypatch):
     assert asyncio.run(bot._translate_draw_prompt("one apple", deadline)) == "one apple"
     assert len(calls) == 1
 
-    # Guard sana режет ЛЮБОЙ не-ASCII, поэтому «café» или эмодзи в переводе
-    # выключали резерв целиком (ревью 10.11.2026).
+    # The sana guard rejects ANY non-ASCII, so "café" or emoji in a translation
+    # disabled the reserve entirely (review 10.11.2026).
     async def accented_munito(path, method="GET", *, json_body=None, deadline=None):
         return {"choices": [{"message": {"content": "cafe\u0301 \u2615 one apple"}}]}
 
@@ -1214,8 +1256,8 @@ def test_translate_draw_prompt_translates_non_ascii(monkeypatch):
 
 
 def test_translate_draw_prompt_keeps_original_on_failure(monkeypatch):
-    # Сбой перевода не роняет картинку: уходит оригинал. Пустой ответ и ответ
-    # длиннее капа — тоже оригинал (модель ушла в рассуждения вместо описания).
+    # A translation failure does not break the image: the original is sent. An empty response and a response
+    # longer than the cap is also original (the model went into reasoning instead of a description).
     async def failing_munito(*args, **kwargs):
         raise RuntimeError("munito down")
 
@@ -1236,8 +1278,8 @@ def test_translate_draw_prompt_keeps_original_on_failure(monkeypatch):
 
 
 def test_cloudflare_gets_original_prompt_and_pollinations_the_translation(monkeypatch):
-    # Klein понимает русский и сохраняет надписи; перевод нужен только резерву
-    # sana, которая теряет кириллицу в '?' (пруф 09.11.2026).
+    # Klein understands Russian and preserves lettering; translation is needed only for the reserve
+    # sana, which loses Cyrillic in '?' (proof 09.11.2026).
     chat_id = 999447
     captured = {"cloudflare": [], "pollinations": []}
 
@@ -1269,7 +1311,7 @@ def test_cloudflare_gets_original_prompt_and_pollinations_the_translation(monkey
 
 
 def test_inline_draw_passes_aspect_size_to_cloudflare(monkeypatch):
-    # "16:9" в промпте — реальные width/height для klein, а не дефолтный квадрат.
+    # "16:9" in the prompt — actual width/height for klein, not the default square.
     chat_id = 999448
     captured = {}
 
@@ -1291,8 +1333,8 @@ def test_inline_draw_passes_aspect_size_to_cloudflare(monkeypatch):
 
 
 def test_inline_draw_sends_translated_prompt_to_provider(monkeypatch):
-    # Регрессия прода 09.11.2026: кириллица умирала в '?' по дороге в sana, человек
-    # получал случайную картинку. Провайдер обязан получить перевод, а не оригинал.
+    # Production regression 09.11.2026: Cyrillic died into '?' on the way to sana; the person
+    # received a random image. The provider must receive the translation, not the original.
     chat_id = 999441
     captured = {}
 
@@ -1318,9 +1360,9 @@ def test_inline_draw_sends_translated_prompt_to_provider(monkeypatch):
 
 
 def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
-    # Правка не должна уходить в цепочку генерации: референс понимает только
-    # Cloudflare klein. Промпт идёт как есть: klein понимает русский и сохраняет
-    # надписи на картинке (перевод тут испортил бы текст на изображении).
+    # An edit must not enter the generation chain: the reference understands only
+    # Cloudflare klein. The prompt is passed as-is: klein understands Russian and preserves
+    # on the image (translation here would corrupt the text in the image).
     chat_id = 999442
     captured = {}
 
@@ -1348,12 +1390,12 @@ def test_inline_draw_edit_uses_cloudflare_edit_with_reference(monkeypatch):
     reference = (b"ref bytes", "image/jpeg")
     asyncio.run(bot.inline_draw(incoming, "сделай небо синим", reference=reference))
     assert captured["edit"] == ("сделай небо синим", reference[0])
-    # Под правкой кнопки «Ещё вариант» нет: повторять нечего.
+    # There is no “Another option” button under an edit: there is nothing to repeat.
     assert captured["sent"].get("reply_markup") is None
 
 
 def test_edit_trigger_with_reply_photo_routes_to_edit(rate_guard_setup, monkeypatch):
-    # Reply на фото + глагол правки: уходит в inline_draw с референсом, а не в LLM.
+    # A reply to a photo + an edit verb goes to inline_draw with a reference, not to the LLM.
     message = rate_guard_setup()
     reference = (b"ref bytes", "image/jpeg")
 
@@ -1367,7 +1409,7 @@ def test_edit_trigger_with_reply_photo_routes_to_edit(rate_guard_setup, monkeypa
 
 
 def test_edit_word_without_image_goes_to_llm(rate_guard_setup, monkeypatch):
-    # "измени мир" без картинки — обычный текст: рисование не запускается.
+    # “change the world” without an image — ordinary text: drawing does not start.
     message = rate_guard_setup()
 
     async def no_reference(*args, **kwargs):
@@ -1384,7 +1426,7 @@ def test_edit_word_without_image_goes_to_llm(rate_guard_setup, monkeypatch):
 
 
 def test_draw_command_edits_photo_when_prompt_is_edit_verb(rate_guard_setup, monkeypatch):
-    # "/draw сделай фон синим" реплаем на фото — правка, а не новая картинка.
+    # "/draw make the background blue" as a reply to a photo — an edit, not a new picture.
     message = rate_guard_setup()
     reference = (b"ref bytes", "image/jpeg")
 
@@ -1400,7 +1442,7 @@ def test_draw_command_edits_photo_when_prompt_is_edit_verb(rate_guard_setup, mon
 
 
 def test_resolve_edit_reference_prefers_reply_photo_over_last_media(monkeypatch):
-    # Референс реплая важнее «последнего фото»: человек прямо указал картинку.
+    # The replied-to image is more important than the “last photo”: the user explicitly named the image.
     from lumen_media_flow import _resolve_edit_reference
 
     reply_photo = SimpleNamespace(file_id="reply-fid", mime_type="image/jpeg")
@@ -1435,8 +1477,8 @@ def _edit_ref_message(user_id=7):
 
 
 def test_resolve_edit_reference_finds_generated_image_in_bucket(monkeypatch):
-    # Прод 10.11.2026: "измени" после /draw уходил в текстовую модель, потому что
-    # сгенерированная картинка живёт только в recent_media_ids, не в общем логе.
+    # Prod 10.11.2026: "edit" after /draw went to the text model because
+    # the generated image lives only in recent_media_ids, not in the general log.
     from lumen_media_flow import _resolve_edit_reference
 
     state = {
@@ -1457,7 +1499,7 @@ def test_resolve_edit_reference_finds_generated_image_in_bucket(monkeypatch):
 
 
 def test_resolve_edit_reference_strong_verb_needs_recent_photo(monkeypatch):
-    # «Поменяй пароль» после старого фото — не правка; свежее фото — правка.
+    # "Change the password" after an old photo is not an edit; a fresh photo is.
     from lumen_media_flow import _resolve_edit_reference
 
     async def fake_fetch(fid, mime):
@@ -1481,8 +1523,8 @@ def test_resolve_edit_reference_strong_verb_needs_recent_photo(monkeypatch):
 
 
 def test_resolve_edit_reference_weak_verb_uses_fresh_generation_only(monkeypatch):
-    # "добавь звезду" без реплая — правка свежей генерации (прод 10.11.2026),
-    # но древняя генерация или чужое фото контекстом не становятся.
+    # “add a star” without a reply — edit the fresh generation (production 10.11.2026),
+    # but an old generation or someone else's photo does not become context.
     from lumen_media_flow import _resolve_edit_reference
 
     async def fake_fetch(fid, mime):
@@ -1516,7 +1558,7 @@ def test_resolve_edit_reference_weak_verb_uses_fresh_generation_only(monkeypatch
 
 
 def test_inline_draw_edit_keeps_reference_orientation(monkeypatch):
-    # 16:9 референс правится в 16:9: квадрат обрезал края кадра (прод 10.11.2026).
+    # A 16:9 reference is edited at 16:9: a square crop cut off the frame edges (prod 10.11.2026).
     chat_id = 999449
     captured = {}
 
@@ -1535,8 +1577,8 @@ def test_inline_draw_edit_keeps_reference_orientation(monkeypatch):
     monkeypatch.setattr(bot, "image_dimensions", fake_dims)
     monkeypatch.setattr(bot, "_cloudflare_edit_to_image", fake_edit)
     monkeypatch.setattr(bot, "bot", _FakePhotoBot())
-    # Декодирование заголовков картинки — CPU, оно не должно вставать в цикл
-    # (b83277b): without to_thread тест проходил бы ровно так же (ревью 10.11.2026).
+    # Decoding image headers is CPU work; it must not block the loop
+    # (b83277b): without to_thread the test would pass exactly the same (review 10.11.2026).
     real_to_thread = asyncio.to_thread
     off_loop = []
 
@@ -1566,7 +1608,7 @@ def _make_draw_more_query(user_id=456, chat_id=123):
 
 
 def test_draw_more_callback_regenerates_last_prompt(monkeypatch):
-    # Кнопка под фото повторяет генерацию тем же описанием.
+    # The button under the photo repeats generation with the same description.
     state = {
         "last_draw_prompt": "красное яблоко на белом столе",
         "last_drawn_at": time.time(),
@@ -1592,12 +1634,12 @@ def test_draw_more_callback_regenerates_last_prompt(monkeypatch):
     query = _make_draw_more_query()
     asyncio.run(bot.handle_draw_more_callback(query))
     assert captured == [("красное яблоко на белом столе", None)]
-    # Повтор обязан идти под тем же чат-локом и потолком, что обычный /draw.
+    # A repeat must run under the same chat lock and ceiling as a normal /draw.
     assert len(lock_calls) == 1
 
 
 def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
-    # Чужой тап и кнопка от старой генерации не тратят чужие слоты и бюджет.
+    # Another person's tap or a button from an old generation must not consume their slots or budget.
     state = {
         "last_draw_prompt": "кот",
         "last_drawn_at": time.time(),
@@ -1626,9 +1668,9 @@ def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
     asyncio.run(bot.handle_draw_more_callback(stale))
     assert stale.answer.await_args.args[0] == bot._t(123, "pick_expired")
 
-    # Кнопки старых фото снимаются при новой генерации; после рестарта это
-    # страховка: тап не под последней картинкой не повторяет чужой сюжет
-    # (ревью 10.11.2026).
+    # Buttons on old photos are removed on a new generation; after a restart, the
+    # last-image anchor is the safeguard: a tap not on the last image must not repeat someone else’s plot
+    # (review 10.11.2026).
     state["last_drawn_at"] = time.time()
     state["last_drawn_message_id"] = 404
     older = _make_draw_more_query(user_id=456)
@@ -1638,8 +1680,8 @@ def test_draw_more_callback_refuses_foreign_and_stale_taps(monkeypatch):
 
 
 def test_draw_more_callback_refuses_rate_limited_tap(monkeypatch):
-    # True у rate-гейта = «окно 5/30с исчерпано»: тап обязан погаснуть здесь,
-    # а не в генерации (прод 10.11.2026: обратное условие резало каждый тап).
+    # True from the rate gate = "the 5/30s window is exhausted": the tap must go out here,
+    # not in generation (prod 10.11.2026: the reversed condition cut off every tap).
     state = {
         "last_draw_prompt": "кот в шляпе",
         "last_drawn_at": time.time(),
@@ -1665,8 +1707,188 @@ def test_draw_more_callback_refuses_rate_limited_tap(monkeypatch):
     assert called == []
 
 
+def test_draw_more_callback_answers_when_chat_lock_refuses(monkeypatch):
+    # Moving validation into the lock must not leave Telegram's spinner unanswered.
+    generated = AsyncMock()
+    rate_calls = []
+
+    def register_rate(uid):
+        rate_calls.append(uid)
+        return False
+
+    async def refuse_lock(message, run):
+        return None
+
+    monkeypatch.setattr(bot, "_run_under_chat_lock", refuse_lock)
+    monkeypatch.setattr(bot, "inline_draw", generated)
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", register_rate)
+    query = _make_draw_more_query()
+    asyncio.run(bot.handle_draw_more_callback(query))
+    query.answer.assert_awaited_once_with()
+    generated.assert_not_awaited()
+    assert rate_calls == []
+
+
+def _observe_chat_lock_wait(monkeypatch, *, wait_number=1):
+    """Signal when a handler reaches the selected chat-lock acquisition."""
+    waiting = asyncio.Event()
+    real_acquire = bot.acquire_chat_lock
+    calls = 0
+
+    async def observed_acquire(chat_id, timeout):
+        nonlocal calls
+        calls += 1
+        if calls == wait_number:
+            waiting.set()
+        return await real_acquire(chat_id, timeout)
+
+    monkeypatch.setattr(bot, "acquire_chat_lock", observed_acquire)
+    return waiting
+
+
+def test_draw_more_callback_rechecks_state_after_reset_while_waiting(monkeypatch):
+    # A queued tap must not reuse the prompt that reset clears under the same lock.
+    chat_id = 999468
+    user_id = 456
+    state = {
+        "last_draw_prompt": "old cat prompt",
+        "last_drawn_at": time.time(),
+        "last_drawn_user": user_id,
+        "last_drawn_message_id": 11,
+    }
+    bot.chat_state[chat_id] = state
+    monkeypatch.setattr(bot, "_chat_locks", {})
+    waiting = _observe_chat_lock_wait(monkeypatch)
+    generated = []
+
+    async def fake_inline(message, prompt, *, reference=None):
+        generated.append(prompt)
+
+    rate_calls = []
+    monkeypatch.setattr(bot, "inline_draw", fake_inline)
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: rate_calls.append(uid) or False)
+    monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
+    monkeypatch.setattr(bot, "_is_privileged_in_chat", AsyncMock(return_value=True))
+    monkeypatch.setattr(bot, "_tg_call", AsyncMock())
+    query = _make_draw_more_query(user_id=user_id, chat_id=chat_id)
+    reset_message = _FakeIncomingMessage(chat_id)
+    reset_message.from_user = SimpleNamespace(id=user_id)
+    reset_message.text = "/reset"
+
+    async def scenario():
+        lock = bot.get_chat_lock(chat_id)
+        await lock.acquire()
+        try:
+            callback_task = asyncio.create_task(bot.handle_draw_more_callback(query))
+            await waiting.wait()
+            await bot.cmd_reset(reset_message)
+        finally:
+            lock.release()
+        await callback_task
+
+    asyncio.run(scenario())
+    assert generated == []
+    assert rate_calls == []
+    assert query.answer.await_args.args[0] == bot._t(chat_id, "pick_expired")
+    assert "last_draw_prompt" not in state
+
+
+def test_draw_more_callback_rapid_double_tap_generates_once(monkeypatch):
+    # The second tap waits for the first generation, then sees the stale button.
+    chat_id = 999469
+    user_id = 456
+    prompt = "red apple on a table"
+    state = {
+        "last_draw_prompt": prompt,
+        "last_drawn_at": time.time(),
+        "last_drawn_user": user_id,
+        "last_drawn_message_id": 11,
+    }
+    bot.chat_state[chat_id] = state
+    monkeypatch.setattr(bot, "_chat_locks", {})
+    second_waiting = _observe_chat_lock_wait(monkeypatch, wait_number=2)
+    generation_started = asyncio.Event()
+    finish_generation = asyncio.Event()
+    generated = []
+
+    async def fake_inline(message, prompt, *, reference=None):
+        generated.append(prompt)
+        generation_started.set()
+        await finish_generation.wait()
+        state["last_draw_prompt"] = prompt
+        state["last_drawn_at"] = time.time()
+        state["last_drawn_user"] = user_id
+        state["last_drawn_message_id"] = 12
+
+    rate_calls = []
+    monkeypatch.setattr(bot, "inline_draw", fake_inline)
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: rate_calls.append(uid) or False)
+    first_query = _make_draw_more_query(user_id=user_id, chat_id=chat_id)
+    second_query = _make_draw_more_query(user_id=user_id, chat_id=chat_id)
+
+    async def scenario():
+        first_task = asyncio.create_task(bot.handle_draw_more_callback(first_query))
+        await generation_started.wait()
+        second_task = asyncio.create_task(bot.handle_draw_more_callback(second_query))
+        await second_waiting.wait()
+        finish_generation.set()
+        await asyncio.gather(first_task, second_task)
+
+    asyncio.run(scenario())
+    assert generated == [prompt]
+    assert rate_calls == [user_id]
+    assert second_query.answer.await_args.args[0] == bot._t(chat_id, "pick_expired")
+
+
+def test_draw_more_callback_rejects_stale_button_after_state_replacement(monkeypatch):
+    # A tap from the replaced image must not consume either prompt after admission.
+    chat_id = 999470
+    user_id = 456
+    state = {
+        "last_draw_prompt": "old lighthouse prompt",
+        "last_drawn_at": time.time(),
+        "last_drawn_user": user_id,
+        "last_drawn_message_id": 11,
+    }
+    bot.chat_state[chat_id] = state
+    monkeypatch.setattr(bot, "_chat_locks", {})
+    waiting = _observe_chat_lock_wait(monkeypatch)
+    generated = []
+
+    async def fake_inline(message, prompt, *, reference=None):
+        generated.append(prompt)
+
+    rate_calls = []
+    monkeypatch.setattr(bot, "inline_draw", fake_inline)
+    monkeypatch.setattr(bot, "_check_and_register_rate_limit", lambda uid: rate_calls.append(uid) or False)
+    query = _make_draw_more_query(user_id=user_id, chat_id=chat_id)
+
+    async def scenario():
+        lock = bot.get_chat_lock(chat_id)
+        await lock.acquire()
+        try:
+            callback_task = asyncio.create_task(bot.handle_draw_more_callback(query))
+            await waiting.wait()
+            state.clear()
+            state.update({
+                "last_draw_prompt": "new forest prompt",
+                "last_drawn_at": time.time(),
+                "last_drawn_user": user_id,
+                "last_drawn_message_id": 12,
+            })
+        finally:
+            lock.release()
+        await callback_task
+
+    asyncio.run(scenario())
+    assert generated == []
+    assert rate_calls == []
+    assert query.answer.await_args.args[0] == bot._t(chat_id, "pick_expired")
+    assert state["last_draw_prompt"] == "new forest prompt"
+
+
 def test_inline_draw_edit_passes_second_reference(monkeypatch):
-    # «Совмести это с этим»: два референса уезжают в input_image_0/1.
+    # "Combine this with this": two references go to input_image_0/1.
     chat_id = 999452
     captured = {}
 
@@ -1688,7 +1910,7 @@ def test_inline_draw_edit_passes_second_reference(monkeypatch):
 
 
 def test_resolve_edit_references_collects_attachment_and_reply(monkeypatch):
-    # Вложение и фото в реплае — два референса; дубликат того же файла не считается.
+    # An attachment and a photo in a reply are two references; a duplicate of the same file does not count.
     from lumen_media_flow import _resolve_edit_references
 
     attachment = SimpleNamespace(file_id="att-fid", mime_type="image/jpeg")
@@ -1719,7 +1941,7 @@ def test_resolve_edit_references_collects_attachment_and_reply(monkeypatch):
 
 
 def test_repeat_variant_redraws_last_prompt(rate_guard_setup, monkeypatch):
-    # «ещё вариант» после генерации повторяет последнее описание без реплая.
+    # “another option” after generation repeats the last description without a reply.
     message = rate_guard_setup()
     uid = 456
     state = {
@@ -1752,14 +1974,14 @@ def test_detect_image_variants(text, expected):
     ("кот", (1, "кот")),
 ])
 def test_split_image_variants_removes_phrase(text, expected):
-    # Фраза количества не должна уезжать модели и в повтор («ещё вариант»).
+    # The quantity phrase must not reach the model in a repeat ("another version") either.
     from lumen_message_parse import _split_image_variants
     assert _split_image_variants(text) == expected
 
 
 def test_weak_verb_with_variants_is_generation_not_edit(rate_guard_setup, monkeypatch):
-    # «Сделай 2 варианта кота» без вложений — серия генераций, а не правка
-    # (ревью 10.11.2026: слабый edit-глагол съедал запрос).
+    # "Make 2 cat variants" without attachments is a generation series, not an edit
+    # (review 10.11.2026: a weak edit verb consumed the request).
     message = rate_guard_setup()
     captured = {}
 
@@ -1783,7 +2005,8 @@ def test_wants_style_reference(text, expected):
 
 
 def test_style_reference_uses_edit_with_photo(rate_guard_setup, monkeypatch):
-    # «Нарисуй X в стиле этого фото» — генерация с референсом стиля (одна, без серии).
+    # "Draw X in the style of this photo" — generation with a style reference (one,
+    #     without a series).
     message = rate_guard_setup()
     message.reply_to_message = SimpleNamespace(
         photo=None, document=SimpleNamespace(file_id="style-fid", mime_type="image/jpeg"),
@@ -1805,7 +2028,7 @@ def test_style_reference_uses_edit_with_photo(rate_guard_setup, monkeypatch):
 
 
 def test_style_reference_without_photo_generates_plain(rate_guard_setup, monkeypatch):
-    # Без фото «в стиле» — обычное описание: референс не ищем вовсе.
+    # Without a photo, "in this style" is an ordinary description: do not look for a reference at all.
     message = rate_guard_setup()
     captured = {}
     resolve_calls = []
@@ -1826,8 +2049,8 @@ def test_style_reference_without_photo_generates_plain(rate_guard_setup, monkeyp
 
 
 def test_inline_draw_variants_stops_after_failure(monkeypatch):
-    # Серия вариантов тратит слоты только на реальные картинки: сбой/отказ
-    # останавливает её, а не добивает лимит пустыми попытками.
+    # A series of options consumes slots only for actual images: a failure/refusal
+    # stops it instead of exhausting the limit with empty attempts.
     calls = []
     results = [True, True, False, True]
 
@@ -1855,7 +2078,7 @@ def test_inline_draw_variants_caps_at_four(monkeypatch):
 
 
 def test_draw_trigger_passes_variant_count(rate_guard_setup, monkeypatch):
-    # «нарисуй 2 варианта кота» — обёртка получает 2 и текст без глагола.
+    # 'draw 2 variants of a cat': the wrapper gets 2 and text without the verb.
     message = rate_guard_setup()
     captured = {}
 
@@ -1869,8 +2092,8 @@ def test_draw_trigger_passes_variant_count(rate_guard_setup, monkeypatch):
 
 
 def test_draw_more_words_with_new_subject_generate_it(rate_guard_setup, monkeypatch):
-    # «нарисуй ещё кота» — новая картинка кота, а не повтор прошлого промпта:
-    # repeat-список длинных фраз не содержит (ревью 10.11.2026).
+    # "draw another cat" means a new cat image, not a repeat of the previous prompt:
+    # the repeat list does not contain long phrases (review 10.11.2026).
     message = rate_guard_setup()
     state = {
         "last_draw_prompt": "маяк на скале",
@@ -1886,8 +2109,8 @@ def test_draw_more_words_with_new_subject_generate_it(rate_guard_setup, monkeypa
 
 
 def test_edit_reference_too_large_replies_media_too_big(rate_guard_setup, monkeypatch):
-    # Гигантский файл реплая при «измени…» — честный отказ, а не молчание
-    # глобального обработчика (ревью 10.11.2026).
+    # A giant reply file with "edit..." — an honest refusal, not silence
+    # of the global handler (review 10.11.2026).
     message = rate_guard_setup()
 
     async def too_big(*args, **kwargs):
@@ -1902,7 +2125,7 @@ def test_edit_reference_too_large_replies_media_too_big(rate_guard_setup, monkey
 
 
 def test_repeat_variant_without_fresh_draw_goes_to_llm(rate_guard_setup, monkeypatch):
-    # Без свежей своей генерации «ещё раз» — обычный текст, а не рисование.
+    # Without a fresh generation of one's own, "again" is ordinary text, not drawing.
     message = rate_guard_setup()
     state = {
         "last_draw_prompt": "старый кот",
@@ -1991,22 +2214,22 @@ def test_natural_language_trigger_consumes_one_slot(rate_guard_setup, text, hand
     ("подскажи музыку для тренировки", "music"),
     ("накидай сериалов", "series"),
     ("придумай игру для компании", "games"),
-    # Английские запросы — тот же детектор (дефолтный язык бота — en).
+    # English queries use the same detector (the bot's default language is en).
     ("recommend a movie", "film"),
     ("suggest music for training", "music"),
-    # Существительные и инфинитивы по-прежнему ведут в games.
+    # Nouns and infinitives still lead to games.
     ("посоветуй игры", "games"),
     ("посоветуй во что поиграть", "games"),
-    # Длинный запрос с деталями — обычным путём в модель, без кнопок.
+    # A long request with details goes through the normal model path, without buttons.
     ("посоветуй фильм про космос, ужасы, 2024 год, длинный список", None),
     ("привет, как дела?", None),
     ("нарисуй кота", None),
     ("", None),
-    # Латиница — только по границам слов: "notebook" — не книги.
+    # Latin is matched only at word boundaries: "notebook" is not books.
     ("recommend a notebook", None),
-    # Кириллица — по началу слова: "тигр" — не игры (AUD-E-006).
+    # Cyrillic is checked at the word start: "tiger" is not games (AUD-E-006).
     ("посоветуй тигра", None),
-    # Префикс "игр" не ловит глаголы: "кто играет" — не запрос игры.
+    # The prefix "games" does not catch verbs: "who plays" is not a game request.
     ("посоветуй кто играет сегодня", None),
 ])
 def test_match_pick_request(text, expected):
@@ -2041,8 +2264,8 @@ def test_pick_disabled_flag_goes_to_ai_route(rate_guard_setup, monkeypatch):
 
 
 def test_pick_resolved_flag_goes_to_ai_route(rate_guard_setup, monkeypatch):
-    # Дополненный выбор ("посоветуй фильм (жанр: ...)") всё ещё матчится
-    # детектором — флаг _pick_resolved обрывает круг.
+    # An expanded choice ("recommend a film (genre: ...)") still matches
+    # by the detector — the _pick_resolved flag breaks the cycle.
     message = rate_guard_setup()
     message.text = "посоветуй фильм (жанр: Триллер)"
     message._pick_resolved = True
@@ -2077,8 +2300,9 @@ def test_pick_callback_happy_path_runs_augmented_request(monkeypatch):
 
 
 def test_pick_callback_busy_chat_does_not_run_core(monkeypatch):
-    # Pick идёт через общий _run_under_chat_lock: при занятом чате ядро не
-    # запускается, ожидание ограничено, счётчик ожидающих не течёт (ревью 08.11.2026).
+    # Pick goes through the shared _run_under_chat_lock: when the chat is busy, the
+    # core does not
+    # it starts, waiting is bounded, and the waiter counter does not leak (review 08.11.2026).
     bot._pending_picks.clear()
     bot._pending_picks["bb12cd34"] = {
         "chat_id": 777, "user_id": 111, "scenario": "film",
@@ -2101,12 +2325,62 @@ def test_pick_callback_busy_chat_does_not_run_core(monkeypatch):
         asyncio.run(scenario())
         fake_core.assert_not_awaited()
         assert bot._chat_lock_waiters.get(777, 0) == 0
+        # R3-04 (audit 26.11.2026): when the chat is busy, the choice is not spent: the token
+        # and the keyboard remain alive; another tap after release will work.
+        assert "bb12cd34" in bot._pending_picks
+        assert q.message.edits == []
+        assert q.answered  # the click confirmation still goes out before the lock
+    finally:
+        bot._pending_picks.clear()
+
+
+def test_pick_callback_double_tap_runs_core_once(monkeypatch):
+    # Review 26.11.2026 (R3-04): there are awaits between token get and pop inside the lock
+    # (answer, lock wait), so a second tap of the same button must not
+    # send the request to the core: one-time use keeps the pop guard, not line order.
+    bot._pending_picks.clear()
+    bot._pending_picks["db12cd34"] = {
+        "chat_id": 777, "user_id": 111, "scenario": "film",
+        "original": "посоветуй фильм", "expires": time.monotonic() + 300,
+        "lang": "ru",
+    }
+    msg = _FakeQueryMessage()
+    q1 = _make_pick_query("pick:db12cd34:2", msg=msg)
+    q2 = _make_pick_query("pick:db12cd34:2", msg=msg)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_answer(text=None, show_alert=False):
+        # Deliberately leave the first tap pending between getting the token and entering the lock,
+        # while the second tap goes through the same checks.
+        q1.answered.append((text, show_alert))
+        started.set()
+        await release.wait()
+
+    q1.answer = slow_answer
+    fake_core = AsyncMock()
+    monkeypatch.setattr(bot, "_handle_message_core", fake_core)
+
+    async def scenario():
+        t1 = asyncio.create_task(bot.handle_pick_callback(q1))
+        await started.wait()
+        t2 = asyncio.create_task(bot.handle_pick_callback(q2))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(t1, t2)
+
+    try:
+        asyncio.run(scenario())
+        assert fake_core.await_count == 1
+        assert len(msg.edits) == 1
+        assert "db12cd34" not in bot._pending_picks
     finally:
         bot._pending_picks.clear()
 
 
 def test_pick_callback_happy_path_english_template(monkeypatch):
-    # Запись без языка → язык берётся из чата (дефолт en): шаблон и опции английские.
+    # An entry without a language uses the chat language (default en): the template and
+    #     options are English.
     bot._pending_picks.clear()
     bot._pending_picks["en12cd34"] = {
         "chat_id": 777, "user_id": 111, "scenario": "film",
@@ -2153,8 +2427,9 @@ def test_pick_callback_wrong_user_rejected(monkeypatch):
 
 
 def test_pick_callback_foreign_tap_does_not_burn_token(monkeypatch):
-    # Регрессия: pop до проверки владельца сжигал кнопку — чужак одним тапом
-    # лишал владельца выбора. Теперь чужой тап отклоняется, свой после — работает.
+    # Regression: pop before checking the owner consumed the button — an outsider with one tap
+    # deprived the owner of the choice. Now a foreign tap is rejected; the owner
+    # tap works afterward.
     bot._pending_picks.clear()
     bot._pending_picks["dd44ee55"] = {
         "chat_id": 777, "user_id": 111, "scenario": "film",
@@ -2191,8 +2466,8 @@ def test_pick_callback_ignores_foreign_callbacks():
 
 
 def test_pick_callback_expired_known_token_reissues_buttons_once(monkeypatch):
-    # Протухший, но известный выбор — свежие кнопки вместо стены (один ресенд:
-    # токен уже popped, следующий тап упрётся в rec None и покажет expired).
+    # A stale but known selection gets fresh buttons instead of a wall (one resend:
+    # the token is already popped, the next tap hits rec None and shows expired).
     bot._pending_picks.clear()
     bot._pending_picks["oldtok12"] = {
         "chat_id": 777, "user_id": 111, "scenario": "film",
@@ -2209,12 +2484,12 @@ def test_pick_callback_expired_known_token_reissues_buttons_once(monkeypatch):
         assert len(bot._pending_picks) == 1
         fresh = next(iter(bot._pending_picks))
         assert fresh != "oldtok12"
-        # Свежие кнопки идут обычным путём до конца.
+        # Fresh buttons follow the normal path to the end.
         q2 = _make_pick_query(f"pick:{fresh}:2")
         asyncio.run(bot.handle_pick_callback(q2))
         assert "Триллер" in q2.message.edits[0][0]
         fake_core.assert_awaited_once()
-        # А вот теперь токен и правда сгорел — дальше честное «кнопки не активны».
+        # Now the token really has expired; next comes an honest 'buttons are inactive'.
         q3 = _make_pick_query(f"pick:{fresh}:0")
         asyncio.run(bot.handle_pick_callback(q3))
         assert any("aren't active" in (text or "").lower() or "не активны" in (text or "").lower() for text, _ in q3.answered)
@@ -2224,16 +2499,16 @@ def test_pick_callback_expired_known_token_reissues_buttons_once(monkeypatch):
 
 
 def test_pick_callback_stranger_cannot_reissue_expired_pick(monkeypatch):
-    # Регрессия (враждебное ревью 27.09.2026): проверка авторства стояла ПОСЛЕ
-    # перевыпуска кнопок, поэтому чужой тап по протухшей кнопке продлевал чужой
-    # выбор новыми кнопками. Теперь чужак получает отказ и ничего не возникает.
+    # Regression (hostile review 27.09.2026): the authorship check ran AFTER
+    # reissuing buttons, so another person's tap on a stale button extended another person's
+    # selection with new buttons. Now an outsider gets a refusal and nothing is created.
     bot._pending_picks.clear()
     bot._pending_picks["oldtok99"] = {
         "chat_id": 777, "user_id": 111, "scenario": "film",
         "original": "посоветуй фильм", "expires": time.monotonic() - 1,
         "lang": "ru",
     }
-    # user_id=999 — не владелец записи (владелец 111).
+    # user_id=999 is not the record owner (the owner is 111).
     q = _make_pick_query("pick:oldtok99:1", user_id=999)
     fake_core = AsyncMock()
     monkeypatch.setattr(bot, "_handle_message_core", fake_core)
@@ -2242,7 +2517,7 @@ def test_pick_callback_stranger_cannot_reissue_expired_pick(monkeypatch):
         assert q.message.edits == [], "чужим нельзя перевыпускать кнопки"
         assert len(bot._pending_picks) == 1, "у чужого тапа не должно появляться записей"
         assert "oldtok99" in bot._pending_picks, "запись владельца остаётся нетронутой"
-        # Реплика берётся языком самой записи (здесь lang="ru"), а не языком чата.
+        # A reply uses the language of the record itself (here lang="ru"), not the chat language.
         from lumen_lang import t as _lang_t
         expected = _lang_t("ru", "pick_not_yours")
         assert any(text == expected for text, _ in q.answered), (q.answered, expected)
@@ -2252,8 +2527,8 @@ def test_pick_callback_stranger_cannot_reissue_expired_pick(monkeypatch):
 
 
 def test_pick_callback_ownerless_record_confined_to_its_chat(monkeypatch):
-    # Вопрос от поста канала/анонима (from_user пустой): user_id=None, и раньше
-    # кнопку мог нажать кто угодно. Теперь выбор живёт только в своём чате.
+    # A question from a channel post/anonymous user (from_user is empty): user_id=None, and previously
+    # button could be pressed by anyone. Now the choice exists only in its own chat.
     bot._pending_picks.clear()
     bot._pending_picks["ownrless1"] = {
         "chat_id": 777, "user_id": None, "scenario": "film",
@@ -2278,9 +2553,9 @@ def test_pick_callback_ownerless_record_confined_to_its_chat(monkeypatch):
 
 
 def test_callback_handlers_have_data_prefix_filters():
-    # Регрессия 25.09.2026: handle_lang_callback висел первым БЕЗ фильтра и по
-    # правилу first match wins съедал вообще все callback_query — кнопки pick
-    # рисовались, но нажатия до handle_pick_callback не доходили никогда.
+    # Regression 25.09.2026: handle_lang_callback was registered first WITHOUT a filter and
+    # the first match wins rule consumed all callback_query messages, so pick buttons
+    # were drawn, but clicks never reached handle_pick_callback.
     handlers = bot.dp.callback_query.handlers
     by_fn = {h.callback.__name__: h for h in handlers}
     assert "handle_lang_callback" in by_fn and "handle_pick_callback" in by_fn
@@ -2288,9 +2563,9 @@ def test_callback_handlers_have_data_prefix_filters():
     assert by_fn["handle_pick_callback"].filters, "pick handler must not be a catch-all"
     assert "handle_draw_more_callback" in by_fn, "draw:more handler must be registered"
     assert by_fn["handle_draw_more_callback"].filters, "draw:more handler must not be a catch-all"
-    # «Фильтр есть» не значит «фильтр правильный»: F.data == "draw:moreX" тоже
-    # фильтр, но кнопку бы не нашёл (ревью 10.11.2026). FilterObject.callback —
-    # внутренний вызов aiogram 3.31, привязан к этой версии.
+    # "The filter exists" does not mean "the filter is correct": F.data == "draw:moreX" also
+    # filter, but would not find the button (review 10.11.2026). FilterObject.callback —
+    # an internal aiogram 3.31 call tied to this version.
     draw_filter = by_fn["handle_draw_more_callback"].filters[0]
     assert bool(draw_filter.callback(value=SimpleNamespace(data="draw:more"))) is True
     assert bool(draw_filter.callback(value=SimpleNamespace(data="draw:moreX"))) is False
@@ -2319,8 +2594,8 @@ def test_expired_picks_purged_on_new_pick(rate_guard_setup, monkeypatch):
 
 
 def test_start_text_examples_cover_every_language():
-    # Приветствие должно иметь одинаковый состав во всех языках, а не только
-    # в en/ru (аудит 28.10.2026).
+    # The greeting must have the same composition in every language, not just
+    # in en/ru (audit 28.10.2026).
     import lumen_lang
     assert set(lumen_lang._START_EXAMPLES) == set(lumen_lang.SUPPORTED_LANGS)
     for lang in lumen_lang.SUPPORTED_LANGS:
@@ -2330,8 +2605,8 @@ def test_start_text_examples_cover_every_language():
 
 
 def test_pick_templates_have_no_foreign_cyrillic_letters():
-    # Аудит 29.10.2026: в персидском шаблоне жанра затесалась кириллическая «р».
-    # Проверяем RTL-языки, где кириллицы быть не должно.
+    # 29.10.2026 audit: a Cyrillic letter resembling Latin "p" slipped into the Persian genre template.
+    # Check RTL languages, where there should be no Cyrillic.
     import re
     import lumen_lang
     for lang in ("ar", "fa", "ur"):
@@ -2344,20 +2619,21 @@ def test_lang_table_covers_all_keys_in_all_languages():
     import lumen_lang
     assert tuple(lumen_lang.SUPPORTED_LANGS) == tuple(sorted(lumen_lang.SUPPORTED_LANGS))
     assert set(lumen_lang.LANG_NAMES) == set(lumen_lang.SUPPORTED_LANGS)
-    # Байт-дубликат английского не перевод: такую строку удаляем, показ едет
-    # фолбэком. Исключения с причиной — только здесь.
+    # A byte-for-byte duplicate of English is not a translation: remove such a
+    # string; display falls back
+    # fallback. Exceptions with a reason appear only here.
     allowed_en_duplicates = {("selftest_header", "fil")}
-    # Имя собственное: заголовок inline-ответа одинаков во всех языках.
+    # A proper name: the inline-response heading is identical in all languages.
     allowed_en_duplicates |= {("inline_answer_title", lang)
                               for lang in lumen_lang.SUPPORTED_LANGS if lang != "en"}
-    # Имя бота — бренд: во всех 25 паках одно и то же латиницей, дубликат en
-    # здесь и есть перевод (10.11.2026, профиль вместо BotFather).
+    # The bot name is a brand: all 25 packs use the same Latin spelling; a duplicate en
+    # is the translation here (10.11.2026, the profile instead of BotFather).
     allowed_en_duplicate_keys = {"profile_name"}
     for key, table in lumen_lang.STRINGS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
             explicit = lumen_lang.LANG_PACKS.get(lang, {}).get(key) or table.get(lang)
-            # Фолбэк на английский скрывал пропуски в переводе; теперь каждый
-            # ключ обязан иметь явный перевод во всех 25 языках (аудит 28.10.2026).
+            # English fallback hid translation gaps; now every
+            # the key must have an explicit translation in all 25 languages (audit 28.10.2026).
             assert explicit, f"missing translation {key}[{lang}]"
             assert explicit != key, f"value equals key {key}[{lang}]"
             assert "\u00ad" not in explicit, f"soft hyphen {key}[{lang}]"
@@ -2369,8 +2645,8 @@ def test_lang_table_covers_all_keys_in_all_languages():
                 assert allowed, (
                     f"untranslated duplicate {key}[{lang}]: delete it, English fallback covers display"
                 )
-    # Плейсхолдеры обязаны совпадать во всех паках: опечатка {current_x}
-    # уезжала в прод видимым литералом (ревью 17.11.2026).
+    # Placeholders must match in every pack: a typo in {current_x}
+    # reached production as a visible literal (review 17.11.2026).
     import re as _re_ph
 
     def _placeholders(value):
@@ -2388,10 +2664,10 @@ def test_lang_table_covers_all_keys_in_all_languages():
             assert q and len(opts) == 4 and "{original}" in tpl and "{choice}" in tpl
 
 
-# ── Claude-стиль фиксированных строк (аудит 11.11.2026) ──
-# Ключи, которые уходят только владельцу: им разрешено называть внутренности.
+# ── Claude-style fixed lines (audit 11.11.2026) ──
+# Keys sent only to the owner: they are allowed to name internals.
 _OWNER_ONLY_KEYS = ("owner_quota_notice", "selftest_", "stats_", "logs_")
-# Стоп-слова проверены на всех 25 паках: ложных вхождений нет.
+# Stop words were checked in all 25 packs: there are no false matches.
 _PROVIDER_STOPWORDS = [
     "gemini", "gemma", "munito", "groq", "whisper", "tikwm", "openai",
     "claude", "chatgpt", "chat gpt", "google", "deepseek", "glm", "qwen",
@@ -2416,9 +2692,9 @@ def _is_user_facing(key):
 
 
 def test_user_facing_strings_name_no_provider_or_model():
-    # Регрессия: внутренности в пользовательском тексте («провайдерам моделей»,
-    # «Bot API», «TikWM», «поисковая квота») — ровно то, что аудит вычищал
-    # вручную во всех 25 паках. Без теста утечка вернётся с любым новым ключом.
+    # Regression: internals in user text (“model providers”,
+    # "Bot API", "TikWM", "search quota") — exactly what the audit removed
+    # manually in all 25 packs. Without the test, a leak would return with any new key.
     import lumen_lang
     for key in lumen_lang.STRINGS:
         if not _is_user_facing(key):
@@ -2429,29 +2705,29 @@ def test_user_facing_strings_name_no_provider_or_model():
             hits = [term for term in _PROVIDER_STOPWORDS if re.search(term, low)]
             assert not hits, (key, lang, hits, v[:120])
             assert not _EMOJI_RE.search(v), (key, lang, v[:120])
-    # Строка примеров в /start — часть того же пользовательского текста.
+    # The examples row in /start is part of the same user-facing text.
     for lang in lumen_lang.SUPPORTED_LANGS:
         assert not _EMOJI_RE.search(lumen_lang._START_EXAMPLES[lang])
         for cb in lumen_lang.PICK_TABLE[lang].values():
             assert not _EMOJI_RE.search(cb["q"])
 
 
-# Отказ на служебные команды (logs_deny/stats_deny) читает человек без прав.
-# Старая форма «No access to this command.» подтверждала, что команда существует
-# и что у бота есть владелец, — то есть что бот не Claude (решение владельца
-# 11.11.2026). Стоп-слова взяты из всех 25 прежних формулировок, поэтому тест
-# падает на любом возврате к ним.
+# A user without rights reads refusals for service commands (logs_deny/stats_deny).
+# The old wording "No access to this command." confirmed that the command existed
+# and that the bot has an owner — that is, that the bot is not Claude (owner's decision
+# 11.11.2026). Stop words were taken from all 25 previous phrasings, so the test
+# fails on any return to them.
 _DENY_KEYS = ("logs_deny", "stats_deny")
 _DENY_LEAK_WORDS = [
-    # доступ / права
+    # access / permissions
     r"\bacces", r"accès", r"\bdost", r"\bдост", r"toegang", r"erişim",
     r"akses", r"สิทธิ์", r"पहुंच", r"প্রবেশাধিকার", r"رسائی", r"دسترسی",
     r"kirish", r"ilungelo", r"صلاحية", r"қолжетімділік", r"\bправ", r"quyền",
-    # команда
+    # command
     r"\bcommand", r"\bcomand", r"\bkomand", r"\bкоманд", r"\bкаманд",
     r"befehl", r"komut", r"perintah", r"คำสั่ง", r"कमांड", r"কমান্ড", r"کمانڈ",
     r"دستور", r"buyruq", r"myalo", r"الأمر", r"lệnh",
-    # владелец / админ: отказ не должен указывать, кому принадлежит команда
+    # owner/admin: a refusal must not reveal who owns the command
     r"\bowner", r"\badmin", r"админ", r"владели", r"власник", r"ўладальнік",
 ]
 
@@ -2464,15 +2740,15 @@ def test_service_command_deny_reveals_no_internals():
             v = _string_value(lumen_lang, key, lang)
             hits = [w for w in _DENY_LEAK_WORDS if re.search(w, v, re.IGNORECASE)]
             assert not hits, (key, lang, hits, v)
-            # Калька с английского — не перевод: форма обязана быть своей.
+            # A calque from English is not a translation: the form must be native.
             if lang != "en":
                 assert v != en, (key, lang, v)
 
 
 def test_tiktok_processing_phase_matches_the_live_status_family():
-    # Ревью 11.11.2026: этот ключ живёт в спиннере так же, как status_* и
-    # progress_*, но скачивание TikTok не носило многоточия — в одном блоке
-    # активности phases выглядели по-разному во всех 25 языках.
+    # Review 11.11.2026: this key lives in the spinner just like status_* and
+    # progress_*, but downloading TikTok had no ellipsis — in one block
+    # of phases activity looked different in all 25 languages.
     import lumen_lang
     for lang in lumen_lang.SUPPORTED_LANGS:
         v = (lumen_lang.LANG_PACKS.get(lang, {}).get("tiktok_processing")
@@ -2482,9 +2758,9 @@ def test_tiktok_processing_phase_matches_the_live_status_family():
 
 
 def test_status_and_progress_punctuation_is_consistent():
-    # Регрессия: «Слушаю.» с точкой и фазы без многоточия ломают вид статусного
-    # блока Claude. Живые media/поиск-фазы вне правила: lumen_status ставит им
-    # впереди «✓» как завершённым этапам, многоточие попало бы в строку галочки.
+    # Regression: "Listening." with a period and phases without an ellipsis break the appearance of the status
+    # of the Claude block. Live media/search phases are outside the rule: lumen_status gives them
+    # ahead of "✓" as a completed stage; an ellipsis would end up in the checkmark line.
     import lumen_lang
     live = {"status_listening", "status_generating_image", "status_voicing",
             "status_taking_longer", "progress_thinking", "progress_retry"}
@@ -2499,9 +2775,9 @@ def test_status_and_progress_punctuation_is_consistent():
 
 
 def test_placeholders_match_across_all_languages():
-    # Регрессия: потерянный в одном паке {hours} молча съедается — t() глотает
-    # KeyError, пользователь видит обрубленное предложение. Набор фигурных
-    # скобок теперь сверяется между всеми 25 языками на каждом ключе.
+    # Regression: a {hours} missing from one pack is silently swallowed — t() eats
+    # KeyError, and the user sees a truncated sentence. The set of typographic
+    # brackets are now compared across all 25 languages for every key.
     import lumen_lang
     for key in lumen_lang.STRINGS:
         found = {lang: frozenset(re.findall(r"\{([a-z_]+)\}", _string_value(lumen_lang, key, lang)))
@@ -2512,9 +2788,9 @@ def test_placeholders_match_across_all_languages():
 
 
 def test_timed_one_forms_keep_placeholders_and_supported_langs():
-    # Формы единственного числа (smoke 11.11.2026) живут вне STRINGS, общий
-    # тест плейсхолдеров их не видит: потерянный {sec} или чужой код языка
-    # молча отдали бы обрезанную строку при sec == 1.
+    # Singular forms (smoke 11.11.2026) live outside STRINGS; the shared
+    # the placeholder test does not see them: a lost {sec} or someone else's language code
+    # would silently return a truncated line when sec == 1.
     import lumen_lang
     for key, forms in lumen_lang._TIMED_ONE_FORMS.items():
         assert key in lumen_lang.STRINGS, key
@@ -2525,8 +2801,8 @@ def test_timed_one_forms_keep_placeholders_and_supported_langs():
 
 
 def test_cmd_descriptions_are_short_and_filled():
-    # Регрессия: пустой cmd_desc ломает setMyCommands языка, а длинный или
-    # с точкой раздувает список команд — читаемость важнее лимита Telegram в 256.
+    # Regression: an empty cmd_desc breaks setMyCommands for the language, while a long or
+    # with a period inflates the command list — readability matters more than Telegram's limit of 256.
     import lumen_lang
     for key in lumen_lang.STRINGS:
         if not key.startswith("cmd_desc_"):
@@ -2574,8 +2850,9 @@ def test_lang_menu_lists_languages_alphabetically(monkeypatch):
     )
     monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=None))
     monkeypatch.setattr(bot, "get_state", lambda chat_id: {"lang": "ru"})
-    # /lang теперь под общим лимитом (спамер в группе гонял меню без ограничения) —
-    # здесь важен порядок языков, а не лимит (тот же приём, что в тесте /start).
+    # /lang now uses the shared limit (a group spammer could loop the menu without
+    # restriction), so
+    # language order matters here, not the limit (the same technique as in the /start test).
     monkeypatch.setattr(bot, "_reject_rate_limited_message", AsyncMock(return_value=False))
     asyncio.run(bot.cmd_lang(message))
     kwargs = bot._tg_call.await_args[1]
@@ -2584,32 +2861,32 @@ def test_lang_menu_lists_languages_alphabetically(monkeypatch):
     assert codes == list(lumen_lang.SUPPORTED_LANGS)
     texts = [cb.text for row in markup.inline_keyboard for cb in row]
     assert texts == [lumen_lang.LANG_NAMES[c] for c in codes]
-    # Текущий язык — в заголовке, не на кнопке (галочка в UI не нужна, аудит 11.11.2026).
+    # Put the current language in the header, not on a button (no checkmark needed in the UI, audit 11.11.2026).
     title = bot._tg_call.await_args[0][1]
     assert title == lumen_lang.t("ru", "lang_title", current="Русский")
 
 
 def test_command_locales_excludes_filipino_without_iso_639_1_code():
-    # Прод-инцидент: "fil" ронял setMyCommands с 400 (Bot API принимает только
-    # двухбуквенные ISO 639-1 коды, которых у филиппинского нет).
+    # Production incident: “fil” crashed setMyCommands with 400 (Bot API accepts only
+    # two-letter ISO 639-1 codes, which Filipino does not have).
     assert "fil" not in bot.COMMAND_LOCALES
     assert set(bot.COMMAND_LOCALES) == (set(bot.SUPPORTED_LANGS) - {bot.DEFAULT_LANG, "fil"})
 
 
-# Лимиты Bot API на поля профиля и разбор method -> (ключ, аргумент).
+# Bot API limits for profile fields and method -> (key, argument) parsing.
 _PROFILE_LIMITS = {"profile_name": 64, "profile_short": 120, "profile_description": 500}
 _PROFILE_ARG_BY_METHOD = {
     "set_my_name": ("profile_name", "name"),
     "set_my_short_description": ("profile_short", "short_description"),
     "set_my_description": ("profile_description", "description"),
 }
-# Политика репо: пользовательский текст не называет провайдера и модель.
+# Repo policy: user-facing text must not name a provider or model.
 _PROFILE_STOPWORDS = (
     "gemini", "gemma", "openai", "claude", "anthropic", "munito", "groq",
     "pollinations", "cloudflare", "chatgpt", "gpt", "llama", "qwen", "deepseek",
     "glm", "openrouter", "mistral", "hermes", "nemotron", "google",
 )
-# Эмодзи ловим диапазоном Unicode, а не списком знаков: список устаревает.
+# Catch emojis with a Unicode range, not a list of characters: the list becomes outdated.
 _PROFILE_EMOJI_RANGES = ((0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF), (0xFE0F, 0xFE0F))
 
 
@@ -2618,9 +2895,9 @@ def _has_emoji(text: str) -> bool:
 
 
 def test_profile_strings_fit_telegram_limits():
-    # Что сторожим: жёсткие лимиты setMyName/setMyShortDescription/
-    # setMyDescription. При превышении Telegram отвечает 400, и «О себе» молча
-    # остаётся старым — ни один другой тест строки профиля не читает.
+    # What we guard: the hard limits of setMyName/setMyShortDescription/
+    # setMyDescription. If exceeded, Telegram returns 400, and "About" silently
+    # remains the old one — no other test reads the profile line.
     import lumen_lang
     for key, cap in _PROFILE_LIMITS.items():
         for lang in lumen_lang.SUPPORTED_LANGS:
@@ -2632,8 +2909,8 @@ def test_profile_strings_fit_telegram_limits():
 
 
 def test_profile_texts_never_name_a_provider_or_model():
-    # То же требование, что к текстам ошибок, но к профилю: его видит каждый, кто
-    # открывает бота, ещё до /start.
+    # Same requirement as for error texts, but for the profile: everyone who
+    # opens the bot, even before /start.
     import lumen_lang
     for key in _PROFILE_LIMITS:
         for lang in lumen_lang.SUPPORTED_LANGS:
@@ -2643,8 +2920,8 @@ def test_profile_texts_never_name_a_provider_or_model():
 
 
 def test_profile_locales_are_iso_639_1_codes():
-    # Прод-инцидент setMyCommands с "fil": Bot API принимает только двухбуквенные
-    # коды, а language_code из трёх букв дал бы 400 на всех трёх вызовах профиля.
+    # Production setMyCommands incident with "fil": Bot API accepts only two-letter
+    # codes, while a three-letter language_code would cause 400 on all three profile calls.
     import lumen_lang
     assert len(set(bot.PROFILE_LANGS)) == len(bot.PROFILE_LANGS)
     assert bot.DEFAULT_LANG in bot.PROFILE_LANGS
@@ -2653,19 +2930,19 @@ def test_profile_locales_are_iso_639_1_codes():
 
 
 def test_profile_locales_match_command_locales():
-    # РЕГРЕССИЯ на 11.11.2026: профиль заводили за десять «ходовых» локалей, а
-    # меню команд — за все 23. Тайец, урду и зулу видели английское «О себе»
-    # при описаниях команд на своём языке.
+    # REGRESSION on 11.11.2026: the profile was created for ten "common" locales, while
+    # the command menu, all 23. Thai, Urdu, and Zulu saw the English "About"
+    # with command descriptions in their own language.
     assert set(bot.PROFILE_LANGS) == set(bot.COMMAND_LOCALES) | {bot.DEFAULT_LANG}
 
 
 async def _no_sleep(_sec: float) -> None:
-    # Пауза между вызовами профиля — шов уровня модуля; в тесте она не нужна.
+    # The pause between profile calls is a module-level seam; tests do not need it.
     return None
 
 
 def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
-    # Без этих вызовов «О себе» живёт только в BotFather и расходится с
+    # Without these calls, "About" lives only in BotFather and diverges from
     # lumen_lang (10.11.2026).
     from collections import Counter
     import lumen_lang
@@ -2684,8 +2961,8 @@ def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
     monkeypatch.setattr(bot, "_profile_sleep", _no_sleep)
     monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: _spy(m) for m in _PROFILE_ARG_BY_METHOD}))
     bot._profile_queue.clear()
-    # Имя одинаковое во всех паках, значит set_my_name уходит один раз: SetMyName
-    # лимитирован сильнее всех, а 19 повторов той же строки стоили штрафа на ~20 ч.
+    # The name is identical in every pack, so set_my_name runs once: SetMyName
+    # most restricted, and 19 repetitions of the same line cost a penalty of about 20 hours.
     expected = {
         "set_my_name": 1,
         "set_my_short_description": len(bot.PROFILE_LANGS),
@@ -2699,13 +2976,14 @@ def test_register_bot_profile_sets_three_fields_per_locale(monkeypatch):
         assert set(kwargs) - {"language_code"} == {arg}, (name, kwargs)
         assert kwargs[arg] == lumen_lang.t(lang, key), (name, lang)
     assert {kw.get("language_code") for _, kw in calls} == (set(bot.PROFILE_LANGS) - {bot.DEFAULT_LANG}) | {None}
-    # Дефолт (без language_code) — ровно по одному полю: он же только один.
+    # The default (without language_code) has exactly one field, because it is the
+    # only one.
     assert sorted(name for name, kw in calls if "language_code" not in kw) == sorted(_PROFILE_ARG_BY_METHOD)
 
 
 def test_register_bot_profile_survives_dead_telegram(monkeypatch, caplog):
-    # _tg_call при недоступном прокси отдаёт None вместо исключения: профиль не
-    # критичен, старт из-за него падать не вправе, а лог обязан быть честным.
+    # _tg_call returns None instead of raising when the proxy is unavailable. The profile
+    # is not critical to startup, and the log must report the failure honestly.
     import logging
     monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=None))
     monkeypatch.setattr(bot, "bot", SimpleNamespace(**{m: AsyncMock() for m in _PROFILE_ARG_BY_METHOD}))
@@ -2717,7 +2995,7 @@ def test_register_bot_profile_survives_dead_telegram(monkeypatch, caplog):
 
 
 def test_register_bot_profile_survives_missing_method(monkeypatch):
-    # Старый aiogram без set_my_name давал бы AttributeError внутри стартапа.
+    # Old aiogram without set_my_name would raise AttributeError during startup.
     monkeypatch.setattr(bot, "_tg_call", AsyncMock(return_value=True))
     monkeypatch.setattr(bot, "bot", SimpleNamespace())
     bot._profile_queue.clear()
@@ -2725,8 +3003,9 @@ def test_register_bot_profile_survives_missing_method(monkeypatch):
 
 
 def test_ru_system_messages_use_informal_ty():
-    # Стиль бота — на "ты" везде: вежливые формы в русских строках — баг стиля
-    # (аудит 11.11.2026: в tiktok-подсказках проскакивали "Попробуйте/Пришлите").
+    # The bot always uses an informal "you": polite forms in Russian strings are a
+    # style bug
+    # (audit 11.11.2026: "Try/Send" prompts leaked into TikTok hints).
     import re
     import lumen_lang
     too_big = lumen_lang.STRINGS["tiktok_too_big"]["ru"]
@@ -2741,7 +3020,8 @@ def test_ru_system_messages_use_informal_ty():
 
 
 def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
-    # Регрессия A8-01: send_photo идёт через _tg_call (breaker/таймаут/RetryAfter), а не напрямую.
+    # A8-01 regression: send_photo goes through _tg_call
+    #     (breaker/timeout/RetryAfter), not directly.
     chat_id = 999433
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
@@ -2771,7 +3051,8 @@ def test_inline_draw_sends_photo_via_tg_call(monkeypatch):
 
 
 def test_inline_draw_send_failure_reports_service_error(monkeypatch):
-    # Регрессия A8-01: _tg_call вернул None (сеть/брейкер) — пользователь видит ошибку сервиса.
+    # Regression A8-01: _tg_call returned None (network/breaker), so the user saw
+    # a service error.
     chat_id = 999434
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
@@ -2801,8 +3082,43 @@ def test_inline_draw_send_failure_reports_service_error(monkeypatch):
     bot.chat_state.pop(chat_id, None)
 
 
+def test_inline_draw_cancelled_accepted_send_keeps_reservation(monkeypatch):
+    # A cancelled send may already be visible in Telegram. Charging that attempt is safer
+    # than refunding it and allowing an unbounded retry through a cancellation seam.
+    chat_id = 999457
+    uid = 777058
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    refunds = []
+
+    async def ok(session, prompt, timeout_sec=None, **_):
+        return b"\x89PNG fake bytes"
+
+    async def cancelled_send(method, *args, **kwargs):
+        if "photo" in kwargs or "document" in kwargs:
+            exc = asyncio.CancelledError()
+            exc._lumen_tg_unknown = True
+            exc._lumen_tg_method = method
+            raise exc
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_refund_user_daily", lambda *args, **kwargs: refunds.append(kwargs))
+    _one_image_provider(monkeypatch, ok)
+    monkeypatch.setattr(bot, "_tg_call", cancelled_send)
+    monkeypatch.setattr(bot, "_edit_message_quietly", AsyncMock(return_value=True))
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_photo=AsyncMock()))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+    finally:
+        bot.chat_state.pop(chat_id, None)
+    assert refunds == []
+    assert bot._user_daily_entry(uid)["draw"] == 1
+
+
 def test_inline_tts_sends_voice_via_tg_call(monkeypatch):
-    # Регрессия A8-01: send_voice идёт через _tg_call, а не напрямую.
+    # A8-01 regression: send_voice goes through _tg_call, not directly.
     chat_id = 999435
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
@@ -2831,9 +3147,83 @@ def test_inline_tts_sends_voice_via_tg_call(monkeypatch):
     direct.assert_not_awaited()
 
 
+def test_inline_tts_cancelled_accepted_send_keeps_current_chunk(monkeypatch):
+    # Once send_voice starts, cancellation cannot prove non-delivery. Delivered chunks stay
+    # charged, while an unstarted send still follows the ordinary refund path.
+    chat_id = 999458
+    uid = 777059
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    refunds = []
+
+    async def fake_synth(text):
+        return (b"fake-ogg", "speech.ogg", 5)
+
+    async def cancelled_send(method, *args, **kwargs):
+        if "voice" in kwargs:
+            exc = asyncio.CancelledError()
+            exc._lumen_tg_unknown = True
+            exc._lumen_tg_method = method
+            raise exc
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_refund_user_daily", lambda *args, **kwargs: refunds.append(kwargs))
+    monkeypatch.setattr(bot, "_tg_call", cancelled_send)
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fake_synth)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_voice=AsyncMock(return_value=SimpleNamespace())))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(bot.inline_tts(incoming, "привет"))
+    finally:
+        bot.chat_state.pop(chat_id, None)
+    assert refunds == []
+    assert bot._user_daily_entry(uid)["tts"] == 1
+
+
+def test_inline_tts_cancelled_second_send_refunds_only_unstarted_chunks(monkeypatch):
+    # The interrupted second voice may be delivered; the third was never started. Keeping
+    # all remaining reservations would charge for a chunk that cancellation made impossible.
+    chat_id = 999459
+    uid = 777060
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.message_id = 1
+    incoming.from_user = SimpleNamespace(id=uid)
+    refunds = []
+    voice_calls = 0
+
+    async def fake_synth(text):
+        return (b"fake-ogg", "speech.ogg", 5)
+
+    async def cancelled_second_send(method, *args, **kwargs):
+        nonlocal voice_calls
+        if "voice" in kwargs:
+            voice_calls += 1
+            if voice_calls == 2:
+                exc = asyncio.CancelledError()
+                exc._lumen_tg_unknown = True
+                exc._lumen_tg_method = method
+                raise exc
+            return SimpleNamespace()
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_refund_user_daily", lambda *args, **kwargs: refunds.append(kwargs))
+    monkeypatch.setattr(bot, "_tg_call", cancelled_second_send)
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fake_synth)
+    monkeypatch.setattr(lumen_commands, "_split_tts_chunks", lambda text, limit: ["one", "two", "three"])
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(send_voice=AsyncMock(return_value=SimpleNamespace())))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(bot.inline_tts(incoming, "one two three"))
+    finally:
+        bot.chat_state.pop(chat_id, None)
+    assert voice_calls == 2
+    assert [(item["total"], item["tts"]) for item in refunds] == [(1, 1)]
+
+
 def test_inline_tts_send_failure_replies_with_error(monkeypatch):
-    # Аудит 28.10.2026: None от _tg_call раньше уходил исключением, а статус
-    # уже удалён — пользователь оставался без ответа. Теперь честная ошибка.
+    # Audit 28.10.2026: None from _tg_call used to escape as an exception, while the status
+    # has already been removed — the user was left without a response. Now there is an honest error.
     chat_id = 999436
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
@@ -2871,7 +3261,7 @@ def _make_selftest_message(chat_id, user_id, text="/selftest", group=False):
 
 
 def _setup_selftest_fakes(monkeypatch, fail_heads=()):
-    # Фейковые пробы голов и сети + захват ответа. Возвращает (calls, fake_tg_call).
+    # Fake head and network probes plus response capture. Returns (calls, fake_tg_call).
     import lumen_commands
     calls = []
 
@@ -2891,7 +3281,7 @@ def _setup_selftest_fakes(monkeypatch, fail_heads=()):
         fake_tg_call.text = args[0] if args else kwargs.get("text", "")
         return SimpleNamespace()
 
-    # Голова текста — Munito, и проба отправляется только при активном провайдере.
+    # The text head is Munito, and the probe is sent only when the provider is active.
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "selftest_llm_head", fake_head)
     monkeypatch.setattr(bot, "_get_http_session", fake_session)
@@ -2902,7 +3292,7 @@ def _setup_selftest_fakes(monkeypatch, fail_heads=()):
 
 
 def test_cmd_selftest_denies_non_owner_without_probing(monkeypatch):
-    # Чужой не должен даже запускать пробы: иначе любой сливал бы квоту и видел внутрянку.
+    # An outsider must not even trigger probes; otherwise anyone could drain quota and see internals.
     monkeypatch.setattr(bot, "OWNER_ID", 111001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     incoming = _make_selftest_message(999701, 222002)
@@ -2912,7 +3302,7 @@ def test_cmd_selftest_denies_non_owner_without_probing(monkeypatch):
 
 
 def test_cmd_selftest_group_only_for_owner(monkeypatch):
-    # ID моделей в группы не отдаём: команда в группах только отказывает, проб нет.
+    # Do not expose model IDs in groups: the command only refuses there, with no probes.
     from lumen_router_config import GEMINI_DEFAULT_CHAIN, _MUNITO_ORDER
     monkeypatch.setattr(bot, "OWNER_ID", 333001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
@@ -2925,9 +3315,9 @@ def test_cmd_selftest_group_only_for_owner(monkeypatch):
 
 
 def test_cmd_selftest_reports_the_search_layer(monkeypatch):
-    # Строка состояния слоя поиска: после рестарта Space по ней видно, включён ли
-    # цикл и сколько обращений к источникам уже израсходовано. Без неё владелец
-    # проверял бы переключатели вслепую.
+    # Search-layer status line: after a Space restart, it shows whether the agent cycle is
+    # active and how many source requests have been spent. Without it, the owner would test
+    # the switches blindly.
     monkeypatch.setattr(bot, "OWNER_ID", 444002)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999713, 444002)))
@@ -2937,7 +3327,7 @@ def test_cmd_selftest_reports_the_search_layer(monkeypatch):
 
 
 def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
-    # Без паузы владелец случайно выжигал бы квоту повторными тапами.
+    # Without a pause, the owner could accidentally burn quota with repeated taps.
     monkeypatch.setattr(bot, "OWNER_ID", 444001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999703, 444001)))
@@ -2948,8 +3338,8 @@ def test_cmd_selftest_cooldown_blocks_second_run(monkeypatch):
 
 
 def test_cmd_selftest_first_run_after_boot_not_throttled(monkeypatch):
-    # Падение CI на dependabot-PR: monotonic() свежего контейнера меньше 60с,
-    # и ноль как «давно» давал ложный кулдаун первому же запуску.
+    # CI failure on a dependabot PR: monotonic() in a fresh container is under 60 seconds,
+    # and treating zero as "long ago" caused a false cooldown on the very first launch.
     monkeypatch.setattr(bot, "OWNER_ID", 109001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     monkeypatch.setattr(time, "monotonic", lambda: 42.0)
@@ -2958,7 +3348,7 @@ def test_cmd_selftest_first_run_after_boot_not_throttled(monkeypatch):
 
 
 def test_selftest_short_error_redacts_org_id():
-    # Прод 05.10.2026: текст Groq-ошибки тащил ID организации — внутрянка даже в личке.
+    # Prod 05.10.2026: Groq error text carried an organization ID — internal details even in a private chat.
     import lumen_routes
     err = lumen_routes._selftest_short_error(RuntimeError(
         "Request too large for model `qwen/qwen3.8-27b` in organization `org_01m321tq18eqksff96hz17m7es` service tier"))
@@ -2967,7 +3357,7 @@ def test_selftest_short_error_redacts_org_id():
 
 
 def test_cmd_selftest_default_skips_gemini_and_hides_model_ids(monkeypatch):
-    # Дефолт без gemini бережёт самую дефицитную квоту; ID моделей в ответе нет.
+    # The default without gemini preserves the scarcest quota; model IDs are absent from the response.
     from lumen_router_config import GEMINI_DEFAULT_CHAIN, _MUNITO_ORDER
     monkeypatch.setattr(bot, "OWNER_ID", 555001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
@@ -2979,8 +3369,8 @@ def test_cmd_selftest_default_skips_gemini_and_hides_model_ids(monkeypatch):
 
 
 def test_cmd_selftest_without_key_skips_munito_probe(monkeypatch):
-    # Что защищает: провайдера нет — пробы нет. Регрессия: /selftest тратил бы
-    # пробу и время владельца на провайдер, который маршрут не использует.
+    # What it protects: no provider means no probe. Regression: /selftest would spend
+    # an attempt and the owner's time on a provider the route does not use.
     monkeypatch.setattr(bot, "OWNER_ID", 555002)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
@@ -2990,7 +3380,7 @@ def test_cmd_selftest_without_key_skips_munito_probe(monkeypatch):
 
 
 def test_cmd_selftest_with_gemini_arg_probes_gemini(monkeypatch):
-    # Явный аргумент включает пробу Gemini.
+    # An explicit argument enables the Gemini probe.
     monkeypatch.setattr(bot, "OWNER_ID", 666001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch)
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999705, 666001, "/selftest gemini")))
@@ -2999,8 +3389,8 @@ def test_cmd_selftest_with_gemini_arg_probes_gemini(monkeypatch):
 
 
 def test_cmd_selftest_reports_failed_head(monkeypatch):
-    # Упавшая голова — строка FAIL с причиной, а не молчание или падение команды;
-    # остальные строки отчёта при этом остаются живыми.
+    # A failed head is a FAIL line with a reason, not silence or a command crash;
+    # the other report lines remain live.
     monkeypatch.setattr(bot, "OWNER_ID", 777001)
     calls, fake_tg_call = _setup_selftest_fakes(monkeypatch, fail_heads=("munito",))
     asyncio.run(bot.cmd_selftest(_make_selftest_message(999706, 777001)))
@@ -3010,7 +3400,7 @@ def test_cmd_selftest_reports_failed_head(monkeypatch):
 
 
 def test_selftest_llm_head_munito_success_targets_head_without_quota_write(monkeypatch):
-    # Честный учёт: успешная проба идёт ровно в голову текстового маршрута и +1 в квоту.
+    # Honest accounting: a successful probe goes to the very front of the text route and adds +1 to the quota.
     import lumen_model_speed
     import lumen_routes
     from lumen_router_config import _MUNITO_ORDER
@@ -3037,12 +3427,12 @@ def test_selftest_llm_head_munito_success_targets_head_without_quota_write(monke
         bot.GLOBAL_QUOTA.get("munito", {}).pop(head, None)
     assert ok is True and detail == "" and elapsed >= 0
     assert seen["model"] == head
-    # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
-    # Сама запись проверена до очистки в finally: здесь она всегда None.
+    # Probe — service call: no counter, exhaustion marks, or EMA (run-2 audit).
+    # The write itself was checked before finally cleanup: here it is always None.
 
 
 def test_selftest_llm_head_munito_error_returns_false_without_quota(monkeypatch):
-    # Неуспех квоту не трогает (как в ask_*): иначе ошибка стоила бы как ответ.
+    # Failure does not consume quota (as in ask_*); otherwise an error would cost as much as an answer.
     import lumen_routes
     from lumen_router_config import _MUNITO_ORDER
     head = _MUNITO_ORDER[0]
@@ -3059,7 +3449,7 @@ def test_selftest_llm_head_munito_error_returns_false_without_quota(monkeypatch)
 
 
 def test_cmd_stats_shows_quarantine(monkeypatch):
-    # Карантин виден владельцу в /stats: иначе объезд модели выглядел бы магией.
+    # Quarantine is visible to the owner in /stats: otherwise bypassing a model would look like magic.
     monkeypatch.setattr(bot, "OWNER_ID", 888001)
     for _ in range(3):
         bot._record_model_outcome("munito", "qs-model", bad=True)
@@ -3099,7 +3489,7 @@ def _capture_replies(monkeypatch):
 
 
 def test_ban_flow_by_id_unban_and_list(monkeypatch):
-    # Полный цикл: бан по ID, список, разбан, повторный разбан — мимо.
+    # Full cycle: ID ban, list, unban, repeated unban — skip.
     monkeypatch.setattr(bot, "OWNER_ID", 101001)
     sent = _capture_replies(monkeypatch)
     assert bot._is_banned(777002) is False
@@ -3118,7 +3508,7 @@ def test_ban_flow_by_id_unban_and_list(monkeypatch):
 
 
 def test_ban_by_reply_and_usage_and_owner_refuse(monkeypatch):
-    # Цель ответом на сообщение; мусор вместо ID — подсказка; владельца — отказ.
+    # Target is the reply to a message; garbage instead of an ID is a hint; the owner gets a refusal.
     monkeypatch.setattr(bot, "OWNER_ID", 102001)
     sent = _capture_replies(monkeypatch)
     replied = SimpleNamespace(from_user=SimpleNamespace(id=555003))
@@ -3132,7 +3522,7 @@ def test_ban_by_reply_and_usage_and_owner_refuse(monkeypatch):
 
 
 def test_ban_denies_non_owner_and_group(monkeypatch):
-    # Чужой и группа: только отказ, список не меняется.
+    # Outsider and group: refusal only; the list is unchanged.
     monkeypatch.setattr(bot, "OWNER_ID", 103001)
     sent = _capture_replies(monkeypatch)
     asyncio.run(bot.cmd_ban(_make_ban_message(999803, 999999, "/ban 123")))
@@ -3143,7 +3533,7 @@ def test_ban_denies_non_owner_and_group(monkeypatch):
 
 
 def test_handle_message_ignores_banned_user(monkeypatch):
-    # Заблокированный: ни ответа, ни ядра (там контекст группы и счётчики лимитов).
+    # Blocked: no reply and no core allocation (group context and limit counters live there).
     from unittest.mock import AsyncMock
     monkeypatch.setattr(bot, "OWNER_ID", 104001)
     bot._ban_user(605001)
@@ -3167,7 +3557,7 @@ def test_handle_message_ignores_banned_user(monkeypatch):
 
 
 def test_banned_list_survives_quota_reload(monkeypatch):
-    # Список живёт в том же файле, что квота: рестарт его не сбрасывает.
+    # The list lives in the same file as the quota: a restart does not reset it.
     import json
     monkeypatch.setattr(bot, "OWNER_ID", 105001)
     bot._ban_user(606001)
@@ -3180,7 +3570,7 @@ def test_banned_list_survives_quota_reload(monkeypatch):
 
 
 def test_pick_callback_ignores_banned_user(monkeypatch):
-    # Забаненный не отвечает и кнопками: иначе игнор обходился живыми пиками.
+    # A banned user gets neither replies nor buttons; otherwise the ignore could be bypassed with live picks.
     from unittest.mock import AsyncMock
     monkeypatch.setattr(bot, "OWNER_ID", 106001)
     bot._ban_user(607001)
@@ -3203,8 +3593,9 @@ def test_pick_callback_ignores_banned_user(monkeypatch):
 
 
 def test_answer_sender_skips_reply_quote_in_private(monkeypatch):
-    # В личке ответ не должен быть Telegram-реплаем: цитата над ответом — не как
-    # у Claude. В группах reply остаётся для контекста.
+    # In a private chat, the response must not be a Telegram reply: a quote above
+    # the answer is not
+    # as with Claude. In groups, reply remains for context.
     from unittest.mock import AsyncMock
     from aiogram import Bot
     real_bot = Bot(token="123456:" + "x" * 35)
@@ -3212,9 +3603,9 @@ def test_answer_sender_skips_reply_quote_in_private(monkeypatch):
     monkeypatch.setattr(bot, "bot", real_bot)
     incoming = _FakeIncomingMessage(999807)
     sender = bot._answer_sender(incoming)
-    # Позиционный текст — как в реальных вызовах _tg_call(sender, text, ...):
-    # partial(chat_id=...) + позиционный аргумент падал с "multiple values for
-    # chat_id" и отключал стрим (прод 28.10.2026).
+    # Positional text, as in real _tg_call(sender, text, ...) calls:
+    # partial(chat_id=...) plus a positional argument failed with "multiple values for
+    # chat_id" and disabled streaming (production 28.10.2026).
     asyncio.run(sender("x", parse_mode=None))
     real_bot.send_message.assert_awaited_once()
     assert real_bot.send_message.await_args.kwargs["chat_id"] == 999807
@@ -3222,13 +3613,13 @@ def test_answer_sender_skips_reply_quote_in_private(monkeypatch):
     group = _FakeIncomingMessage(999808)
     group.chat.type = bot.ChatType.GROUP
     assert bot._answer_sender(group) == group.reply
-    # Реальная сессия aiogram: закрываем, иначе «Unclosed client session» (ревью 17.11.2026).
+    # A real aiogram session: close it, otherwise “Unclosed client session” (review 17.11.2026).
     asyncio.run(real_bot.session.close())
 
 
 def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
-    # Аудит 28.10.2026: /reset чистил историю, но старые ссылки на медиа
-    # и имена оставались в состоянии.
+    # 28.10.2026 audit: /reset cleared history, but old media links
+    # and the names remained in state.
     from collections import deque
     from unittest.mock import AsyncMock
     chat_id = 999806
@@ -3269,8 +3660,8 @@ def test_cmd_reset_clears_media_refs_and_names(monkeypatch):
 
 
 def test_banned_user_commands_send_nothing(monkeypatch):
-    # Обход бана через прямые команды: catch-all с _is_banned не ловит
-    # зарегистрированные раньше cmd_*, каждая проверяет первой строкой.
+    # Ban bypass through direct commands: a catch-all with _is_banned does not catch
+    # cmd_* registered earlier, each checking on its first line.
     from unittest.mock import AsyncMock
     monkeypatch.setattr(bot, "OWNER_ID", 106002)
     banned_id = 607002
@@ -3302,8 +3693,8 @@ def test_banned_user_commands_send_nothing(monkeypatch):
 
 
 def test_help_command_opens_the_start_screen(rate_guard_setup):
-    # Регресс: без алиаса /help уходил в catch-all и уезжал в модель как текст,
-    # а человек, печатающий /help по привычке, получал выдуманный ответ.
+    # Regression: without the /help alias, it went to the catch-all and into the model as text,
+    # and a person typing /help out of habit received an invented answer.
     import datetime
     from aiogram import Bot
     from aiogram.types import Chat as TgChat
@@ -3311,7 +3702,7 @@ def test_help_command_opens_the_start_screen(rate_guard_setup):
     real_bot = Bot(token="123456:" + "x" * 35)
 
     def resolved(text):
-        # Матчит сам реестр dp и aiogram, а не копия правил Command.
+        # Matches the actual dp registry and aiogram, not a copy of Command rules.
         message = TgMessage(
             message_id=1, date=datetime.datetime.now(),
             chat=TgChat(id=999812, type="private"), text=text,
@@ -3327,7 +3718,7 @@ def test_help_command_opens_the_start_screen(rate_guard_setup):
         incoming = rate_guard_setup()
         incoming.text = text
         asyncio.run(bot.cmd_start(incoming))
-        # фикстура ставит свой AsyncMock на каждый вызов — смотрим его аргументы
+        # the fixture installs its own AsyncMock on every call; inspect its arguments
         sent.append(bot._tg_call.await_args.args[1])
     assert sent[0] == sent[1] == bot._t(123, "start_text")
     asyncio.run(real_bot.session.close())
@@ -3335,8 +3726,8 @@ def test_help_command_opens_the_start_screen(rate_guard_setup):
 
 
 def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(monkeypatch):
-    # Проба Gemini: исход в счётчик карантина сбрасывается, но квота и EMA латентности
-    # не двигаются — это служебный пинг, а не ответ пользователю.
+    # Gemini probe: the outcome resets the quarantine counter, but the quota and latency EMA
+    # do not move: this is a service ping, not an answer to the user.
     import lumen_model_speed
     import lumen_routes
     from lumen_router_config import GEMINI_DEFAULT_CHAIN
@@ -3366,13 +3757,13 @@ def test_selftest_llm_head_gemini_success_does_not_write_quota_or_latency_ema(mo
         bot.GLOBAL_QUOTA.get("gemini", {}).pop(head, None)
     assert ok is True and detail == "" and elapsed >= 0
     assert fake_models.calls == [head]
-    # Проба — служебный вызов: ни счётчик, ни отметки об исчерпании, ни EMA (аудит run-2).
-    # Сама запись проверена до очистки в finally: здесь она всегда None.
+    # A probe is a service call: no counter, exhaustion marks, or EMA (run-2 audit).
+    # The write itself was checked before cleanup in finally: here it is always None.
     assert bot._is_quarantined("gemini", head) is False
 
 
 def test_selftest_llm_head_gemini_empty_feeds_quarantine(monkeypatch):
-    # Пустая проба Gemini тоже плохой исход, как в цепочке.
+    # An empty Gemini probe is also a bad outcome, as in the chain.
     import lumen_router_config
     import lumen_routes
     from lumen_router_config import GEMINI_DEFAULT_CHAIN
@@ -3389,7 +3780,7 @@ def test_selftest_llm_head_gemini_empty_feeds_quarantine(monkeypatch):
 
 
 def test_cmd_banlist_cuts_long_output(monkeypatch):
-    # Сотни банов не роняют команду лимитом Telegram: режем по строкам.
+    # Hundreds of bans do not make the command hit Telegram's limit: split by lines.
     monkeypatch.setattr(bot, "OWNER_ID", 107001)
     sent = _capture_replies(monkeypatch)
     for uid in range(200001, 200601):
@@ -3400,8 +3791,8 @@ def test_cmd_banlist_cuts_long_output(monkeypatch):
 
 
 def _fresh_draw_state(uid=456, prompt="красное яблоко на столе"):
-    """Своя генерация несколько секунд назад — окно, в котором слабый глагол
-    правки имеет смысл (DRAW_EDIT_CONTEXT_TTL_SEC)."""
+    """A recent own generation is the window in which a weak edit verb makes sense
+    (DRAW_EDIT_CONTEXT_TTL_SEC)."""
     return {
         "last_draw_prompt": prompt,
         "last_drawn_at": time.time(),
@@ -3411,9 +3802,9 @@ def _fresh_draw_state(uid=456, prompt="красное яблоко на стол
 
 
 def test_tts_trigger_right_after_generation_is_audio_not_edit(rate_guard_setup, monkeypatch):
-    # «сделай голосовое» начинается со слабого edit-глагола: в окне свежей
-    # генерации запрос уезжал в правку картинки, и после любого рисунка озвучка
-    # была недоступна 10 минут (ревью 10.11.2026).
+    # "make a voice note" starts with a weak edit verb: a fresh
+    # generation request was sent to image editing, and after any image the TTS
+    # was unavailable for 10 minutes (review 10.11.2026).
     message = rate_guard_setup()
     state = _fresh_draw_state()
     ref_calls = []
@@ -3433,8 +3824,8 @@ def test_tts_trigger_right_after_generation_is_audio_not_edit(rate_guard_setup, 
 
 
 def test_variants_inside_edit_window_stay_generation(rate_guard_setup, monkeypatch):
-    # Тот же класс: «сделай 2 варианта кота» внутри окна правки превращалось в
-    # одну правку, а фраза «2 варианта» оставалась внутри промпта (ревью 10.11.2026).
+    # Same class: "make 2 cat variants" within the edit window turned into
+    # one edit, while "2 versions" remained inside the prompt (review 10.11.2026).
     message = rate_guard_setup()
     state = _fresh_draw_state()
     captured = {}
@@ -3457,8 +3848,8 @@ def test_variants_inside_edit_window_stay_generation(rate_guard_setup, monkeypat
 
 
 def test_repeat_trigger_with_new_subject_draws_the_subject(rate_guard_setup, monkeypatch):
-    # «ещё вариант кота в шляпе» называет новый сюжет: молча повторять старое
-    # описание значило рисовать не то (ревью 10.11.2026).
+    # "another option of a cat in a hat" names a new scene: silently repeating the old
+    # description meant drawing the wrong thing (review 10.11.2026).
     message = rate_guard_setup()
     state = _fresh_draw_state(prompt="красное яблоко")
     captured = {}
@@ -3475,16 +3866,16 @@ def test_repeat_trigger_with_new_subject_draws_the_subject(rate_guard_setup, mon
 
 
 def test_longest_trigger_prefix_wins():
-    # «нарисуй» стоит в списке раньше «нарисуй-ка»: первый матч резал
-    # «нарисуй-ка кота» до «ка кота» (ревью 10.11.2026).
+    # “draw” is listed before “draw, please”: the first match cut
+    # "draw me a cat" down to "a cat" (review 10.11.2026).
     from lumen_message_parse import DRAW_TRIGGER_PREFIXES, _match_trigger_prefix
     assert _match_trigger_prefix("нарисуй-ка кота", DRAW_TRIGGER_PREFIXES) == "нарисуй-ка"
 
 
 def test_inline_draw_parks_relay_5xx(monkeypatch):
-    # Ответ relay-прокси («Cloudflare HTTP 502») не похож ни на одно сетевое
-    # слово из прошлого списка: без паузы каждый следующий платил бы полный
-    # таймаут попытки (прод 09.11.2026, ревью 10.11.2026).
+    # A relay proxy response ('Cloudflare HTTP 502') does not resemble any network
+    # word from the previous list: without a pause, every next call would pay the full
+    # attempt timeout (production 09.11.2026, review 10.11.2026).
     chat_id = 999447
     attempts = []
 
@@ -3515,8 +3906,8 @@ def test_inline_draw_parks_relay_5xx(monkeypatch):
 
 
 def test_inline_draw_moderation_refusal_stops_the_chain(monkeypatch):
-    # Отказ по фильтру содержания — не сетевой сбой: резерв повторил бы то же
-    # самое и списал общий бюджет (ревью 10.11.2026).
+    # A content-filter refusal is not a network failure: fallback would repeat the same
+    # itself and charged the shared budget (review 10.11.2026).
     chat_id = 999448
     attempts = []
     usage_before = bot._image_usage_total()
@@ -3542,17 +3933,17 @@ def test_inline_draw_moderation_refusal_stops_the_chain(monkeypatch):
         assert asyncio.run(bot.inline_draw(incoming, "cat")) is False
         assert attempts == ["cloudflare"]
         assert bot._image_provider_ready("cloudflare") is True, "модерация — не перегрузка"
-        # klein картинку посчитал, значит Neuron списаны: попытка обязана попасть в
-        # общий дневной бюджет, иначе цикл из запрещённых описаний выжигал бы квоту
-        # провайдера мимо всяких лимитов (ревью 10.11.2026).
+        # klein counted the image, so Neuron was charged: the attempt must be included in
+        # the shared daily budget; otherwise a loop of rejected descriptions would burn the quota
+        # of the provider, bypassing all limits (10.11.2026 review).
         assert bot._image_usage_total() == usage_before + 1
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
 def test_inline_draw_refunds_slot_even_if_failure_notice_explodes(monkeypatch):
-    # Возврат слота стоял после awaited-ответов в Telegram: сбой уведомления лишал
-    # человека слота до полуночи без картинки (ревью 10.11.2026).
+    # The slot was returned after awaited Telegram replies: a notification failure cost
+    # the person’s slot until midnight without an image (review 10.11.2026).
     chat_id = 999450
     uid = 777050
 
@@ -3577,8 +3968,8 @@ def test_inline_draw_refunds_slot_even_if_failure_notice_explodes(monkeypatch):
 
 
 def test_inline_draw_strips_more_button_from_previous_photo(monkeypatch):
-    # «Повторить» живёт только у последней картинки, как в ChatGPT: без съёма
-    # старой клавиатуры под ней оставался кликабельный чужой сюжет (ревью 10.11.2026).
+    # "Repeat" lives only on the last image, as in ChatGPT: without clearing
+    # of the old keyboard, another person's clickable story remained underneath (review 10.11.2026).
     from aiogram.types import InlineKeyboardMarkup, PhotoSize
 
     chat_id = 999453
@@ -3611,20 +4002,20 @@ def test_inline_draw_strips_more_button_from_previous_photo(monkeypatch):
         asyncio.run(bot.inline_draw(incoming, "cat"))
         asyncio.run(bot.inline_draw(incoming, "dog"))
         sends = [kw for fn, kw in calls if fn is fake_bot.send_photo]
-        # Мок возвращал sent_photo ЛЮБОМУ вызову, и «кнопка под фото» в тесте
-        # не проверялась вовсе: мутант без клавиатуры проходил зелёным
-        # (ревью 10.11.2026).
+        # The mock returned sent_photo for ANY call, and "a button below the photo" in the test
+        # was not checked at all: a mutant without a keyboard passed green
+        # (review 10.11.2026).
         assert len(sends) == 2
         for kw in sends:
             buttons = [b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row]
             assert buttons == ["draw:more"], "кнопка «Ещё вариант» обязана ехать с фото"
-        # Съём клавиатуры опознаётся по самой функции, а не по форме kwargs.
+        # Keyboard removal is recognized by the function itself, not by the shape of kwargs.
         strips = [kw for fn, kw in calls if fn is fake_bot.edit_message_reply_markup]
         assert len(strips) == 1, "у первой генерации снимать клавиатуру не с чего"
         assert strips[0]["chat_id"] == chat_id
         assert strips[0]["message_id"] == 4242
-        # Снятие — явная пустая клавиатура: None aiogram вообще не отправляет поле,
-        # и работало бы молчаливое «нет поля = нет кнопок» (ревью 10.11.2026).
+        # Removal uses an explicit empty keyboard: if it is None, aiogram does not send the field at all,
+        # and 'missing field = no buttons' would work silently (review 10.11.2026).
         assert isinstance(strips[0]["reply_markup"], InlineKeyboardMarkup)
         assert strips[0]["reply_markup"].inline_keyboard == []
     finally:
@@ -3633,9 +4024,9 @@ def test_inline_draw_strips_more_button_from_previous_photo(monkeypatch):
 
 
 def test_inline_draw_sends_photo_when_markup_editor_is_absent(monkeypatch):
-    # Съём клавиатуры берёт метод через getattr: у бота без edit_message_reply_markup
-    # прямой доступ кидал AttributeError внутри except, и человек оставался
-    # без картинки (ревью 10.11.2026).
+    # Keyboard removal obtains the method via getattr: for a bot without edit_message_reply_markup
+    # direct access raised AttributeError inside except, and the person was left
+    # without an image (review 10.11.2026).
     from aiogram.types import PhotoSize
 
     chat_id = 999454
@@ -3671,8 +4062,8 @@ def test_inline_draw_sends_photo_when_markup_editor_is_absent(monkeypatch):
 
 
 def test_reply_to_foreign_photo_lands_in_that_photos_owner_bucket(monkeypatch):
-    # Реплай на чужое фото клал файл в корзину ответившего: следующий «добавь
-    # звезду» без реплая правил чужой снимок (ревью 10.11.2026).
+    # A reply to someone else's photo put the file in the responder's basket: the next "add
+    # star" without a reply changed someone else's snapshot (10.11.2026 review).
     from lumen_media_flow import _resolve_edit_references
 
     saved = []
@@ -3697,8 +4088,8 @@ def test_reply_to_foreign_photo_lands_in_that_photos_owner_bucket(monkeypatch):
 
 
 def test_resolve_edit_references_dedups_same_file_id(monkeypatch):
-    # Вложение и реплай с одним file_id дают один референс; ветка seen_ids раньше
-    # не выполнялась ни в одном тесте (ревью 10.11.2026).
+    # An attachment and a reply with the same file_id produce one reference; the seen_ids branch previously
+    # was not executed in any test (review 10.11.2026).
     from lumen_media_flow import _resolve_edit_references
 
     fid = "same-fid"
@@ -3728,9 +4119,9 @@ def test_resolve_edit_references_dedups_same_file_id(monkeypatch):
 
 
 def test_repeat_trigger_without_draw_context_stays_text(rate_guard_setup, monkeypatch):
-    # «другой вариант перевода письма» и «regenerate the summary» в чате, где
-    # картинку не просили, — это текст: рисовать по одному слову «вариант»
-    # значило тратить дневный слот на неизвестно что (ревью 10.11.2026).
+    # "translate the letter differently" and "regenerate the summary" in a chat where
+    # the person did not ask for a picture — this is text: do not draw based on the single word "option"
+    # meant spending a daily slot on goodness knows what (review 10.11.2026).
     message = rate_guard_setup()
     variants_calls = []
 
@@ -3747,8 +4138,8 @@ def test_repeat_trigger_without_draw_context_stays_text(rate_guard_setup, monkey
 
 
 def test_repeat_trigger_reply_to_text_message_does_not_paint_the_reply(rate_guard_setup, monkeypatch):
-    # Реплай «ещё вариант» на текстовый ответ рисовал текст этого ответа:
-    # фолбэк на реплай в ветке повтора выключен (ревью 10.11.2026).
+    # An “another option” reply to a text response drew that response's text:
+    # reply fallback in the retry branch is disabled (review 10.11.2026).
     message = rate_guard_setup()
     state = _fresh_draw_state(prompt="красное яблоко")
     variants_calls = []
@@ -3765,13 +4156,13 @@ def test_repeat_trigger_reply_to_text_message_does_not_paint_the_reply(rate_guar
     )
     asyncio.run(bot._handle_message_core(message))
     assert variants_calls == [], "текст реплая не уезжает в промпт"
-    # Повторяется последняя генерация, а не чужая подпись.
+    # Repeats the last generation, not someone else's caption.
     bot.inline_draw.assert_awaited_once_with(message, "красное яблоко")
 
 
 def test_edit_variants_request_keeps_the_reference(rate_guard_setup, monkeypatch):
-    # «сделай 3 варианта: убери фон» с фото в реплае давал одну картинку без
-    # объяснений: число вариантов отрезала проверка «нет вложения» (ревью 10.11.2026).
+    # "make 3 options: remove the background" with a photo in the reply produced one image without
+    # explanations: the option-count check cut them off ("no attachment", review 10.11.2026).
     message = rate_guard_setup()
     refs = [(b"ref-bytes", "image/jpeg")]
     captured = {}
@@ -3796,9 +4187,9 @@ def test_edit_variants_request_keeps_the_reference(rate_guard_setup, monkeypatch
 
 
 def test_inline_draw_edit_leaves_the_generation_button_alone(monkeypatch):
-    # Правка не переносит якорь кнопки и не снимает клавиатуру с прошлого фото:
-    # под правкой кнопки нет, а «ещё вариант» повторяет именно генерацию,
-    # иначе кнопка и текст расходились (ревью 10.11.2026).
+    # An edit does not move the button anchor or remove the keyboard from the previous photo:
+    # there is no edit button, and “another option” repeats generation specifically,
+    # otherwise the button and text would diverge (review 10.11.2026).
     from aiogram.types import PhotoSize
 
     chat_id = 999456
@@ -3847,16 +4238,16 @@ def test_inline_draw_edit_leaves_the_generation_button_alone(monkeypatch):
 
 
 def test_draw_prompt_ascii_without_latin_returns_original():
-    # После нормализации не осталось ни одной латинской буквы — оригинал
-    # возвращаем как есть: иначе sana рисовала бы случайное по пустому описанию
-    # вместо честного отказа (ревью 10.11.2026).
+    # After normalization, not a single Latin letter remains — the original
+    # is returned as-is: otherwise sana would draw something random from the empty description
+    # instead of an honest refusal (review 10.11.2026).
     assert lumen_commands._draw_prompt_ascii("просто кот") == "просто кот"
     assert lumen_commands._draw_prompt_ascii("\u2615\u2615") == "\u2615\u2615"
 
 
 def test_repeat_trigger_without_letters_repeats_stored_prompt(rate_guard_setup, monkeypatch):
-    # «ещё вариант...» с хвостом из точек: остаток уезжал в модель промптом и
-    # рисовал абстрактное месиво вместо прошлой картинки (live 10.11.2026 16:49).
+    # “another option...” with trailing dots: the remainder went to the model as a prompt and
+    # drew an abstract mess instead of the previous image (live 10.11.2026 16:49).
     message = rate_guard_setup()
     state = _fresh_draw_state(prompt="красное яблоко")
     variants_calls = []
@@ -3873,9 +4264,10 @@ def test_repeat_trigger_without_letters_repeats_stored_prompt(rate_guard_setup, 
 
 
 def test_repeat_trigger_with_stale_draw_context_stays_text(rate_guard_setup, monkeypatch):
-    # Окно свежести нужно обеим веткам повтора: в чате, где рисовали неделю назад,
-    # «другой вариант перевода письма» сжигал картинку вместо текста
-    # (ревью 10.11.2026).
+    # The freshness window is needed for both retry branches: in a chat that generated an
+    # image a week ago,
+    # “another translation option for the letter” burned an image instead of text
+    # (review 10.11.2026).
     message = rate_guard_setup()
     state = _fresh_draw_state(prompt="красное яблоко")
     state["last_drawn_at"] = time.time() - (bot.DRAW_EDIT_CONTEXT_TTL_SEC + 120)
@@ -3895,9 +4287,9 @@ def test_repeat_trigger_with_stale_draw_context_stays_text(rate_guard_setup, mon
 
 
 def test_inline_draw_moderation_refusal_keeps_the_personal_slot(monkeypatch):
-    # Отказ модерации НЕ возвращает личный суточный слот: klein посчитал картинку
-    # и списал Neuron, и без этого один человек циклом запрещённых описаний
-    # выжигал общий дневной бюджет (ревью 10.11.2026).
+    # A moderation refusal does NOT return the personal daily slot: klein counted the image
+    # and charged Neuron, and without this one person could cycle through forbidden descriptions
+    # burned the shared daily budget (review 10.11.2026).
     chat_id = 999461
     uid = 777061
 
@@ -3922,9 +4314,9 @@ def test_inline_draw_moderation_refusal_keeps_the_personal_slot(monkeypatch):
 
 
 def test_cmd_reset_strips_more_button_from_last_photo(monkeypatch):
-    # /reset стирает якорь кнопки, поэтому снимает клавиатуру заранее: иначе под
-    # забытым фото навечно оставалась живая «Ещё вариант» на сброшенное описание
-    # (ревью 10.11.2026).
+    # /reset clears the button anchor, so remove the keyboard in advance; otherwise, under
+    # a forgotten photo left a live "Another variant" button forever, tied to a reset description
+    # (review 10.11.2026).
     from aiogram.types import InlineKeyboardMarkup
 
     chat_id = 999462
@@ -3959,8 +4351,8 @@ def test_cmd_reset_strips_more_button_from_last_photo(monkeypatch):
 
 
 def test_draw_attempt_timeout_excludes_translation_budget(monkeypatch):
-    # Таймаут попытки считался ДО перевода: его 12 секунд ложились сверх потолка,
-    # и зависшая sana съедала бюджет сообщения целиком (ревью 10.11.2026).
+    # The attempt timeout was counted BEFORE translation: its 12 seconds were added on top of the ceiling,
+    # and a hung sana consumed the entire message budget (review 10.11.2026).
     chat_id = 999463
     uid = 777063
     recorded = []
@@ -3991,14 +4383,14 @@ def test_draw_attempt_timeout_excludes_translation_budget(monkeypatch):
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
         bot.chat_state.pop(chat_id, None)
     assert len(recorded) == 1
-    # Полсекундного запаса достаточно: сборка до перевода стоит миллисекунды.
+    # Half a second of headroom is enough: assembly before translation takes milliseconds.
     assert recorded[0] < 59.5, "таймаут попытки должен учитывать уже потраченный перевод"
 
 
 def test_cmd_draw_runs_under_chat_lock(monkeypatch):
-    # /draw шёл мимо per-chat лока: два человека в группе читали один старый
-    # якорь кнопки, снимали клавиатуру с одного фото, и под чатом оставалось две
-    # живые «Ещё вариант» (ревью 10.11.2026).
+    # /draw bypassed the per-chat lock: two people in a group read one old
+    # the button anchor, removed the keyboard from one photo, and left two
+    # live “Another option” buttons (review 10.11.2026).
     calls = []
 
     async def ok_variants(message, prompt, *, variants=1, reference=None):
@@ -4025,18 +4417,18 @@ def test_cmd_draw_runs_under_chat_lock(monkeypatch):
     assert calls == [], "занятый чат не должен запускать генерацию в обход лока"
 
 
-# ── Паритет с ChatGPT: провайдер получает не дословную просьбу, а описание кадра
-# (10.11.2026). Без этих тестов шаг подготовки мог молча выпасть из пути:
-# он добавлен в основную ветку inline_draw и в серию вариантов.
+# ── ChatGPT parity: the provider receives not the verbatim request, but a frame description
+# (10.11.2026). Without these tests, the preparation step could silently fall out of the path:
+# it is added to the main inline_draw branch and to the variants series.
 def _prep_teardown(chat_id):
-    # Слот и состояние чата после каждого прогона: иначе user_daily
-    # перетекает в соседние тесты.
+    # The slot and chat state after each run: otherwise user_daily
+    # leaks into neighboring tests.
     bot.chat_state.pop(chat_id, None)
     bot.GLOBAL_QUOTA.get("user_daily", {}).pop("456", None)
 
 
 def _draw_prep_env(monkeypatch, chat_id, reply=""):
-    """Munito «активен» и отдаёт заготовленное описание; провайдер пишет его в лог."""
+    """Munito is \"active\" and returns a prepared description; the provider writes it to the log."""
     captured = {}
 
     async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
@@ -4072,8 +4464,8 @@ def _draw_prep_env(monkeypatch, chat_id, reply=""):
 
 
 def test_draw_prompt_is_rewritten_before_provider(monkeypatch):
-    # Короткая просьба должна доезжать до klein как описание кадра: иначе
-    # «кот в шляпе» давало плоский случайный кадр (паритет 10.11.2026).
+    # A short request must reach klein as a frame description: otherwise
+    # "a cat in a hat" produced a flat random frame (parity 10.11.2026).
     chat_id = 999480
     rich = "A ginger cat in a straw hat on a windowsill, soft morning light, 35 mm framing, photorealistic."
     incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=rich)
@@ -4086,8 +4478,8 @@ def test_draw_prompt_is_rewritten_before_provider(monkeypatch):
 
 
 def test_draw_prompt_rewrite_english_also_enhanced(monkeypatch):
-    # Английскую просьбу раньше не трогали вообще (prompt.isascii -> выход):
-    # паритет требует, чтобы улучшение дописывало и её.
+    # English requests were previously ignored entirely (prompt.isascii -> exit):
+    # parity requires the enhancement to append it too.
     chat_id = 999481
     incoming, captured = _draw_prep_env(
         monkeypatch, chat_id, reply="A red apple on a wooden table, studio light, macro detail.",
@@ -4101,8 +4493,8 @@ def test_draw_prompt_rewrite_english_also_enhanced(monkeypatch):
 
 
 def test_draw_edit_prompt_stays_instruction(monkeypatch):
-    # Правка — инструкция, а не пересказ сцены: системный контракт обязан быть
-    # edit-variant, иначе klein терял, что именно менять.
+    # An edit is an instruction, not a scene recap: the system contract must be
+    # edit-variant, otherwise klein lost what exactly to change.
     chat_id = 999482
     incoming, captured = _draw_prep_env(
         monkeypatch, chat_id, reply="Make the background deep blue, keep the cat unchanged.",
@@ -4118,7 +4510,7 @@ def test_draw_edit_prompt_stays_instruction(monkeypatch):
 
 
 def test_draw_prompt_rewrite_failure_keeps_user_wording(monkeypatch):
-    # Пустой ответ и сбой модели не отменяют генерацию: уходит исходная фраза.
+    # An empty response or model failure does not cancel generation: the original phrase is sent.
     chat_id = 999483
     for answer in ("", RuntimeError("munito down")):
         incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=answer)
@@ -4130,8 +4522,8 @@ def test_draw_prompt_rewrite_failure_keeps_user_wording(monkeypatch):
 
 
 def test_draw_prompt_rewrite_is_clipped_not_discarded(monkeypatch):
-    # Длинное описание лучше обрезать по границе слова, чем выбросить: кап
-    # провайдера жёсткий, а исходная фраза хуже подготовленной.
+    # It is better to trim a long description at a word boundary than discard it: the cap
+    # provider is strict, and the original phrase is worse prepared than the processed one.
     chat_id = 999484
     long_answer = "word " * 300
     incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=long_answer)
@@ -4145,8 +4537,8 @@ def test_draw_prompt_rewrite_is_clipped_not_discarded(monkeypatch):
 
 
 def test_draw_variants_prepare_description_once(monkeypatch):
-    # Серия из трёх вариантов — один сюжет: три вызова подготовки добавили бы
-    # ~3 секунды и квоту на каждую картинку.
+    # A series of three variants is one concept: three preparation calls would add
+    # ~3 seconds and quota for every image.
     chat_id = 999485
     incoming, captured = _draw_prep_env(
         monkeypatch, chat_id, reply="A ginger cat sleeping, warm light, shallow depth of field.",
@@ -4159,8 +4551,8 @@ def test_draw_variants_prepare_description_once(monkeypatch):
 
 
 def test_draw_size_comes_from_user_words_not_rewrite(monkeypatch):
-    # Кадр считаем по словам человека: переписанное описание могло потерять
-    # «16:9», и широкая сцена стала бы квадратом.
+    # Count the frame by the user’s words: the rewritten description may have lost
+    # "16:9", and a wide scene would become a square.
     chat_id = 999486
     incoming, captured = _draw_prep_env(
         monkeypatch, chat_id, reply="A wide coastal cliff at sunset with gulls overhead.",
@@ -4172,9 +4564,9 @@ def test_draw_size_comes_from_user_words_not_rewrite(monkeypatch):
         _prep_teardown(chat_id)
 
 
-# ── Фиксы слепого ревью слоя подготовки (10.11.2026): мета-ответ модели не
-# имеет права становиться промптом, payload резолвера не должен терять просьбу
-# человека, служебные вызовы — свой дневный кап.
+# Blind-review fixes for the preparation layer (10.11.2026): the model's meta-response does not
+# may become a prompt, the resolver's payload must not lose the request
+# per person, while service calls have their own daily cap.
 def test_draw_prompt_meta_refusal_keeps_user_wording(monkeypatch):
     chat_id = 999520
     incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply="I can't generate that.")
@@ -4186,8 +4578,8 @@ def test_draw_prompt_meta_refusal_keeps_user_wording(monkeypatch):
 
 
 def test_draw_prompt_refusal_in_russian_keeps_user_wording(monkeypatch):
-    # Кириллица проходит ASCII-фолдинг как есть, поэтому отказ ловится именно
-    # фильтром мета-фраз, а не капом длины (ревью 10.11.2026).
+    # Cyrillic passes ASCII folding unchanged, so the refusal is caught specifically
+    # with a meta-phrase filter, not a length cap (review 10.11.2026).
     chat_id = 999521
     incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply="Не могу это нарисовать, извините.")
     try:
@@ -4198,8 +4590,8 @@ def test_draw_prompt_refusal_in_russian_keeps_user_wording(monkeypatch):
 
 
 def test_draw_prompt_identity_leak_is_not_sent(monkeypatch):
-    # Описание с самоидентификацией модели = ливк наружу через промпт
-    # (он ещё и попадает в last_draw_prompt).
+    # A description with model self-identification = a leak outward through the prompt
+    # (it also ends up in last_draw_prompt).
     chat_id = 999522
     incoming, captured = _draw_prep_env(
         monkeypatch, chat_id,
@@ -4213,8 +4605,8 @@ def test_draw_prompt_identity_leak_is_not_sent(monkeypatch):
 
 
 def test_draw_edit_prompt_keeps_cyrillic_instruction(monkeypatch):
-    # Смешанный ответ правки: ASCII-фолдинг съедал русскую инструкцию, и klein
-    # получал «ничего не меняй» (ревью 10.11.2026).
+    # A mixed edit response: ASCII folding swallowed the Russian instruction, and klein
+    # received “do not change anything” (review 10.11.2026).
     chat_id = 999523
     answer = "Убери фон с картинки, keep the cat unchanged."
     incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=answer)
@@ -4228,8 +4620,8 @@ def test_draw_edit_prompt_keeps_cyrillic_instruction(monkeypatch):
 
 
 def test_draw_description_daily_budget_stops_extra_calls(monkeypatch):
-    # Служебные описания не пишутся в квоту моделей: без собственного капа
-    # 80 картинок с резолвером выжигали MUNITO_DAILY_LIMIT целиком (ревью 10.11.2026).
+    # Service descriptions are not written to model quotas: without their own cap
+    # 80 images with the resolver burned through the entire MUNITO_DAILY_LIMIT (review 10.11.2026).
     chat_id = 999524
     incoming, captured = _draw_prep_env(
         monkeypatch, chat_id, reply="A ginger cat on a windowsill, soft morning light.",
@@ -4245,8 +4637,8 @@ def test_draw_description_daily_budget_stops_extra_calls(monkeypatch):
 
 
 def test_prepared_prompt_skips_second_rewrite(monkeypatch):
-    # Разрешённое резолвером описание не переписывается вторым вызовом:
-    # лишний Munito, лишние ~8 секунд и потеря деталей (ревью 10.11.2026).
+    # A description permitted by the resolver is not overwritten by a second call:
+    # an extra Munito, about 8 extra seconds, and lost details (review 10.11.2026).
     chat_id = 999525
     incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply="ignored")
     try:
@@ -4260,10 +4652,39 @@ def test_prepared_prompt_skips_second_rewrite(monkeypatch):
         _prep_teardown(chat_id)
 
 
+def test_variants_skip_paid_prepare_when_draw_limit_hit(monkeypatch):
+    # R4-05 (audit 26.11.2026): series whose first option is doomed to fail
+    # the daily image limit, do not pay Munito for retelling before inline_draw refuses.
+    chat_id, uid = 999526, 777526
+    incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply="описание")
+    incoming.from_user = SimpleNamespace(id=uid)
+    # Quota days must match today's, otherwise reset-if-new-day
+    # the seed before peek (the same pattern as in state tests).
+    saved_day = bot.GLOBAL_QUOTA.get("quota_day")
+    bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+    bucket = bot.GLOBAL_QUOTA.setdefault("user_daily", {})
+    saved = bucket.get(str(uid))
+    bucket[str(uid)] = {"total": 0, "gemini": 0, "tts": 0, "draw": 999, "bonus": 0}
+    try:
+        asyncio.run(bot.inline_draw_variants(incoming, "кот в шляпе", variants=2))
+        # Neither a rewrite (Munito) nor a provider: inline_draw itself emitted the refusal.
+        assert "calls" not in captured
+        assert "text" not in captured
+    finally:
+        if saved is None:
+            bucket.pop(str(uid), None)
+        else:
+            bucket[str(uid)] = saved
+        if saved_day is None:
+            bot.GLOBAL_QUOTA.pop("quota_day", None)
+        else:
+            bot.GLOBAL_QUOTA["quota_day"] = saved_day
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_reserve_translation_memoized_per_text(monkeypatch):
-    # Резерв sana требует ASCII: серия из N вариантов иначе звала переводчик
-    # N раз по 12 секунд, а другой текст кэш подменять не имеет права
-    # (ревью 10.11.2026).
+    # The sana fallback requires ASCII: otherwise a series of N variants called a translator
+    # N times at 12 seconds each, and the cache must not substitute different text
     translate = AsyncMock(return_value="A ginger cat on the moon.")
     monkeypatch.setattr(bot, "_translate_draw_prompt", translate)
     monkeypatch.setattr(lumen_commands, "_reserve_translate_memo", {})
@@ -4277,8 +4698,8 @@ def test_reserve_translation_memoized_per_text(monkeypatch):
 
 
 def test_resolve_draw_request_payload_keeps_current_request(monkeypatch):
-    # Просьба человека шла в конец payload и отсекалась капом: модель решала
-    # только по истории (ревью 10.11.2026).
+    # The person's request went to the end of the payload and was cut by the cap: the model decided
+    # only from history (review 10.11.2026).
     payloads = []
 
     async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
@@ -4302,9 +4723,9 @@ def test_resolve_draw_request_payload_keeps_current_request(monkeypatch):
 
 
 def test_resolve_draw_request_history_is_flattened_data(monkeypatch):
-    # Чужие реплики — данные: без флейтнинга перевод строк ломал рамку
-    # «Recent conversation», а «Ignore previous instructions…» читалась моделью
-    # как приказ (ревью 10.11.2026).
+    # Other people's utterances are data: without flattening, line breaks broke the frame
+    # "Recent conversation," while "Ignore previous instructions..." was read by the model
+    # as an order (review 10.11.2026).
     payloads = []
 
     async def fake_munito(path, method="GET", *, json_body=None, deadline=None):
@@ -4326,8 +4747,8 @@ def test_resolve_draw_request_history_is_flattened_data(monkeypatch):
 
 
 def test_draw_prompt_refusal_forms_all_keep_user_wording(monkeypatch):
-    # Отказ модели приходит в формах, которых не было в первой версии фильтра:
-    # сокращения, ведущая разметка, другой язык (ревью 10.11.2026).
+    # Model refusals arrive in forms that were absent from the first version of the filter:
+    # an abbreviation, leading markup, a different language (review 10.11.2026).
     forms = [
         "I'm unable to generate that image, sorry.",
         "I\u2019m sorry, but I can\u2019t help with that request.",
@@ -4344,8 +4765,8 @@ def test_draw_prompt_refusal_forms_all_keep_user_wording(monkeypatch):
 
 
 def test_draw_prompt_meta_preamble_is_stripped(monkeypatch):
-    # «Sure — here is your prompt: X»: преамбула режется, иначе модель просит
-    # нарисовать её как текст в кадре (ревью 10.11.2026).
+    # "Sure — here is your prompt: X": the preamble is cut, otherwise the model asks
+    # draw it as text in the frame (review 10.11.2026).
     chat_id = 999540
     rich = "A ginger cat on a windowsill, soft morning light, 35 mm framing, photorealistic."
     incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply="Sure \u2014 here is your prompt: " + rich)
@@ -4357,8 +4778,8 @@ def test_draw_prompt_meta_preamble_is_stripped(monkeypatch):
 
 
 def test_draw_prompt_word_starting_like_none_is_not_none(monkeypatch):
-    # startswith("NONE") ловил «Nonexistent bridge …»: хороший ответ
-    # выбрасывался, а серия вариантов рисовала исходную фразу (ревью 10.11.2026).
+    # startswith("NONE") caught "Nonexistent bridge …": a good response
+    # was discarded, and a series of options drew the original phrase (review 10.11.2026).
     chat_id = 999541
     rich = "A nonexistent bridge at dusk over a dry riverbed, wide shot, soft haze."
     incoming, captured = _draw_prep_env(monkeypatch, chat_id, reply=rich)
@@ -4370,9 +4791,9 @@ def test_draw_prompt_word_starting_like_none_is_not_none(monkeypatch):
 
 
 def test_reserve_translation_memo_skips_failed_translation(monkeypatch):
-    # Неудачный перевод возвращает ту же кириллицу: в кэше она заморозила бы
-    # подпись для sana на 60 секунд, и резерв рисовал бы знаками «?»
-    # (ревью 10.11.2026).
+    # A failed translation returns the same Cyrillic: in the cache it would freeze
+    # caption for sana in 60 seconds, and the fallback would draw characters as "?"
+    # (review 10.11.2026).
     translate = AsyncMock(return_value="рыжий кот на луне")
     monkeypatch.setattr(bot, "_translate_draw_prompt", translate)
     monkeypatch.setattr(lumen_commands, "_reserve_translate_memo", {})
@@ -4383,10 +4804,10 @@ def test_reserve_translation_memo_skips_failed_translation(monkeypatch):
 
 
 def test_profile_pass_pauses_on_flood_control_and_resumes_later(monkeypatch):
-    # РЕГРЕССИЯ на прод 11.11.2026 17:44-17:47: 72 вызова профиля подряд поймали
-    # «Flood control exceeded ... Retry in 79522 seconds», и в эти минуты у живых
-    # людей рвались ответы. Теперь один отказ = пауза, поле остаётся в очереди,
-    # часовой проход продолжает с того же места.
+    # REGRESSION for prod 11.11.2026 17:44-17:47: 72 consecutive profile calls hit
+    # "Flood control exceeded ... Retry in 79522 seconds", and during those minutes real users'
+    # people lost their answers. Now one refusal = a pause; the field stays in the queue,
+    # the hourly pass continues from the same place.
     bot._profile_queue.clear()
     total = len(bot._profile_payloads())
     seen = []
@@ -4412,7 +4833,7 @@ def test_profile_pass_pauses_on_flood_control_and_resumes_later(monkeypatch):
     fifth = bot._profile_queue[0]
     assert fifth in seen, "неудавшееся поле обязано остаться первым в очереди"
 
-    # Второй проход (часовой цикл) продолжает с того же поля и добирает остаток.
+    # The second pass (hourly loop) continues from the same field and collects the remainder.
     def _calm(method_name):
         async def _method(**kwargs):
             return True
@@ -4426,22 +4847,22 @@ def _profile_value(kwargs: dict) -> str:
 
 
 def test_profile_payloads_sends_the_shared_name_only_once():
-    # Локализованное поле с тем же текстом, что в языке по умолчанию, Telegram
-    # покажет из дефолта; отдельная запись только съедает лимит метода.
+    # A localized field with the same text as the default language, Telegram
+    # will show it from the default; a separate entry only consumes the method limit.
     import lumen_lang
     payloads = bot._profile_payloads()
     names = [kw for method, kw in payloads if method == "set_my_name"]
     assert len(names) == 1 and "language_code" not in names[0]
     shared = lumen_lang.t(bot.DEFAULT_LANG, "profile_name")
     assert all(lumen_lang.t(lang, "profile_name") == shared for lang in bot.PROFILE_LANGS)
-    # Описания различаются по языкам — их очередь обязана нести целиком.
+    # Descriptions differ by language, so their queue must carry all of them.
     assert sum(1 for method, _ in payloads if method == "set_my_description") == len(bot.PROFILE_LANGS)
 
 
 def test_register_bot_profile_skips_fields_telegram_already_has(monkeypatch):
-    # Каждый редиплой писал все поля заново и ловил Flood control на ~20 часов
-    # (прод 11.11.2026: SetMyName лимитирован сильнее всех). Перед записью сверяем
-    # get*: в чат и в профиль уходит только то, чего там ещё нет.
+    # Each redeploy rewrote every field and hit flood control for about 20 hours
+    # (prod 11.11.2026: SetMyName is limited more strictly than all the others). Before writing, we compare
+    # get*: only what is not already there goes to the chat and the profile.
     payloads = bot._profile_payloads()
     current: dict[tuple[str, str], str] = {}
     for method_name, kwargs in payloads:
@@ -4483,8 +4904,8 @@ def test_register_bot_profile_skips_fields_telegram_already_has(monkeypatch):
 
 
 def test_register_bot_profile_writes_everything_when_reads_are_unavailable(monkeypatch):
-    # Старый aiogram без getMyName: отсутствие чтения не должно молча оставить
-    # профиль незаписанным.
+    # Old aiogram without getMyName: failing to read it must not silently leave
+    # the profile unwritten.
     calls = []
 
     def _setter(method_name):
@@ -4505,9 +4926,9 @@ def test_register_bot_profile_writes_everything_when_reads_are_unavailable(monke
     assert len(calls) == len(bot._profile_payloads())
 
 def test_image_budget_counts_neurons_not_only_pictures():
-    # Аудит 16.11.2026: тяжёлая правка 12 МП списывает около трети бесплатного
-    # бюджета, оставаясь «одной из 80». Бюджет считается в Neuron; штуки остаются
-    # для /stats и лимита человека. Старый снапшот без веса не обнуляет бюджет.
+    # 16.11.2026 audit: a heavy 12 MP edit costs about one third of the free
+    # budget while remaining “one of 80.” The budget is counted in Neuron; the items remain
+    # for /stats and the person's limit. An old snapshot without weight does not zero the budget.
     import json as _json
     import lumen_quotas as lq
 
@@ -4536,21 +4957,78 @@ def test_image_budget_counts_neurons_not_only_pictures():
         bot.IMAGE_DAILY_NEURONS = real_limit
 
 
+def test_reserve_image_neurons_blocks_at_last_slot_and_release_restores():
+    # R4-04 (audit 26.11.2026): the daily neuron budget is reserved synchronously
+    # before the request (gate+charge in one asyncio-stream step). Without a reserve, two
+    # concurrent drawings passed `_image_budget_exhausted` together and
+    # exceeded the ceiling; an aborted request must return the fallback.
+    import json as _json
+    import lumen_quotas as lq
+
+    real_quota = _json.loads(_json.dumps(bot.GLOBAL_QUOTA))
+    real_limit = bot.IMAGE_DAILY_NEURONS
+    real_pending = lq._pending_image_neurons
+    try:
+        bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+        bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER] = {}
+        lq._pending_image_neurons = 0.0
+        bot.IMAGE_DAILY_NEURONS = lq.IMAGE_UNIT_NEURONS * 2
+        assert bot._reserve_image_neurons(1) is True
+        assert bot._reserve_image_neurons(1) is True
+        assert bot._image_budget_exhausted() is True  # pending is counted in the budget
+        assert bot._reserve_image_neurons(1) is False  # there is no third place
+        bot._release_image_neurons(1)  # a failed attempt returns the reserve
+        assert bot._image_budget_exhausted() is False
+        assert bot._reserve_image_neurons(1) is True
+    finally:
+        lq._pending_image_neurons = real_pending
+        bot.GLOBAL_QUOTA.clear()
+        bot.GLOBAL_QUOTA.update(real_quota)
+        bot.IMAGE_DAILY_NEURONS = real_limit
+
+
+def test_inline_draw_holds_neuron_reserve_during_provider_call(monkeypatch):
+    # Review I22 (26.11.2026): the reserve must stay alive while the provider request is in flight.
+    # The pool was tested separately, but the wiring in inline_draw was not; rolling back reserve-
+    # of the block passed the gate unnoticed. Here we observe pending inside the call.
+    import lumen_quotas as lq
+    chat_id = 999439
+    seen = []
+
+    async def fake_image(session, prompt, timeout_sec=None, **_):
+        seen.append(lq._pending_image_neurons)
+        raise RuntimeError("provider down")
+
+    _one_image_provider(monkeypatch, fake_image)
+    real_pending = lq._pending_image_neurons
+    lq._pending_image_neurons = 0.0
+    try:
+        incoming = _FakeIncomingMessage(chat_id)
+        delivered = asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        assert delivered is not True
+        assert seen and seen[0] > 0.0  # while the request is in progress, the reserve is active
+        assert lq._pending_image_neurons == 0.0  # a failed attempt restored the reserve
+    finally:
+        lq._pending_image_neurons = real_pending
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_inline_draw_falls_back_to_document_when_photo_is_rejected(monkeypatch):
-    # Telegram не принимает фото больше 10 МБ, а провайдер может вернуть до 30 МБ:
-    # без фолбэка картинка терялась уже после списания бюджета (аудит 16.11.2026).
+    # Telegram rejects photos larger than 10 MB, while a provider may return up to 30 MB:
+    # without a fallback, the image was lost after the budget was charged (audit 16.11.2026).
     chat_id = 999438
-    sent = {"document": 0}
+    calls = []
 
     async def fake_image(session, prompt, timeout_sec=None, **_):
         return b"PNG fake bytes"
 
     class _FakePhotoBot:
         async def send_photo(self, **kwargs):
-            return None
+            calls.append(("photo", kwargs))
+            return None  # Telegram rejects photos over 10 MB
 
         async def send_document(self, **kwargs):
-            sent["document"] += 1
+            calls.append(("document", kwargs))
             return SimpleNamespace()
 
     _one_image_provider(monkeypatch, fake_image)
@@ -4558,16 +5036,29 @@ def test_inline_draw_falls_back_to_document_when_photo_is_rejected(monkeypatch):
     incoming = _FakeIncomingMessage(chat_id)
     incoming.message_id = 1
     try:
-        asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
-        assert sent["document"] == 1
+        delivered = asyncio.run(bot.inline_draw(incoming, "нарисуй кота"))
+        # Order is part of the contract: a document is a reserve for a rejected photo, not
+        # main path. Already paid-for bytes, the caption and the reply anchor carry over
+        # to the reserve unchanged, and the user gets confirmed delivery,
+        # rather than an error after a silent failure (review 17.11.2026).
+        assert delivered is True
+        assert [name for name, _ in calls] == ["photo", "document"]
+        photo_kwargs, doc_kwargs = calls[0][1], calls[1][1]
+        assert photo_kwargs["photo"].data == b"PNG fake bytes"
+        assert doc_kwargs["document"].data == b"PNG fake bytes"
+        assert doc_kwargs["document"].filename == photo_kwargs["photo"].filename
+        assert doc_kwargs["chat_id"] == photo_kwargs["chat_id"] == chat_id
+        assert doc_kwargs["reply_to_message_id"] == photo_kwargs["reply_to_message_id"] == 1
+        assert doc_kwargs["caption"] == photo_kwargs["caption"]
+        assert doc_kwargs["reply_markup"] == photo_kwargs["reply_markup"]
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
 def test_bare_read_trigger_does_not_swallow_explain_requests():
-    # Внешний аудит 16.11.2026: «прочти инструкцию и объясни, что делать»
-    # озвучивалось вместо ответа. Голые «прочти/зачитай» остаются TTS только
-    # без глагола пересказа.
+    # External audit 16.11.2026: "read the instructions and explain what to do"
+    # was voiced instead of the answer. Bare "read/recite" remains TTS only
+    # without a recap verb.
     from lumen_message_parse import _tts_trigger_is_speech
     assert _tts_trigger_is_speech("прочти", " инструкцию и объясни, что делать") is False
     assert _tts_trigger_is_speech("прочтите", " текст и перескажите кратко") is False

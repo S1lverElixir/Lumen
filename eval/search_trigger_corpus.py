@@ -1,10 +1,10 @@
-"""Замер триггера веб-поиска на живом корпусе формулировок.
+"""Measurement of the web-search trigger on a live corpus of phrasings.
 
-Базовый замер 11.11.2026 (прод, скрины владельца из группы): из 35 вопросов, где
-Claude ищет, бот искал только 18 — «когда вышла Fable 5.2» ушло в память.
-Корпус не тест: это линейка, по которой судят правку детекта.
+Baseline measurement 11.11.2026 (production, owner's screenshots from the group): of 35 questions where
+Claude searches, the bot searched only 18 — “when Fable 5.2 came out” went to memory.
+The corpus is not a test: it is a ruler for judging changes to the detector.
 
-Запуск:  python eval/search_trigger_corpus.py
+Run:  python eval/search_trigger_corpus.py
 """
 import io
 import os

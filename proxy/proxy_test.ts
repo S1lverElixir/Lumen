@@ -12,6 +12,7 @@ import {
   buildForwardHeaders,
   buildResponseHeaders,
   handleRequest,
+  handleReadPage,
   READ_PAGE_MAX_BYTES,
   isPrivateAddress,
   resolveReadTarget,
@@ -557,9 +558,13 @@ Deno.test("handleRequest HEAD отдаёт пустое тело, таймаут
 });
 
 Deno.test("read: hex-виды и зарезервированные диапазоны считаются приватными", () => {
-  for (const ip of ["::ffff:7f00:1", "::127.0.0.1", "64:ff9b::10.0.0.1", "ff02::1", "192.0.0.8", "198.51.100.4", "203.0.113.9"]) {
+  // R6-05: special-purpose из IANA registry внутри 2000::/3 раньше проходили как публичные.
+  for (const ip of ["::ffff:7f00:1", "::127.0.0.1", "64:ff9b::10.0.0.1", "ff02::1", "192.0.0.8", "198.51.100.4", "203.0.113.9",
+    "2001:db8::1", "2001:2::1", "2001:10::1", "2001:20::1", "2001:1::1", "3000::1", "2620:4f80::1"]) {
     assert(isPrivateAddress(ip), "должен быть приватным: " + ip);
   }
+  // Ревью 26.11.2026: публичный контроль — классификатор не должен глушить всё подряд.
+  assert(!isPrivateAddress("2606:4700:4700::1111"), "публичный адрес обязан оставаться публичным");
 });
 
 Deno.test("read: charset пробрасывается, слишком большая страница обрезается, а не рвётся", async () => {
@@ -585,4 +590,83 @@ Deno.test("read: charset пробрасывается, слишком больш
   assertEquals(capped.status, 200);
   const body = await capped.arrayBuffer();
   assert(body.byteLength <= READ_PAGE_MAX_BYTES + 1024 * 1024, "тело не должно расти бесконечно");
+});
+
+Deno.test("read: кап отменяет апстрим, а не досчитывает его до EOF", async () => {
+  // R6-02 (аудит 26.11.2026): раньше остаток после капа вычитывался весь —
+  // поток тянул трафик и время, пока апстрим сам не закроется.
+  let cancelled = false;
+  let pulled = 0;
+  const src = new ReadableStream<Uint8Array>({
+    pull(c) {
+      pulled += 1;
+      if (pulled > 512) { c.close(); return; }
+      c.enqueue(new Uint8Array(1024));
+    },
+    cancel() { cancelled = true; },
+  });
+  const capped = warnOnTruncation(src, 4 * 1024, "example.com", "close");
+  const body = await new Response(capped).arrayBuffer();
+  assert(body.byteLength <= 5 * 1024, "тело не перерастает кап больше чем на чанк");
+  assert(cancelled, "апстрим обязан быть отменён на капе");
+  assert(pulled < 512, "остаток не должен вычитываться досуха: pulls=" + pulled);
+});
+
+Deno.test("read: отказ по типу и по статусу отменяет непрочитанное тело", async () => {
+  // R6-03: тело отказного ответа раньше оставалось неоткрытым на соединении.
+  const mkSpy = (status: number, contentType: string) => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) { c.enqueue(new Uint8Array(16)); },
+      cancel() { cancelled = true; },
+    });
+    return {
+      res: () => Promise.resolve(new Response(stream, { status, headers: { "content-type": contentType } })),
+      isCancelled: () => cancelled,
+    };
+  };
+  const u = "https://proxy.test/read?url=" + encodeURIComponent("https://example.com/");
+  const pubDns = () => Promise.resolve(["93.184.216.34"]);
+  const png = mkSpy(200, "image/png");
+  const refused = await handleReadPage(new Request(u), new URL(u), png.res as typeof fetch, pubDns);
+  assertEquals(refused.status, 415);
+  assert(png.isCancelled(), "415 обязан отменить тело апстрима");
+  const err500 = mkSpy(500, "text/html");
+  const failed = await handleReadPage(new Request(u), new URL(u), err500.res as typeof fetch, pubDns);
+  assertEquals(failed.status, 502);
+  assert(err500.isCancelled(), "нестандовый статус обязан отменить тело апстрима");
+});
+
+Deno.test("read: дедлайн тикает и во время DNS", async () => {
+  // R6-04: AbortSignal.timeout создавался после резолва — медленный DNS не
+  // ограничивался ничем. Теперь дедлайн начинается с начала запроса.
+  const u = "https://proxy.test/read?url=" + encodeURIComponent("https://example.com/");
+  let fetched = false;
+  const slowDns = () => new Promise<string[]>((res) => setTimeout(() => res(["93.184.216.34"]), 60));
+  const fetchImpl = (() => {
+    fetched = true;
+    return Promise.resolve(new Response("<p>x</p>", { headers: { "content-type": "text/html" } }));
+  }) as typeof fetch;
+  const res = await handleReadPage(new Request(u), new URL(u), fetchImpl, slowDns, 20);
+  assertEquals(res.status, 504);
+  assert(!fetched, "fetch не должен стартовать после истечения дедлайна");
+});
+
+Deno.test("read: зависший DNS отсекается дедлайном, а не дожидается резолвера", async () => {
+  // Ревью 26.11.2026 (R6-04): проверка после resolveReadTarget не спасает от
+  // резолва, который никогда не возвращается, — обязательна гонка DNS и дедлайна.
+  const u = "https://proxy.test/read?url=" + encodeURIComponent("https://example.com/");
+  let fetched = false;
+  const hangDns = () => new Promise<string[]>(() => {});
+  const fetchImpl = (() => {
+    fetched = true;
+    return Promise.resolve(new Response("<p>x</p>", { headers: { "content-type": "text/html" } }));
+  }) as typeof fetch;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<"hang">((res) => { timer = setTimeout(() => res("hang"), 500); });
+  const raced = await Promise.race([handleReadPage(new Request(u), new URL(u), fetchImpl, hangDns, 20), guard]);
+  clearTimeout(timer);
+  assert(raced !== "hang", "зависший резолв не должен переживать дедлайн");
+  assertEquals((raced as Response).status, 504);
+  assert(!fetched, "при зависшем DNS fetch не запускается");
 });

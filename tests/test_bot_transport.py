@@ -1,9 +1,9 @@
-"""
-test_bot_transport.py — Транспорт: прокси-мидлварь, circuit breaker, ротация прокси, задачи shutdown.
+"""test_bot_transport.py — Transport: proxy middleware, circuit breaker, proxy rotation, shutdown tasks.
 
-Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
+Extracted from test_bot.py (P2 audit); shared fakes are in bot_test_helpers.py.
 """
 import asyncio
+import json
 import bot
 import lumen_telegram_transport
 import pytest
@@ -44,13 +44,13 @@ def test_circuit_breaker_success_resets_consecutive_failures():
     breaker.note_failure()
     breaker.note_success()
     assert breaker.consecutive_failures == 0
-    # Единичные последующие сбои не должны сразу срабатывать — счётчик правда сброшен.
+    # Isolated subsequent failures must not trigger immediately — the counter really was reset.
     assert breaker.note_failure() is False
 
 
 def test_circuit_breaker_garbage_event_count_never_resets():
-    # В отличие от consecutive_failures, совокупный счётчик для /stats копится
-    # за всё время жизни процесса и не должен сбрасываться на success.
+    # Unlike consecutive_failures, the cumulative counter for /stats keeps growing
+    # over the entire process lifetime and must not reset on success.
     breaker = bot._TelegramProxyCircuitBreaker(cooldown_sec=20.0, trip_threshold=3)
     breaker.note_failure()
     breaker.note_success()
@@ -78,7 +78,7 @@ def test_track_inflight_task_registers_and_self_removes_on_completion():
         task = bot._track_inflight_task(asyncio.create_task(quick()))
         assert task in bot._inflight_tasks
         await task
-        # done_callback снимает таску из набора сама, без ручной чистки.
+        # done_callback removes the task from the set itself, without manual cleanup.
         assert task not in bot._inflight_tasks
 
     asyncio.run(_run())
@@ -127,7 +127,7 @@ def test_drain_inflight_tasks_cancels_tasks_that_time_out():
 
 def test_drain_inflight_tasks_noop_when_nothing_pending():
     bot._inflight_tasks.clear()
-    # Явный failure вместо неявного pass: регрессия даст понятный отчёт, а не голый error.
+    # Explicit failure instead of an implicit pass: a regression will produce a clear report, not a bare error.
     try:
         asyncio.run(bot._drain_inflight_tasks())
     except Exception as exc:
@@ -148,9 +148,9 @@ def test_rotate_telegram_proxy_noop_with_single_candidate():
 
 
 @pytest.mark.parametrize(("start_idx", "expected_idx", "expected_switched", "expected_url"), [
-    # Ещё не замкнули круг — есть смысл пробовать сразу.
+    # The circuit is not closed yet, so an immediate retry makes sense.
     (0, 1, True, "https://fallback.example.com"),
-    # Уже на резервном — поворот вернёт на primary, круг замкнулся, пора пауза.
+    # Already on fallback — switching back would return to primary, the loop is closed, time for a pause.
     (1, 0, False, "https://primary.example.com"),
 ])
 def test_rotate_telegram_proxy_advances_and_reports_lap(start_idx, expected_idx, expected_switched, expected_url):
@@ -161,7 +161,7 @@ def test_rotate_telegram_proxy_advances_and_reports_lap(start_idx, expected_idx,
     bot._TELEGRAM_PROXY_CANDIDATES = ["https://primary.example.com", "https://fallback.example.com"]
     bot._telegram_proxy_idx = start_idx
     bot.TELEGRAM_API_BASE_URL = "https://primary.example.com" if start_idx == 0 else "https://fallback.example.com"
-    bot.bot = None  # без реального aiogram Bot — проверяем только URL-переключение
+    bot.bot = None  # without a real aiogram Bot; we are checking only URL switching
     try:
         switched = asyncio.run(bot._rotate_telegram_proxy())
         assert switched is expected_switched
@@ -175,8 +175,8 @@ def test_rotate_telegram_proxy_advances_and_reports_lap(start_idx, expected_idx,
 
 
 def test_rotate_telegram_proxy_concurrent_rotations_advance_one_step_each():
-    # Контракт AUD-E-004: индекс и URL мутируют под локом — две concurrent-
-    # ротации дают два шага (0→1→2), а не два прыжка в одну точку.
+    # AUD-E-004 contract: the index and URL are mutated under the lock — two concurrent
+    # from rotation take two steps (0→1→2), not two jumps to the same point.
     original_candidates = bot._TELEGRAM_PROXY_CANDIDATES
     original_idx = bot._telegram_proxy_idx
     original_base_url = bot.TELEGRAM_API_BASE_URL
@@ -214,7 +214,7 @@ def test_tikwm_proxy_candidates_primary_plus_fallbacks_deduped():
     original_fallbacks = bot._TIKWM_API_BASE_URL_FALLBACKS
     bot.TIKWM_API_BASE_URL = "https://primary.example.com/fetch/www.tikwm.com"
     bot._TIKWM_API_BASE_URL_FALLBACKS = [
-        "https://primary.example.com/fetch/www.tikwm.com",  # дубль основного — должен быть отфильтрован
+        "https://primary.example.com/fetch/www.tikwm.com",  # a duplicate of the primary — must be filtered out
         "https://backup.example.com/fetch/www.tikwm.com",
     ]
     try:
@@ -262,8 +262,8 @@ def test_proxy_middleware_strips_stale_secret_and_requires_secret():
 
 
 def test_proxy_middleware_rejects_authenticated_redirects():
-    # Редирект через прокси отключён в коде, но ветка была без теста: регрессия
-    # осталась бы незамеченной. Секрет при этом уже снят с заголовков.
+    # Redirects through the proxy are disabled in code, but the branch had no test: a regression
+    # would have gone unnoticed. The secret has already been removed from the headers.
     from multidict import CIMultiDict
     from types import SimpleNamespace
     from yarl import URL
@@ -314,8 +314,8 @@ def _restore_breaker_state(saved):
 
 
 def test_ipv4_session_request_timeout_matches_session_total():
-    # aiogram кладёт self.timeout (дефолт 60с) на каждый запрос поверх дефолта
-    # сессии: без явного значения здесь действовали бы 60с, а не total=30.
+    # aiogram applies self.timeout (default 60 seconds) to each request on top of the default
+    # session: without an explicit value here, 60s would apply instead of total=30.
     import lumen_telegram_transport
     sess = lumen_telegram_transport.IPv4AiohttpSession(proxy_secret="x", proxy_base_urls=())
     try:
@@ -325,10 +325,9 @@ def test_ipv4_session_request_timeout_matches_session_total():
 
 
 def test_get_http_session_reuses_cached_and_rebuilds_closed(monkeypatch):
-    # Общий пул соединений (TikTok-слайдшоу, TTS, Whisper): сессия создаётся один
-    # раз и пересоздаётся только после close — сессия на каждый вызов выжгла бы
-    # сокеты контейнера. Все существующие тесты подменяют _get_http_session
-    # целиком, реальное кэширование не покрыто.
+    # Shared connection pool (TikTok slideshow, TTS, Whisper): the session is created once
+    # and recreated only after close. A session per call would burn through container
+    # sockets. Other tests replace _get_http_session entirely, so caching needs this test.
     from lumen_transport_calls import _get_http_session
     monkeypatch.setattr(bot, "_http_session", None)
 
@@ -346,31 +345,43 @@ def test_get_http_session_reuses_cached_and_rebuilds_closed(monkeypatch):
 
 
 def test_get_http_session_connector_ipv4_limit_and_public_resolver(monkeypatch):
-    # Пины датированных решений коннектора общего пула: limit=40 — слайдшоу
-    # TikTok до 35 слайдов разом через gather (24.07.2026), AF_INET — живого
-    # IPv6 у контейнера нет, _PublicOnlyResolver режет не-публичные IP на каждом
-    # резолве — DNS-rebinding guard для всех внешних запросов этой сессии.
+    # Dated decisions pinned for the shared connector pool: limit=40 lets a TikTok
+    # slideshow fetch up to 35 slides through gather (24.07.2026); AF_INET matches the
+    # container's lack of IPv6. _PublicOnlyResolver blocks non-public IPs on every
+    # resolution, guarding all external requests in this session against DNS rebinding.
+    # R7-17: pin the arguments of our TCPConnector call, not private fields
+    # aiohttp (connector._resolver) is a private name that may disappear on upgrade,
+    # and the test will turn red even with healthy prod.
+    import aiohttp
     import socket
     from lumen_tiktok import _PublicOnlyResolver
-    from lumen_transport_calls import _get_http_session
+    import lumen_transport_calls
     monkeypatch.setattr(bot, "_http_session", None)
+    captured = {}
+    real_connector = aiohttp.TCPConnector
+
+    def spy_connector(*args, **kwargs):
+        captured.update(kwargs)
+        return real_connector(*args, **kwargs)
+
+    monkeypatch.setattr(aiohttp, "TCPConnector", spy_connector)
 
     async def _run():
-        s = await _get_http_session()
+        s = await lumen_transport_calls._get_http_session()
         try:
-            assert s.connector.limit == 40
-            assert s.connector.family == socket.AF_INET
-            # Публичного атрибута у aiohttp нет, резолвер лежит в _resolver.
-            resolver = getattr(s.connector, "_resolver", None)
-            assert isinstance(resolver, _PublicOnlyResolver)
+            assert s is not None
         finally:
             await s.close()
 
     asyncio.run(_run())
+    assert captured.get("family") == socket.AF_INET
+    assert captured.get("limit") == 40
+    assert captured.get("ttl_dns_cache") == 300
+    assert isinstance(captured.get("resolver"), _PublicOnlyResolver)
 
 
 def test_tg_call_does_not_retry_send_after_timeout(monkeypatch):
-    # Повтор отправки после таймаута (исход неизвестен) давал дубли сообщений.
+    # Resending after a timeout (outcome unknown) produced duplicate messages.
     from aiogram.exceptions import TelegramNetworkError
     calls = []
 
@@ -385,17 +396,113 @@ def test_tg_call_does_not_retry_send_after_timeout(monkeypatch):
 
     saved = _save_breaker_state()
     try:
-        assert asyncio.run(bot._tg_call(flaky_send, retries=1)) is None
-        assert asyncio.run(bot._tg_call(slow_aiogram, retries=1)) is None
+        # R4-03 (audit 26.11.2026): a timeout must not look like definite non-delivery.
+        # The falsy _TG_UNKNOWN sentinel stops draw/TTS refunds and TikTok duplicate sends
+        # when Telegram may already have accepted the media.
+        res = asyncio.run(bot._tg_call(flaky_send, retries=1))
+        assert bot._tg_outcome_unknown(res) and not res
+        res = asyncio.run(bot._tg_call(slow_aiogram, retries=1))
+        assert bot._tg_outcome_unknown(res) and not res
     finally:
         _restore_breaker_state(saved)
     assert len(calls) == 1
 
 
+def test_tg_call_cancellation_preserves_unknown_method_outcome():
+    # Cancellation after a mutation starts may arrive after Telegram accepted it. The task
+    # must still cancel, while quota consumers can distinguish that send from a status edit.
+    async def scenario():
+        started = asyncio.Event()
+        blocker = asyncio.Event()
+
+        async def send_voice(**kwargs):
+            started.set()
+            await blocker.wait()
+
+        async def other_method(**kwargs):
+            return None
+
+        saved = _save_breaker_state()
+        try:
+            task = asyncio.create_task(bot._tg_call(send_voice))
+            await started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await task
+            assert bot._tg_cancelled_unknown(caught.value, send_voice)
+            assert not bot._tg_cancelled_unknown(caught.value, other_method)
+        finally:
+            _restore_breaker_state(saved)
+
+    asyncio.run(scenario())
+
+
+def test_tg_call_reset_after_send_is_unknown_without_retry():
+    # R4-03: a disconnect after sending the request — outcome unknown;
+    # retrying a mutation (send_photo) would create a duplicate, so make one call and use _TG_UNKNOWN.
+    from aiogram.exceptions import TelegramNetworkError
+    calls = []
+
+    async def dropping_send(**kwargs):
+        calls.append(1)
+        raise TelegramNetworkError(method=MagicMock(), message="Connection reset by peer")
+
+    saved = _save_breaker_state()
+    try:
+        res = asyncio.run(bot._tg_call(dropping_send, retries=2))
+    finally:
+        _restore_breaker_state(saved)
+    assert bot._tg_outcome_unknown(res)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("exc", [
+    json.JSONDecodeError("Expecting value", "<html>", 0),
+    UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    RuntimeError("Failed to decode response body"),
+])
+def test_tg_call_post_response_decode_failure_is_unknown_without_retry(monkeypatch, exc):
+    # The response may have been accepted: retrying creates a duplicate, while None
+    # incorrectly lets the consumer refund the slot or enable the legacy retry.
+    calls = []
+    slept = []
+
+    async def garbage(**kwargs):
+        calls.append(kwargs)
+        raise exc
+
+    async def fake_sleep(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(bot, "_tg_proxy_breaker", bot._TelegramProxyCircuitBreaker(
+        cooldown_sec=20.0, trip_threshold=5,
+    ))
+    res = asyncio.run(bot._tg_call(garbage, retries=2))
+    assert bot._tg_outcome_unknown(res)
+    assert len(calls) == 1
+    assert slept == []
+
+
+def test_tg_call_connect_failure_stays_definite_none():
+    # "Cannot connect" — the request never left: this is definitely None (return the slot and
+    # retries are safe), not unknown (R4-03, audit 26.11.2026).
+    from aiogram.exceptions import TelegramNetworkError
+
+    async def no_connect(**kwargs):
+        raise TelegramNetworkError(method=MagicMock(), message="Cannot connect to host api.telegram.org")
+
+    saved = _save_breaker_state()
+    try:
+        assert asyncio.run(bot._tg_call(no_connect, retries=0)) is None
+    finally:
+        _restore_breaker_state(saved)
+
+
 def test_handle_proxy_failure_does_not_reenter_on_failing_notify(monkeypatch):
-    # Реентрантность: на пороге _notify_owner идёт ДО trip() через _tg_call;
-    # падение того же прокси звало _handle_proxy_failure снова (счётчик уже за
-    # порогом) — цепочка повторялась. Вложенный сбой не запускает вторую ветку.
+    # Reentrancy: the _notify_owner gate runs BEFORE trip() via _tg_call;
+    # failure of the same proxy called _handle_proxy_failure again (the counter was already
+    # threshold) — the chain repeated. A nested failure does not start the second branch.
     import json
     from types import SimpleNamespace
 
@@ -431,14 +538,14 @@ def test_handle_proxy_failure_does_not_reenter_on_failing_notify(monkeypatch):
     breaker.down_until = 0.0
     try:
         asyncio.run(bot._handle_proxy_failure("probe"))
-        # Внешний вызов + один вложенный из уведомления, дальше ветка закрыта.
+        # One external call plus one nested call from the notification; the branch is closed beyond that.
         assert len(entries) == 2
     finally:
         _restore_breaker_state(saved)
 
 
 def test_tg_call_waits_retry_after_before_retry(monkeypatch):
-    # Регрессия A8-02: флуд-контроль ждём по retry_after, а не 0.5с (ранний повтор продлевал бан).
+    # A8-02 regression: wait for flood control according to retry_after, not 0.5s (an early retry extended the ban).
     calls = []
     slept = []
 
@@ -468,7 +575,7 @@ def test_tg_call_waits_retry_after_before_retry(monkeypatch):
     TelegramNotFound,
 ])
 def test_tg_call_does_not_retry_client_errors(monkeypatch, exc_cls):
-    # Регрессия A8-02: 4xx (кроме 429) повторять бессмысленно — один вызов, сразу None.
+    # Regression A8-02: retrying 4xx (except 429) is pointless: one call, immediately None.
     calls = []
 
     async def always_bad():
@@ -477,8 +584,8 @@ def test_tg_call_does_not_retry_client_errors(monkeypatch, exc_cls):
 
     saved = _save_breaker_state()
     try:
-        # Аудит 16.11.2026: валидный JSON от Telegram — признак живого прокси.
-        # Без сброса счётчика следующая единичная заминка прокси глушила все чаты.
+        # Audit 16.11.2026: valid JSON from Telegram is a sign of a live proxy.
+        # Without resetting the counter, the next single proxy delay would silence all chats.
         bot._tg_proxy_breaker.note_failure()
         bot._tg_proxy_breaker.note_failure()
         assert bot._tg_proxy_breaker.consecutive_failures == 2
@@ -490,8 +597,8 @@ def test_tg_call_does_not_retry_client_errors(monkeypatch, exc_cls):
 
 
 def test_tg_call_still_retries_transient_errors(monkeypatch):
-    # Сторож к A8-02: запрет повторов 4xx не должен отменять ретраи сетевых сбоев.
-    # Таймауты сюда не входят: повтор после таймаута давал дубли (исход неизвестен).
+    # Guard for A8-02: banning 4xx retries must not cancel retries for network failures.
+    # Timeouts are excluded: retrying after a timeout produced duplicates (outcome unknown).
     calls = []
     slept = []
 
@@ -515,7 +622,7 @@ def test_tg_call_still_retries_transient_errors(monkeypatch):
 
 
 def test_telegram_api_call_network_error_keeps_cause(monkeypatch):
-    # Регрессия A8-03: цепочка для Sentry не рвётся (было from None).
+    # Regression A8-03: the chain for Sentry is not broken (previously from None).
     original = ConnectionError("dns boom")
 
     class _Post:
@@ -544,7 +651,8 @@ def test_telegram_api_call_network_error_keeps_cause(monkeypatch):
 
 
 def test_telegram_api_call_ok_false_reports_description(monkeypatch):
-    # Регрессия A8-03: в тексте код+описание, а не весь словарь ответа целиком.
+    # Regression A8-03: the text contains code+description, not the entire response
+    # dictionary.
     body = {"ok": False, "error_code": 400, "description": "Bad Request: chat not found"}
 
     class _Resp:
@@ -578,9 +686,9 @@ def test_telegram_api_call_ok_false_reports_description(monkeypatch):
 
 
 def test_message_deadline_caps_stage_budget():
-    # Что защищает: общий потолок сообщения (MESSAGE_TOTAL_BUDGET_SEC). Регрессия:
-    # таймауты этапов складывались без учёта остатка, и обработка выходила за
-    # бюджет (аудит 27.10.2026).
+    # What it protects: the overall message ceiling (MESSAGE_TOTAL_BUDGET_SEC). Regression:
+    # stage timeouts were summed without the remaining budget, and processing exceeded
+    # budget (audit 27.10.2026).
     token = bot._MSG_DEADLINE.set(time.monotonic() + 5)
     try:
         assert bot._msg_remaining_sec() <= 5
@@ -592,9 +700,9 @@ def test_message_deadline_caps_stage_budget():
 
 
 def test_handle_message_sets_and_resets_message_deadline(monkeypatch):
-    # Что защищает: установку потолка на входе в обработчик. Регрессия: дедлайн
-    # оставался бы в контексте после обработки и урезал следующий апдейт
-    # (аудит 27.10.2026).
+    # What this protects: setting the ceiling on handler entry. Regression: the deadline
+    # would remain in the context after processing and truncate the next update
+    # (audit 27.10.2026).
     from types import SimpleNamespace
     seen = {}
 
@@ -608,8 +716,8 @@ def test_handle_message_sets_and_resets_message_deadline(monkeypatch):
 
 
 def test_proxy_middleware_sends_secret_to_the_read_route():
-    # Аудит 16.11.2026: /read шёл без секрета, прокси отвечал 401, чтение страниц
-    # было мертво целиком. Секрет обязан доезжать до /read того же origin.
+    # Audit 16.11.2026: /read was sent without a secret, the proxy returned 401, page reading
+    # was entirely dead. The secret must reach /read on the same origin.
     _, _, seen = _run_proxy_middleware(
         "https://proxy.example/read?url=https%3A%2F%2Fexample.com%2F",
     )

@@ -1,9 +1,9 @@
-"""Матрица маршрутов рисования: какие фразы становятся картинкой, а какие нет.
+"""Drawing-route matrix: which phrases produce an image and which do not.
 
-Защищает паритет с ChatGPT (10.11.2026): просьбу нарисовать должно видно и без
-триггера в первом слове, но вопрос или служебный глагол не должны выдавать
-ненужную генерацию. Краснеет, если сузить триггеры, снять обвязку вместе с
-местоимением правки или перепутать «сделай картинку» с «сделай эту картинку».
+Protects parity with ChatGPT (10.11.2026): a request to draw must be recognized even
+without a trigger in the first word, but a question or auxiliary verb must not cause
+unwanted generation. It fails if triggers are narrowed, the edit scaffolding is removed
+along with the edit pronoun, or "make a picture" is confused with "make this picture".
 """
 import asyncio
 import time
@@ -23,15 +23,15 @@ from lumen_message_parse import (
 )
 
 DRAW_INTENTS = [
-    # Обвязка перед глаголом не меняет смысл просьбы.
+    # A wrapper before the verb does not change the meaning of the request.
     "ну нарисуй кота",
     "мне нарисуй кота",
     "и нарисуй ещё лису",
     "пожалуйста, нарисуй закат",
     "давай нарисуй кота",
-    # Императив в конце фразы.
+    # An imperative at the end of the phrase.
     "кот в шляпе, нарисуй",
-    # Заказ артефакта без глагола рисования.
+    # An artifact order without a drawing verb.
     "хочу картинку с котом",
     "нужен логотип кофейни",
     "давай иллюстрацию к статье",
@@ -39,15 +39,15 @@ DRAW_INTENTS = [
     "накидай вариантов обложки альбома",
     "хочу обои на рабочий стол с горами",
     "сделай аватарку с лисом",
-    # Слабый глагол + новый артефакт = генерация, а не правка.
+    # Weak verb + new artifact = generation, not editing.
     "сделай картинку кота",
     "сделай мне постер для концерта",
     "сделай обложку для телеграм-канала",
     "сделай плакат с китом",
     "сделай наклейку с молнией",
     "сделай аватарку с лисом",
-    # Название артефакта своими словами: местоимение правки не должно
-    # читаться внутри слов «талисман», «телефон», «телеграм».
+    # Name the artifact in your own words: an edit pronoun must not
+    # be read inside the words "talisman", "telephone", "Telegram".
     "придумай талисман для олимпиады",
     "хочу обои на телефон с космосом",
     "нужен макет визитки",
@@ -66,10 +66,10 @@ DRAW_INTENTS = [
     "give me an illustration of a dragon",
     "create a wallpaper with mountains",
     "can you make an image of a castle",
-    # Вежливые формы.
+    # Polite forms.
     "ты можешь нарисовать дракона?",
     "можешь нарисовать кота?",
-    # Английский.
+    # English.
     "draw a cat",
     "make me an image of a cat",
     "can you draw a cat?",
@@ -80,8 +80,8 @@ DRAW_INTENTS = [
     "create a poster for a jazz night",
     "illustrate this scene",
     "picture of a cat on a fence",
-    # Глагола просьбы нет, но артефакт стоит первым словом: так просят постер,
-    # логотип и макет и в ChatGPT (ревью 10.11.2026).
+    # There is no request verb, but the artifact is the first word: this is how people ask for a poster,
+    # a logo and layout in ChatGPT as well (review 10.11.2026).
     "логотип кофейни", "макет лендинга", "аватарку в круге", "стикерпак с капибарами",
     "визитка для кофейни", "превью для ютуба", "карикатуру на отца", "набросок замка",
     "emblem for a gaming clan", "poster for a gig", "thumbnail for the video",
@@ -89,7 +89,7 @@ DRAW_INTENTS = [
 ]
 
 NOT_DRAW_INTENTS = [
-    # Вопросы и инструкции — текст, а не генерация.
+    # Questions and instructions are text, not generation.
     "как нарисовать кота карандашом",
     "почему коты на картинах выглядят грустными",
     "объясни, как художники рисуют перспективу",
@@ -98,13 +98,13 @@ NOT_DRAW_INTENTS = [
     "кто нарисовал Мону Лизу",
     "можно ли есть картинку",
     "что на этой картинке",
-    # Служебные глаголы про уже существующий файл.
+    # Service verbs for an already existing file.
     "покажи картинку из прошлого запроса",
     "сохрани картинку",
     "пришли фото кота",
     "найди картинку кота в интернете",
     "переведи: нарисуй кота",
-    # Совсем не про картинки.
+    # Nothing to do with images.
     "хочу кофе",
     "кот",
     "что такое стикерпак",
@@ -118,8 +118,8 @@ NOT_DRAW_INTENTS = [
     "make me a coffee",
     "how do I draw a cat",
     "show me the picture you saved",
-    # Артефактное слово в начале, но фраза — жалоба или утверждение о прошлом:
-    # картинка по ним не нужна (ревью 10.11.2026).
+    # An artifact word at the start, but the phrase is a complaint or a statement about the past:
+    # an image is not needed for them (review 10.11.2026).
     "картинка не загружается в браузере", "image not loading", "обложка альбома была лучшей",
     "картинка в галерее не видна", "this poster is ugly", "стикер был классный",
     "логотип не работает на тёмном фоне", "the sticker doesn't work",
@@ -127,10 +127,10 @@ NOT_DRAW_INTENTS = [
 
 
 def _intent(text):
-    """Ожидание матрицы: порядок двух матчеров, а не проводка ядра.
+    """The matrix asserts matcher ordering, not core wiring.
 
-    Матрица сторожит сами матчеры (F-170, 17.11.2026); сквозную проводку
-    через _handle_message_core проверяют тесты ниже в этом файле."""
+    The matrix guards the matchers themselves (F-170, 17.11.2026); end-to-end
+    wiring through _handle_message_core is checked by the tests below in this file."""
     low = text.lower().strip()
     if _match_trigger_with_fillers(low, DRAW_TRIGGER_PREFIXES)[0]:
         return "draw"
@@ -176,8 +176,8 @@ def test_repeat_phrases_stay_repeat(text):
 
 
 def test_new_artifact_vs_existing_image():
-    # «картинку кота» не должно читаться как местоимение «та»: это новый заказ,
-    # а не правка (ревью паритета 10.11.2026).
+    # "draw a cat" must not be read as the pronoun "it": this is a new request,
+    # rather than an edit (parity review 10.11.2026).
     assert _is_new_artifact_request("сделай картинку кота")
     assert _is_new_artifact_request("сделай мне постер для концерта")
     assert not _is_new_artifact_request("сделай эту картинку ярче")
@@ -185,8 +185,8 @@ def test_new_artifact_vs_existing_image():
 
 
 def test_intent_content_keeps_original_case():
-    # Буквальные надписи важны в исходном регистре: провайдер рисует текст
-    # с картинки, а не с нижнего регистра.
+    # Literal text and its original case matter: the provider draws text
+    # from the image, not from lowercase text.
     kind, content = _match_draw_intent(
         "хочу открытку с надписью «С Днём Рождения»",
         "Хочу открытку с надписью «С Днём Рождения»",
@@ -196,8 +196,8 @@ def test_intent_content_keeps_original_case():
 
 
 def test_intent_does_not_eat_first_letter_of_verb():
-    # Срез императива обязан быть по границе слова: «illustrate this scene»
-    # давало «i this scene» (ревью паритета 10.11.2026).
+    # The imperative cut must follow a word boundary: "illustrate this scene"
+    # produced "i this scene" (parity review 10.11.2026).
     kind, content = _match_draw_intent("illustrate this scene", "illustrate this scene")
     assert kind == "draw"
     assert content == "this scene"
@@ -207,12 +207,12 @@ def test_intent_does_not_eat_first_letter_of_verb():
     ("хочу картинку с котом", "хочу картинку с котом"),
     ("сделай картинку кота", "сделай картинку кота"),
     ("нужен логотип кофейни", "нужен логотип кофейни"),
-    # Глагол из середины фразы вырезается: в модель уходит сюжет.
+    # A verb from the middle of the phrase is cut: the model receives the plot.
     ("кот в шляпе, нарисуй", "кот в шляпе"),
 ])
 def test_core_routes_natural_requests_to_draw(rate_guard_setup, text, expected):
-    # Матчер без проводки в message_core бесполезен: проверяем, что просьба
-    # реально доезжает до генерации, а не уходит текстовой модели.
+    # A matcher not wired into message_core is useless: verify that the request
+    # actually reaches generation, rather than going to the text model.
     message = rate_guard_setup()
     message.text = text
     asyncio.run(bot._handle_message_core(message))
@@ -228,17 +228,17 @@ def test_core_keeps_question_as_text(rate_guard_setup):
 
 
 def test_core_keeps_service_request_as_text(rate_guard_setup):
-    # «покажи картинку из прошлого запроса» — это про уже существующий файл,
-    # генерация по такому запросу была бы лишней картинкой в чате.
+    # “show the picture from the previous request” refers to an existing file,
+    # generation for such a request would be an unnecessary picture in the chat.
     message = rate_guard_setup()
     message.text = "покажи картинку из прошлого запроса"
     asyncio.run(bot._handle_message_core(message))
     bot.inline_draw.assert_not_awaited()
 
 
-# ── Разбор просьбы без названия артефакта и местоименной («нарисуй это»).
-# Без этих тестов шаг обращения к модели мог выпасть из пути, а «нарисуй это»
-# снова уезжало провайдеру словом «это» и рисовало мусор (паритет 10.11.2026).
+# ── Parsing a request without an artifact name and with a pronoun ("draw this").
+# Without these tests, the model-addressing step could fall out of the path, while “draw this”
+# was sent to the provider as the word "this" again and drew garbage (parity 10.11.2026).
 _RESOLVED = "A ginger cat sitting on the moon above a blue sea, soft light, wide shot."
 
 
@@ -276,7 +276,7 @@ def test_anaphoric_draw_resolves_from_history(rate_guard_setup, monkeypatch):
     asyncio.run(bot._handle_message_core(message))
     bot.inline_draw.assert_awaited_once()
     assert bot.inline_draw.await_args.args[1] == _RESOLVED
-    # История чата ушла в вопрос модели — иначе разрешать было бы нечем.
+    # Chat history went into the model's question — otherwise there would be nothing to authorize with.
     assert "кот рыжий сидит на луне" in message._ctx_calls[0]
 
 
@@ -296,8 +296,8 @@ def test_scene_request_without_artifact_word_draws_resolved_text(rate_guard_setu
 
 
 def test_scene_request_strips_variants_phrase_from_resolved_text(rate_guard_setup, monkeypatch):
-    # Тот же дефект F-169 на пути визуального сигнала: фраза количества из
-    # описания резолвера не должна уезжать в промпт второй ветки.
+    # The same F-169 defect on the visual-signal path: a quantity phrase from
+    # the resolver's description must not enter the second branch's prompt.
     message = _ctx_env(monkeypatch, rate_guard_setup, "хочу увидеть кота на луне",
                        "A ginger cat on the moon, 3 variants, photorealistic.")
     asyncio.run(bot._handle_message_core(message))
@@ -312,15 +312,15 @@ def test_scene_request_answered_none_stays_text(rate_guard_setup, monkeypatch):
     monkeypatch.setattr(bot, "_run_route", run_route)
     asyncio.run(bot._handle_message_core(message))
     bot.inline_draw.assert_not_awaited()
-    # Ветка вызывалась реально (иначе «не рисуем» тривиально верно) и сообщение
-    # доехало до текстовой модели (ревью покрытия 10.11.2026).
+    # The branch was actually called (otherwise “we do not draw” is trivially true), and the message
+    # reached the text model (coverage review 10.11.2026).
     assert len(message._ctx_calls) == 1
     run_route.assert_awaited()
 
 
 def test_question_about_imagining_does_not_call_the_model(rate_guard_setup, monkeypatch):
-    # «как представить себе кота» — это вопрос, а не заказ: лишний вызов модели
-    # и тем более картинка тут были бы багом.
+    # "how to imagine a cat" is a question, not an order: an extra model call
+    # and an image here would be a bug anyway.
     message = _ctx_env(monkeypatch, rate_guard_setup, "как представить себе кота на луне", _RESOLVED)
     asyncio.run(bot._handle_message_core(message))
     assert message._ctx_calls == []
@@ -328,8 +328,8 @@ def test_question_about_imagining_does_not_call_the_model(rate_guard_setup, monk
 
 
 def test_anaphoric_draw_with_photo_edits_that_photo(rate_guard_setup, monkeypatch):
-    # С приложенным фото «нарисуй это» правит фото, а не рисует по словам из
-    # истории: иначе вложение молча игнорировалось.
+    # With an attached photo, “draw this” edits the photo instead of drawing from the words in
+    # history: otherwise the attachment was silently ignored.
     message = _ctx_env(monkeypatch, rate_guard_setup, "нарисуй это", _RESOLVED)
     photo = SimpleNamespace(file_id="f1", file_unique_id="u1", width=10, height=10, file_size=10)
     message.photo = [photo]
@@ -345,11 +345,11 @@ def test_anaphoric_draw_with_photo_edits_that_photo(rate_guard_setup, monkeypatc
     assert message._ctx_calls == []
 
 
-# ── Маршруты по находкам слепого ревью (10.11.2026): обвязка, местоимение,
-# заказ артефакта поверх правки, число вариантов из фразы человека.
+# ── Routes from blind-review findings (10.11.2026): wrapper, pronoun,
+# artifact order on top of an edit; take the variant count from the person's phrase.
 def test_core_polite_prefix_keeps_the_subject(rate_guard_setup, monkeypatch):
-    # «please draw a cat in a cat» теряло «please draw» дважды: до модели
-    # доходило «in a hat» (ревью 10.11.2026).
+    # "please draw a cat in a cat" lost "please draw" twice: before reaching the model
+    # reached "in a hat" (10.11.2026 review).
     message = rate_guard_setup()
     message.text = "please draw a cat in a hat"
     prompts = []
@@ -364,8 +364,8 @@ def test_core_polite_prefix_keeps_the_subject(rate_guard_setup, monkeypatch):
 
 
 def test_core_repeat_after_filler_repeats_the_subject(rate_guard_setup, monkeypatch):
-    # «ну ещё вариант кота»: хвост повтора режется из тела без обвязки,
-    # иначе сдвиг на «ну » съедал буквы сюжета (ревью 10.11.2026).
+    # "one more cat variant": the repetition tail is cut from the body without the wrapper,
+    # otherwise a shift by "well " ate plot letters (review 10.11.2026).
     message = rate_guard_setup()
     message.text = "ну ещё вариант кота"
     state = {"last_draw_prompt": "A ginger cat.", "last_drawn_at": time.time(), "last_drawn_user": 456}
@@ -382,8 +382,8 @@ def test_core_repeat_after_filler_repeats_the_subject(rate_guard_setup, monkeypa
 
 
 def test_core_artifact_word_over_photo_is_an_edit(rate_guard_setup, monkeypatch):
-    # «сделай картинку ярче» с отреплайченным фото — правка: заказ артефакта
-    # не имеет права уводить её в новую генерацию (ревью 10.11.2026).
+    # "make the picture brighter" with a replied-to photo is an edit: an artifact order
+    # must not send it into a new generation (review 10.11.2026).
     message = rate_guard_setup()
     message.text = "сделай картинку ярче"
     message.reply_to_message = SimpleNamespace(
@@ -410,21 +410,21 @@ def test_core_artifact_word_over_photo_is_an_edit(rate_guard_setup, monkeypatch)
 
 
 def test_core_variants_count_comes_from_human_phrase(rate_guard_setup, monkeypatch):
-    # Резолвер мог вернуть «A ginger cat, 3 variants»: серия из чужого текста
-    # стоила бы человеку три слота, тогда как человек просил один кадр
-    # (ревью 10.11.2026).
+    # The resolver could return "A ginger cat, 3 variants": a series from someone else's text
+    # would cost the person three slots when they asked for one frame
+    # (review 10.11.2026).
     message = _ctx_env(monkeypatch, rate_guard_setup, "нарисуй это",
                        "A ginger cat on the moon, 3 variants, photorealistic.")
     asyncio.run(bot._handle_message_core(message))
     assert bot.inline_draw.await_count == 1, bot.inline_draw.await_args_list
     _prompt = bot.inline_draw.await_args.args[1]
     assert _prompt.startswith("A ginger cat")
-    # «3 variants» из чужого текста не должно остаться в промпте (ревью 17.11.2026).
+    # "3 variants" from foreign text must not remain in the prompt (review 17.11.2026).
     assert "3 variants" not in _prompt and "variants" not in _prompt
 
 
 def test_core_variants_count_survives_anaphora(rate_guard_setup, monkeypatch):
-    # А когда о вариантах попросил сам человек, их терять нельзя.
+    # And when the user asks for variants themselves, they must not be lost.
     message = _ctx_env(monkeypatch, rate_guard_setup, "нарисуй это, 3 варианта",
                        "A ginger cat on the moon, photorealistic.")
     asyncio.run(bot._handle_message_core(message))
@@ -432,8 +432,8 @@ def test_core_variants_count_survives_anaphora(rate_guard_setup, monkeypatch):
 
 
 def test_weak_english_draw_prefix_needs_a_visual_object():
-    # Внешний аудит 16.11.2026: «draw a table of the results» уходило в
-    # генерацию картинки и жгло личный слот. Русские триггеры не ограничены.
+    # External audit 16.11.2026: “draw a table of the results” went to
+    # triggered image generation and burned a personal slot. Russian triggers are not restricted.
     from lumen_message_parse import _draw_trigger_is_visual
     assert _draw_trigger_is_visual("draw a", " table of the results") is False
     assert _draw_trigger_is_visual("can you draw", " a table of the results") is False

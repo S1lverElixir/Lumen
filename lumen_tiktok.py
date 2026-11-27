@@ -1,7 +1,6 @@
-"""
-lumen_tiktok.py — механика TikTok-загрузчика без прямого Telegram: подписи,
-слайдшоу, выбор URL/качества, разбор ссылок на звук, MP3-теги, ffmpeg-пробинг.
-Оркестрация отправки — в lumen_tiktok_flow.py.
+"""lumen_tiktok.py handles TikTok downloader mechanics without direct Telegram: captions,
+slideshows, URL/quality selection, sound-link parsing, MP3 tags, and ffmpeg probing.
+Send orchestration is in lumen_tiktok_flow.py.
 """
 
 from __future__ import annotations
@@ -26,13 +25,13 @@ from mutagen.mp3 import MP3
 log = logging.getLogger("bot")
 
 
-# Подпись нужна на языке отправителя ссылки, а не автора видео.
-# TikWM даёт язык автора, поэтому берём message.from_user.language_code.
+# The caption must be in the language of the link sender, not the video author.
+# TikWM provides the author's language, so use message.from_user.language_code.
 _ORIGINAL_SOUND_LABELS: dict[str, str] = {
     "ru": "Оригинальный звук",
     "uk": "Оригінальний звук",
     "be": "Арыгінальны гук",
-    # Sentence case везде — поле идёт в MP3-тег как настоящее название трека.
+    # Sentence case throughout—the field goes into the MP3 tag as the actual track title.
     "en": "Original sound",
     "hi": "ओरिजिनल साउंड",
     "id": "Suara asli",
@@ -62,12 +61,14 @@ _ORIGINAL_SOUND_LABELS: dict[str, str] = {
 }
 _ORIGINAL_SOUND_LABEL_DEFAULT = _ORIGINAL_SOUND_LABELS["en"]
 
-# Фразы для детекта безымянного звука в bot.py: raw_title приходит на языке автора, а не получателя, поэтому проверяем все языки сразу. Строится из _ORIGINAL_SOUND_LABELS — единый источник правды.
+# Phrases for detecting unnamed audio in bot.py: raw_title comes in the language of
+# the author, not the recipient, so all languages are checked at once. Built from
+# _ORIGINAL_SOUND_LABELS, the single source of truth.
 _GENERIC_ORIGINAL_SOUND_PHRASES: tuple[str, ...] = tuple(sorted({v.lower() for v in _ORIGINAL_SOUND_LABELS.values()}))
 
 
 def _original_sound_label(language_code: str | None, fallback_code: str | None = None) -> str:
-    """Подпись на языке отправителя: первичный подтег до дефиса; нет кода — fallback_code чата, затем английский."""
+    """Caption in the sender's language: the initial subtag before the hyphen; if there is no code, use the chat's fallback_code, then English."""
     for code in (language_code, fallback_code):
         if not code:
             continue
@@ -77,13 +78,14 @@ def _original_sound_label(language_code: str | None, fallback_code: str | None =
     return _ORIGINAL_SOUND_LABEL_DEFAULT
 
 
-# ─────────────────── разбиение слайдшоу на группы sendMediaGroup ───────────────────
+# ─────────────────── splitting the slideshow into sendMediaGroup groups ───────────────────
 
 TELEGRAM_MEDIA_GROUP_CHUNK = 10
 
 
 def _chunk_tiktok_media_items(items: list, chunk_size: int = TELEGRAM_MEDIA_GROUP_CHUNK) -> list[list]:
-    """Режем на группы 2–10 (требование sendMediaGroup): хвост из 1 при 11/21/31 лечим займом у предпоследней."""
+    """Split into groups of 2–10 (sendMediaGroup requirement): fix a trailing single item
+    at 11/21/31 by borrowing from the penultimate group."""
     if not items:
         return []
     chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
@@ -94,12 +96,14 @@ def _chunk_tiktok_media_items(items: list, chunk_size: int = TELEGRAM_MEDIA_GROU
 
 
 def _looks_like_video_bytes(data: bytes) -> bool:
-    """Видео или картинка — по "ftyp" на смещении 4 (MP4) или сигнатуре EBML в начале (WebM): Content-Type от TikWM недостоверен, поле в JSON не помечено."""
+    """Video or image, identified by \"ftyp\" at offset 4 (MP4) or the EBML signature at
+    the start (WebM): the Content-Type from TikWM is unreliable, and the JSON field
+    is unmarked."""
     return len(data) >= 12 and (data[4:8] == b"ftyp" or data[:4] == b"\x1a\x45\xdf\xa3")
 
 
 def _slideshow_slide_urls(media_data: dict, images_to_fetch: list[str]) -> list[str]:
-    """URL слайда: live_images[i] вместо images[i], если есть. play/hdplay у фото-постов — аудиодорожка, игнорируем."""
+    """Slide URL: live_images[i] instead of images[i], if available. For photo posts, play/hdplay are the audio track; ignore them."""
     live_images = media_data.get("live_images")
     if not isinstance(live_images, list):
         return images_to_fetch
@@ -111,7 +115,7 @@ def _slideshow_slide_urls(media_data: dict, images_to_fetch: list[str]) -> list[
 
 
 def _tiktok_video_candidates(media_data: dict) -> list[dict[str, Any]]:
-    """Кандидаты HD → обычное → с водяным (hdplay требует &hd=1 в запросе). Размер из ответа — пропускаем заведомо больше лимита до скачивания."""
+    """Candidates: HD → normal → watermarked (hdplay requires &hd=1 in the request). Skip sizes reported in the response that clearly exceed the limit before downloading."""
     candidates: list[dict[str, Any]] = []
     for url_key, size_key, label in (
         ("hdplay", "hd_size", "HD"),
@@ -122,24 +126,24 @@ def _tiktok_video_candidates(media_data: dict) -> list[dict[str, Any]]:
         if not raw_url:
             continue
         if not isinstance(raw_url, str):
-            log.warning("[tiktok] Skipping non-string URL for %s: %r.", url_key, raw_url)
+            log.warning("[tiktok] Skipping non-string URL for %s (type=%s).", url_key, type(raw_url).__name__)
             continue
         if raw_url.startswith("//"):
-            # Протокол-относительный URL чиним как https, иначе ниже склеилось бы в битый "https://www.tikwm.com//host/path".
+            # Fix a protocol-relative URL to https; otherwise it would concatenate below into a broken "https://www.tikwm.com//host/path".
             raw_url = "https:" + raw_url
         elif not raw_url.startswith("http"):
-            # Склейка давала userinfo-путаницу ("@evil.com/x" ехал хостом):
-            # только относительный путь к базовому хосту.
+            # Concatenation caused userinfo confusion ("@evil.com/x" became the host):
+            # only a path relative to the base host.
             raw_url = urllib.parse.urljoin("https://www.tikwm.com/", raw_url)
         try:
             scheme = urllib.parse.urlsplit(raw_url).scheme.lower()
         except ValueError:
-            # urlsplit падает на "]" в хосте: ссылка из чужого JSON — пропускаем один
-            # вариант качества, а не весь пост (аудит 01.11.2026).
+            # urlsplit fails on "]" in the host: skip one
+            # a quality variant, not the entire post (audit 01.11.2026).
             log.warning("[tiktok] Skipping unparsable URL for %s.", url_key)
             continue
         if scheme not in ("http", "https"):
-            log.warning("[tiktok] Skipping non-HTTP(S) URL for %s: %r.", url_key, raw_url)
+            log.warning("[tiktok] Skipping non-HTTP(S) URL for %s: %s.", url_key, _log_safe_url(raw_url))
             continue
         try:
             size_bytes = int(media_data.get(size_key) or 0)
@@ -149,18 +153,21 @@ def _tiktok_video_candidates(media_data: dict) -> list[dict[str, Any]]:
     return candidates
 
 
-# ── TikWM API: троттлинг + ретрай при 403 ──
-# 11.08.2026, Sentry: оба зеркала ответили 403 с разрывом ~36мс — у TikWM лимит ~1 запр/сек.рвал 1.1с на процесс; 403 от обоих подряд — ретрай после паузы, а не "видео нет".
+# TikWM API: throttling + retry on 403
+# 11.08.2026, Sentry: both mirrors returned 403 about 36 ms apart — TikWM has a
+#     limit of about 1 request/sec, and one process ate 1.1 s; consecutive 403s from
+#     both mean retry after a pause, not "video unavailable".
 _TIKWM_MIN_INTERVAL_SEC = 1.1
 _TIKWM_RETRY_BACKOFF_SEC = 2.0
 _tikwm_last_request_ts: float | None = None
 _tikwm_throttle_lock = asyncio.Lock()
-# Точка подмены для тестов — реальные секунды ожидания не нужны ни одному тесту.
+# A substitution point for tests — no test needs actual seconds of waiting.
 _sleep = asyncio.sleep
 
 
 async def _tikwm_throttle() -> None:
-    """Ждём интервал с прошлого запроса. None вместо 0.0 — чтобы первый вызов не решил, что "прошло мало времени"."""
+    """Safe numeric parsing. None becomes 0.0 so a missing value does not break stats
+    as \"unknown duration\"."""
     global _tikwm_last_request_ts
     async with _tikwm_throttle_lock:
         now = time.monotonic()
@@ -172,23 +179,59 @@ async def _tikwm_throttle() -> None:
         _tikwm_last_request_ts = now
 
 
-# JSON TikWM обязан быть маленьким: свой кап, а не общий видео-лимит.
+# TikWM JSON must be small: use its own cap, not the general video limit.
 TIKWM_JSON_MAX_BYTES = 1 * 1024 * 1024
 
 
 def _log_safe_url(url: str) -> str:
-    """URL без query/fragment: в ?url= лежит ссылка пользователя, её нельзя писать в общий лог."""
-    parts = urllib.parse.urlsplit(url)
-    path = parts.path
-    if "@" in path:
-        # Ссылка пользователя: @аккаунт в пути — это его приватность, не диагностика.
-        path = "/<user>"
-    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    """Remove credentials, account paths, queries, and fragments before logging a URL."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return "<invalid-url>"
+    if not hostname or "%" in hostname or parts.scheme.lower() not in ("http", "https"):
+        return "<invalid-url>"
+    try:
+        host = ipaddress.ip_address(hostname).compressed
+        authority = f"[{host}]" if ":" in host else host
+    except ValueError:
+        try:
+            host = hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            return "<invalid-url>"
+        labels = host.split(".")
+        if len(host) > 253 or any(
+            len(label) > 63 or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
+            for label in labels
+        ):
+            return "<invalid-url>"
+        authority = host
+    if port is not None:
+        authority = f"{authority}:{port}"
+    # Media paths can contain signed identifiers, so retain no path at all.
+    return urllib.parse.urlunsplit((parts.scheme.lower(), authority, "/<path>", "", ""))
+
+
+def _safe_code_for_log(value: object) -> str:
+    """Return only a numeric API code; upstream JSON fields are untrusted."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return f"<{type(value).__name__}>"
+
+
+def _decimal_id(value: object) -> str:
+    """Accept only ASCII decimal IDs used by TikTok and iTunes."""
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        return ""
+    text = str(value)
+    return text if text.isascii() and text.isdecimal() else ""
 
 
 async def _read_capped_body(resp: aiohttp.ClientResponse, url: str, *, cap_bytes: int | None = None) -> bytes | None:
-    # JSON TikWM обязан быть маленьким: читаем с тем же капом, что бинарные
-    # скачивания, иначе скомпрометированный прокси льёт в память без края.
+    # TikWM JSON must be small: read it with the same cap as binary
+    # download limit; otherwise a compromised proxy pours into memory without bound.
     cap = cap_bytes if cap_bytes is not None else TIKTOK_DOWNLOAD_MAX_BYTES
     content_length = resp.headers.get("Content-Length")
     if content_length is not None:
@@ -213,7 +256,7 @@ async def _fetch_tikwm_media_data(
     session: aiohttp.ClientSession, resolved_url: str, headers: dict, *, hd: bool = True,
     proxy_base_url: str = "",
 ) -> dict | None:
-    """Метаданные поста у TikWM (None — данных нет даже после ретрая). 200 с code != 0 — тоже не данные."""
+    """Post metadata from TikWM (None means no data even after a retry). HTTP 200 with code != 0 also means no data."""
     api_headers = {
         **headers,
         "Referer": "https://www.tikwm.com/",
@@ -229,7 +272,7 @@ async def _fetch_tikwm_media_data(
             f"https://www.tikwm.com/api/?url={quoted}&hd=1" if hd else f"https://www.tikwm.com/api/?url={quoted}",
             f"https://tikwm.com/api/?url={quoted}&hd=1" if hd else f"https://tikwm.com/api/?url={quoted}",
         ]
-    # True — только если ВСЕ попытки были "403 + пустое тело": узкий сигнал блокировки для диагн. лога.
+    # True only if ALL attempts returned "403 + empty body": a narrow blocking signal for the diagnostic log.
     all_attempts_403_empty = True
     any_attempt_made = False
     for retry_round in range(2):
@@ -247,12 +290,12 @@ async def _fetch_tikwm_media_data(
                         try:
                             res = json.loads(raw_body.decode("utf-8"))
                         except Exception as e:
-                            log.warning("[tikwm] Endpoint %s returned undecodable JSON: %s", _log_safe_url(api_url), e)
+                            log.warning("[tikwm] Endpoint %s returned undecodable JSON (error=%s)", _log_safe_url(api_url), type(e).__name__)
                             continue
                         if res.get("code") == 0 and isinstance(res.get("data"), dict):
                             log.info("[tikwm] Successfully fetched media data from %s", _log_safe_url(api_url))
                             return res.get("data")
-                        log.warning("[tikwm] Endpoint %s returned code %s: %s", _log_safe_url(api_url), res.get("code"), res.get("msg"))
+                        log.warning("[tikwm] Endpoint %s returned code %s", _log_safe_url(api_url), _safe_code_for_log(res.get("code")))
                     else:
                         raw_error = await _read_capped_body(r, api_url, cap_bytes=TIKWM_JSON_MAX_BYTES)
                         body = raw_error if raw_error is not None else b""
@@ -260,10 +303,10 @@ async def _fetch_tikwm_media_data(
                             saw_403 = True
                         if r.status != 403 or body:
                             all_attempts_403_empty = False
-                        log.warning("[tikwm] Endpoint %s returned status %s: %r", _log_safe_url(api_url), r.status, body[:300])
+                        log.warning("[tikwm] Endpoint %s returned status %s (body_len=%d)", _log_safe_url(api_url), r.status, len(body))
             except Exception as e:
                 all_attempts_403_empty = False
-                log.warning("[tikwm] Request failed for endpoint %s: %s", _log_safe_url(api_url), e)
+                log.warning("[tikwm] Request failed for endpoint %s (error=%s)", _log_safe_url(api_url), type(e).__name__)
         if not saw_403 or retry_round == 1:
             break
         log.warning(
@@ -280,21 +323,25 @@ async def _fetch_tikwm_media_data(
 
 
 class TikTokUserFacingError(RuntimeError):
-    """Текст уже написан для пользователя: handle_tiktok показывает str(exc) as-is. Обычный RuntimeError — "сырой", пользователю не показывается."""
+    """The text is already written for the user: handle_tiktok displays str(exc) as-is.
+    An ordinary RuntimeError is "raw" and is not shown to the user.
+    """
 
 
-# ── Ссылка на страницу звука (не видео) ──
-# TikWM не парсит /music/-ссылки ("Url parsing is failed") — ловим их здесь по ID.анных о звуке (bot-scoring для дата-центровых IP). Поэтому честно отвечаем сразу, рабочий путь — ссылка на видео с этим звуком.
+# ── Link to an audio page (not video) ──
+# TikWM does not parse /music/ links ("Url parsing is failed"); catch them here by ID.
+# Audio extraction is unreliable from data-center IPs, so report the limitation and point
+# to a video link with sound as the working path.
 _TIKTOK_MUSIC_PAGE_RE = re.compile(r"/music/\S*-(\d{6,})/?$", re.IGNORECASE)
 
 
 def _tiktok_music_page_id(url: str) -> str | None:
-    """Числовой ID из ссылки на страницу звука (признак "это звук, а не видео"), иначе None."""
+    """Numeric ID from an audio-page link (the \"this is audio, not video\" signal), or None otherwise."""
     m = _TIKTOK_MUSIC_PAGE_RE.search(url)
     return m.group(1) if m else None
 
 
-# ─────────────────── теги MP3 ───────────────────
+# ─────────────────── MP3 tags ───────────────────
 
 def _write_mp3_tags(path: str, title: str, artist: str, cover: bytes | None) -> None:
     try:
@@ -308,31 +355,33 @@ def _write_mp3_tags(path: str, title: str, artist: str, cover: bytes | None) -> 
             audio.tags["APIC"] = APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover)
         audio.save()
     except Exception as exc:
-        log.warning("[tags] Failed to write tags: %s", exc)
+        log.warning("[tags] Failed to write tags (error=%s)", type(exc).__name__)
 
 
-# ── ffmpeg и скачивание бинарных URL ──
-# Лимит размера (аудит 04.09.2026): слайды качаются до 35 параллельно — читаем потоково с капом.рвём свыше лимита.
-# Число из окружения — через bot._env_number (мусор в переменной не должен ронять
-# старт; отложенный импорт, потому что bot.py импортирует этот модуль).
+# ── ffmpeg and downloading binary URLs ──
+# Size limit (audit 04.09.2026): up to 35 slides download in parallel, so read streaming with a cap and cut anything above the limit.
+# Number from the environment, via bot._env_number (garbage in the variable must
+# not crash
+# startup; deferred import because bot.py imports this module).
 def _env_number_or_default(name: str, default: int) -> int:
     try:
         import bot
-        # bot._env_number уже кастует и режет мусор дефолтом; здесь только
-        # отложенный импорт (bot.py импортирует этот модуль) и страховка.
+        # bot._env_number already casts and discards junk with the default; here only
+        # a deferred import (bot.py imports this module) and a safeguard.
         return bot._env_number(name, default, cast=int, min_value=1024)
     except Exception:
         return default
 TIKTOK_DOWNLOAD_MAX_BYTES = _env_number_or_default("TIKTOK_DOWNLOAD_MAX_BYTES", 75 * 1024 * 1024)
 
 
-# ── SSRF-гард для _download_url_bin ──
-# Скомпрометированная выдача TikWM могла бы подсунуть внутренний адрес
-# (localhost, metadata-IP облака 169.254.169.254 и т.п.) — сервер сам сходил бы
-# внутрь своей сети. Литералы проверяем без DNS, хосты — через резолв
-# (fail-closed: не резолвится — не качаем). Известное ограничение: TOCTOU между
-# резолвом и коннектом (DNS-rebinding) лечится только на уровне коннектора;
-# для нашей угрозы (прямой внутренний адрес в JSON) предпроверки достаточно.
+# ── SSRF guard for _download_url_bin ──
+# A compromised TikWM response could supply an internal address
+# (localhost, cloud metadata IP 169.254.169.254, etc.), so the server itself would
+# inside its own network. Check literals without DNS, and hosts through resolution
+# (fail-closed: if it does not resolve, do not download). Known limitation: TOCTOU between
+# resolution and connection (DNS rebinding) can only be fixed at the connector level;
+# for our threat (a direct internal address in JSON), the preliminary checks
+# are sufficient.
 def _host_resolves_to_public(host: str | None) -> bool:
     if not host:
         return False
@@ -357,7 +406,7 @@ def _host_resolves_to_public(host: str | None) -> bool:
 
 
 def _resolve_result_is_public(result: Any) -> bool:
-    """Одна запись резолва публична: имя уже раскрыто в IP, смотрим is_global."""
+    """One resolution record is public: the name is already exposed in the IP, so check is_global."""
     try:
         return ipaddress.ip_address(result["host"]).is_global
     except (KeyError, TypeError, ValueError):
@@ -365,16 +414,16 @@ def _resolve_result_is_public(result: Any) -> bool:
 
 
 class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
-    """Резолвер shared-сессии: отбрасывает не-публичные адреса при каждом резолве.
+    """Shared-session resolver: rejects non-public addresses on every resolution.
 
-    Предпроверка _host_resolves_to_public ловит прямой внутренний адрес в JSON,
-    но не TOCTOU между резолвом и коннектом (DNS-rebinding: первый резолв
-    публичный, второй приватный). Коннектор зовёт resolve перед каждым новым
-    соединением, включая хопы редиректов, поэтому фильтрация здесь закрывает и
-    цепочку. SNI/Host не трогаем: фильтруем только IP, имя хоста едет дальше."""
+The _host_resolves_to_public precheck catches a direct private address in JSON,
+but not the TOCTOU gap between resolution and connection (DNS rebinding: the first resolution
+is public, the second private). The connector calls resolve before every new
+connection, including redirect hops, so filtering here closes the entire
+chain. We do not touch SNI/Host: only IPs are filtered; the hostname continues."""
     def __init__(self) -> None:
-        # DefaultResolver требует бегущий loop в конструкторе, поэтому создаём
-        # лениво при первом резолве, а не здесь.
+        # DefaultResolver requires a running loop in its constructor, so create
+        # lazily on the first resolution, not here.
         self._inner: Any | None = None
 
     async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET) -> list[Any]:
@@ -392,50 +441,50 @@ class _PublicOnlyResolver(aiohttp.abc.AbstractResolver):
             self._inner = None
 
 
-# Редиректы проверяем вручную, а не доверяем клиенту: aiohttp с allow_redirects=True
-# уже сходил бы на следующий хоп до нашей проверки конечного хоста. Каждый адрес
-# из цепочки Location обязан пройти ту же схему и SSRF-проверку, что стартовый URL.
+# Redirects are checked manually rather than trusted to the client: aiohttp with allow_redirects=True
+# would go to the next hop before our final-host check. Every address
+# from the Location chain must pass the same scheme and SSRF checks as the starting URL.
 _DOWNLOAD_MAX_REDIRECTS = 5
 _DOWNLOAD_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 
 def _checked_redirect_url(current_url: str, location: str | None) -> str | None:
     if not location:
-        log.warning("[download] Redirect without a Location header for %r.", current_url)
+        log.warning("[download] Redirect without a Location header for %s.", _log_safe_url(current_url))
         return None
     next_url = urllib.parse.urljoin(current_url, location)
     parts = urllib.parse.urlsplit(next_url)
     if parts.scheme.lower() not in ("http", "https"):
-        log.warning("[download] Refusing redirect to non-HTTP(S) URL %r.", next_url)
+        log.warning("[download] Refusing redirect to non-HTTP(S) URL %s.", _log_safe_url(next_url))
         return None
     if not _host_resolves_to_public(parts.hostname):
-        log.warning("[download] Refusing redirect to non-public host %r.", next_url)
+        log.warning("[download] Refusing redirect to non-public host %s.", _log_safe_url(next_url))
         return None
     return next_url
 
 
 async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: dict | None = None, *, cap_bytes: int | None = None) -> bytes | None:
-    # URL — из JSON чужого сервиса (TikWM): качаем только http(s) (AUD-D-003)
-    # и только с публичных адресов (SSRF-гард ниже). cap_bytes — отдельный кап
-    # вызывающего (видео режем лимитом отправки Telegram, а не общим 75МБ).
-    # Не-строка вместо ссылки раньше роняла urlsplit и весь пост.
+    # URL from another service's JSON (TikWM): download only http(s) (AUD-D-003)
+    # and only from public addresses (SSRF guard below). cap_bytes is a separate cap
+    # the caller (video is trimmed by Telegram's send limit, not the general 75MB).
+    # A non-string in place of a link previously crashed urlsplit and the entire post.
     if not isinstance(url, str):
-        log.warning("[download] Refusing non-string URL %r.", url)
+        log.warning("[download] Refusing non-string URL (type=%s).", type(url).__name__)
         return None
     cap = cap_bytes if cap_bytes is not None else TIKTOK_DOWNLOAD_MAX_BYTES
-    # Разбор — ВНУТРИ защиты: urlsplit бросает ValueError на адресе с "]" в хосте
-    # ("https://p16]x.com/v.mp4"), а такие ссылки приходят из чужого JSON. Без этого
-    # один битый URL ронял весь пост (тот же класс, что и не-строка выше — аудит 01.11.2026).
+    # Parsing happens inside the guard: urlsplit raises ValueError for an address with "]" in
+    # the host ("https://p16]x.com/v.mp4"), and such links come from third-party JSON.
+    # The same URL in a row indicates a bad retry, not a new track (production 01.11.2026).
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError as parse_exc:
-        log.warning("[download] Refusing unparsable URL: %s", parse_exc)
+        log.warning("[download] Refusing unparsable URL (error=%s)", type(parse_exc).__name__)
         return None
     if parts.scheme.lower() not in ("http", "https"):
-        log.warning("[download] Refusing non-HTTP(S) URL (scheme=%r).", parts.scheme)
+        log.warning("[download] Refusing non-HTTP(S) URL (scheme=<non-http-scheme>).")
         return None
     if not await asyncio.to_thread(_host_resolves_to_public, parts.hostname):
-        # Подписанные ссылки (сигнатура в query) в общий лог не пишем — см. _log_safe_url.
+        # Do not write signed URLs (signature in the query) to the general log — see _log_safe_url.
         log.warning("[download] Refusing non-public host for URL %s.", _log_safe_url(url))
         return None
     if headers is None:
@@ -449,7 +498,7 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
         for _ in range(_DOWNLOAD_MAX_REDIRECTS + 1):
             async with session.get(current_url, headers=headers, timeout=60, allow_redirects=False) as resp:
                 if resp.status in _DOWNLOAD_REDIRECT_STATUSES:
-                    # Резолв хопа тоже в потоке: внутри getaddrinfo, loop не стопорим.
+                    # Hop resolution is also offloaded: it happens inside getaddrinfo, so we do not block the loop.
                     next_url = await asyncio.to_thread(_checked_redirect_url, current_url, resp.headers.get("Location"))
                     if next_url is None:
                         return None
@@ -457,15 +506,16 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
                     continue
                 if resp.status != 200:
                     return None
-                # Тестовые заглушки могут не иметь .url; у настоящего ответа с
-                # выключенными автор редиректами это текущий URL, а каждый хоп уже
-                # проверен выше. Проверку оставляем как последний рубеж.
+                # Test stubs may lack .url; a real response with
+                # with author redirects disabled, this is the current URL, and each hop is already
+                # checked above. Keep the check as the last line of defense.
                 final_url = getattr(resp, "url", None)
                 final_host = urllib.parse.urlsplit(str(final_url)).hostname if final_url is not None else None
                 if final_host is not None and not await asyncio.to_thread(_host_resolves_to_public, final_host):
                     log.warning("[download] Refusing redirect to non-public host %r.", final_host)
                     return None
-                # Content-Length — быстрый отказ ДО скачивания (сервер может соврать/не прислать — ниже та же проверка потоково по факту).
+                # Content-Length allows an early rejection BEFORE downloading (the server may lie
+                #     or omit it; the same check is performed on the stream below).
                 content_length = resp.headers.get("Content-Length")
                 if content_length is not None:
                     try:
@@ -486,13 +536,13 @@ async def _download_url_bin(session: aiohttp.ClientSession, url: str, headers: d
         log.warning("[download] Too many redirects for %s.", _log_safe_url(url))
         return None
     except Exception as e:
-        # Ссылку — без подписи (см. _log_safe_url): текст исключения aiohttp иногда
-        # содержит URL целиком.
-        log.warning("[download] Failed to download %s: %s", _log_safe_url(url), e)
+        # Log the URL without its signature (see _log_safe_url): an aiohttp exception's text sometimes
+        # contains the entire URL.
+        log.warning("[download] Failed to download %s (error=%s)", _log_safe_url(url), type(e).__name__)
     return None
 
 
-# Сколько ждём зависший communicate после kill перед снятием задачи (аудит 06.10.2026).
+# How long to wait for a hung communicate after kill before removing the task (audit 06.10.2026).
 _COMMUNICATE_DRAIN_SEC = 5.0
 
 
@@ -510,9 +560,9 @@ async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: flo
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-        # Дренаж ограничен: communicate, переживший kill, не держит loop вечно.
-        # Ошибка самого дренажа летит как есть (вызывающие ловят широкий
-        # Exception); исходный TimeoutError — когда дренаж просто не уложился.
+        # Bounded drain: communicate, which survived kill, must not hold the loop forever.
+        # A drain error propagates as-is (callers catch the broad
+        # Exception); the original TimeoutError when drain simply ran out of time.
         try:
             await asyncio.wait_for(asyncio.shield(completion), timeout=_COMMUNICATE_DRAIN_SEC)
         except asyncio.TimeoutError:
@@ -523,7 +573,7 @@ async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: flo
                 completion.cancel()
         raise
     except asyncio.CancelledError:
-        # Внешняя отмена не дренаж: глотать её продолжением ожидания нельзя.
+        # External cancellation is not draining: it must not be swallowed by continuing to wait.
         if proc.returncode is None:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
@@ -536,7 +586,7 @@ async def _communicate_process(proc: asyncio.subprocess.Process, *, timeout: flo
 
 
 async def _probe_audio_duration(path: str) -> int:
-    """Длительность аудиофайла в секундах (для send_audio — без неё Telegram показывает 0:00). 0 при любой неудаче."""
+    """Audio duration in seconds (without it, send_audio makes Telegram show 0:00). 0 on any failure."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
@@ -551,12 +601,12 @@ async def _probe_audio_duration(path: str) -> int:
         if raw and raw[0] and raw[0] != "N/A":
             return max(1, round(float(raw[0])))
     except Exception as e:
-        log.warning("[ffmpeg] Audio probe failed: %s", e)
+        log.warning("[ffmpeg] Audio probe failed (error=%s)", type(e).__name__)
     return 0
 
 
 async def _probe_video_dimensions(path: str) -> tuple[int, int, int]:
-    """Возвращает (duration, width, height): без них Telegram показывает видео "сырым файлом" 0:00 (TikTok не всегда ставит faststart)."""
+    """Returns (duration, width, height): without them Telegram shows the video as a \"raw file\" at 0:00 (TikTok does not always set faststart)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -573,7 +623,7 @@ async def _probe_video_dimensions(path: str) -> tuple[int, int, int]:
             line = line.strip()
             if line.startswith("width="):
                 raw_w = line.split("=", 1)[1]
-                # "N/A" раньше ронял float() и вместе с ним валидный duration всего пробинга.
+                # 'N/A' previously crashed float() and, with it, the valid duration from the entire probe.
                 if raw_w and raw_w != "N/A":
                     width = int(float(raw_w))
             elif line.startswith("height="):
@@ -586,12 +636,12 @@ async def _probe_video_dimensions(path: str) -> tuple[int, int, int]:
                     duration = max(1, round(float(raw)))
         return duration, width, height
     except Exception as e:
-        log.warning("[ffmpeg] Video probe failed: %s", e)
+        log.warning("[ffmpeg] Video probe failed (error=%s)", type(e).__name__)
         return 0, 0, 0
 
 
 async def _generate_video_thumbnail(path: str, duration: int) -> bytes | None:
-    """Достаёт один кадр из видео как JPEG-превью для Telegram."""
+    """Extracts one video frame as a JPEG preview for Telegram."""
     seek_at = min(1.0, max(0.0, duration / 2)) if duration else 0.5
     try:
         with tempfile.TemporaryDirectory() as tdir:
@@ -607,19 +657,19 @@ async def _generate_video_thumbnail(path: str, duration: int) -> bytes | None:
                 with open(thumb_path, "rb") as f:
                     return f.read()
     except Exception as e:
-        log.warning("[ffmpeg] Thumbnail generation failed: %s", e)
+        log.warning("[ffmpeg] Thumbnail generation failed (error=%s)", type(e).__name__)
     return None
 
 
 async def _probe_and_thumbnail_from_path(path: str) -> tuple[int, int, int, bytes | None]:
-    """Запускает ffprobe и ffmpeg параллельно: thumbnail зависит от duration лишь как min(1.0, duration/2)."""
+    """Runs ffprobe and ffmpeg in parallel: thumbnail depends on duration only as min(1.0, duration/2)."""
     duration, width, height, thumb_bytes = 0, 0, 0, None
     try:
         (duration, width, height), thumb_bytes = await asyncio.gather(
             _probe_video_dimensions(path), _generate_video_thumbnail(path, 0),
         )
     except Exception as probe_exc:
-        log.warning("[tiktok] Video metadata probe failed, sending without: %s", probe_exc)
+        log.warning("[tiktok] Video metadata probe failed, sending without (error=%s)", type(probe_exc).__name__)
     return duration, width, height, thumb_bytes
 
 
@@ -629,25 +679,25 @@ def _write_file_sync(path: str, data: bytes) -> None:
 
 
 async def _probe_and_thumbnail_from_bytes(video_bytes: bytes) -> tuple[int, int, int, bytes | None]:
-    """То же для байтов видео в памяти (видео-слайды): ffprobe/ffmpeg умеют только файлы — пишем во временный файл."""
+    """Same for video bytes in memory (video slides): ffprobe/ffmpeg only accept files — write to a temporary file."""
     try:
         with tempfile.TemporaryDirectory() as tdir:
             raw_path = os.path.join(tdir, "slide.mp4")
-            # Запись до 50МБ в потоке: в loop стопорила всех.
+            # Writing up to 50 MB to the stream: in the loop it stalled everyone.
             await asyncio.to_thread(_write_file_sync, raw_path, video_bytes)
             return await _probe_and_thumbnail_from_path(raw_path)
     except Exception as probe_exc:
-        log.warning("[tiktok] Video-slide metadata probe failed, sending without: %s", probe_exc)
+        log.warning("[tiktok] Video-slide metadata probe failed, sending without (error=%s)", type(probe_exc).__name__)
         return 0, 0, 0, None
 
 
-# ── Проверка "короткая ссылка довелась до канонического адреса поста" ──
-# 12.08.2026, Sentry: HEAD отдал URL с пустым юзернеймом — требуем непустой сегмент @user.м строгий regex с непустым юзернеймом.
+# Check that "the short link resolved to the canonical post address"
+# 12.08.2026, Sentry: HEAD returned a URL with an empty username — require a non-empty @user segment. A strict regex with a non-empty username.
 _RESOLVED_TIKTOK_POST_RE = re.compile(r"tiktok\.com/@[^/\s]+/(?:video|photo)/\d+", re.IGNORECASE)
 
 
 def _looks_like_resolved_tiktok_url(url: str) -> bool:
-    """True — канонический адрес поста (видео/фото) с непустым юзернеймом; иначе вызывающий код пробует резолвить дальше."""
+    """True means the canonical post address (video/photo) has a non-empty username; otherwise the caller tries to resolve it further."""
     return bool(url) and bool(_RESOLVED_TIKTOK_POST_RE.search(url))
 
 
@@ -657,12 +707,12 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Upgrade-Insecure-Requests": "1"
     }
-    # Стартовый URL от пользователя: внутренний адрес режем до первого запроса.
+    # The user's starting URL: strip the internal address down to the first request.
     if not await asyncio.to_thread(_host_resolves_to_public, urllib.parse.urlsplit(url).hostname):
         log.warning("[tiktok] Refusing to resolve non-public start URL %s.", _log_safe_url(url))
         return url
-    # Редиректы разбираем вручную через _checked_redirect_url: aiohttp
-    # с allow_redirects=True сходил бы на следующий хоп до проверки хоста.
+    # Parse redirects manually via _checked_redirect_url: aiohttp
+    # with allow_redirects=True would visit the next hop before host validation.
     current_url = url
     for _ in range(_DOWNLOAD_MAX_REDIRECTS + 1):
         try:
@@ -679,7 +729,7 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
                         return resolved
                 break
         except Exception as e:
-            log.warning("[tiktok] HEAD resolution failed: %s", e)
+            log.warning("[tiktok] HEAD resolution failed (error=%s)", type(e).__name__)
             break
 
     current_url = url
@@ -692,32 +742,32 @@ async def _resolve_tiktok_short(session: aiohttp.ClientSession, url: str) -> str
                         break
                     current_url = next_url
                     continue
-                # Тело осознанно не читаем: нужен только итоговый URL, соединение
-                # просто закроется — капа не требуется, байты не качаем.
+                # Deliberately do not read the body: only the final URL is needed, the connection
+                # will simply close — no cap is needed, and no bytes are downloaded.
                 resolved = str(resp.url)
                 if not _looks_like_resolved_tiktok_url(resolved):
-                    # Битый URL после GET тоже логируем — иначе остаётся только малопонятный 403 уже на стороне TikWM.
+                    # Log malformed URLs after GET too; otherwise only TikWM's less informative 403 remains visible.
                     log.warning(
                         "[tiktok] Resolving short link %s didn't yield anything that looks like a post URL via either HEAD or GET (result: %s) — passing it through as-is, TikWM may reject it.", _log_safe_url(url), _log_safe_url(resolved),
                     )
                 return resolved
     except Exception as e:
-        log.warning("[tiktok] GET resolution failed: %s", e)
+        log.warning("[tiktok] GET resolution failed (error=%s)", type(e).__name__)
 
     return url
 
 
-# ─────────────────── точные метаданные трека через DSP-идентификатор TikTok ───────────────────
-# TikTok кладёт в страницу видео tt2dsp.SongId — ID трека в Apple Music. По нему
-# бесплатный iTunes Lookup отдаёт настоящее название, исполнителя и обложку.
-# Это единственный доступный способ узнать трек для лицензированной музыки:
-# music_info у TikWM для таких звуков содержит только "original sound - хендл".
+# Exact track metadata via TikTok’s DSP identifier
+# TikTok puts tt2dsp.SongId in the video page — the track ID in Apple Music. Using it
+# the free iTunes Lookup API returns the real title, artist, and cover.
+# This is the only available way to identify the track for licensed music:
+# For such sounds, TikWM's music_info contains only "original sound - handle".
 _DSP_TRACK_CACHE: dict[str, dict[str, str] | None] = {}
 _DSP_TRACK_CACHE_MAX = 500
 
 
 def _cache_dsp_track(sound_id: str, value: dict[str, str] | None) -> None:
-    """Кэш с капом: без него словарь рос до рестарта (ревью 17.11.2026)."""
+    """Capped cache: without it, the dictionary grew until restart (review 17.11.2026)."""
     _DSP_TRACK_CACHE[sound_id] = value
     while len(_DSP_TRACK_CACHE) > _DSP_TRACK_CACHE_MAX:
         _DSP_TRACK_CACHE.pop(next(iter(_DSP_TRACK_CACHE)))
@@ -730,7 +780,7 @@ _DSP_PAGE_UAS = (
 
 
 def _find_tt2dsp_song_id(obj: Any) -> str | None:
-    """Ищет SongId в tt2dsp любого уровня вложенности страницы TikTok."""
+    """Finds SongId at any nesting level in a TikTok page's tt2dsp."""
     if isinstance(obj, dict):
         infos = obj.get("tt_to_dsp_song_infos")
         if isinstance(infos, list):
@@ -778,9 +828,9 @@ async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, uni
             ) as resp:
                 if resp.status != 200:
                     continue
-                # Страница TikTok и ответ iTunes читаются с капом, как и TikWM:
-                # без него скомпрометированный апстрим льёт в память без края
-                # (ревью 17.11.2026).
+                # The TikTok page and the iTunes response are read with a cap, like TikWM:
+                # without it, a compromised upstream can pour into memory without bound
+                # (review 17.11.2026).
                 raw_html = await _read_capped_body(resp, url, cap_bytes=2 * 1024 * 1024)
                 if raw_html is None:
                     continue
@@ -791,21 +841,22 @@ async def _tiktok_dsp_song_id(session: aiohttp.ClientSession, video_id: str, uni
             if song_id:
                 return song_id
         except Exception as exc:
-            log.info("[tiktok-music] DSP page fetch failed (%s), trying next UA/fallback: %s", type(exc).__name__, exc)
+            log.info("[tiktok-music] DSP page fetch failed (error=%s), trying next UA/fallback", type(exc).__name__)
     if hydration_seen:
-        # Страница TikTok валидна, но DSP-трека в ней нет: это оригинальный
-        # звук. Не выключаем DSP на 5 минут для следующих лицензированных
-        # треков (аудит 29.10.2026); этот sound_id уже закэширован как None.
+        # The TikTok page is valid, but has no DSP track: this is an original
+        # the sound. Do not disable DSP for 5 minutes for subsequent licensed
+        # tracks (audit 29.10.2026); this sound_id is already cached as None.
         return None
-    # TikTok не отдал разметку (антибот/сеть): не долбим его на каждой загрузке.
+    # TikTok returned no markup (anti-bot/network): do not hammer it on every download.
     _DSP_DISABLED_UNTIL = time.monotonic() + 300.0
     log.warning("[tiktok-music] DSP metadata unavailable for 5 minutes (TikTok page unreachable), using TikWM fields.")
     return None
 
 
 async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> tuple[dict[str, str] | None, bool]:
-    """(метаданные, был ли сбой временным). Временный сбой не кэшируем: иначе
-    один таймаут iTunes навсегда лишал трек точных полей (аудит 16.11.2026)."""
+    """(metadata indicating whether the failure was temporary). Do not cache temporary
+    failures: otherwise, a single iTunes timeout would permanently deprive the track
+    of exact fields (audit 16.11.2026)."""
     try:
         async with session.get(
             "https://itunes.apple.com/lookup",
@@ -813,10 +864,10 @@ async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> tuple[d
             timeout=aiohttp.ClientTimeout(total=6.0),
         ) as resp:
             if resp.status == 404:
-                # Песня реально не найдена — это окончательный ответ.
+                # The song is genuinely not found — this is the final response.
                 return None, False
             if resp.status != 200:
-                # 429/5xx — временный сбой: не кэшируем отрицательный итог.
+                # 429/5xx — a temporary failure: do not cache the negative outcome.
                 return None, True
             raw_json = await _read_capped_body(
                 resp, "https://itunes.apple.com/lookup", cap_bytes=1024 * 1024)
@@ -824,7 +875,7 @@ async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> tuple[d
                 return None, True
             payload = json.loads(raw_json.decode("utf-8", errors="ignore"))
     except Exception as exc:
-        log.info("[tiktok-music] iTunes lookup failed: %s", exc)
+        log.info("[tiktok-music] iTunes lookup failed (error=%s)", type(exc).__name__)
         return None, True
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list) or not results:
@@ -841,18 +892,18 @@ async def _itunes_track(session: aiohttp.ClientSession, song_id: str) -> tuple[d
 
 
 async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: dict) -> dict[str, str] | None:
-    """Точные метаданные лицензированного трека; None — оставляем поля TikWM."""
+    """Exact metadata for a licensed track; None means keep the TikWM fields."""
     music_info = media_data.get("music_info") or {}
-    sound_id = str(music_info.get("id") or "")
+    sound_id = _decimal_id(music_info.get("id"))
     if sound_id and sound_id in _DSP_TRACK_CACHE:
         return _DSP_TRACK_CACHE[sound_id]
     video_id = str(media_data.get("id") or "")
     unique_id = (media_data.get("author") or {}).get("unique_id") or ""
     if not video_id or not unique_id:
         return None
-    # None кэшируем только когда страница реально прочитана и DSP-трека в ней нет.
-    # Кулдаун/недоступность — не приговор звуку: иначе один антибот навсегда
-    # отправлял трек к полям TikWM до рестарта (внешний аудит 16.11.2026).
+    # Cache None only when the page was actually read and contains no DSP track.
+    # Cooldown/unavailability is not a death sentence for the audio; otherwise one anti-bot would forever
+    # sent the track to TikWM fields before restart (external audit 16.11.2026).
     was_paused = time.monotonic() < _DSP_DISABLED_UNTIL
     song_id = await _tiktok_dsp_song_id(session, video_id, unique_id)
     if not song_id:
@@ -864,7 +915,7 @@ async def _fetch_dsp_track_metadata(session: aiohttp.ClientSession, media_data: 
         _cache_dsp_track(sound_id, track)
     if track:
         log.info(
-            "[tiktok-music] DSP metadata: sound_id=%s song_id=%s title=%r artist=%r has_cover=%s",
-            sound_id, song_id, track["title"], track["artist"], bool(track.get("cover")),
+            "[tiktok-music] DSP metadata: sound_id=%s song_id=%s title_len=%d artist_len=%d has_cover=%s",
+            sound_id or "<invalid>", _decimal_id(song_id) or "<invalid>", len(track["title"]), len(track["artist"]), bool(track.get("cover")),
         )
     return track

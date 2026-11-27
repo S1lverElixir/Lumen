@@ -1,12 +1,8 @@
-"""
-test_lumen_model_speed.py — юнит-тесты на lumen_model_speed.py: EMA-оценки
-задержек, приор для новых моделей, адаптивный предел первого куска и
-переупорядочивание маршрута без нарушения порядка провайдерных блоков.
+"""test_lumen_model_speed.py — unit tests for lumen_model_speed.py: EMA latency estimates, a prior for new models, the adaptive first-chunk limit, and route reordering without disturbing provider block order.
 
-Часть разбиения тестов по модулям — см. test_lumen_security.py про общий
-принцип. Модуль не зависит от bot.py — тестируется напрямую.
+Part of the split into module-specific tests; see test_lumen_security.py for the general principle. The module does not depend on bot.py and is tested directly.
 
-Запуск:
+Run:
     pytest test_lumen_model_speed.py -v
 """
 import lumen_model_speed
@@ -48,8 +44,8 @@ def test_record_response_clamps_outliers_and_ignores_garbage():
 
 
 def test_record_response_without_ttf_keeps_ttf_ema():
-    # Аудит A2-4: нестриминговый ответ первого куска не видел — подстановка total
-    # в ttf-EMA завышала first_chunk_limit, зависшая голова держалась дольше.
+    # Audit A2-4: the non-streaming response to the first chunk was invisible — substitution of total
+    # in ttf-EMA inflated first_chunk_limit, so a stuck head stayed alive longer.
     _reset()
     key = lumen_model_speed.speed_key("openrouter", "m:free")
     lumen_model_speed.record_response(key, total_sec=30.0)
@@ -79,8 +75,8 @@ def test_reorder_route_sorts_within_consecutive_runs_only():
     lumen_model_speed.record_response(lumen_model_speed.speed_key(*fast), total_sec=5.0)
     route = [slow, ("gemini", "gemini-3.8-flash"), fast, ("openrouter", "openrouter/free")]
     reordered = lumen_model_speed.reorder_route(route)
-    # Блоки не склеиваются по провайдеру: медленная голова не переезжает через
-    # Gemini, порядок блоков остаётся кураторским (аудит 27.10.2026).
+    # Blocks are not merged by provider: a slow head does not move past
+    # Gemini; the block order remains curated (audit 27.10.2026).
     assert [m for _, m in reordered] == [
         "slow:free", "gemini-3.8-flash", "fast:free", "openrouter/free",
     ]

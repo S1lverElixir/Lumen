@@ -1,10 +1,10 @@
-"""Офлайн-проверка поискового контура на кейсах из недельного корпуса (eval/search_cases.json).
+"""Offline check of the search pipeline on cases from the weekly corpus (eval/search_cases.json).
 
-Без сети: триггер (_wants_web_search), формы запроса (plan_search_queries),
-интенты (detect_intents), вики-сигнал (_wants_game_wiki). Кейс, где регекс молчит,
-а искать надо — не провал: его закрывает агентный цикл (запросы пишет модель);
-такие помечаются «модель». Провал — регекс зовёт поиск там, где искать не нужно.
-Запуск: python eval/search_offline_check.py
+No network: trigger (_wants_web_search), query forms (plan_search_queries),
+intents (detect_intents), and wiki signal (_wants_game_wiki). A case where the regex is silent
+but a search is needed is not a failure: the agent loop handles it (the model writes the queries);
+such cases are marked “model.” A failure is the regex calling for a search where none is needed.
+Run: python eval/search_offline_check.py
 """
 import io
 import json

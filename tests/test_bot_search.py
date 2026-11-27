@@ -1,12 +1,12 @@
-"""
-test_bot_search.py — сквозные тесты внешнего поиска в _handle_message_core.
+"""test_bot_search.py — end-to-end tests of external search in _handle_message_core.
 
-Что защищают: инцидент 11.10.2026 — явная просьба "погугли" при мёртвой квоте
-2.5 шла на модели без поиска и отвечала по памяти. Первый тест ловит подклейку
-сниппетов в промпт, второй — честную пометку, когда и внешний поиск пуст.
-Квота гасится точечно (только поисковые Gemini), fetch мокается на границе I/O.
+What they protect: the 11.10.2026 incident — an explicit request to Google with an exhausted
+2.5 quota went to models without search and answered from memory. The first test catches
+snippet injection into the prompt; the second catches the honest note when external search is
+also empty. The quota is disabled selectively (search Gemini only); fetch is mocked at the I/O
+boundary.
 
-Запуск:
+Run:
     pytest tests/test_bot_search.py -v
 """
 import asyncio
@@ -49,9 +49,9 @@ def test_explicit_search_request_gets_snippets_without_live_search(rate_guard_se
 
 
 def test_past_chat_reference_does_not_run_external_search(rate_guard_setup, monkeypatch):
-    # Замер 11.11.2026: «помнишь, мы вчера обсуждали ремонт?» считалось свежим
-    # вопросом из-за слова «вчера» — поиск запускался и ответ получал пометку
-    # «без интернета». Ссылка на прошлый разговор — это вопрос к памяти чата.
+    # Measurement 11.11.2026: "remember, we discussed repairs yesterday?" was considered fresh
+    # a question because of the word "yesterday" — the search started, and the answer received a mark
+    # "without the internet". A link to a past conversation is a question to the chat's memory.
     message = rate_guard_setup()
     message.text = "помнишь, мы вчера обсуждали ремонт? что ты советовал про плитку"
     _kill_search_quota(monkeypatch)
@@ -68,15 +68,15 @@ def test_past_chat_reference_does_not_run_external_search(rate_guard_setup, monk
     monkeypatch.setattr(bot, "_run_route", fake_run_route)
     asyncio.run(bot._handle_message_core(message))
     assert calls == []
-    # Пометку сверяем с фактическим текстом ключа, а не выдуманной подстрокой:
-    # «without live web search» ни в одном языковом пакете не существует.
+    # Check the marker against the actual key text, not a made-up substring:
+    # "without live web search" does not exist in any language pack.
     assert bot._t(123, "fallback_no_live_search") not in bot._safe_reply.await_args[0][1]
     bot.chat_state.pop(123, None)
 
 
 def test_bare_time_word_reply_does_not_run_external_search(rate_guard_setup, monkeypatch):
-    # Корпус недели (15.11.2026): голая реплика «вчера» ловилась регексом свежести —
-    # поиск запускался на реакцию, не на вопрос.
+    # Week's corpus (15.11.2026): a bare "yesterday" reply matched the freshness regex—
+    # search was triggered by the reaction, not the question.
     message = rate_guard_setup()
     message.text = "вчера"
     _kill_search_quota(monkeypatch)
@@ -97,21 +97,21 @@ def test_bare_time_word_reply_does_not_run_external_search(rate_guard_setup, mon
 
 
 def test_bare_time_word_guard_does_not_hide_real_fresh_questions():
-    # Настоящий вопрос со словом «сегодня» по-прежнему ищется.
+    # A real question with the word "today" still triggers search.
     assert lumen_message_core._wants_web_search("что сегодня идёт по телевизору") is True
     assert lumen_message_core._wants_web_search("вчера") is False
     assert lumen_message_core._wants_web_search("сегодня!") is False
-    # Эмодзи, скобки и NBSP не делают реакцию вопросом (ревью 16.11.2026).
+    # Emoji, parentheses, and NBSP do not make a response a question (review 16.11.2026).
     assert lumen_message_core._wants_web_search("вчера 😢") is False
     assert lumen_message_core._wants_web_search("(вчера)") is False
     assert lumen_message_core._wants_web_search("вчера\u00a0?") is False
-    # Реплика с содержанием рядом со словом времени — не реакция.
+    # A reply with content next to a time word is not a reaction.
     assert lumen_message_core._wants_web_search("а вчера?") is True
 
 
 def test_release_status_question_runs_external_search(rate_guard_setup, monkeypatch):
-    # Тот же замер: «вышёл ли финал» — вопрос о текущем состоянии дела, на таком
-    # ищут, а классификатор молчал, и модель отвечала по памяти.
+    # Same measurement: "has the finale aired" asks about the current state of affairs; on such
+    # search, while the classifier stayed silent, and the model answered from memory.
     message = rate_guard_setup()
     message.text = "что нового в пятом сезоне очень странных дел, вышел ли финал"
     seen = []
@@ -147,7 +147,7 @@ def test_empty_fallback_search_marks_reply_without_live_search(rate_guard_setup,
 
 
 def test_disabled_search_marks_reply_without_live_search(rate_guard_setup, monkeypatch):
-    # Ревью: выключенный свитч при мёртвой квоте молча отвечал по памяти — пометка обязана быть.
+    # Review: with the switch off and an exhausted quota, it silently answered from memory — the note is mandatory.
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
     _kill_search_quota(monkeypatch)
@@ -168,9 +168,9 @@ def test_disabled_search_marks_reply_without_live_search(rate_guard_setup, monke
 
 
 def test_fresh_query_with_live_gemini_still_gets_external_snippets(rate_guard_setup, monkeypatch):
-    # Раньше сниппеты подставлялись только когда в маршруте не оставалось
-    # grounding-моделей; теперь искать обязана любая ответившая модель, в том
-    # числе резервная после 429 у Gemini (прод 28.10.2026).
+    # Previously, snippets were inserted only when the route had no
+    # grounding models; now any responding model must search, including
+    # in number, the reserve after a Gemini 429 (production 28.10.2026).
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
     captured: dict = {}
@@ -180,8 +180,8 @@ def test_fresh_query_with_live_gemini_still_gets_external_snippets(rate_guard_se
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         captured["prompt"] = ai_prompt
-        # Отвечает grounding-модель: пост-хок ретрай не должен маскировать
-        # отсутствие предварительной подстановки.
+        # The grounding model answers: the post-hook retry must not mask
+        # no prior substitution.
         provenance = kwargs.get("provenance")
         if isinstance(provenance, dict):
             provenance.update(provider="gemini", model="gemini-2.5-flash-lite")
@@ -195,8 +195,8 @@ def test_fresh_query_with_live_gemini_still_gets_external_snippets(rate_guard_se
 
 
 def test_fresh_query_status_shows_search_then_thinking(rate_guard_setup, monkeypatch):
-    # Живой статус: до поиска «Ищу в интернете», после — счётчик источников и
-    # «Думаю…» с таймером; тот же пузырь уходит в маршрут под ответ.
+    # Live status: before search, “Searching the internet”; after — a source counter and
+    # "Thinking..." with a timer; the same bubble goes to the route as the answer.
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
     fake_status = _FakeStatus()
@@ -227,9 +227,9 @@ def test_fresh_query_status_shows_search_then_thinking(rate_guard_setup, monkeyp
 
 
 def test_status_start_is_deleted_when_pre_route_setup_raises(rate_guard_setup, monkeypatch):
-    # Прод 23.11.2026: статус ссылки пережил свой запрос и тикал поверх следующих.
-    # Startup-task создаётся до основного try; сбой сборки промпта не должен
-    # оставлять ни задачу, ни пузырь в чате.
+    # Prod 23.11.2026: a link status outlived its request and kept ticking over subsequent ones.
+    # The startup task is created before the main try; a prompt-building failure must not
+    # leave neither the task nor the bubble in the chat.
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
     fake_status = _FakeStatus()
@@ -257,8 +257,8 @@ def test_status_start_is_deleted_when_pre_route_setup_raises(rate_guard_setup, m
 
 
 def test_empty_external_search_with_grounded_answer_has_no_note(rate_guard_setup, monkeypatch):
-    # Прод 28.10.2026: внешний поиск пуст, но ответила Gemini со встроенным
-    # поиском — пометка «без поиска» была бы ложью.
+    # Prod 28.10.2026: external search was empty, but Gemini replied with its built-in
+    # with search — a "no search" marker would be a lie.
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
 
@@ -280,9 +280,9 @@ def test_empty_external_search_with_grounded_answer_has_no_note(rate_guard_setup
 
 
 def test_daily_limit_still_gets_external_search_snippets(rate_guard_setup, monkeypatch):
-    # Дневной лимит Gemini не отключает внешний поиск: сниппеты едут резерву
-    # (Munito), иначе он отвечает по памяти (задумка поиска — искать умеет не
-    # только Gemini).
+    # The Gemini daily limit does not disable external search: snippets go to the reserve
+    # (Munito), otherwise it answers from memory (the idea behind search is that not
+    # only Gemini).
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
@@ -305,13 +305,13 @@ def test_daily_limit_still_gets_external_search_snippets(rate_guard_setup, monke
     assert captured["allow_stream"] is True
     sent_text = bot._safe_reply.await_args[0][1]
     assert "without web search" not in sent_text
-    # Соседняя пометка «без живого поиска» — отдельный ключ (ревью 17.11.2026).
+    # The neighboring "without live search" note is a separate key (review 17.11.2026).
     assert bot._t(123, "fallback_no_live_search") not in sent_text
     bot.chat_state.pop(123, None)
 
 
 def test_daily_limit_with_empty_search_keeps_no_search_note(rate_guard_setup, monkeypatch):
-    # Если и внешний поиск пуст — пометка «без поиска» обязана остаться.
+    # If external search is also empty, the "no search" marker must remain.
     message = rate_guard_setup()
     message.text = "погугли что происходит с ДЦ Яндекса"
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
@@ -335,8 +335,8 @@ def test_daily_limit_with_empty_search_keeps_no_search_note(rate_guard_setup, mo
 
 
 def test_guest_message_never_streams(rate_guard_setup, monkeypatch):
-    # Аудит 28.10.2026: гостевой ответ уходит через answerGuestQuery, а не
-    # правкой сообщения — стрим редактировал бы несуществующее сообщение.
+    # Audit 28.10.2026: the guest answer goes through answerGuestQuery, not
+    # by editing the message: the stream would edit a nonexistent message.
     message = rate_guard_setup()
     message.text = "привет"
     message.guest_query_id = "g1"
@@ -354,10 +354,10 @@ def test_guest_message_never_streams(rate_guard_setup, monkeypatch):
 
 
 def test_freshness_prompt_carries_today_date(rate_guard_setup, monkeypatch):
-    # Контекст даты (eval 22.10.2026): модели без живого поиска не знали текущую
-    # дату и строили «завтра» по догадке. Дата обязана уехать в промпт свежего
-    # вопроса и соответствовать сегодняшнему дню в Москве — зашитая константа
-    # или опечатка формата поймаются сравнением с живым now.
+    # Date context (eval 22.10.2026): models without live search did not know the current
+    # the date and guessed "tomorrow". The date must be sent to the fresh
+    # the question and match today's date in Moscow — a hardcoded constant
+    # or a format typo will be caught by comparison with the live now.
     message = rate_guard_setup()
     message.text = "какая сегодня погода в Москве"
     captured: dict = {}
@@ -381,9 +381,10 @@ def test_freshness_prompt_carries_today_date(rate_guard_setup, monkeypatch):
 
 
 def test_non_freshness_prompt_has_no_date_context(rate_guard_setup, monkeypatch):
-    # Болтовня (skip-лист зоны 2) дату не получает вовсе; содержательный вопрос
-    # без слов свежести дату получает — модель решает «устарело ли моё знание»
-    # (ревью 16.11.2026), свежие вопросы — как и раньше.
+    # Small talk (the zone 2 skip list) gets no date at all; a substantive question
+    # freshness words, it still gets a date; the model decides "whether my knowledge
+    # is stale"
+    # (review 16.11.2026), fresh questions — as before.
     message = rate_guard_setup()
     message.text = "спасибо"
     captured: dict = {}
@@ -411,11 +412,10 @@ def test_non_freshness_prompt_has_no_date_context(rate_guard_setup, monkeypatch)
 
 
 def test_zone2_respects_agent_max_searches_zero_kill_switch(rate_guard_setup, monkeypatch):
-    # AGENT_MAX_SEARCHES=0 — килл-свитч владельца: флор зоны 2 не имеет права
-    # поднимать его до единицы, иначе глушение работало бы асимметрично
-    # (ревью 16.11.2026). Форма «шпион + подменённая голова»: без головы цикл
-    # пропускался бы ещё до флора, а AssertionError из шпиона глотался бы
-    # except'ом — тест был бы пустым.
+    # AGENT_MAX_SEARCHES=0 is the owner's kill switch: zone-2 flora must not raise it to one,
+    # otherwise muting would work asymmetrically (review 16.11.2026). The "spy + substituted
+    # head" form matters: without a head, the cycle would be skipped before the floor, and
+    # an AssertionError from the spy would be swallowed by except, leaving an empty test.
     message = rate_guard_setup()
     message.text = "скок стоит терминал старлинк"
     monkeypatch.setenv("AGENT_MAX_SEARCHES", "0")
@@ -437,9 +437,9 @@ def test_zone2_respects_agent_max_searches_zero_kill_switch(rate_guard_setup, mo
     bot.chat_state.pop(123, None)
 
 def test_anaphoric_followup_searches_with_previous_topic(rate_guard_setup, monkeypatch):
-    # Замер 11.11.2026: на «а кто был до неё» движок получало местоимение и не находил
-    # ничего. Тема продолжения — из прошлого вопроса того же чата, и сам такой
-    # вопрос тоже обязан запускать поиск, иначе ответ строится по памяти.
+    # Measured 11.11.2026: for "and who came before her," the engine received a pronoun and could not find
+    # anything. The continuation topic comes from the previous question in the same chat, and such a
+    # the question must also trigger search; otherwise the answer is built from memory.
     message = rate_guard_setup()
     message.text = "а кто был до неё"
     state = {"history": [{"role": "user", "content": "кто сейчас возглавляет Центральный банк России"}]}
@@ -458,12 +458,13 @@ def test_anaphoric_followup_searches_with_previous_topic(rate_guard_setup, monke
     bot.chat_state.pop(123, None)
 
 
-# ── зона 2: регекс молчал — решает модель агент-цикла ──
+# ── zone 2: the regex was silent — the agent-loop model decides ──
 
 def test_zone2_substantive_message_searches_via_agent_turn(rate_guard_setup, monkeypatch):
-    # Прод 15.11.2026: «есть ли theoneprobe на 1.7.10» — регекс свежести молчал,
-    # агент-цикл не звался вовсе, ответ уходил по памяти. Зона 2: содержательное
-    # сообщение без свежести тоже идёт в цикл, найденное попадает в промпт.
+    # Prod 15.11.2026: "is theoneprobe available for 1.7.10" — the freshness regex stayed silent,
+    # the agent loop was never invoked, and the answer relied on memory. Zone 2: substantive
+    # a message without freshness also enters the loop, and the result goes into the
+    # prompt.
     message = rate_guard_setup()
     message.text = "скок стоит терминал старлинк"
     captured: dict = {}
@@ -494,8 +495,8 @@ def test_zone2_substantive_message_searches_via_agent_turn(rate_guard_setup, mon
         captured["prompt"] = ai_prompt
         return "ок", False
 
-    # В тестовом окружении ключа Munito нет и маршрут собирается без него:
-    # для зоны 2 подменяем голову, иначе цикл молча пропускается (head=None).
+    # The test environment has no Munito key, so the route is built without it:
+    # for zone 2, replace the head; otherwise, the loop is silently skipped (head=None).
     monkeypatch.setattr("lumen_message_core._munito_head", lambda route: "deepseek-ai/deepseek-v4.1-flash-1017")
     monkeypatch.setattr("lumen_agent.run_search_turn", fake_turn)
     monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
@@ -509,8 +510,8 @@ def test_zone2_substantive_message_searches_via_agent_turn(rate_guard_setup, mon
 
 
 def test_zone2_model_decline_is_normal_no_no_search_note(rate_guard_setup, monkeypatch):
-    # Отказ модели искать в зоне 2 — норма: пометка «без live-поиска» на
-    # несвежем вопросе была бы ложью, фолбэк-фетч по сырой фразе — болтовнёй.
+    # A model's refusal to search in zone 2 is normal: the “no live search” mark on
+    # on a stale question would be a lie, and a fallback fetch using the raw phrase would be nonsense.
     message = rate_guard_setup()
     message.text = "скок стоит терминал старлинк"
 
@@ -540,20 +541,20 @@ def test_zone2_model_decline_is_normal_no_no_search_note(rate_guard_setup, monke
     asyncio.run(bot._handle_message_core(message))
     texts = _outgoing_texts()
     assert any("около $349" in t for t in texts), "ответ обязан доехать без поиска"
-    # Пометка сверяется с фактическим текстом ключей (ревью 16.11.2026: прежний
-    # ассерт ловил подстроку, которой ни в одном языковом пакете нет).
+    # The marker is checked against the actual key text (review 16.11.2026: the previous
+    # the assertion caught a substring absent from every language pack).
     assert not any(bot._t(123, "fallback_no_live_search") in t for t in texts)
     assert not any(bot._t(123, "fallback_no_search") in t for t in texts)
     bot.chat_state.pop(123, None)
 
 
 def test_zone2_chatter_skips_agent_turn(rate_guard_setup, monkeypatch):
-    # Болтовня не зовёт цикл: каждый лишний планирующий вызов — секунда и токены.
+    # Small talk does not invoke the loop: every extra planning call costs a second and tokens.
     message = rate_guard_setup()
     message.text = "спасибо"
 
-    # Рекордер, а не исключение в моке: вызов обёрнут в except Exception и глотался,
-    # поэтому «упавший» тест оставался зелёным (ревью 17.11.2026).
+    # A recorder, not an exception in the mock: the call was wrapped in except Exception and
+    # swallowed, so a "failing" test stayed green (review 17.11.2026).
     calls = []
 
     async def record_turn(**kwargs):
@@ -570,13 +571,11 @@ def test_zone2_chatter_skips_agent_turn(rate_guard_setup, monkeypatch):
     bot.chat_state.pop(123, None)
 
 
-# ── решение о поиске принимает сама модель: маркер [[SEARCH]] ──
+# The model itself decides whether to search: the [[SEARCH]] marker
 
 
 def _stream_turns(monkeypatch, turns):
-    """Куски Gemini-стрима по списку на каждый проход маршрута: первый ответ —
-    маркер, второй — заземлённый текст. Подменяется клиент, а не код стрима,
-    чтобы `_run_streaming_reply` шёл боевым путём."""
+    """Gemini stream chunks listed for each route pass: the first response is a marker, the second is grounded text. The client is replaced, not the streaming code, so `_run_streaming_reply` follows the production path."""
     queue = [list(t) for t in turns]
 
     async def _stream(*, model, contents, config=None):
@@ -593,7 +592,7 @@ def _stream_turns(monkeypatch, turns):
 
 
 def _outgoing_texts():
-    """Всё, что ушло в Telegram: к транспорту ведут только _tg_call и _safe_reply."""
+    """Everything sent to Telegram: only _tg_call and _safe_reply lead to the transport."""
     out = []
     for call in bot._tg_call.await_args_list:
         for value in list(call.args[1:]) + list(call.kwargs.values()):
@@ -607,8 +606,9 @@ def _outgoing_texts():
 
 
 def _routing_penalty_spies(monkeypatch):
-    """Счётчики всего, что вычёркивает модель из роутинга: просьба поиска — не
-    её отказ, ни один из этих хуков дёрнут быть не должен."""
+    """Counters for everything that makes the model strike something from routing:
+    a search request is not a refusal by the model, and none of these hooks
+    should fire."""
     import lumen_routes
     marks: list = []
     monkeypatch.setattr(bot, "_mark_rate_limited", lambda provider, model_id: marks.append("rate_limited"))
@@ -627,7 +627,7 @@ def _routing_penalty_spies(monkeypatch):
 
 
 def _route_spy(monkeypatch):
-    """Промпт и allow_stream каждого прохода маршрута под боевым _run_route."""
+    """Prompt and allow_stream of each route pass under the production _run_route."""
     calls: list = []
     real_run_route = bot._run_route
 
@@ -640,15 +640,15 @@ def _route_spy(monkeypatch):
 
 
 def _kill_classifier(monkeypatch):
-    # Список слов глушим намеренно: проверяется второй механизм, он обязан
-    # работать и там, где классификатор формулировку не узнал.
+    # Suppress the word list deliberately: this tests the second mechanism, which must
+    # work even where the classifier did not recognize the wording.
     monkeypatch.setattr("lumen_message_core._wants_web_search", lambda text, *, previous="": False)
 
 
 def test_model_search_marker_retries_with_snippets_and_shows_second_answer(rate_guard_setup, monkeypatch):
-    # Скрины из группы 11.11.2026: на «когда вышла Fable 5.2» был ответ «такой
-    # модели нет» без поиска. Модель теперь просит поиск сама маркером, и первый
-    # проход с маркером не имеет права показаться.
+    # Group screenshots 11.11.2026: "when did Fable 5.2 come out" received "no such
+    # model is absent' without searching. The model now requests search itself with a marker, and the first
+    # the pass with a marker must not appear.
     message = rate_guard_setup()
     message.text = "когда вышла Fable 5.2"
     _kill_classifier(monkeypatch)
@@ -676,8 +676,8 @@ def test_model_search_marker_retries_with_snippets_and_shows_second_answer(rate_
 
 
 def test_model_search_marker_without_snippets_does_not_lose_the_answer(rate_guard_setup, monkeypatch):
-    # Поиск по маркеру пуст: человек всё равно обязан получить ответ, а не пустой
-    # пузырь и не служебную строку.
+    # The marker search is empty: the person must still receive an answer, not an empty
+    # the bubble, not a service line.
     message = rate_guard_setup()
     message.text = "когда вышла Fable 5.2"
     _kill_classifier(monkeypatch)
@@ -701,8 +701,8 @@ def test_model_search_marker_without_snippets_does_not_lose_the_answer(rate_guar
 
 
 def test_answer_without_marker_streams_and_never_searches(rate_guard_setup, monkeypatch):
-    # Обычный ответ не должен ни дождаться поиска, ни лишиться живой печати:
-    # маркер ловится только в ответе, который состоит из маркера.
+    # An ordinary answer must neither wait for search nor lose live typing:
+    # the marker is caught only in a response consisting solely of the marker.
     message = rate_guard_setup()
     message.text = "объясни, как работает рекурсия"
     _kill_classifier(monkeypatch)
@@ -722,9 +722,9 @@ def test_answer_without_marker_streams_and_never_searches(rate_guard_setup, monk
 
 
 def test_search_marker_never_reaches_the_chat_inside_an_answer():
-    # Модель поставила маркер и всё равно написала ответ: служебный знак обязан
-    # срезаться, а не уезжать в чат (замер 11.11.2026 — маркер видела только
-    # ветка «только маркер», примесь в тексте показывалась как есть).
+    # The model emitted the marker and still wrote an answer: the internal token must
+    # be truncated instead of going to chat (measurement 11.11.2026 — only the marker saw
+    # the "marker only" branch; the admixture in the text was displayed as is).
     import lumen_routes
     assert lumen_routes._raise_if_search_requested("[[SEARCH]] Обычный ответ", "munito", "m-x") == "Обычный ответ"
     assert lumen_routes._raise_if_search_requested("Обычный ответ", "munito", "m-x") == "Обычный ответ"

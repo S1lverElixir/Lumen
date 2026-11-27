@@ -1,8 +1,8 @@
-"""Живой зонд внешнего поиска: находит ли новый слой ответ на вопрос со свежими данными.
+"""Live external-search probe: whether the new layer finds an answer to a question requiring fresh data.
 
-Меряет не «пришлились ли сниппеты», а «есть ли в блоке ответ»: для каждого кейза
-заданы обязательные токены. Без ключей и без секретов; сеть — публичные источники.
-Запуск: python eval/search_parity_probe.py
+Measures not “whether snippets arrived,” but “whether the block contains an answer”: each case
+has required tokens. No keys or secrets; network access is to public sources.
+Run: python eval/search_parity_probe.py
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 import lumen_search  # noqa: E402
 
-# (вопрос, обязательные токены в блоке, ждём ли хоть один результат)
+# (question, required tokens in the block, whether we expect at least one result)
 CASES = [
     ("Привет! Подскажи, пожалуйста, а кто сейчас возглавляет Центральный банк России?",
      ["набиуллина"], True),
@@ -29,7 +29,7 @@ CASES = [
     ("последние новости Беларуси сегодня", ["беларус"], True),
     ("what is the latest official unemployment rate in the US", ["unemploy"], True),
     ("какой процессор лучше купить для игр в 2026", ["процессор"], True),
-    # Кейсы, где честный ответ — «в источниках этого нет»: молчание здесь правильно.
+    # Cases where an honest answer is “the sources do not contain this”: silence is correct here.
     ("кто такая Абдулманова Угона", [], False),
 ]
 
@@ -57,7 +57,7 @@ async def main() -> int:
         passed += int(ok)
         print(f"{'OK  ' if ok else 'MISS'} {question[:58]!r} — {detail}")
     print(f"\nИтого: {passed}/{len(CASES)}")
-    # Ненулевой код при MISS: иначе провал пробы невиден (ревью 17.11.2026).
+    # Nonzero exit code on MISS: otherwise a probe failure is invisible (review 17.11.2026).
     return 0 if passed == len(CASES) else 1
 
 

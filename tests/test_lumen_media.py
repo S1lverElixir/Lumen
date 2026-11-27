@@ -1,7 +1,7 @@
-"""
-test_lumen_media.py — юнит-тесты на чистые утилиты lumen_media.py (mime-типы,
-суффиксы файлов). Модуль без зависимости от рантайма бота, тестируется
-напрямую (import lumen_media), без импорта bot.py.
+"""test_lumen_media.py contains unit tests for the pure utilities in
+lumen_media.py (MIME types, file suffixes). The module does not depend on the
+bot runtime and is tested directly (import lumen_media), without importing
+bot.py.
 """
 import mimetypes
 
@@ -9,7 +9,7 @@ import lumen_media
 
 
 def test_mime_suffix_rejects_hostile_subtype():
-    # Аудит A6-5: неизвестный subtype уходил в имя tmp-файла как есть.
+    # Audit A6-5: an unknown subtype went into the tmp filename as is.
     assert lumen_media._mime_suffix("image/../../x") == ".bin"
     assert lumen_media._mime_suffix("audio/x-unknown") == ".bin"
     assert lumen_media._mime_suffix("image/png") == ".png"
@@ -17,8 +17,8 @@ def test_mime_suffix_rejects_hostile_subtype():
 
 
 def test_sanitize_mime_uses_builtin_map_without_system_guess(monkeypatch):
-    # Аудит A6-10: ext_map не знал .md/.py/.js/.css — на системах без них в
-    # системной таблице файлы уходили в octet-stream.
+    # Audit A6-10: ext_map did not know .md/.py/.js/.css — on systems without them in
+    # in the system table, files were sent as octet-stream.
     monkeypatch.setattr(mimetypes, "guess_type", lambda *args, **kwargs: (None, None))
     assert lumen_media._sanitize_mime_type("notes.md", None) == "text/markdown"
     assert lumen_media._sanitize_mime_type("x.py", None) == "text/x-python"

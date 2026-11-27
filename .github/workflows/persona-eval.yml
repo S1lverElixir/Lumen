@@ -56,6 +56,10 @@ jobs:
       - name: Persona eval
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # R9-02 (аудит 26.11.2026): в дефолтном списке есть munito-модели, а
+          # ключ не передавался — eval падал на первом таргете. Секрет обязан
+          # существовать в репозитории (имена смотрят gh secret list).
+          MUNITO_API_KEY: ${{ secrets.MUNITO_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           # Входы workflow_dispatch идут в окружение, а не в текст скрипта:

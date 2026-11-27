@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   buildForwardHeaders,
   buildResponseHeaders,
+  handleReadPage,
   handleRequest,
   isPrivateAddress,
   PROXY_AUTH_HEADER,
@@ -29,10 +30,12 @@ test("target resolution keeps the allowlist and path rules", () => {
 });
 
 test("private addresses cover the usual ranges", () => {
-  for (const ip of ["127.0.0.1", "10.1.2.3", "169.254.169.254", "192.168.1.1", "::1", "fc00::1", "fe80::1", "2002::1", "64:ff9b::1"]) {
+  // R6-05: special-purpose внутри 2000::/3 из IANA registry.
+  for (const ip of ["127.0.0.1", "10.1.2.3", "169.254.169.254", "192.168.1.1", "::1", "fc00::1", "fe80::1", "2002::1", "64:ff9b::1", "2001:db8::1", "2001:2::1", "2001:10::1", "2001:20::1", "2001:1::1", "3000::1", "2620:4f80::1"]) {
     assert.equal(isPrivateAddress(ip), true, ip);
   }
   assert.equal(isPrivateAddress("93.184.216.34"), false);
+  assert.equal(isPrivateAddress("2606:2800:220:1::1"), false);
 });
 
 test("read target rejects literals, ports and private DNS answers", async () => {
@@ -53,7 +56,14 @@ test("missing or wrong secret is rejected before any upstream call", async () =>
   }) as typeof fetch;
   const noSecret = await handleRequest(new Request("https://proxy/fetch/api.telegram.org/bot1/x"), fakeFetch, undefined);
   assert.equal(noSecret.status, 503);
-  const wrong = await handleRequest(new Request("https://proxy/fetch/api.telegram.org/bot1/x"), fakeFetch, SECRET);
+  const wrongSecret = "y".repeat(40);
+  assert.notEqual(wrongSecret, SECRET);
+  const wrong = await handleRequest(
+    new Request("https://proxy/fetch/api.telegram.org/bot1/x", {
+      headers: { [PROXY_AUTH_HEADER]: wrongSecret },
+    }),
+    fakeFetch, SECRET,
+  );
   assert.equal(wrong.status, 401);
   assert.equal(called, 0);
 });
@@ -172,7 +182,7 @@ test("upstream timeout is 504", async () => {
   assert.equal(resp.status, 504);
 });
 
-test("response body over the cap is truncated in close mode", async () => {
+test("response body over the cap is cut with an error", async () => {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       // Кап режет по границам чанков, как Deno-релей: первый чанк ровно 4.
@@ -186,7 +196,10 @@ test("response body over the cap is truncated in close mode", async () => {
     new Request("https://proxy/fetch/api.telegram.org/bot1/getMe", { headers: { [PROXY_AUTH_HEADER]: SECRET } }),
     fakeFetch, SECRET, 4,
   );
-  assert.equal(await resp.text(), "abcd");
+  // Ревью 26.11.2026: /fetch у обоих релеев рвётся ошибкой (mode "error"),
+  // обрезка close осталась только у /read.
+  assert.equal(resp.status, 200);
+  await assert.rejects(() => resp.text(), /exceeds 4 byte cap/);
 });
 
 test("read route: method, content type, status and redirect are enforced", async () => {
@@ -223,4 +236,88 @@ test("full and mapped IPv6 forms are private", () => {
     const expected = ip !== "2606:4700:4700::1111";
     assert.equal(isPrivateAddress(ip), expected, ip);
   }
+});
+
+// ── Паритет I18 (аудит 26.11.2026): R6-02/03/04 в /read. ──
+
+test("read: кап отменяет апстрим, а не досчитывает его до EOF", async () => {
+  // R6-02: раньше остаток после капа вычитывался весь — поток тянул трафик
+  // и время, пока апстрим сам не закроется.
+  let cancelled = false;
+  let pulled = 0;
+  const src = new ReadableStream<Uint8Array>({
+    pull(c) {
+      pulled += 1;
+      if (pulled > 512) { c.close(); return; }
+      c.enqueue(new Uint8Array(1024));
+    },
+    cancel() { cancelled = true; },
+  });
+  const capped = warnOnTruncation(src, 4 * 1024, "example.com", "close");
+  const body = await new Response(capped).arrayBuffer();
+  assert.ok(body.byteLength <= 5 * 1024, "тело не перерастает кап больше чем на чанк");
+  assert.ok(cancelled, "апстрим обязан быть отменён на капе");
+  assert.ok(pulled < 512, "остаток не должен вычитываться досуха: pulls=" + pulled);
+});
+
+test("read: отказ по типу, статусу и редиректу отменяет непрочитанное тело", async () => {
+  // R6-03: тело отказного ответа раньше оставалось неоткрытым на соединении.
+  // У workers redirect:"manual", поэтому ветка 3xx здесь тоже своя.
+  const mkSpy = (status: number, contentType: string) => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) { c.enqueue(new Uint8Array(16)); },
+      cancel() { cancelled = true; },
+    });
+    return {
+      res: () => Promise.resolve(new Response(stream, { status, headers: { "content-type": contentType } })),
+      isCancelled: () => cancelled,
+    };
+  };
+  const u = new URL("https://proxy.test/read?url=" + encodeURIComponent("https://example.com/"));
+  const req = new Request(u);
+  const pubDns = async () => ["93.184.216.34"];
+  const png = mkSpy(200, "image/png");
+  assert.equal((await handleReadPage(req, u, png.res as typeof fetch, pubDns)).status, 415);
+  assert.ok(png.isCancelled(), "415 обязан отменить тело апстрима");
+  const err500 = mkSpy(500, "text/html");
+  assert.equal((await handleReadPage(req, u, err500.res as typeof fetch, pubDns)).status, 502);
+  assert.ok(err500.isCancelled(), "нестандовый статус обязан отменить тело апстрима");
+  const redir = mkSpy(302, "text/html");
+  assert.equal((await handleReadPage(req, u, redir.res as typeof fetch, pubDns)).status, 502);
+  assert.ok(redir.isCancelled(), "редирект обязан отменить тело апстрима");
+});
+
+test("read: дедлайн тикает и во время DNS", async () => {
+  // R6-04: AbortSignal.timeout создавался после резолва — медленный DNS не
+  // ограничивался ничем. Теперь дедлайн начинается с начала запроса.
+  const u = new URL("https://proxy.test/read?url=" + encodeURIComponent("https://example.com/"));
+  let fetched = false;
+  const slowDns = () => new Promise<string[]>((res) => setTimeout(() => res(["93.184.216.34"]), 60));
+  const fetchImpl = (async () => {
+    fetched = true;
+    return new Response("<p>x</p>", { headers: { "content-type": "text/html" } });
+  }) as typeof fetch;
+  const res = await handleReadPage(new Request(u), u, fetchImpl, slowDns, 20);
+  assert.equal(res.status, 504);
+  assert.ok(!fetched, "fetch не должен стартовать после истечения дедлайна");
+});
+
+test("read: зависший DNS отсекается дедлайном, а не дожидается резолвера", async () => {
+  // Ревью 26.11.2026 (R6-04): без гонки DNS-и-дедлайн висячий резолв
+  // переживал readTimeoutMs; здесь резолвер не возвращается никогда.
+  const u = new URL("https://proxy.test/read?url=" + encodeURIComponent("https://example.com/"));
+  let fetched = false;
+  const hangDns = () => new Promise<string[]>(() => {});
+  const fetchImpl = (async () => {
+    fetched = true;
+    return new Response("<p>x</p>", { headers: { "content-type": "text/html" } });
+  }) as typeof fetch;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<"hang">((res) => { timer = setTimeout(() => res("hang"), 500); });
+  const raced = await Promise.race([handleReadPage(new Request(u), u, fetchImpl, hangDns, 20), guard]);
+  clearTimeout(timer);
+  assert.notEqual(raced, "hang", "зависший резолв не должен переживать дедлайн");
+  assert.equal((raced as Response).status, 504);
+  assert.ok(!fetched);
 });

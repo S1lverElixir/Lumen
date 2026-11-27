@@ -1,22 +1,22 @@
-"""Замер персоны по моделям: гоняет вопросы из docs/PROMPT_EVAL.md и ставит баллы по той же шкале.
+"""Persona measurement across models: runs questions from docs/PROMPT_EVAL.md and scores them on the same scale.
 
-Зачем: вопрос «какая голова маршрута отвечает ближе к персоне» решается замером,
-а не вкусом. Скрипт собирает запросы ровно так, как их собирает бот (системный
-промпт из lumen_errors.get_system_prompt, боевой payload со `reasoning_effort`
-для Munito), отдаёт ответы LLM-судье по рубрике PROMPT_EVAL.md и печатает
-таблицу «модель → сумма баллов».
+Why: the question “which route head answers closer to the persona” is settled by measurement,
+not taste. The script builds requests exactly as the bot does (the system
+prompt from lumen_errors.get_system_prompt and the production payload with `reasoning_effort`
+for Munito), sends the answers to an LLM judge using the PROMPT_EVAL.md rubric, and prints
+a “model → total score” table.
 
-Ключи провайдеров берутся из переменных окружения, из .env в корне репозитория, а если
-его там нет (worktree не получает файл из .gitignore) — из основного дерева: путь можно
-передать переменной LUMEN_ENV_DIR (тот же порядок, что в eval/agent_loop_probe.py).
-Интервал между вызовами — EVAL_CALL_GAP_SEC (по умолчанию 2 с). Значения ключей нигде
-не печатаются и не пишутся в отчёт.
+Provider keys come from environment variables and .env in this worktree's root
+(the path is derived from the script location). For .env outside the worktree, set LUMEN_ENV_DIR;
+the owner's machine path is not assumed by default.
+The interval between calls is EVAL_CALL_GAP_SEC (2 s by default). Key values are never
+printed or written to the report.
 
     python eval/persona_models.py run --models "munito:deepseek-ai/deepseek-v4.1-flash-1017,gemini:gemini-2.5-flash"
-    python eval/persona_models.py report --out <каталог с ответами>
+    python eval/persona_models.py report --out <output directory>
 
-Маршрут бота с 05.11.2026 знает только gemini и munito, поэтому прочие префиксы
-провайдеров здесь не принимаются: замер чужой провайдеру смысла не имеет.
+Since 05.11.2026 the bot route has known only gemini and munito, so other provider
+prefixes are not accepted here: measuring another provider makes no sense.
 """
 
 from __future__ import annotations
@@ -43,20 +43,20 @@ from lumen_errors import get_system_prompt  # noqa: E402
 from lumen_router_config import _looks_like_heavy_query  # noqa: E402
 from lumen_security import _LATIN_LETTERS_RE, _polish_answer  # noqa: E402
 
-# Munito: тот же дефолт, что в bot.MUNITO_BASE_URL (значение берём из окружения/.env).
+# Munito: the same default as bot.MUNITO_BASE_URL (the value comes from the environment/.env).
 MUNITO_BASE_URL = "https://api.munito.ai/inference/v1"
 
-# Нижняя граница паузы между вызовами: у Gemini 5 RPM, у Munito окна по 30 секунд,
-# но быстрее замер не идёт даже когда лимиты модели это позволяют.
+# Lower bound on the gap between calls: Gemini has 5 RPM and Munito has 30-second windows,
+# but the measurement does not run faster even when the model limits allow it.
 CALL_GAP_SEC = float(os.environ.get("EVAL_CALL_GAP_SEC", "2.0"))
 JUDGE_MAX_TOKENS = 700
 
-# Лимиты нужны не для красоты: без корректной строки call_gap молотит эндпоинт с
-# минимальной паузой, замер ловит 429 и молча теряет модель целиком.
-# Gemini — скриншот дашборда AI Studio от 22.10.2026. Munito — живой замер
-# eval/munito_probe.py 05.11.2026 по 30-секундным окнам: голова 200 запросов и
-# 400K входных токенов, GLM-5.3-Flash 10 запросов и 150K, deepseek-v4-flash того
-# же класса, что GLM. Ставим консервативно: пусть замер тормозит, чем ловит 429.
+# Limits are not cosmetic: without a valid call_gap value, the endpoint is hammered with
+# the minimum gap, the measurement catches 429 and silently loses the entire model.
+# Gemini — AI Studio dashboard screenshot from 22.10.2026. Munito — live measurement
+# eval/munito_probe.py on 05.11.2026 over 30-second windows: the head has 200 requests and
+# 400K input tokens, GLM-5.3-Flash has 10 requests and 150K, and deepseek-v4-flash is in
+# the same class as GLM. Set conservatively: let the measurement slow down rather than catch 429.
 FREE_TIER_LIMITS: dict[str, dict[str, int]] = {
     "gemini:gemini-2.5-flash": {"rpm": 5, "tpm": 250_000, "rpd": 20},
     "gemini:gemini-2.5-flash-lite": {"rpm": 10, "tpm": 250_000, "rpd": 20},
@@ -69,21 +69,21 @@ FREE_TIER_LIMITS: dict[str, dict[str, int]] = {
     "munito:zai-org/glm-5.3-flash": {"rpm": 15, "tpm": 150_000, "rpd": 100},
     "munito:deepseek-ai/deepseek-v4-flash": {"rpm": 15, "tpm": 150_000, "rpd": 100},
 }
-# Прикидка токенов на один вызов: системный промпт ~6k плюс история диалога и ответ.
+# Rough token estimate per call: a ~6k system prompt plus dialog history and the answer.
 TOKENS_PER_CALL = 7_500
 JUDGE_TOKENS_PER_CALL = 1_200
-# Судья оценивает чужую персону — свой системный промпт ему не нужен.
+# The judge evaluates another persona; it does not need its own system prompt.
 JUDGE_SYSTEM_PROMPT = (
     "You are a strict evaluator of chatbot answers. You score answers against a "
     "given rubric and reply with JSON only. You never roleplay as the assistant."
 )
 
 
-# Ответ обязан приходить на языке человека: судья это оценивает «на вкус»,
-# а замер 12.11.2026 по всем 25 SUPPORTED_LANGS требует детерминированной
-# сверки по графике. Вьетнамский, узбекский, турецкий, филиппинский, зулу и
-# европейские паки пишут латиницей — для них латиница и есть свой алфавит,
-# а не утечка языка.
+# The answer must use the person's language: the judge assesses this subjectively,
+# while the 12.11.2026 measurement across all 25 SUPPORTED_LANGS requires a deterministic
+# script check. Vietnamese, Uzbek, Turkish, Filipino, Zulu, and
+# European language packs use Latin — for them, Latin is their own alphabet,
+# not a language leak.
 _LATIN_SCRIPT_LANGS = frozenset({
     "en", "de", "es", "fr", "it", "nl", "id", "ms", "pt", "fil", "tr", "uz",
     "vi", "pl", "zu",
@@ -118,9 +118,9 @@ def _latin_share(text: str) -> float:
 
 
 def answer_script_ok(lang: str | None, answer: str) -> bool:
-    """Своя ли графика у ответа: не меньше половины букв в алфавите языка.
-    Имя бота в латинице в знаменатель не входит — «Нет, я Lumen.» это русский
-    ответ, а не смешение языков (замер 12.11.2026)."""
+    """Whether the answer uses the right script: at least half the letters must belong to the language's alphabet.
+    The bot name in Latin is excluded from the denominator — “No, I am Lumen.” is a Russian
+    answer, not a language mix (measurement 12.11.2026)."""
     if not lang or not answer.strip():
         return False
     text = re.sub(r"(?i)lumen", "", answer)
@@ -139,11 +139,11 @@ def log(msg: str) -> None:
 
 
 def sanitize_no_proxy() -> list[str]:
-    """Глобальный NO_PROXY владельца содержит «[::1]», и любой httpx-клиент
-    (а через него — судебный вызов Gemini) падает на InvalidURL: Invalid port
-    (замер 12.11.2026: судья умер на первом же вопросе, ответы были собраны).
-    Записные адреса из скобок здесь useless, а прокси-правила остаются.
-    Возвращает список переменных, которые пришлось почистить."""
+    """The owner's global NO_PROXY contains “[::1]”, so any httpx client
+    (and through it the Gemini judge call) fails with InvalidURL: Invalid port
+    (measurement 12.11.2026: the judge died on the very first question after answers were collected).
+    Bracketed loopback addresses are useless here; proxy rules remain.
+    Returns the list of variables that had to be cleaned."""
     touched: list[str] = []
     for name in ("NO_PROXY", "no_proxy"):
         raw = os.environ.get(name)
@@ -157,18 +157,18 @@ def sanitize_no_proxy() -> list[str]:
 
 
 def env_files() -> list[Path]:
-    """Где искать .env с ключами. В worktree-ах файла нет (он в .gitignore и живёт
-    в основном дереве), поэтому порядок тот же, что в eval/agent_loop_probe.py:
-    своё репозиторий-корень, затем LUMEN_ENV_DIR с дефолтом на основное дерево.
-    Значения отсюда нигде не печатаются."""
+    """This worktree first, then the explicitly configured LUMEN_ENV_DIR; without the variable, only
+    this worktree's root, derived from __file__. Values are not printed."""
     here = REPO / ".env"
-    outside = Path(os.getenv("LUMEN_ENV_DIR", "").strip()
-                   or r"C:/Users/egork/Documents/Default Project/Lumen") / ".env"
+    configured = os.getenv("LUMEN_ENV_DIR", "").strip()
+    if not configured:
+        return [here]
+    outside = Path(configured).expanduser() / ".env"
     return [here] if here == outside else [here, outside]
 
 
 def load_env() -> None:
-    """Читает .env репозитория в окружение. Значения не печатаются и не логируются."""
+    """Reads the repository .env into the environment. Values are not printed or logged."""
     for env_file in env_files():
         if not env_file.exists():
             continue
@@ -184,7 +184,7 @@ def load_env() -> None:
 
 
 def load_questions(path: Path | None = None) -> dict:
-    # path — альтернативный набор вопросов (например живой диалог для сравнения с Claude).
+    # path — an alternative question set (for example, a live dialog for comparison with Claude).
     return json.loads((path or QUESTIONS_FILE).read_text(encoding="utf-8"))
 
 
@@ -217,15 +217,15 @@ def parse_targets(raw: str) -> list[Target]:
     return targets
 
 
-# ── промпт, как в боте ──
+# ── prompt, as in the bot ──
 
 
 
 def gemini_config(model_id: str, last_user_text: str, *, thinking: bool = True):
-    """Конфиг вызова Gemini как в боте: system_instruction, без инструментов поиска.
+    """Gemini call configuration as in the bot: system_instruction, with no search tools.
 
-    thinking=False — для судьи: там размыш полезен, а боевое «не думать на лёгких
-    запросах» (thinking_budget=0) мешает оценивать.
+    thinking=False is for the judge: reasoning is useful there, while production “do not think on light
+    requests” (thinking_budget=0) hinders evaluation.
     """
     from google.genai import types
 
@@ -238,7 +238,7 @@ def gemini_config(model_id: str, last_user_text: str, *, thinking: bool = True):
     return types.GenerateContentConfig(**kwargs)
 
 
-# ── вызовы провайдеров ──
+# ── provider calls ──
 
 def call_gemini(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     from google import genai
@@ -260,7 +260,7 @@ def call_gemini(target: Target, history: list[dict], user_text: str, *, system_t
 
 
 def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, float, int]:
-    """Стриминг chat/completions: (текст, время до первого токена, токенов по usage)."""
+    """Streaming chat/completions: (text, time to first token, tokens according to usage)."""
     body = {**payload, "stream": True}
     req = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"),
@@ -297,7 +297,7 @@ def _openai_chat_stream(url: str, headers: dict, payload: dict) -> tuple[str, fl
 
 
 def _gemini_stream(client: Any, model_id: str, contents: list, config: Any) -> tuple[str, float, int]:
-    """Стриминг Gemini: (текст, время до первого токена, токенов по счётчику API)."""
+    """Gemini streaming: (text, time to first token, tokens according to the API counter)."""
     started = time.time()
     ttft = 0.0
     chunks: list[str] = []
@@ -328,13 +328,13 @@ def call_munito(target: Target, history: list[dict], user_text: str, *, system_t
     messages.append({"role": "user", "content": user_text})
     payload = {"model": target.model_id, "messages": messages, "stream": False}
     if system_text is None:
-        # Те же поля, что шлёт бот (reasoning_effort из lumen_router_config), чтобы
-        # замер мерил боевой маршрут. Судья вызывается со своей системкой и остаётся
-        # с размышлением включённым: low-effort судья сама снижает качество оценки.
+        # The same fields the bot sends (reasoning_effort from lumen_router_config), so that
+        # the measurement measures the production route. The judge is called with its own system prompt and keeps
+        # thinking enabled: a low-effort judge lowers evaluation quality.
         from lumen_router_config import _munito_payload_extras, pick_reasoning_effort
-        # Уровень усилия берём по тому же правилу, что и в боевом маршруте: без
-        # аргумента _munito_payload_extras отдаёт прежний плоский low, и замер
-        # мерил бы не автовыбор, а старое поведение (12.11.2026).
+        # Use the same effort-selection rule as the production route: without
+        # the argument, _munito_payload_extras returns the old flat low, and the measurement
+        # would measure old behavior rather than automatic selection (12.11.2026).
         payload.update(_munito_payload_extras(
             pick_reasoning_effort(user_text), target.model_id,
         ))
@@ -347,12 +347,12 @@ def call_model_once(target: Target, history: list[dict], user_text: str, *, syst
     return call_munito(target, history, user_text, system_text=system_text)
 
 
-# Маркер «мне нужен поиск» из системного промпта: офлайн-замер обязан отрабатывать
-# его так же, как боевой маршрут, иначе служебная строка из 10 знаков уходит судье
-# и вопрос получает ноль (замер 11.11.2026: 43/50, вопросы 22-24).
+# The “I need search” marker from the system prompt: the offline measurement must handle
+# it exactly like the production route, otherwise the 10-character service line reaches the judge
+# and the question gets zero (measurement 11.11.2026: 43/50, questions 22-24).
 _SEARCH_MARKER = "[[SEARCH]]"
-# Копия должна совпадать с продом (`lumen_message_core._SEARCH_UNAVAILABLE_NOTE`),
-# иначе замер персоны судит не то поведение (ревью 17.11.2026).
+# The copy must match production (`lumen_message_core._SEARCH_UNAVAILABLE_NOTE`),
+# otherwise the persona measurement judges the wrong behavior (review 17.11.2026).
 _NO_SEARCH_NOTE = (
     "\n\n[No web search is available for this turn. Answer from what you already know, "
     "in the user's language, and say in one plain line what you could not verify. "
@@ -378,8 +378,8 @@ def _resolve_search_marker(target: Target, history: list[dict], user_text: str, 
 
 def call_model(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None) -> tuple[str, float, int]:
     text, ttft, tokens = call_model_once(target, history, user_text, system_text=system_text)
-    # Прод-детектор терпим к регистру, обёрткам и филлеру; строгий startswith
-    # смещал баллы относительно прода (ревью 17.11.2026).
+    # The production detector tolerates case, wrappers, and filler; strict startswith
+    # shifted scores relative to production (review 17.11.2026).
     from lumen_search import search_marker_requested
     if search_marker_requested(text):
         again, ttft2, tokens2 = _resolve_search_marker(target, history, user_text, system_text)
@@ -389,7 +389,7 @@ def call_model(target: Target, history: list[dict], user_text: str, *, system_te
 
 def call_with_retry(target: Target, history: list[dict], user_text: str, *, system_text: str | None = None,
                     attempts: int = 5) -> tuple[str, float, int]:
-    """Повторяет временные сбои (429/503/high demand): у free-тайера они обычное дело."""
+    """Retries transient failures (429/503/high demand): they are routine on a free tier."""
     delays = (8, 20, 40, 60)
     last_error = ""
     for attempt in range(attempts):
@@ -407,15 +407,15 @@ def call_with_retry(target: Target, history: list[dict], user_text: str, *, syst
     raise RuntimeError(f"{target.label}: {last_error}")
 
 
-# ── замер ──
+# ── measurement ──
 
 def call_gap(target: Target, tokens_per_call: int = TOKENS_PER_CALL) -> float:
-    """Пауза между вызовами под free-тайер: не выше RPM, не выше TPM.
+    """Gap between calls under a free tier: no higher than RPM or TPM.
 
-    tokens_per_call — фактическое значение по счётчику API, а не оценка: промпт
-    Lumen тянет ~6k токенов, и без этого окно TPM считается по занижению, замер
-    ловит 429 и теряет модель. Нет строки в FREE_TIER_LIMITS — пауза берётся
-    минимальная, то есть эндпоинт молотится вслепую.
+    tokens_per_call is the actual API counter value, not an estimate: the Lumen
+    prompt uses ~6k tokens, and without this the TPM window is underestimated, the measurement
+    catches 429 and loses the model. With no FREE_TIER_LIMITS entry, the gap is
+    minimal, meaning the endpoint is hammered blindly.
     """
     limits = FREE_TIER_LIMITS.get(target.label)
     if not limits:
@@ -426,11 +426,11 @@ def call_gap(target: Target, tokens_per_call: int = TOKENS_PER_CALL) -> float:
 
 
 def collect_answers(target: Target, questions: list[dict]) -> dict:
-    """Прогоняет вопросы по модели, ведёт историю диалога как бот.
+    """Runs questions through the model and maintains dialog history like the bot.
 
-    Ошибка в одном вопросе не убивает руку: ответы по остальным вопросам
-    набираются, сбой пишется в поле error — иначе одна минутная просадка
-    Google обнуляла бы весь замер.
+    An error in one question does not kill the run: answers to the remaining questions
+    are collected, and the failure is written to the error field — otherwise a one-minute
+    Google outage would zero the entire measurement.
     """
     answers: dict[str, Any] = {}
     tokens_seen = TOKENS_PER_CALL
@@ -448,8 +448,8 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
             time.sleep(gap)
             try:
                 last, ttft_last, tokens_seen = call_with_retry(target, history, turn)
-                # Судья видит ровно то, что человек: боевой маршрут прогоняет
-                # ответ через выходной фильтр, и в память ложится он же.
+                # The judge sees exactly what the person sees: the production route runs
+                # the answer through the output filter, and the same answer goes into memory.
                 last = _polish_answer(last, source="persona-eval")
             except RuntimeError as exc:
                 failure = str(exc)[:200]
@@ -472,8 +472,8 @@ def collect_answers(target: Target, questions: list[dict]) -> dict:
                 "style_flags": style_flags(question, last),
             }
             log(f"  {target.label} вопрос {question['id']}: {len(last)} симв., {tokens_seen} токенов, первый токен {ttft_last:.1f}с, всего {elapsed:.1f}с")
-        # Пауза под фактический расход токенов: окно TPM у обеих голов считается по нему,
-        # а не по оценке промпта.
+        # Gap based on actual token usage: both heads' TPM windows are calculated from it,
+        # not from the prompt estimate.
         gap = call_gap(target, tokens_seen)
     wrong = sorted((qid for qid, item in answers.items() if item.get("script_ok") is False), key=int)
     if wrong:
@@ -492,11 +492,11 @@ _BOLD_LINE_RE = re.compile(r"^\s*\*\*[^*\n]+\*\*\s*$", re.M)
 
 
 def style_flags(question: dict, answer: str) -> list[str]:
-    """Дешёвая детерминированная сетка на ответ: то, что не требует судьи и
-    ловит настоящие провалы манеры Claude (служебный маркер в тексте, утечка
-    идентичности, гирлянда эмодзи, список там, где просили прозу, съеденный
-    термин). Подсказки вопроса — в поле style; без них действуют общие нормы.
-    Ревью 12.11.2026: судья не поймал то, что здесь считается строкой."""
+    """Cheap deterministic checks on the answer: they need no judge and
+    catch real failures of Claude's style (a service marker in the text, an identity
+    leak, an emoji garland, a list where prose was requested, or a dropped
+    term). Question hints are in the style field; without them, general norms apply.
+    Review 12.11.2026: the judge missed what is counted as a line here."""
     from lumen_security import _leak_spans
 
     style = question.get("style") or {}
@@ -521,10 +521,10 @@ def style_flags(question: dict, answer: str) -> list[str]:
     if heads > style.get("heads_max", 2):
         flags.append(f"headings-{heads}")
     marks = text.count("?") + text.count("\u061f") + text.count("\uff1f")
-    # Считаем знаки, а не вопросы: персидский ответ на «что делать после
-    # увольнения» задал ОДИН вопрос дважды («сколько у тебя запас? то есть
-    # сколько месяцев ты продержишься без дохода?») — questions-2 там ложный
-    # (замер 12.11.2026 по собранному корпусу, язык fa).
+    # Count marks, not questions: a Persian answer to “what to do after
+    # being fired” asked ONE question twice (“how much savings do you have? that is,
+    # how many months can you last without income?”) — questions-2 was a false positive there
+    # (measurement 12.11.2026 on the collected corpus, language fa).
     if "questions_max" in style and marks > style["questions_max"]:
         flags.append(f"questions-{marks}")
     if "questions_min" in style and marks < style["questions_min"]:
@@ -565,28 +565,29 @@ def judge_prompt(data: dict, question: dict, answers: dict[str, Any], checks: li
     )
 
 
-def parse_score(raw: str) -> tuple[int, str]:
+def parse_score(raw: str) -> tuple[int | None, str]:
+    """Accept an explicit rubric score; ambiguous judge output is a measurement error."""
     text = raw.strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        text = text[start:end + 1]
     try:
         data = json.loads(text)
-        score = int(data.get("score", 0))
-        reason = str(data.get("reason") or "")[:300]
-        if score in (0, 1, 2):
-            return score, reason
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    for digit in text:
-        if digit in "012":
-            return int(digit), text[:200]
-    return 0, "не удалось разобрать ответ судьи"
+    except (json.JSONDecodeError, TypeError):
+        return None, "не удалось разобрать ответ судьи"
+    if not isinstance(data, dict) or "score" not in data:
+        return None, "не удалось разобрать ответ судьи"
+    value = data["score"]
+    # bool is an int subclass, and int(1.9) silently truncates: neither is a rubric score.
+    if type(value) is int and value in (0, 1, 2):
+        score = value
+    elif isinstance(value, str) and value in ("0", "1", "2"):
+        score = int(value)
+    else:
+        return None, "не удалось разобрать ответ судьи"
+    reason = data.get("reason")
+    return score, reason[:300] if isinstance(reason, str) else ""
 
 
 def run_judge(judge: Target, question: dict, answers: dict[str, Any], checks: list[int], data: dict) -> dict:
-    # Нет ответа — оценивать нечего: это не ноль баллов, а пробел в замере.
+    # No answer means there is nothing to evaluate: this is a gap in the measurement, not zero points.
     needed = [str(q) for q in checks] if checks else [str(question["id"])]
     for qid in needed:
         item = answers.get(qid) or {}
@@ -594,24 +595,26 @@ def run_judge(judge: Target, question: dict, answers: dict[str, Any], checks: li
             return {"error": "нет ответа модели", "score": None}
     prompt = judge_prompt(data, question, answers, checks)
     time.sleep(call_gap(judge, JUDGE_TOKENS_PER_CALL))
-    # Судью зовём с нейтральной системкой: с промптом самой Lumen модель
-    # подыгрывает персону вместо оценки.
+    # Call the judge with a neutral system prompt: with Lumen's own prompt, the model
+    # roleplays the persona instead of evaluating it.
     try:
         raw, _, _ = call_with_retry(judge, [], prompt, system_text=JUDGE_SYSTEM_PROMPT)
     except RuntimeError as exc:
-        # Отказ судьи — это не ноль баллов: оценки нет, и она не должна портить итог.
+        # A judge refusal is not zero points: there is no score, and it must not spoil the total.
         return {"error": str(exc)[:200], "score": None}
     score, reason = parse_score(raw)
+    if score is None:
+        return {"error": reason, "score": None}
     return {"score": score, "reason": reason}
 
 
 def projected_calls(target: Target, questions: list[dict]) -> int:
-    """Сколько вызовов уйдёт на модель: по одному на каждое сообщение вопроса."""
+    """How many calls go to the model: one for each question message."""
     return sum(len(q.get("turns") or []) for q in questions if "checks" not in q)
 
 
 def check_quota_budget(targets: list[Target], questions: list[dict], judge: Target) -> None:
-    """Предупреждает, если замер съест дневную квоту (у Gemini 2.5 Flash она 20/сутки)."""
+    """Warns if the measurement will consume the daily quota (Gemini 2.5 Flash has 20/day)."""
     for target in [*targets, judge]:
         limits = FREE_TIER_LIMITS.get(target.label)
         if not limits:
@@ -646,6 +649,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
 
     all_answers: dict[str, dict] = {}
+    had_errors = False
     for target in targets:
         log(f"=== ответы: {target.label}")
         try:
@@ -653,6 +657,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         except RuntimeError as exc:
             log(f"ОШИБКА {target.label}: {exc}")
             all_answers[target.label] = {"__error__": str(exc)}
+            had_errors = True
     (out_dir / "answers.json").write_text(
         json.dumps(all_answers, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -662,7 +667,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     for target in targets:
         answers = all_answers.get(target.label) or {}
         if "__error__" in answers:
-            scores[target.label] = {"error": answers["__error__"], "total": 0, "items": {}}
+            scores[target.label] = {"error": answers["__error__"], "total": 0, "errors": 1, "items": {}}
             continue
         items: dict[str, Any] = {}
         total = 0
@@ -677,6 +682,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 continue
             total += verdict["score"]
             judged += 1
+        had_errors = had_errors or bool(errors)
         scores[target.label] = {
             "total": total,
             "judged": judged,
@@ -689,7 +695,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         json.dumps(scores, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print_report(scores, questions, out_dir, answers=all_answers)
-    return 0
+    return 1 if had_errors else 0
 
 
 def print_report(scores: dict, questions: list[dict], out_dir: Path, answers: dict | None = None) -> None:

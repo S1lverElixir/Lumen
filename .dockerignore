@@ -22,6 +22,7 @@ worker/
 # Внутренние доки и метаданные — в рантайме не читаются, в слои образа не едут
 AGENTS.md
 SECURITY.md
+audit/
 audit-*.md
 opencode.json
 .github/
@@ -35,10 +36,18 @@ venv/
 # Эфемерное состояние — не должно "запекаться" в образ со старого билда
 bot.log
 *.log
-chat_state.json
+chat_state.json*
 chat_state.tmp
-global_quota.json
+global_quota.json*
 global_quota.tmp
-export_state.json
+chat_index.json*
+chat_index.tmp
+chat_replacements.json*
+chat_replacements.tmp
+export_state.json*
+# Per-chat истории и devtrace: включая ротацию .1 и приватные варианты.
+chats/
+devtrace*
+**/devtrace*
 
 .DS_Store

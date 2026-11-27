@@ -1,9 +1,9 @@
-"""Аудит пользовательских строк: каждый ключ, который код просит у переводов,
-обязан существовать в таблице. Регресс вида `_t(chat, "progress_foo")` показал бы
-человеку служебное имя вместо фразы, и тесты таблицы этого не ловят (они проверяют
-ключи таблицы, а не обращения кода).
+"""Audit of user-facing strings: every key the code requests from translations
+must exist in the table. A regression like `_t(chat, "progress_foo")` would show
+a person an internal name instead of a phrase, and the table tests do not catch it (they check
+table keys, not code references).
 
-Запуск:  python eval/keys_audit.py
+Run:  python eval/keys_audit.py
 """
 import io
 import pathlib

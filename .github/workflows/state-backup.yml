@@ -32,6 +32,9 @@ concurrency:
 
 jobs:
   backup:
+    # Keep repository secrets away from workflow code on untrusted refs.
+    # Scheduled runs use main and remain allowed.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -52,6 +55,90 @@ jobs:
           STATE_BACKUP_REPO: ${{ secrets.STATE_BACKUP_REPO }}
         run: |
           set -euo pipefail
+          # Validate the downloaded contract before touching the last good backup.
+          # A non-zero chat count alone accepts partial and malformed snapshots.
+          backup_filter='
+            def finite_numbers:
+              if type == "number" then isfinite
+              elif type == "object" then all(.[]; finite_numbers)
+              elif type == "array" then all(.[]; finite_numbers)
+              else true end;
+            def nonneg_int: type == "number" and isfinite and floor == . and . >= 0;
+            def nonneg_num: type == "number" and isfinite and . >= 0;
+            def valid_provider_entry:
+              if type != "object" then false
+              else
+                ((has("used") | not) or (.used | nonneg_int)) and
+                ((has("exhausted_at") | not) or
+                 (.exhausted_at == null or (.exhausted_at | type == "number" and isfinite))) and
+                ((has("cooldown_until") | not) or
+                 (.cooldown_until == null or (.cooldown_until | type == "number" and isfinite))) and
+                ((has("neurons") | not) or (.neurons | nonneg_num))
+              end;
+            def valid_daily_entry:
+              if type != "object" then false
+              else
+                ((has("total") | not) or (.total | nonneg_int)) and
+                ((has("gemini") | not) or (.gemini | nonneg_int)) and
+                ((has("tts") | not) or (.tts | nonneg_int)) and
+                ((has("draw") | not) or (.draw | nonneg_int)) and
+                ((has("bonus") | not) or (.bonus | nonneg_int))
+              end;
+            (. | finite_numbers) and
+            (.export_schema_version | type == "number" and floor == . and . == 1) and
+            (.complete == true) and
+            (.exported_at | type == "string" and length > 0) and
+            (.chat_count | nonneg_int) and
+            (.chat_count == (.chats | length)) and
+            (.chats | type == "object" and length > 0) and
+            (.global_quota | type == "object") and
+            ([["gemini", "groq", "munito", "image"][] as $key |
+              (if (.global_quota | has($key)) then .global_quota[$key] else {} end) |
+              if type == "object" then all(.[]; valid_provider_entry) else false end
+            ] | all) and
+            ((if (.global_quota | has("user_daily")) then .global_quota.user_daily else {} end) |
+              if type == "object" then (length <= 20000 and all(.[]; valid_daily_entry)) else false end) and
+            ((if (.global_quota | has("stats")) then .global_quota.stats else {} end) |
+              if type == "object" then all(.[]; nonneg_int) else false end) and
+            ((if (.global_quota | has("banned_users")) then .global_quota.banned_users else {} end) |
+              if type == "object" then all(.[]; nonneg_num) else false end) and
+            (if (.global_quota | has("quota_day"))
+             then (.global_quota.quota_day == null or (.global_quota.quota_day | type == "string"))
+             else true end) and
+            (if (.global_quota | has("last_storage_write_ts"))
+             then (.global_quota.last_storage_write_ts | type == "number" and isfinite)
+             else true end) and
+            ([.chats | keys[] | test("^(0|-?[1-9][0-9]*)$")] | all) and
+            ([.chats[] |
+              (type == "object") and
+              (.schema_version | type == "number" and floor == . and . == 2) and
+              (.history | type == "array") and
+              (.history | all(.[]; type == "object")) and
+              (.memory_summary | type == "string") and
+              (.memory_pending | type == "array") and
+              (.memory_pending | all(.[]; type == "object")) and
+              (.recent_media_ids | type == "object") and
+              (.recent_media_ids | all(.[]; type == "array")) and
+              (.user_names | type == "object") and
+              (.user_names | all(.[]; type == "object")) and
+              (.last_activity | type == "number" and isfinite) and
+              (.lang | type == "string") and
+              ((.last_drawn_message_id == null) or
+               (.last_drawn_message_id | type == "number" and isfinite and floor == .)) and
+              (.last_drawn_at | type == "number" and isfinite) and
+              ((.last_drawn_user == null) or
+               (.last_drawn_user | type == "number" and isfinite and floor == .)) and
+              (.last_draw_prompt | type == "string") and
+              ((has("replacement_generation") | not) or
+               (.replacement_generation == null or
+                (.replacement_generation | type == "string" and test("^[0-9a-f]{32}$")))) and
+              (.draw_versions | type == "array") and
+              (.draw_versions | all(.[]; type == "object" and (.file_id | type == "string"))) and
+              (.draw_redo | type == "array") and
+              (.draw_redo | all(.[]; type == "object" and (.file_id | type == "string")))
+            ] | all)
+          '
+          jq -e -s "length == 1 and (.[0] | $backup_filter)" export_state.json >/dev/null
           # Приватность: бэкап только в приватный репозиторий, иначе стоп.
           visibility="$(GH_TOKEN="${STATE_BACKUP_TOKEN}" gh repo view "${STATE_BACKUP_REPO}" --json visibility -q .visibility)"
           if [ "${visibility}" != "PRIVATE" ]; then
@@ -63,14 +150,6 @@ jobs:
           # PAT не в URL клона, а в extraheader: иначе светится в remote -v и логах.
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "${STATE_BACKUP_TOKEN}" | base64 -w0)" \
             clone "https://github.com/${STATE_BACKUP_REPO}.git" backup-repo
-          # Пустой снимок не коммитим: сбой загрузки на Space давал 0 чатов, и
-          # дневной бэкап затирал хороший (ревью 17.11.2026). Шаг падает — ниже
-          # сработает алерт в Telegram.
-          chats="$(jq '.chats | length' export_state.json)"
-          if [ "${chats}" -eq 0 ]; then
-            echo "Refusing to commit an empty state snapshot (0 chats)" >&2
-            exit 1
-          fi
           cp export_state.json backup-repo/export_state.json
           cd backup-repo
           git add export_state.json

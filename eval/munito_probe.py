@@ -1,7 +1,7 @@
-"""Живой зонд Munito AI: доступность моделей, лимиты, время до первого токена.
+"""Live Munito AI probe: model availability, limits, and time to first token.
 
-Ключ только из окружения или .env; значение нигде не печатается.
-Запуск: python eval/munito_probe.py
+The key comes only from the environment or .env; its value is never printed.
+Run: python eval/munito_probe.py
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import aiohttp
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE = "https://api.munito.ai/inference/v1"
 
-# Порядок = гипотеза головы цепочки; 1017 есть только в EU/глобальном хосте.
+# Order is the hypothesized chain head; 1017 exists only on the EU/global host.
 PROBE_MODELS = [
     "deepseek-ai/deepseek-v4.1-flash-1017",
     "zai-org/glm-5.3-flash",
@@ -30,7 +30,7 @@ _USER = "Что такое контекстное окно у языковой �
 
 
 def _env(name: str, default: str = "") -> str:
-    """Окружение важнее файла; .env читаем молча и только нужные имена."""
+    """Environment takes precedence over the file; read .env silently and only the required names."""
     value = os.getenv(name, "").strip()
     if value:
         return value
@@ -128,7 +128,7 @@ async def main() -> None:
             print(f"\n=== {model} ===")
             await _once(session, base, key, model, stream=False)
             await _once(session, base, key, model, stream=True)
-        # Пакет из 6 запросов подряд: на котором приходит 429/503 — тот и есть реальный RPM.
+        # Batch of 6 consecutive requests: whichever gets 429/503 reveals the real RPM.
         print("\n=== burst 6 одинаковых запросов (голова списка) ===")
         burst_model = PROBE_MODELS[0]
         for i in range(6):
@@ -138,7 +138,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    # Windows консоль в cp1251 рвёт кириллицу и стрелки (прод замер 05.11.2026).
+    # The Windows console in cp1251 breaks Cyrillic and arrows (production measurement 05.11.2026).
     import sys
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     asyncio.run(main())

@@ -1,7 +1,6 @@
-"""
-test_bot_admin.py — Админка и webhook: гейты секретов, healthcheck, /export_state, /logs, /stats.
+"""test_bot_admin.py — Admin and webhook: secret gates, healthcheck, /export_state, /logs, /stats.
 
-Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
+Split from test_bot.py (P2 audit); shared fakes are in bot_test_helpers.py.
 """
 import asyncio
 import bot
@@ -19,14 +18,14 @@ from tests.bot_test_helpers import (
 
 
 def _fake_webhook_secret() -> str:
-    # Подменный секрет строим выражением, а не литералом: credential-сканеры
-    # флагают `*SECRET* = "строка"`, хотя значение здесь заведомо тестовое.
+    # Build the replacement secret with an expression, not a literal: credential scanners
+    # flag `*SECRET* = "string"` even though the value is definitely a test value.
     return "real-webhook-" + "secret"
 
 
 @pytest.fixture(autouse=True)
 def _clear_webhook_update_dedup():
-    """Дедупликация update_id глобальна: тесты не должны видеть id друг друга."""
+    """update_id deduplication is global: tests must not see each other IDs."""
     import lumen_admin
     lumen_admin._seen_update_ids.clear()
     lumen_admin._seen_update_id_set.clear()
@@ -38,7 +37,7 @@ def _clear_webhook_update_dedup():
 
 
 def test_public_log_formatter_hashes_long_numeric_ids():
-    # Публичные логи Space не должны содержать chat/user id (аудит 28.10.2026).
+    # Public Space logs must not contain chat/user IDs (audit 28.10.2026).
     import logging
     record = logging.LogRecord("bot", logging.INFO, __file__, 1,
                                "[chat=123456789] user 987654321 ok", None, None)
@@ -59,10 +58,10 @@ def test_check_bot_token_auth_accepts_correct_bearer_header():
 
 
 def test_check_bot_token_auth_rejects_query_param_regression():
-    # РЕГРЕССИЯ (код-ревью): раньше BOT_TOKEN читался из ?bot_token=... в URL — GET-
-    # запрос с секретом в query-строке попадает в access-логи прокси/историю браузера
-    # (CWE-598). Теперь query-параметр должен полностью ИГНОРИРОВАТЬСЯ — единственный
-    # легитимный путь — заголовок Authorization: Bearer.
+    # REGRESSION (code review): BOT_TOKEN was previously read from ?bot_token=... in the URL — GET-
+    # a request with a secret in the query string reaches proxy access logs/browser history
+    # (CWE-598). The query parameter must now be completely IGNORED — the only
+    # legitimate path: the Authorization: Bearer header.
     original = bot.BOT_TOKEN
     bot.BOT_TOKEN = "real-secret-token"
     try:
@@ -78,7 +77,7 @@ def test_check_bot_token_auth_rejects_wrong_or_missing_header():
     try:
         assert bot._check_bot_token_auth(_FakeAdminRequest(headers={"Authorization": "Bearer wrong"})) is False
         assert bot._check_bot_token_auth(_FakeAdminRequest(headers={})) is False
-        # Без префикса "Bearer " — тоже отказ, даже если сам токен совпадает.
+        # Without the "Bearer " prefix, also refuse, even if the token itself matches.
         assert bot._check_bot_token_auth(_FakeAdminRequest(headers={"Authorization": "real-secret-token"})) is False
     finally:
         bot.BOT_TOKEN = original
@@ -95,11 +94,11 @@ def test_check_admin_key_accepts_correct_bearer_header():
 
 
 def test_check_admin_key_rejects_query_param_regression():
-    # РЕГРЕССИЯ (аудит техдолга): раньше ADMIN_PANEL_KEY читался из ?key=... в URL —
-    # та же уязвимость (CWE-598), что уже была исправлена для BOT_TOKEN в /admin_keys
-    # (см. test_check_bot_token_auth_rejects_query_param_regression), но не была
-    # применена к /diag/webhook_url/export_state. Query-параметр больше не должен
-    # приниматься вообще, даже если значение верное.
+    # REGRESSION (tech-debt audit): ADMIN_PANEL_KEY used to be read from ?key=... in the URL —
+    # the same vulnerability (CWE-598) already fixed for BOT_TOKEN in /admin_keys
+    # (see test_check_bot_token_auth_rejects_query_param_regression), but it was not
+    # applied to /diag/webhook_url/export_state. The query parameter should no longer
+    # be accepted at all, even if the value is correct.
     original = bot.ADMIN_PANEL_KEY
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     try:
@@ -121,7 +120,7 @@ def test_check_admin_key_rejects_wrong_or_missing_key():
 
 
 def test_bearer_non_ascii_returns_false_not_500():
-    # compare_digest на str падает TypeError на не-ASCII: отказ без исключения.
+    # compare_digest on str raises TypeError for non-ASCII: refuse without an exception.
     original = bot.ADMIN_PANEL_KEY
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     try:
@@ -153,8 +152,8 @@ def test_webhook_handler_tracks_dispatched_task_for_shutdown():
     release = asyncio.Event()
 
     async def fake_process(raw_update):
-        # Живая задача обязана быть в наборе при старте: no-op регистрация
-        # раньше проходила тест (ревью 17.11.2026).
+        # A live task must be in the set at startup: a no-op registration
+        # previously passed the test (review 17.11.2026).
         assert bot._inflight_tasks, "живая задача не зарегистрирована"
         await release.wait()
 
@@ -181,8 +180,8 @@ def test_webhook_handler_tracks_dispatched_task_for_shutdown():
 
 
 def test_webhook_returns_503_until_state_is_ready():
-    # Апдейт во время загрузки состояния не должен создавать пустой чат и
-    # перезаписывать удалённую историю (аудит 28.10.2026).
+    # An update during state loading must not create an empty chat and
+    # overwrite deleted history (audit 28.10.2026).
     original_secret = bot.WEBHOOK_SECRET
     original_bot_obj = bot.bot
     original_process = bot._process_raw_update
@@ -208,8 +207,8 @@ def test_webhook_returns_503_until_state_is_ready():
 
 
 def test_webhook_handler_ignores_duplicate_update_id():
-    # Telegram повторяет доставку при таймауте/сбое: один update_id не должен
-    # давать второй ответ, скачивание и трату квоты (аудит 28.10.2026).
+    # Telegram retries delivery on timeout/failure: one update_id must not
+    # a second response, a download, and quota usage (audit 28.10.2026).
     original_secret = bot.WEBHOOK_SECRET
     original_bot_obj = bot.bot
     original_process = bot._process_raw_update
@@ -267,8 +266,8 @@ def test_export_state_rejects_missing_or_wrong_key():
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     try:
         result = asyncio.run(bot.export_state(_FakeAdminRequest(headers={"Authorization": "Bearer wrong"})))
-        # Отказ — честный 401, а не 200 с телом {"error": ...}: иначе брутфорс
-        # ключа отличался от успеха только телом ответа (аудит 26.09.2026).
+        # Refusal is an honest 401, not 200 with body {"error": ...}: otherwise, brute force
+        # key differed from success only in the response body (audit 26.09.2026).
         assert result.status_code == 401
         assert b"error" in result.body
     finally:
@@ -276,8 +275,8 @@ def test_export_state_rejects_missing_or_wrong_key():
 
 
 def test_export_state_refuses_while_state_is_loading():
-    # Аудит 16.11.2026: бэкап во время загрузки — пустой или частичный, а
-    # state-backup.yml закоммитил бы его как дневной. Ожидаем 503 и просьбу повторить.
+    # Audit 16.11.2026: a backup during loading is empty or partial, and
+    # state-backup.yml would commit it as daily. Expect 503 and a request to retry.
     original_key = bot.ADMIN_PANEL_KEY
     original_ready = getattr(bot, "_state_ready", True)
     bot.ADMIN_PANEL_KEY = "real-admin-key"
@@ -304,15 +303,15 @@ def test_export_state_logs_denied_attempt(caplog):
 
 
 def test_fastapi_schema_endpoints_are_disabled():
-    # Публичная схема на HF Space описывала все эндпоинты бесплатно.
+    # The public schema on the HF Space exposed every endpoint for free.
     assert bot.app.docs_url is None
     assert bot.app.redoc_url is None
     assert bot.app.openapi_url is None
 
 
 def test_export_state_returns_detached_snapshot():
-    # Аудит A11-05: экспорт отдавал живые ссылки на мутабельные объекты —
-    # запись между возвратом и сериализацией давала несогласованный бэкап.
+    # Audit A11-05: export returned live references to mutable objects —
+    # a write between the return and serialization produced an inconsistent backup.
     original = bot.ADMIN_PANEL_KEY
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     chat_id = 999980
@@ -332,9 +331,9 @@ def test_export_state_returns_detached_snapshot():
 
 
 def test_export_state_rejects_query_param_regression():
-    # См. test_check_admin_key_rejects_query_param_regression — /export_state — самый
-    # чувствительный из трёх эндпоинтов (отдаёт ПОЛНЫЕ истории всех чатов), поэтому
-    # регрессия здесь проверяется отдельно, а не только на уровне _check_admin_key.
+    # See test_check_admin_key_rejects_query_param_regression; /export_state is the most
+    # sensitive of the three endpoints (returns COMPLETE histories of all chats), so
+    # the regression is checked here separately, not only at the _check_admin_key level.
     original = bot.ADMIN_PANEL_KEY
     bot.ADMIN_PANEL_KEY = "real-admin-key"
     try:
@@ -358,9 +357,166 @@ def test_export_state_returns_chats_and_quota_with_valid_key():
         assert result["chats"][str(chat_id)]["history"] == [{"role": "user", "content": "hi"}]
         assert "global_quota" in result
         assert "exported_at" in result
+        assert result["export_schema_version"] == 1
+        assert result["complete"] is True
+        assert result["chat_count"] == len(result["chats"])
     finally:
         bot.ADMIN_PANEL_KEY = original
         bot.chat_state.pop(chat_id, None)
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ["_chat_snapshot_unloaded", "_legacy_migration_pending_ids", "_pending_chat_deletions", "_index_extra_ids", "_deleting_chat_ids"],
+)
+def test_export_state_refuses_known_incomplete_state(attribute, monkeypatch):
+    import lumen_chat_state as lcs
+
+    chat_id = 999812
+    monkeypatch.setattr(bot, "ADMIN_PANEL_KEY", "real-admin-key")
+    monkeypatch.setattr(bot, "chat_state", {chat_id: {"history": []}})
+    for name in ("_chat_snapshot_unloaded", "_legacy_migration_pending_ids", "_pending_chat_deletions", "_index_extra_ids", "_deleting_chat_ids"):
+        missing_id = chat_id + 1 if name == "_index_extra_ids" else chat_id
+        monkeypatch.setattr(lcs, name, {missing_id} if name == attribute else set(), raising=False)
+
+    result = asyncio.run(bot.export_state(
+        _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+
+    assert getattr(result, "status_code", None) == 503
+
+
+def test_export_state_refuses_unresolved_chat_replacement(monkeypatch):
+    import lumen_chat_state as lcs
+
+    chat_id = 999812
+    monkeypatch.setattr(bot, "ADMIN_PANEL_KEY", "real-admin-key")
+    monkeypatch.setattr(bot, "chat_state", {chat_id: {"history": []}})
+    for name in (
+        "_chat_snapshot_unloaded", "_legacy_migration_pending_ids",
+        "_pending_chat_deletions", "_index_extra_ids", "_deleting_chat_ids",
+        "_recreated_chat_ids", "_deleted_chat_ids",
+    ):
+        monkeypatch.setattr(lcs, name, set())
+    monkeypatch.setattr(lcs, "_state_load_failed", False)
+    monkeypatch.setattr(lcs, "_quota_load_failed", False)
+    monkeypatch.setattr(lcs, "_replacement_generations", {})
+    lcs._cancel_chat_deletion(chat_id)
+    assert chat_id in lcs._recreated_chat_ids
+    assert chat_id in lcs._deleting_chat_ids
+
+    result = asyncio.run(bot.export_state(
+        _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+
+    assert getattr(result, "status_code", None) == 503
+
+
+@pytest.mark.parametrize("snapshot", [
+    {"schema_version": 2},
+    bot._serialize_chat_state({"history": [{"role": "user", "content": 123}]}),
+])
+def test_export_state_refuses_structurally_invalid_snapshot(monkeypatch, snapshot):
+    import lumen_admin
+    import lumen_chat_state as lcs
+
+    chat_id = 999813
+    monkeypatch.setattr(bot, "ADMIN_PANEL_KEY", "real-admin-key")
+    monkeypatch.setattr(bot, "chat_state", {chat_id: {"history": []}})
+    for name in ("_chat_snapshot_unloaded", "_legacy_migration_pending_ids", "_pending_chat_deletions", "_index_extra_ids"):
+        monkeypatch.setattr(lcs, name, set())
+    monkeypatch.setattr(lumen_admin, "_serialize_chat_state", lambda state: snapshot)
+
+    result = asyncio.run(bot.export_state(
+        _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+
+    assert getattr(result, "status_code", None) == 503
+
+
+def test_export_state_refuses_empty_snapshot(monkeypatch):
+    import lumen_chat_state as lcs
+
+    monkeypatch.setattr(bot, "ADMIN_PANEL_KEY", "real-admin-key")
+    monkeypatch.setattr(bot, "chat_state", {})
+    for name in ("_chat_snapshot_unloaded", "_legacy_migration_pending_ids", "_pending_chat_deletions", "_index_extra_ids", "_deleting_chat_ids"):
+        monkeypatch.setattr(lcs, name, set(), raising=False)
+
+    result = asyncio.run(bot.export_state(
+        _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+
+    assert getattr(result, "status_code", None) == 503
+
+
+def test_export_validator_accepts_integral_json_numbers():
+    import lumen_admin
+
+    snapshot = bot._serialize_chat_state({"history": [{"role": "user", "content": "hi"}]})
+    snapshot["schema_version"] = float(snapshot["schema_version"])
+    payload = {
+        "export_schema_version": 1.0,
+        "complete": True,
+        "exported_at": "2026-11-25T00:00:00+00:00",
+        "chat_count": 1.0,
+        "chats": {"1": snapshot},
+        "global_quota": {"munito": {"model": {"used": 1.0}}},
+    }
+    assert lumen_admin._validate_export_snapshot(payload) is True
+
+
+def test_export_state_refuses_malformed_nested_quota(monkeypatch):
+    import lumen_chat_state as lcs
+
+    chat_id = 999815
+    monkeypatch.setattr(bot, "ADMIN_PANEL_KEY", "real-admin-key")
+    monkeypatch.setattr(bot, "chat_state", {chat_id: {"history": []}})
+    monkeypatch.setattr(bot, "GLOBAL_QUOTA", {"munito": []})
+    for name in ("_chat_snapshot_unloaded", "_legacy_migration_pending_ids", "_pending_chat_deletions", "_index_extra_ids", "_deleting_chat_ids"):
+        monkeypatch.setattr(lcs, name, set(), raising=False)
+
+    result = asyncio.run(bot.export_state(
+        _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+
+    assert getattr(result, "status_code", None) == 503
+
+
+@pytest.mark.parametrize("quota", [
+    {"banned_users": {"7": 10 ** 400}},
+    {"munito": {"model": {"used": 1, "future": float("inf")}}},
+])
+def test_export_state_refuses_unrepresentable_quota_number(monkeypatch, quota):
+    import lumen_chat_state as lcs
+
+    chat_id = 999816
+    monkeypatch.setattr(bot, "ADMIN_PANEL_KEY", "real-admin-key")
+    monkeypatch.setattr(bot, "chat_state", {chat_id: {"history": []}})
+    monkeypatch.setattr(bot, "GLOBAL_QUOTA", quota)
+    for name in ("_chat_snapshot_unloaded", "_legacy_migration_pending_ids", "_pending_chat_deletions", "_index_extra_ids", "_deleting_chat_ids"):
+        monkeypatch.setattr(lcs, name, set(), raising=False)
+
+    result = asyncio.run(bot.export_state(
+        _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+
+    assert getattr(result, "status_code", None) == 503
+
+
+def test_export_state_serialization_failure_is_retryable_and_private(monkeypatch, caplog):
+    import lumen_admin
+    import lumen_chat_state as lcs
+
+    chat_id = 999814
+    monkeypatch.setattr(bot, "ADMIN_PANEL_KEY", "real-admin-key")
+    monkeypatch.setattr(bot, "chat_state", {chat_id: {"history": []}})
+    for name in ("_chat_snapshot_unloaded", "_legacy_migration_pending_ids", "_pending_chat_deletions", "_index_extra_ids"):
+        monkeypatch.setattr(lcs, name, set())
+
+    def fail(state):
+        raise RuntimeError("private chat payload")
+
+    monkeypatch.setattr(lumen_admin, "_serialize_chat_state", fail)
+    with caplog.at_level(logging.WARNING, logger="bot"):
+        result = asyncio.run(bot.export_state(
+            _FakeAdminRequest(headers={"Authorization": "Bearer real-admin-key"})))
+
+    assert getattr(result, "status_code", None) == 503
+    assert "private chat payload" not in caplog.text
 
 
 def test_webhook_handler_accepts_valid_secret_and_dispatches_update():
@@ -368,7 +524,7 @@ def test_webhook_handler_accepts_valid_secret_and_dispatches_update():
     original_bot_obj = bot.bot
     original_process = bot._process_raw_update
     bot.WEBHOOK_SECRET = _fake_webhook_secret()
-    bot.bot = object()  # не-None достаточно, чтобы пройти проверку "бот уже инициализирован"
+    bot.bot = object()  # non-None is enough to pass the "bot is already initialized" check
     calls = []
 
     async def fake_process(raw_update):
@@ -390,9 +546,11 @@ def test_webhook_handler_accepts_valid_secret_and_dispatches_update():
 
 
 def test_webhook_rechecks_inflight_cap_after_body_read(monkeypatch):
-    # Аудит 16.11.2026: кап проверялся только до чтения тела, а между проверкой и
-    # create_task есть await'ы; пачка одновременных POST проходила на пустом наборе
-    # и создавала больше задач, чем кап. Перепроверка стоит прямо перед create_task.
+    # Audit 16.11.2026: the cap was checked only before reading the body, and between the check and
+    # create_task has awaits; a burst of concurrent POSTs passed with an empty set
+    # and created more tasks than the cap. The recheck sits directly before create_task.
+    # R1-03 (audit 26.11.2026): the set is now populated while awaiting the body read —
+    # only window between the first check and the recheck.
     import lumen_admin
 
     original_secret = bot.WEBHOOK_SECRET
@@ -407,27 +565,85 @@ def test_webhook_rechecks_inflight_cap_after_body_read(monkeypatch):
     async def _noop() -> None:
         return None
 
-    def fake_dedupe(_update_id):
-        # Заполняем набор ровно в окне между первой проверкой и create_task.
-        while len(filler) < lumen_admin.WEBHOOK_MAX_INFLIGHT_TASKS:
-            task = asyncio.create_task(_noop())
-            filler.add(task)
-        bot._inflight_tasks.update(filler)
-        return False
-
     async def fake_process(raw_update):
         calls.append(raw_update)
 
-    monkeypatch.setattr(lumen_admin, "_is_duplicate_update", fake_dedupe)
+    class _FillingRequest(_FakeWebhookRequest):
+        async def stream(self):
+            while len(filler) < lumen_admin.WEBHOOK_MAX_INFLIGHT_TASKS:
+                filler.add(asyncio.create_task(_noop()))
+            bot._inflight_tasks.update(filler)
+            async for chunk in super().stream():
+                yield chunk
+
+    monkeypatch.setattr(lumen_admin, "_is_duplicate_update", lambda _update_id: False)
     bot._process_raw_update = fake_process
     try:
-        req = _FakeWebhookRequest(
+        req = _FillingRequest(
             headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
             body={"update_id": 424242},
         )
         result = asyncio.run(_run_webhook_handler(req))
         assert getattr(result, "status_code", None) == 503
         assert calls == []
+    finally:
+        bot.WEBHOOK_SECRET = original_secret
+        bot.bot = original_bot_obj
+        bot._process_raw_update = original_process
+        for task in filler:
+            task.cancel()
+        bot._inflight_tasks.clear()
+
+
+def test_webhook_503_does_not_burn_update_retry():
+    # R1-03 (audit 26.11.2026): in the old order, deduplication ran before rechecking
+    # cap, and an update sent during a 503 was already considered seen — a Telegram retry
+    # was silently lost. Refusal due to the cap must not touch deduplication.
+    import lumen_admin
+
+    original_secret = bot.WEBHOOK_SECRET
+    original_bot_obj = bot.bot
+    original_process = bot._process_raw_update
+    bot.WEBHOOK_SECRET = "real-webhook-secret"
+    bot.bot = object()
+    bot._inflight_tasks.clear()
+    filler: set = set()
+    calls = []
+
+    async def _noop() -> None:
+        return None
+
+    async def fake_process(raw_update):
+        calls.append(raw_update)
+
+    class _FillingRequest(_FakeWebhookRequest):
+        async def stream(self):
+            while len(filler) < lumen_admin.WEBHOOK_MAX_INFLIGHT_TASKS:
+                filler.add(asyncio.create_task(_noop()))
+            bot._inflight_tasks.update(filler)
+            async for chunk in super().stream():
+                yield chunk
+
+    bot._process_raw_update = fake_process
+    try:
+        first = _FillingRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 777001},
+        )
+        result = asyncio.run(_run_webhook_handler(first))
+        assert getattr(result, "status_code", None) == 503
+        assert calls == []
+        for task in filler:
+            task.cancel()
+        filler.clear()
+        bot._inflight_tasks.clear()
+        retry = _FakeWebhookRequest(
+            headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
+            body={"update_id": 777001},
+        )
+        result2 = asyncio.run(_run_webhook_handler(retry))
+        assert result2 == {"ok": True}
+        assert calls == [{"update_id": 777001}]
     finally:
         bot.WEBHOOK_SECRET = original_secret
         bot.bot = original_bot_obj
@@ -462,7 +678,7 @@ def test_webhook_handler_rejects_invalid_or_missing_secret_and_does_not_dispatch
 
 
 def test_webhook_handler_rejects_oversized_body_before_reading():
-    # Тело сверх капа: отказ до разбора, сырые байты не читаем целиком.
+    # A body over the cap: reject before parsing; do not read the raw bytes in full.
     import lumen_admin
     original_secret = bot.WEBHOOK_SECRET
     bot.WEBHOOK_SECRET = _fake_webhook_secret()
@@ -476,15 +692,15 @@ def test_webhook_handler_rejects_oversized_body_before_reading():
         )
         assert asyncio.run(_run_webhook_handler(req)) == {"ok": False}
         assert req.stream_calls == 0
-        # Заголовок соврал (маленький), тело большое — тоже отказ.
+        # The header lied (small) but the body was large—also a refusal.
         req2 = _FakeWebhookRequest(
             headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
             body={"update_id": 2},
         )
         req2._raw = b"x" * (lumen_admin.WEBHOOK_MAX_BODY_BYTES + 1)
         assert asyncio.run(_run_webhook_handler(req2)) == {"ok": False}
-        # Chunked-тело без Content-Length: читаем потоком и рвём на капе, а не
-        # вытягиваем все 3 МБ в память (аудит 26.10.2026).
+        # Chunked body without Content-Length: read as a stream and split into chunks, rather than
+        # we pull all 3 MB into memory (audit 26.10.2026).
         req3 = _FakeWebhookRequest(
             headers={"X-Telegram-Bot-Api-Secret-Token": "real-webhook-secret"},
             chunks=[b"x" * (64 * 1024)] * 48,
@@ -496,14 +712,14 @@ def test_webhook_handler_rejects_oversized_body_before_reading():
 
 
 def test_webhook_denied_log_is_throttled(caplog):
-    # Гроздья отклонений — одной строкой, а не WARNING на каждый запрос в очередь.
+    # Log a burst of errors on one line, not a WARNING for every queue request.
     import logging
     import lumen_admin
     orig_count = lumen_admin._webhook_denied_count
     orig_last = lumen_admin._webhook_denied_last_log
     lumen_admin._webhook_denied_count = 0
-    # Ноль monotonic вместо прошлого: на свежей CI-машине uptime < 60с и первый
-    # отказ молча копится (прод 07.10.2026) — уводим метку в прошлое явно.
+    # Zero monotonic instead of the previous value: on a fresh CI machine uptime < 60s and the first
+    # refusals silently accumulate (prod 07.10.2026) — explicitly move the marker into the past.
     lumen_admin._webhook_denied_last_log = time.monotonic() - lumen_admin._WEBHOOK_DENIED_LOG_INTERVAL_SEC - 1.0
     original_secret = bot.WEBHOOK_SECRET
     bot.WEBHOOK_SECRET = _fake_webhook_secret()
@@ -524,7 +740,7 @@ def test_webhook_denied_log_is_throttled(caplog):
 
 
 def test_webhook_handler_returns_503_when_inflight_full(monkeypatch):
-    # Переполнение фоновых задач — 503 с повтором, апдейт не теряется молча.
+    # Background task overflow: 503 with a retry; the update is not silently lost.
     import lumen_admin
     original_secret = bot.WEBHOOK_SECRET
     original_bot_obj = bot.bot
@@ -546,7 +762,7 @@ def test_webhook_handler_returns_503_when_inflight_full(monkeypatch):
         result = asyncio.run(_run_webhook_handler(req))
         assert result.status_code == 503
         assert calls == []
-        # 503 не должен помечать update_id обработанным, иначе повтор потеряется.
+        # 503 must not mark update_id as processed, otherwise the retry will be lost.
         import lumen_admin
         assert 1 not in lumen_admin._seen_update_id_set
     finally:
@@ -559,7 +775,7 @@ def test_webhook_handler_returns_503_when_inflight_full(monkeypatch):
     ("abc", 25.0), ("", 25.0), ("0", 25.0), ("-5", 25.0), ("30", 30.0),
 ])
 def test_diag_budget_sec_falls_back_on_garbage(monkeypatch, env_value, expected):
-    # Голый float() давал 500 на мусоре в env, а 0 молча ронял все зонды.
+    # Bare float() produced 500 on garbage in env, while 0 silently broke all probes.
     import lumen_admin
     monkeypatch.setenv("DIAG_TOTAL_BUDGET_SEC", env_value)
     assert lumen_admin._diag_budget_sec() == expected
@@ -568,9 +784,9 @@ def test_diag_budget_sec_falls_back_on_garbage(monkeypatch, env_value, expected)
 
 
 def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
-    # Апдейт может прийти раньше, чем main() успеет создать глобальный bot (Bot/
-    # genai.Client создаются уже после старта uvicorn) — отвечаем 503, чтобы
-    # Telegram повторил апдейт, а не считаем дроп успехом (AUD-E-003).
+    # An update may arrive before main() creates the global bot (Bot/
+    # genai.Client are created only after uvicorn starts) — return 503 so that
+    # Telegram retried the update, so do not count the drop as a success (AUD-E-003).
     original_secret = bot.WEBHOOK_SECRET
     original_bot_obj = bot.bot
     original_process = bot._process_raw_update
@@ -597,7 +813,7 @@ def test_webhook_handler_drops_update_when_bot_not_yet_initialized():
 
 
 def test_webhook_handler_retries_broken_body_instead_of_swallowing():
-    # Битое тело раньше отвечало ok:true и Telegram считал дроп успехом (аудит M2).
+    # A malformed body previously returned ok:true and Telegram considered the drop successful (audit M2).
     original_secret = bot.WEBHOOK_SECRET
     original_bot_obj = bot.bot
     original_process = bot._process_raw_update
@@ -625,43 +841,43 @@ def test_webhook_handler_retries_broken_body_instead_of_swallowing():
 
 
 def test_allowed_updates_contains_only_real_telegram_types():
-    # guest_message — валидное поле Update (guest mode, Bot API; проверено по
-    # core.telegram.org/bots/api 2026-09-21). Удаление отсюда было ошибкой
-    # аудита AUD-J-001 и ломало гостевой режим — этот тест её ловит.
+    # guest_message is a valid Update field (guest mode, Bot API; verified against
+    # core.telegram.org/bots/api 2026-09-21). Removing it here was a mistake
+    # of audit AUD-J-001 and broke guest mode; this test catches it.
     assert "guest_message" in bot.ALLOWED_UPDATES
     assert "message" in bot.ALLOWED_UPDATES
 
 
 def test_admin_secrets_are_independent_of_bot_token_when_seed_set():
-    # РЕГРЕССИЯ (аудит техдолга): раньше WEBHOOK_SECRET/ADMIN_PANEL_KEY выводились
-    # ИСКЛЮЧИТЕЛЬНО из BOT_TOKEN — компрометация токена компрометировала оба сразу,
-    # и ни один нельзя было ротировать независимо. Теперь можно задать отдельную соль.
+    # REGRESSION (tech-debt audit): WEBHOOK_SECRET/ADMIN_PANEL_KEY used to be exposed
+    # EXCLUSIVELY from BOT_TOKEN — compromising the token would compromise both at once,
+    # and none could be rotated independently. A separate salt can now be set.
     #
-    # Прежняя версия теста считала sha256 дважды и сравнивала соль саму с собой,
-    # то есть НЕ вызывала код бота и проходила при любой поломке вывода ключей
-    # (враждебное ревью 27.09.2026). Теперь проверяем настоящий инвариант модуля.
+    # The previous version of the test computed sha256 twice and compared the salt to itself,
+    # meaning it did NOT call the bot code and passed regardless of broken key output
+    # (hostile review 27.09.2026). We now check the actual module invariant.
     import hashlib
 
     seed = bot._ADMIN_SECRET_SEED
     assert seed, "соль обязана быть непустой, иначе ключи предсказуемы"
-    # Ключи — реальные производные текущей соли, а не литералы в тесте.
+    # Keys are real derivatives of the current salt, not literals in the test.
     assert bot.WEBHOOK_SECRET == hashlib.sha256(seed.encode()).hexdigest()[:32]
     assert bot.ADMIN_PANEL_KEY == hashlib.sha256(seed.encode() + b"admin_panel").hexdigest()[:24]
-    # Два ключа не совпадают, и ни один не равен самому токену.
+    # The two keys do not match, and neither equals the token itself.
     assert bot.WEBHOOK_SECRET != bot.ADMIN_PANEL_KEY
     assert bot.WEBHOOK_SECRET != bot.BOT_TOKEN
     assert bot.ADMIN_PANEL_KEY != bot.BOT_TOKEN
-    # Соль из ADMIN_SECRET_SEED, когда она задана, — ключи не выводятся из BOT_TOKEN.
+    # Salt from ADMIN_SECRET_SEED, when set — keys are not derived from BOT_TOKEN.
     configured_seed = os.environ.get("ADMIN_SECRET_SEED", "").strip()
     if configured_seed:
         assert seed == configured_seed
 
 
 def test_admin_secret_seed_falls_back_to_bot_token_when_unset():
-    # Без ADMIN_SECRET_SEED поведение идентично прежнему (соль = BOT_TOKEN) — не
-    # ломает существующие деплои, которые эту переменную не настраивали.
-    # Прежняя версия ждала `or "default"`, а код делает `or secrets.token_hex(32)`
-    # (bot.py) — ветка «всё пусто» не проверялась и ожидание было неверным.
+    # Without ADMIN_SECRET_SEED, behavior is identical to before (salt = BOT_TOKEN) — do not
+    # breaks existing deployments that did not configure this variable.
+    # The previous version waited for `or "default"`, while the code does `or secrets.token_hex(32)`
+    # (bot.py) — the "everything empty" branch was not checked, so the expectation was wrong.
     import re
     seed_env = os.environ.get("ADMIN_SECRET_SEED", "").strip()
     if seed_env:
@@ -669,28 +885,28 @@ def test_admin_secret_seed_falls_back_to_bot_token_when_unset():
     elif bot.BOT_TOKEN:
         assert bot._ADMIN_SECRET_SEED == bot.BOT_TOKEN
     else:
-        # Оба пустые: случайная соль, а не литерал "default".
+        # Both empty: a random salt, not the literal "default".
         assert re.fullmatch(r"[0-9a-f]{64}", bot._ADMIN_SECRET_SEED)
 
 
-# ─────────────── lifecycle: токен, часовой цикл, старт (S7) ───────────────
+# lifecycle: token, hourly loop, startup (S7)
 
 def test_require_bot_token_exits_on_empty_token(monkeypatch):
-    # A1-1: пустой токен раньше умирал внутри Bot() с TokenValidationError и
-    # рестартами — теперь чистый выход с понятной причиной.
+    # A1-1: an empty token previously died inside Bot() with TokenValidationError and
+    # restarts — now a clean exit with a clear reason.
     monkeypatch.setattr(bot, "BOT_TOKEN", "")
     with pytest.raises(SystemExit):
         bot._require_bot_token()
 
 
 def test_require_bot_token_returns_configured_token(monkeypatch):
-    # Сторож: непустой токен молча проходит дальше в Bot().
+    # Guard: a non-empty token silently passes through to Bot().
     monkeypatch.setattr(bot, "BOT_TOKEN", "123:abc")
     assert bot._require_bot_token() == "123:abc"
 
 
 def test_secret_log_formatter_survives_interpreter_teardown():
-    # Финализация обнуляет глобалы модуля: форматирование не должно падать.
+    # Finalization resets the module's globals: formatting must not crash.
     import logging
     fmt = bot._SecretLogFormatter()
     rec = logging.LogRecord("bot", logging.WARNING, __file__, 1, "hello %s", ("world",), None)
@@ -703,8 +919,8 @@ def test_secret_log_formatter_survives_interpreter_teardown():
 
 
 def test_secret_log_formatter_prefixes_and_clears_chat_context():
-    # Метка чата на строках обработки — единственная связь лога с чатом;
-    # сброс обязателен, иначе метка утечёт в следующий апдейт (прод 27.10.2026).
+    # The chat label on processing lines is the log's only link to the chat;
+    # a reset is mandatory, or the marker leaks into the next update (prod 27.10.2026).
     import logging
     fmt = bot._SecretLogFormatter()
     rec = logging.LogRecord("bot", logging.INFO, __file__, 1, "hello", (), None)
@@ -717,8 +933,8 @@ def test_secret_log_formatter_prefixes_and_clears_chat_context():
 
 
 def _sleep_then_cancel(loop_sleeps):
-    # Первые loop_sleeps+1 вызовов sleep проходят (1.5с старта + тики),
-    # дальше CancelledError останавливает бесконечный цикл стартапа.
+    # The first loop_sleeps+1 sleep calls pass (1.5 seconds of startup + ticks),
+    # further downstream, CancelledError stops the infinite startup loop.
     state = {"n": 0}
 
     async def _fake_sleep(delay):
@@ -736,7 +952,7 @@ def _patch_startup(monkeypatch, tg_impl, loader=None):
     monkeypatch.setattr(bot, "_cleanup_rate_limit_dict", Mock())
     monkeypatch.setattr(bot, "_evict_orphan_chat_locks", Mock())
     monkeypatch.setattr(bot, "_reset_quota_if_new_day", Mock())
-    # getMe в try_setup переписывает globals — снапшот для отката.
+    # getMe in try_setup rewrites globals; this is a snapshot for rollback.
     monkeypatch.setattr(bot, "BOT_USERNAME", bot.BOT_USERNAME)
 
 
@@ -747,8 +963,8 @@ async def _fake_tg_ok(method, *args, **kwargs):
 
 
 def test_hourly_tick_survives_failing_step(monkeypatch):
-    # A1-2: упавшая чистка раньше убивала часовой цикл навсегда — теперь
-    # второй тик всё равно наступает.
+    # A1-2: a failed cleanup previously killed the hourly loop permanently — now
+    # the second tick still arrives.
     monkeypatch.setattr(bot.asyncio, "sleep", _sleep_then_cancel(2))
     _patch_startup(monkeypatch, _fake_tg_ok)
     monkeypatch.setattr(
@@ -757,14 +973,14 @@ def test_hourly_tick_survives_failing_step(monkeypatch):
     )
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(bot._webhook_startup())
-    # Упавший шаг пропускает остаток своего тика, но цикл живёт: чистка звалась
-    # дважды (второй тик наступил), evict — один раз (первый тик оборвался).
+    # A failed step skips the rest of its tick, but the loop survives: cleanup was called
+    # twice (the second tick occurred), evict — once (the first tick was interrupted).
     assert bot._cleanup_rate_limit_dict.call_count == 2
     assert bot._evict_orphan_chat_locks.call_count == 1
 
 
 def test_startup_loads_state_off_loop(monkeypatch):
-    # A1-3: синхронное чтение диска раньше стопорило loop на старте.
+    # A1-3: synchronous disk reads previously stalled the loop at startup.
     seen = {}
     monkeypatch.setattr(bot.asyncio, "sleep", _sleep_then_cancel(0))
     _patch_startup(monkeypatch, _fake_tg_ok,
@@ -775,7 +991,7 @@ def test_startup_loads_state_off_loop(monkeypatch):
 
 
 def test_startup_logs_commands_failure_honestly(monkeypatch, caplog):
-    # A1-4: провал всех языков раньше логировался как успех (for-else без break).
+    # A1-4: failure of every language used to be logged as success (for-else without break).
     async def _fake_tg_fail_commands(method, *args, **kwargs):
         if method == "getMe":
             return {"username": "testbot"}
@@ -792,7 +1008,7 @@ def test_startup_logs_commands_failure_honestly(monkeypatch, caplog):
 
 
 def test_startup_logs_commands_success(monkeypatch, caplog):
-    # Сторож: хотя бы один язык прошёл — лог успеха на месте.
+    # Guard: at least one language passed, so the success log is present.
     monkeypatch.setattr(bot.asyncio, "sleep", _sleep_then_cancel(0))
     _patch_startup(monkeypatch, _fake_tg_ok)
     with caplog.at_level(logging.INFO, logger="bot"), pytest.raises(asyncio.CancelledError):
@@ -801,7 +1017,7 @@ def test_startup_logs_commands_success(monkeypatch, caplog):
 
 
 def test_message_mentions_bot_without_chat_returns_false():
-    # A1-6: chat None раньше давал AttributeError, апдейт глотался хендлером.
+    # A1-6: chat None previously caused AttributeError, and the handler swallowed the update.
     class _NoChatMessage:
         chat = None
         text = "@somebot hello"
@@ -812,8 +1028,8 @@ def test_message_mentions_bot_without_chat_returns_false():
 
 
 def test_webhook_setup_retries_then_raises(monkeypatch):
-    # Аудит D4: провал setWebhook без ретрая давал тихий мёртвый бот — теперь
-    # ретраи с бэкоффом и явный отказ вместо молчания.
+    # Audit D4: a setWebhook failure without a retry left a silently dead bot; now
+    # retries with backoff and an explicit refusal instead of silence.
     sleeps = []
 
     async def fast_sleep(delay):
@@ -833,7 +1049,7 @@ def test_webhook_setup_retries_then_raises(monkeypatch):
 
 
 def test_webhook_setup_succeeds_after_retries(monkeypatch):
-    # Сторож: два провала подряд — третий регистрирует, стартап живёт дальше.
+    # Guard: two failures in a row, and the third is recorded while startup continues.
     calls = {"hook": 0}
     sleeps = []
 
@@ -861,8 +1077,8 @@ def test_webhook_setup_succeeds_after_retries(monkeypatch):
 
 
 def test_main_exits_nonzero_when_server_dies_first(monkeypatch, caplog):
-    # Падение uvicorn первым (порт занят) раньше терялось: процесс тихо выходил
-    # с кодом 0. Теперь исключение сервера логируется и даёт SystemExit(1).
+    # An early uvicorn failure (port in use) was previously lost: the process exited quietly
+    # with code 0. The server exception is now logged and produces SystemExit(1).
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     import lumen_chat_state
@@ -910,8 +1126,8 @@ def test_main_exits_nonzero_when_server_dies_first(monkeypatch, caplog):
 
 
 def test_main_flushes_on_graceful_server_exit(monkeypatch, caplog):
-    # SIGTERM/SIGINT: сервер завершился штатно — финальный сброс состояния и
-    # закрытие сессий обязаны выполниться (аудит 28.10.2026).
+    # SIGTERM/SIGINT: the server shut down cleanly — the final state flush and
+    # session closures must complete (audit 28.10.2026).
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     import lumen_chat_state
@@ -955,8 +1171,8 @@ def test_main_flushes_on_graceful_server_exit(monkeypatch, caplog):
             asyncio.run(bot.main())
         assert "[serve] HTTP server stopped gracefully" in caplog.text
         assert "chats" in emitted and "quota" in emitted
-        # Частичный сбой стартовой загрузки не отменяет сохранение чатов:
-        # иначе последние сообщения терялись при редеплое (ревью 28.10.2026).
+        # A partial startup-load failure does not prevent saving chats:
+        # otherwise recent messages were lost during redeployment (review 28.10.2026).
         emitted.clear()
         bot._dirty_chat_ids.add(999001)
         lumen_chat_state._quota_dirty = True
@@ -976,8 +1192,8 @@ def test_main_flushes_on_graceful_server_exit(monkeypatch, caplog):
 
 
 def test_probe_url_marks_http_errors_unhealthy_and_sends_headers():
-    # Аудит 28.10.2026: 401 защищённого прокси и 403 TikWM считались «ok»,
-    # /diag и /selftest показывали зелёное при мёртвом пути.
+    # Audit 28.10.2026: a protected proxy's 401 and a TikWM 403 were treated as "ok,"
+    # /diag and /selftest showed green when the path was dead.
     class _FakeResp:
         status = 401
 
@@ -1004,8 +1220,8 @@ def test_probe_url_marks_http_errors_unhealthy_and_sends_headers():
 
 
 def test_probe_url_treats_telegram_401_as_reachable_proxy():
-    # 401 с JSON Telegram доказывает, что прокси и API живы (токен в зонде
-    # обрезан); 401 самого прокси с телом Unauthorized остаётся красным.
+    # A 401 with Telegram JSON proves the proxy and API are alive (the token in the probe
+    # is truncated); a 401 from the proxy itself with an Unauthorized body remains red.
     class _FakeContent:
         async def read(self, n):
             return b'{"ok":false,"error_code":401,"description":"Unauthorized"}'
@@ -1029,7 +1245,7 @@ def test_probe_url_treats_telegram_401_as_reachable_proxy():
 
 
 def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():
-    # Общий зонд /diag и /selftest: успех — статус, неуспех — текст без секрета.
+    # Shared /diag and /selftest probe: success is a status, failure is text without a secret.
     class _FakeResp:
         status = 200
 
@@ -1056,7 +1272,7 @@ def test_probe_url_returns_ok_shape_and_redacts_secret_on_error():
 
 @pytest.mark.parametrize("flag", ["_state_load_failed", "_quota_load_failed"])
 def test_export_state_refuses_after_failed_startup_load(flag):
-    # Ревью 17.11.2026: 200 с пустым снимком после сбоя загрузки — бэкап затрёт хороший.
+    # Review 17.11.2026: 200 with an empty snapshot after a load failure — the backup would overwrite the good one.
     import lumen_chat_state as lcs
     original_key = bot.ADMIN_PANEL_KEY
     original_state = lcs._state_load_failed

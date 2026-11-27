@@ -1,14 +1,14 @@
-"""eval/provider_caps_probe.py — живой замер возможностей Munito по параметрам.
+"""eval/provider_caps_probe.py — live measurement of Munito capabilities by parameter.
 
-Зачем: карта _MUNITO_CAPS («gemma-4-12b и pplx-decider не принимают
-reasoning_effort, головы принимают, tools принимают все текстовые») до этого
-файла опиралась на разовые вызовы, которых в репозитории не было. Теперь
-утверждение можно повторить одной командой, и оно датировано.
+Why: the _MUNITO_CAPS map (“gemma-4-12b and pplx-decider do not accept
+reasoning_effort, the heads do, and all text models accept tools”) previously
+relied on ad hoc calls that were not in the repository. Now the
+claim can be repeated with one command, and it is dated.
 
     python eval/provider_caps_probe.py
 
-Ключи берутся из окружения или из .env основного дерева (LUMEN_ENV_DIR);
-значения нигде не печатаются. Ответ на каждый вопрос — один токен.
+Keys come from the environment or the main tree's .env (LUMEN_ENV_DIR);
+values are never printed. Each question's answer is one token.
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ from pathlib import Path
 BASE = os.getenv("MUNITO_BASE_URL", "").strip() or "https://api.munito.ai/inference/v1"
 ENV_FILE = Path(os.getenv("LUMEN_ENV_DIR", r"C:/Users/egork/Documents/Default Project/Lumen")) / ".env"
 
-# Модель × параметр. Список сверен с _MUNITO_ORDER и _MUNITO_CAPS: снимать
-# признак возможности можно только по живому ответу провайдера.
+# Model × parameter. The list is checked against _MUNITO_ORDER and _MUNITO_CAPS: a
+# capability flag may be removed only on a live provider response.
 MODELS = (
     "deepseek-ai/deepseek-v4.1-flash-1017",
     "zai-org/glm-5.3-flash",
@@ -58,7 +58,7 @@ def post(token: str, body: dict, timeout: float = 25.0) -> tuple[int, str]:
             return resp.status, resp.read().decode("utf-8", errors="replace")[:400]
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", errors="replace")[:400]
-    except Exception as exc:  # сеть, таймаут, битый JSON
+    except Exception as exc:  # network, timeout, invalid JSON
         return 0, exc.__class__.__name__
 
 

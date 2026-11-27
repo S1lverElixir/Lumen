@@ -1,13 +1,12 @@
-"""
-Lumen — телеграм-бот на Munito с резервом в Gemini, webhook-режим.
-История диалога — 100 сообщений, TikTok через TikWM без водяных знаков,
-генерация картинок через Cloudflare Workers AI с резервом в Pollinations, озвучка через Gemini TTS.
+"""Lumen is a Munito-based Telegram bot with Gemini fallback, in webhook mode.
+Dialog history is 100 messages; TikTok goes through TikWM without watermarks;
+image generation uses Cloudflare Workers AI with Pollinations fallback, and speech uses Gemini TTS.
 """
 
 from __future__ import annotations
 
-# Алиас против дубля модуля при `python bot.py` + `import bot`: иначе второй инстанс,
-# пустые state/квоты и вечный 503 (прод-инцидент, сентябрь 2026).
+# Alias to prevent a duplicate module with `python bot.py` + `import bot`; otherwise there is a second instance,
+# empty state/quotas and permanent 503 (production incident, September 2026).
 import sys as _sys
 _sys.modules.setdefault("bot", _sys.modules[__name__])
 del _sys
@@ -45,23 +44,23 @@ from aiogram.types import (
     Message,
 )
 from google import genai
-from google.genai import types  # нужен тестам как bot.types (сборка Content/Part)
+from google.genai import types  # tests need it as bot.types (Content/Part assembly)
 
-# язык системных сообщений бота (см. lumen_lang.py): фиксированные строки,
-# которые бот отправляет сам (/start, подсказки, ошибки, статусы). Ответы ИИ
-# не трогаем — модель отвечает на языке собеседника.
+# language of the bot system messages (see lumen_lang.py): fixed strings,
+# that the bot sends itself (/start, hints, errors, statuses). AI answers
+# do not touch it — the model answers in the interlocutor's language.
 from lumen_lang import (
     DEFAULT_LANG,
     SUPPORTED_LANGS,
     t as _lang_t,
 )
 
-# setMyCommands принимает только двухбуквенные ISO 639-1 коды (прод-инцидент:
-# "fil" ронял регистрацию с 400 Bad Request). У филиппинского такого кода нет
-# (fil — ISO 639-2), эти пользователи видят команды на английском по умолчанию.
+# setMyCommands accepts only two-letter ISO 639-1 codes (production incident:
+# "fil" broke registration with 400 Bad Request). Filipino has no such code
+# (fil — ISO 639-2); these users see commands in English by default.
 COMMAND_LOCALES = [c for c in SUPPORTED_LANGS if c != DEFAULT_LANG and c != "fil"]
 
-# логирование
+# logging
 
 LOG_FILE_PATH = Path(os.getenv("BOT_LOG_PATH", "/app/bot.log"))
 LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -85,31 +84,32 @@ def _current_log_secrets() -> tuple[str, ...]:
     return tuple(sorted(set(values), key=len, reverse=True))
 
 
-# Метка текущего чата на всех строках обработки: aiogram печатает только update
-# id, и собрать путь одного запроса по логу было нельзя (прод 27.10.2026).
+# Current-chat label on every processing line: aiogram prints only update
+# id, making it impossible to reconstruct a single request's path from the log (prod 27.10.2026).
 _LOG_CHAT: contextvars.ContextVar[str] = contextvars.ContextVar("log_chat", default="")
-# Автор запроса для вклада в карантин моделей: два чата одного человека — это
-# один человек, а не два источника плохих ответов (аудит 16.11.2026).
+# Source of the request contributing to model quarantine: two chats belonging
+# to one person are
+# one person, not two sources of bad answers (audit 16.11.2026).
 _LOG_USER: contextvars.ContextVar[str] = contextvars.ContextVar("log_user", default="")
 
-# Общий дедлайн сообщения: каждый этап берёт min(свой таймаут, остаток), иначе
-# лок + поиск + маршрут + саммари в сумме давали до двух минут (аудит 27.10.2026).
+# Overall message deadline: every stage takes min(its timeout, remaining time), or
+# lock + search + route + summary together took up to two minutes (audit 27.10.2026).
 _MSG_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("msg_deadline", default=None)
 
-# Один апдейт = одно списание суточного лимита. Второй и третий проходы маршрута
-# (ретрай после [[SEARCH]], повтор за свежестью, автопродолжение) — это тот же
-# ответ человеку, а не новый: без флага 30 сообщений съедались за 15 (аудит 16.11.2026).
+# One update = one daily-limit charge. The second and third route passes
+# (retry after [[SEARCH]], a freshness retry, auto-continuation) — this is the same
+# a response to the person, not a new one: without the flag, 30 messages were consumed in 15 (audit 16.11.2026).
 _ANSWER_COUNTED: contextvars.ContextVar[bool] = contextvars.ContextVar("answer_counted", default=False)
 
-# Остановка ответа (аудит 16.11.2026): /stop выставляет флаг, цикл стрима выходит на
-# следующем куске, частичный текст остаётся на экране и ложится в историю. Один
-# активный стрим на чат; пользователь = автор вопроса, отказ молчаливый.
+# Stopping an answer (audit 16.11.2026): /stop sets the flag; the stream loop exits at
+# next chunk; partial text stays on screen and is saved to history. One
+# active stream per chat; the user is the question's author, and refusal is silent.
 _STREAM_STOPS: dict[int, dict[str, object]] = {}
 
 
 def _begin_stream_stop_scope(chat_id: int, user_id: int | None, *, stream: bool = False) -> None:
-    """Область с глубиной: внешняя ставится на весь апдейт (чтобы /stop работал и
-    во время фазы поиска), внутренняя — на стрим. Флаг переживает вложенную область."""
+    """Scope with depth: the outer one covers the entire update (so /stop works
+    during the search phase too), the inner one covers streaming. The flag survives a nested scope."""
     entry = _STREAM_STOPS.get(chat_id)
     if entry is None:
         entry = {"event": asyncio.Event(), "user_id": user_id, "depth": 0,
@@ -118,9 +118,9 @@ def _begin_stream_stop_scope(chat_id: int, user_id: int | None, *, stream: bool 
     if user_id is not None and entry.get("user_id") is None:
         entry["user_id"] = user_id
     depth = int(entry.get("depth") or 0)
-    # Очередь может открыть внешнюю область следующего сообщения до завершения
-    # текущего. Токен меняем только при входе в новый стрим, чтобы кнопка
-    # прошлого ответа не гасила следующий (review 24.11.2026).
+    # The queue may open the external area of the next message before completion
+    # the current one. Change the token only when entering a new stream, so the button
+    # of the previous answer did not clear the next one (review 24.11.2026).
     if stream and depth == 1:
         entry["token"] = secrets.token_hex(4)
         entry["user_id"] = user_id
@@ -148,8 +148,7 @@ def _stream_stop_requested(chat_id: int) -> bool:
 
 
 def _consume_stream_stop(chat_id: int) -> None:
-    """Остановка исполнена: флаг и автор сбрасываются, иначе следующий апдейт
-    в очереди того же чата гаснет молча (второй проход аудита 16.11.2026)."""
+    """Stop completed: the flag and author are reset, otherwise the next queued update in the same chat silently turns off (second audit pass 16.11.2026)."""
     entry = _STREAM_STOPS.get(chat_id)
     if not entry:
         return
@@ -160,8 +159,7 @@ def _consume_stream_stop(chat_id: int) -> None:
 
 
 def _request_stream_stop(chat_id: int, user_id: int | None = None, *, token: str | None = None) -> bool:
-    """True — флаг поставлен. Чужой человек в группе остановить ответ не может.
-    token защищает от запоздалого нажатия кнопки прошлого ответа."""
+    """True means the flag is set. Another person in a group cannot stop the answer. The token protects against a late press of a button from a previous answer."""
     entry = _STREAM_STOPS.get(chat_id)
     if not entry:
         return False
@@ -178,13 +176,13 @@ def _request_stream_stop(chat_id: int, user_id: int | None = None, *, token: str
 
 
 def _msg_remaining_sec() -> float | None:
-    """Сколько осталось до потолка сообщения; None — обработка вне handle_message."""
+    """Time remaining before the message ceiling; None means processing outside handle_message."""
     deadline = _MSG_DEADLINE.get()
     return None if deadline is None else max(0.0, deadline - time.monotonic())
 
 
 def _deadline_within_message(seconds: float) -> float:
-    """Дедлайн этапа, не выходящий за общий потолок сообщения."""
+    """Stage deadline that does not exceed the message's overall cap."""
     now = time.monotonic()
     remaining = _msg_remaining_sec()
     return now + seconds if remaining is None else now + min(seconds, remaining)
@@ -192,9 +190,9 @@ def _deadline_within_message(seconds: float) -> float:
 
 class _SecretLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord, _secrets=_current_log_secrets) -> str:
-        # Секреты через замыкание, а не глобал: при финализации интерпретатора
-        # глобалы модуля уже None и форматирование падало с TypeError.
-        # Остатки teardown глушим: строка без вычистки лучше шумного трейсбека.
+        # Secrets through a closure, not a global: during interpreter finalization
+        # module globals were already None, and formatting failed with TypeError.
+        # Suppress teardown leftovers: a clean line is better than a noisy traceback.
         text = super().format(record)
         with contextlib.suppress(Exception):
             chat = _LOG_CHAT.get()
@@ -206,8 +204,8 @@ class _SecretLogFormatter(logging.Formatter):
 
 
 class _PublicLogFormatter(logging.Formatter):
-    """Публичные логи HF Space: длинные числовые id (чаты/пользователи) заменяем
-    стабильным хешем. Файловый лог сохраняет полные id для разбора (аудит 28.10.2026)."""
+    """Public HF Space logs: replace long numeric IDs (chats/users) with
+    a stable hash. The file log retains full IDs for analysis (audit 28.10.2026)."""
     _ID_RE = re.compile(r"(?<!\d)(-?\d{6,})(?!\d)")
 
     def format(self, record: logging.LogRecord) -> str:
@@ -216,7 +214,7 @@ class _PublicLogFormatter(logging.Formatter):
 
 
 def _setup_logging() -> logging.Logger:
-    # LOG_LEVEL из env: раньше INFO был зашит везде и глушил все debug.
+    # LOG_LEVEL from env: previously INFO was hardcoded everywhere and suppressed all debug output.
     level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").strip().upper(), logging.INFO)
     root = logging.getLogger()
     root.setLevel(level)
@@ -231,15 +229,15 @@ def _setup_logging() -> logging.Logger:
     file_handler.setLevel(level)
 
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    # stdout на публичном Space хеширует id; файл (эфемерный, не публичный)
-    # остаётся с полными id.
+    # stdout on a public Space hashes the id; the file (ephemeral, non-public)
+    # remains with full IDs.
     console_handler.setFormatter(_PublicLogFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     file_handler.setFormatter(fmt)
 
     _LOG_QUEUE_HANDLER.setFormatter(_SecretLogFormatter())
 
     global _LOG_LISTENER
-    # Перед стартом останавливаем старый QueueListener: иначе потоки плодятся на одной очереди и вешают выход после "N passed" (гонка за sentinel, 04.09.2026).
+    # Before startup, stop the old QueueListener: otherwise threads multiply on one queue and hang the exit after "N passed" (sentinel race, 04.09.2026).
     if _LOG_LISTENER is not None:
         with contextlib.suppress(Exception):
             _LOG_LISTENER.stop()
@@ -250,7 +248,7 @@ def _setup_logging() -> logging.Logger:
     logging.captureWarnings(True)
     for name in ("httpx", "google_genai", "aiohttp", "uvicorn.access"):
         logging.getLogger(name).setLevel(logging.WARNING)
-    # Единый логгер "bot": __main__ в проде расходился с lumen_*.py (видно в Sentry).
+    # A single "bot" logger: __main__ in production diverged from lumen_*.py (visible in Sentry).
     logger = logging.getLogger("bot")
     logger.info("[setup] Logging: level=%s, file=%s", logging.getLevelName(level), LOG_FILE_PATH)
     return logger
@@ -297,7 +295,7 @@ def _load_env_file(path: Path) -> None:
 for _env_path in (Path('/app/.env'), Path('.env')):
     _load_env_file(_env_path)
 
-# переменные окружения и конфиг
+# environment variables and configuration
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
@@ -311,12 +309,12 @@ else:
     log.info("[setup] BOT_TOKEN configured successfully (length: %d)", len(BOT_TOKEN))
 
 def _normalize_telegram_base_url(url: str) -> str:
-    """Голый хост без схемы чиним в https://: иначе aiohttp валится на каждом вызове невнятной ошибкой."""
+    """Fixes a bare host with no scheme to https://; otherwise aiohttp fails on every call with an unclear error."""
     url = url.strip().rstrip("/")
     if url and not url.lower().startswith(("http://", "https://")):
-        # Реальный инцидент: TELEGRAM_API_BASE_URL задали голым хостом без схемы —
-        # aiohttp падал с невнятным "Network error" на каждый вызов. Молча чиним
-        # схему тут: дешевле, чем снова диагностировать ту же опечатку.
+        # Real incident: TELEGRAM_API_BASE_URL was set to a bare host without a scheme,
+        # aiohttp failed with a vague "Network error" on every call. Silently fix
+        # the schema here: cheaper than diagnosing the same typo again.
         log.warning('[setup] Telegram proxy URL given without a scheme (%r) — adding https:// automatically.', url)
         url = "https://" + url
     return url
@@ -325,43 +323,43 @@ LUMEN_PROXY_SECRET = os.getenv("LUMEN_PROXY_SECRET", "")
 TELEGRAM_API_BASE_URL = _normalize_telegram_base_url(os.getenv("TELEGRAM_API_BASE_URL", "https://api.telegram.org"))
 log.info("[setup] Using Telegram API Base URL: %s", TELEGRAM_API_BASE_URL)
 
-# Список резервных прокси по кругу вместо единой точки отказа (аудит, август 2026).
+# Rotate a list of fallback proxies instead of relying on a single point of failure (audit, August 2026).
 _TELEGRAM_PROXY_FALLBACKS = [
     _normalize_telegram_base_url(u) for u in os.getenv("TELEGRAM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
 ]
 _TELEGRAM_PROXY_CANDIDATES: list[str] = [TELEGRAM_API_BASE_URL] + [u for u in _TELEGRAM_PROXY_FALLBACKS if u != TELEGRAM_API_BASE_URL]
-# Wake-word в группах: «Люмен, ...» работает как упоминание. Выключение одной
-# переменной, слова-синонимы — списком (прод 18.11.2026 по просьбе владельца).
+# Wake word in groups: “Lumen, ...” works as a mention. Turning off one
+# of the variable, word synonyms — as a list (prod 18.11.2026 at the owner's request).
 GROUP_WAKE_ENABLED = os.getenv("GROUP_WAKE_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 GROUP_WAKE_WORDS = tuple(
     w.strip() for w in os.getenv("GROUP_WAKE_WORDS", "люмен,lumen").split(",") if w.strip()
 ) or ("люмен", "lumen")
 
 def group_wake_request(text: str) -> tuple[bool, str]:
-    """(адресовано ли словом, текст без имени). Выключатель — GROUP_WAKE_ENABLED."""
+    """(whether it was addressed by a word, text without a name). Switch — GROUP_WAKE_ENABLED."""
     if not GROUP_WAKE_ENABLED or not text:
         return False, text
     return strip_group_wake_word(text, GROUP_WAKE_WORDS)
 
 
-_telegram_proxy_idx = 0  # индекс текущего активного прокси в _TELEGRAM_PROXY_CANDIDATES
-# Ротация мутирует два глобала сразу — под локом, иначе два concurrent-сбоя
-# уводят индекс на два шага и пропускают кандидата (AUD-E-004).
+_telegram_proxy_idx = 0  # index of the currently active proxy in _TELEGRAM_PROXY_CANDIDATES
+# Rotation mutates two globals at once — under the lock, or two concurrent failures
+# move the index two steps ahead and skip a candidate (AUD-E-004).
 _proxy_rotation_lock = asyncio.Lock()
 
-# База прокси для TikWM: HF IP банится с пустым 403, лечится только прокси (инцидент 11–12.08.2026).
-# Пусто — стучимся в два зеркала напрямую, как раньше.
+# TikWM proxy base: the HF IP is banned with an empty 403; only the proxy fixes it (incident 11–12.08.2026).
+# When empty, call both mirrors directly, as before.
 TIKWM_API_BASE_URL = os.getenv("TIKWM_API_BASE_URL", "").strip().rstrip("/")
-# Резервные прокси для TikWM — та же схема, что у Telegram выше: раньше резервный
-# путь был только у Telegram, хотя точка отказа одна. Пусто по умолчанию —
-# поведение без настройки не меняется.
+# Fallback proxies for TikWM use the same scheme as Telegram above: the fallback
+# existed only for Telegram, although the failure point is shared. Empty by default,
+# behavior without the setting does not change.
 _TIKWM_API_BASE_URL_FALLBACKS = [
     u.strip().rstrip("/") for u in os.getenv("TIKWM_API_BASE_URL_FALLBACKS", "").split(",") if u.strip()
 ]
 
-# Релеи с жёстким лимитом тела (Vercel Hobby — 4,5 МБ) не годятся для отправки
-# медиа. Список хостов задаётся в env; голова aiogram-сессии выбирается только
-# из «больших» релеев, иначе видео/аудио гарантированно падают (прод 17.11.2026).
+# Relays with a hard body limit (Vercel Hobby: 4.5 MB) are unsuitable for sending
+# media. The host list is set in env; the aiogram session head is selected only
+# from “large” relays, otherwise video/audio are guaranteed to fail (prod 17.11.2026).
 _SMALL_BODY_PROXY_HOSTS = {
     h.strip().lower() for h in os.getenv("TELEGRAM_API_SMALL_BODY_HOSTS", "").split(",") if h.strip()
 }
@@ -377,8 +375,8 @@ def _proxy_host(base_url: str) -> str:
 def _pick_media_candidate(
     candidates: list[str], healthy: dict[str, bool], small_hosts: set[str] | None = None,
 ) -> str | None:
-    """Первая здоровая база, не помеченная «маленькой»; если таких нет — первая
-    здоровая. Чистая функция: выбор проверяется тестами без сети."""
+    """The first healthy base not marked "small"; if none exists — the first
+    healthy one. Pure function: tests verify the selection without network access."""
     small = _SMALL_BODY_PROXY_HOSTS if small_hosts is None else small_hosts
     for base in candidates:
         if healthy.get(base) and _proxy_host(base) not in small:
@@ -390,8 +388,8 @@ def _pick_media_candidate(
 
 
 async def _probe_telegram_base(base_url: str, timeout_sec: float = 5.0) -> bool:
-    """getMe через релей: 200=живой, всё остальное — нет. Секрет в заголовке,
-    токен не логируется (в URL он есть, поэтому в логах только хост)."""
+    """getMe through the relay: 200=alive, anything else=not. The secret is in the header,
+    the token is not logged (it is in the URL, so logs contain only the host)."""
     if not base_url or base_url == "https://api.telegram.org":
         return True
     url = f"{base_url}/bot{BOT_TOKEN}/getMe"
@@ -406,7 +404,7 @@ async def _probe_telegram_base(base_url: str, timeout_sec: float = 5.0) -> bool:
 
 
 async def _choose_telegram_media_base() -> str | None:
-    """Проверяет релеи параллельно и возвращает голову для aiogram-сессии."""
+    """Checks relays in parallel and returns the head for the aiogram session."""
     candidates = list(_TELEGRAM_PROXY_CANDIDATES)
     checks = await asyncio.gather(*(_probe_telegram_base(u) for u in candidates))
     healthy = dict(zip(candidates, checks))
@@ -420,8 +418,7 @@ _media_probe_failures = 0
 
 
 async def _telegram_media_relay_watchdog() -> None:
-    """Раз в минуту проверяет текущую базу медиа и переключает aiogram-сессию на
-    здоровый «большой» релей. Прямой api.telegram.org не трогаем."""
+    """Once a minute, checks the current media database and switches the aiogram session to a healthy "large" relay. Direct api.telegram.org is not touched."""
     global _media_base_url, _media_probe_failures
     while True:
         await asyncio.sleep(60)
@@ -446,21 +443,21 @@ async def _telegram_media_relay_watchdog() -> None:
 
 
 def _tikwm_proxy_candidates() -> list[str]:
-    """Список прокси-адресов для TikWM в порядке попытки: основной + резервные
-    (без дублей). Пустая строка ("" — TIKWM_API_BASE_URL не задан) означает
-    "без прокси, прямые запросы к обоим зеркалам TikWM" — в этом случае список
-    всегда из одного элемента [""], т.к. у прямого режима нет понятия "резервный
-    прокси" (он и так уже пробует оба зеркала TikWM внутри самого запроса,
-    см. _fetch_tikwm_media_data)."""
+    """TikWM proxy addresses in attempt order: primary + fallbacks
+    (no duplicates). An empty string ("" — TIKWM_API_BASE_URL is unset) means
+    "no proxy, direct requests to both TikWM mirrors" — in that case the list
+    is always the single element [""], because direct mode has no concept of a
+    "fallback proxy" (it already tries both TikWM mirrors within the request;
+    see _fetch_tikwm_media_data)."""
     if not TIKWM_API_BASE_URL:
         return [""]
     candidates = [TIKWM_API_BASE_URL] + [u for u in _TIKWM_API_BASE_URL_FALLBACKS if u != TIKWM_API_BASE_URL]
     return candidates
 
 def _cloudflare_proxy_candidates() -> list[str]:
-    """Базовый URL Workers AI попадает в скоупы прокси только если он реально прокси:
-    прямому api.cloudflare.com секрет прокси слать нельзя. Мусорный или прямой URL —
-    пустой список, а не падение общей сессии (её создаёт middleware с валидацией)."""
+    """The Workers AI base URL enters proxy scopes only if it is actually a proxy:
+the proxy secret must not be sent to api.cloudflare.com directly. An invalid or direct URL means
+an empty list, not a crash of the shared session (created by middleware with validation)."""
     base = os.getenv("CLOUDFLARE_AI_BASE_URL", "").strip().rstrip("/")
     if not base:
         return []
@@ -480,14 +477,14 @@ BOT_USERNAME = os.getenv("BOT_USERNAME", "LumenAI_bot").strip().lstrip("@")
 
 def _env_number(name: str, default: float | int, *, cast: type = float,
                 min_value: float | None = None, max_value: float | None = None) -> float | int:
-    """Число из переменной окружения с внятной диагностикой.
+    """Read a number from an environment variable with clear diagnostics.
 
-    Раньше все таймауты и лимиты читались голым int()/float(): опечатка в HF
-    Variable (например ROUTE_MODEL_TIMEOUT_SEC=22s или пустое значение) давала
-    голый ValueError на старте — то есть crashloop с невнятным логом вместо
-    понятного сообщения. Теперь мусор и выход за нижнюю границу заменяются
-    дефолтом с WARNING (бот продолжает работать), а не падают (аудит 26.09.2026).
-    """
+    Previously, all timeouts and limits were read with bare int()/float(): a typo
+    in an HF Variable (for example, ROUTE_MODEL_TIMEOUT_SEC=22s or an empty value)
+    produced a bare ValueError at startup, meaning a crash loop with an unclear
+    log instead of a clear message. Invalid values and values below the lower
+    bound now fall back to the default with a WARNING (the bot keeps running)
+    instead of crashing (audit 26.09.2026)."""
     raw = os.getenv(name)
     if raw is None or not str(raw).strip():
         return cast(default)
@@ -505,31 +502,32 @@ def _env_number(name: str, default: float | int, *, cast: type = float,
     return value
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-# Groq — только Whisper для голосовых (_transcribe_audio); чат-модели Groq из кода убраны 05.11.2026.
+# Groq is only for Whisper voice transcription (_transcribe_audio); Groq chat models were removed from the code on 05.11.2026.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-# Munito AI — основной текстовый и vision-провайдер с 05.11.2026 (замер eval/munito_probe.py):
-# ноль-хранение по умолчанию, обучение на промптах запрещено. Ключа нет — маршрут
-# делает вид, что провайдера не существует и отвечает только Gemini.
+# Munito AI — the primary text and vision provider since 05.11.2026 (measured by eval/munito_probe.py):
+# zero retention by default, and training on prompts is prohibited. With no key, the route
+# pretends the provider does not exist and answers only with Gemini.
 MUNITO_API_KEY = os.getenv("MUNITO_API_KEY", "").strip()
 MUNITO_BASE_URL = (os.getenv("MUNITO_BASE_URL", "").strip() or "https://api.munito.ai/inference/v1").rstrip("/")
-# 3M токенов/сутки по тарифу владельца при ~11K входных токенов на запрос — это ~250 ответов.
+# 3M tokens/day under the owner plan at ~11K input tokens per request is
+# about 250 responses.
 MUNITO_DAILY_LIMIT = _env_number("MUNITO_DAILY_LIMIT", 250, cast=int, min_value=1)
-# Голосовые длиннее не транскрибируем (Whisper API всё равно режет 25 МБ) — такие идут прежним путём через Gemini-аудио.
+# For voice, do not forward the original Telegram file: its size is unknown (the Whisper API limit is 25 MB) and it may fail before the Gemini STT fallback.
 VOICE_TRANSCRIBE_MAX_BYTES = _env_number("VOICE_TRANSCRIBE_MAX_BYTES", 10 * 1024 * 1024, cast=int, min_value=1024)
-# ── Sentry (опционально) — персистентный трекинг ошибок между рестартами ──
-# Sentry: bot.log теряется при редеплое, Upstash логи не покрывает; ловит log.error без правок точек вызова.
+# ── Sentry (optional) — persistent error tracking across restarts ──
+# Sentry: bot.log is lost on redeploy, and Upstash does not cover logs; it catches log.error without changing call sites.
 def _redactable_secrets() -> tuple[str, ...]:
-    """Единый список секретов для /logs и Sentry (включая производные секреты и Upstash-токен — полный доступ к историям)."""
+    """Reject /logs from Sentry (in debug mode, all Upstash keys and chat contents went there along with the logs)."""
     return _current_log_secrets()
 
 def _sentry_scrub_secrets(event: dict, hint: dict) -> dict | None:
-    """before_send-хук Sentry: вычищает секреты. Определена безусловно — тестируется без настоящего DSN."""
+    """Sentry before_send hook: scrubs secrets. Defined unconditionally so it can be tested without a real DSN."""
     payload = json.dumps(event, default=str, ensure_ascii=False)
     for secret in _redactable_secrets():
         payload = payload.replace(secret, "<REDACTED>")
-        # JSON экранирует кавычки/бэкслеши/управляющие: точная строка секрета
-        # тогда не находится, и он уезжает в Sentry (ревью 17.11.2026).
+        # JSON escapes quotes/backslashes/control characters: the exact secret string
+        # it is not found then and goes to Sentry (review 17.11.2026).
         escaped = json.dumps(secret, ensure_ascii=False)[1:-1]
         if escaped != secret:
             payload = payload.replace(escaped, "<REDACTED>")
@@ -540,12 +538,12 @@ if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         before_send=_sentry_scrub_secrets,
-        # Только трекинг ошибок (трейсинг выключен — бережём квоту Sentry 5000 событий/мес).
+        # Error tracking only (tracing disabled to preserve Sentry's 5000 events/month quota).
         traces_sample_rate=0.0,
         send_default_pii=False,
-        # Локальные переменные и тела запросов содержат промпты и историю:
-        # before_send чистит только точные секреты, поэтому не отправляем их вовсе
-        # (аудит 28.10.2026).
+        # Local variables and request bodies contain prompts and history:
+        # before_send scrubs only exact secrets, so do not send them at all
+        # (28.10.2026 audit).
         include_local_variables=False,
         max_request_body_size="never",
     )
@@ -561,23 +559,23 @@ for env_name in ("OWNER_ID", "BOT_OWNER_ID", "ADMIN_ID", "TELEGRAM_OWNER_ID"):
 TELEGRAM_REQUEST_TIMEOUT = _env_number("TELEGRAM_REQUEST_TIMEOUT", 45, min_value=1)
 TELEGRAM_AI_TIMEOUT = _env_number("TELEGRAM_AI_TIMEOUT", 45, min_value=1)
 TELEGRAM_MEDIA_TIMEOUT = _env_number("TELEGRAM_MEDIA_TIMEOUT", 25, min_value=1)
-# Потолок скачивания из Telegram: Bot API не отдаёт файлы больше 20МБ через
-# getFile/путь (аудит D1, 30.09.2026) — большее отклоняем до скачивания.
+# Telegram download cap: the Bot API does not serve files larger than 20 MB via
+# getFile/path (audit D1, 30.09.2026) — reject a larger value before downloading.
 TELEGRAM_DOWNLOAD_MAX_BYTES = _env_number("TELEGRAM_DOWNLOAD_MAX_BYTES", 20 * 1024 * 1024, cast=int, min_value=1024 * 1024)
-# Глобальный кап одновременных скачиваний медиа: альбомы и TikTok-слайдшоу из
-# разных чатов иначе складывались в память без общего предела (аудит 28.10.2026).
+# Global cap on concurrent media downloads: albums and TikTok slideshows from
+# different chats otherwise accumulated in memory without a shared limit (audit 28.10.2026).
 MEDIA_GLOBAL_CONCURRENCY = _env_number("MEDIA_GLOBAL_CONCURRENCY", 2, min_value=1)
 _media_semaphores: dict[Any, asyncio.Semaphore] = {}
 
 
 def _media_semaphore() -> asyncio.Semaphore:
-    # Семафор на каждый event loop: тесты гоняют много коротких asyncio.run,
-    # один общий объект привязался бы к первому циклу.
+    # A semaphore per event loop: tests run many short asyncio.run calls,
+    # one shared object would be bound to the first loop.
     loop = asyncio.get_running_loop()
     sem = _media_semaphores.get(loop)
     if sem is None:
-        # Закрытые циклы держат ссылку и всё, что к ним привязано: снимаем
-        # старые записи при создании новой (ревью 17.11.2026).
+        # Closed loops hold a reference and everything attached to them: remove
+        # old entries when creating a new one (review 17.11.2026).
         for stale_loop in [lp for lp in _media_semaphores if lp.is_closed()]:
             _media_semaphores.pop(stale_loop, None)
         sem = asyncio.Semaphore(MEDIA_GLOBAL_CONCURRENCY)
@@ -589,87 +587,89 @@ def _media_semaphore() -> asyncio.Semaphore:
 async def _media_download_slot():
     async with _media_semaphore():
         yield
-# Раньше было захардкожено как 15.0 прямо внутри _download_telegram_file_bytes —
-# несогласованно с остальными таймаутами, которые все конфигурируются через env.
+# Previously hardcoded as 15.0 inside _download_telegram_file_bytes,
+# inconsistently with the other timeouts, which are all configured through env.
 TELEGRAM_GET_FILE_TIMEOUT = _env_number("TELEGRAM_GET_FILE_TIMEOUT", 15, min_value=1)
-# Cooldown после HTML-мусора от прокси вместо JSON: без него десятки вызовов/сек валят лавину WARNING (см. _tg_call).
+# Cooldown after HTML garbage from the proxy instead of JSON: without it, dozens of calls per second trigger an avalanche of WARNINGs (see _tg_call).
 TELEGRAM_PROXY_COOLDOWN_SEC = _env_number("TELEGRAM_PROXY_COOLDOWN_SEC", 20, min_value=0)
-# Потолок одного сна по Retry-After в _tg_call: длинный flood-wait иначе держит
-# лок чата сверх бюджета маршрута (аудит 10.2026). Сам ретрай сохраняется.
+# Cap a single Retry-After sleep in _tg_call: otherwise a long flood wait holds
+# the chat lock beyond the route budget (audit 10.2026). The retry itself is preserved.
 TELEGRAM_FLOOD_SLEEP_MAX_SEC = _env_number("TELEGRAM_FLOOD_SLEEP_MAX_SEC", 10, min_value=1)
-# TIKTOK_GROUP_REQUIRE_MENTION=1 — ссылки TikTok в группах без обращения к боту
-# только пишутся в фон, а не качаются (аудит H2, 10.2026). По умолчанию выключено.
+# TIKTOK_GROUP_REQUIRE_MENTION=1 — TikTok links in groups without addressing the bot
+# only written in the background, not downloaded (audit H2, 10.2026). Disabled by default.
 TIKTOK_GROUP_REQUIRE_MENTION = os.getenv("TIKTOK_GROUP_REQUIRE_MENTION", "0") == "1"
-# Лимит ожидания следующего куска для любого провайдера: зависший стрим иначе держит лок чата бесконечно.
+# Limit for waiting for the next chunk from any provider: otherwise a stuck stream holds the chat lock indefinitely.
 STREAM_CHUNK_TIMEOUT_SEC = _env_number("STREAM_CHUNK_TIMEOUT_SEC", 30, min_value=1)
-# ── Паттерн "живой печати" при стриминге (см. lumen_typing_pace.py) ──
-# Правки рисуются по таймеру (маляр), а не по приходу куска; интервал правок
-# один на чат и для тикера статуса, и для стрима (ревью 11.11.2026).
-# STREAM_EDIT_MIN_INTERVAL_SEC — общий бюджет в личке: тикер (0.3) в него
-# укладывается, суммарно не больше ~3 правок/с в один чат.
+# ── "Live typing" pattern during streaming (see lumen_typing_pace.py) ──
+# Edits are drawn on a timer (the painter), not when a chunk arrives; the edit interval
+# one per chat for both the status ticker and the stream (review 11.11.2026).
+# STREAM_EDIT_MIN_INTERVAL_SEC — the shared budget in private chats: the ticker (0.3) uses it
+# fits, totaling no more than ~3 edits/sec in one chat.
 STREAM_EDIT_MIN_INTERVAL_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_SEC", 0.3, min_value=0)
-# В группе та же анимация жрёт квоту чата на несколько человек: бюджет 1.5-2 с.
+# In a group, the same animation consumes the chat quota for several people: budget 1.5–2 s.
 STREAM_EDIT_MIN_INTERVAL_GROUP_SEC = _env_number("STREAM_EDIT_MIN_INTERVAL_GROUP_SEC", 1.8, min_value=0)
-# Кадр маляра: Claude дописывает пословно каждые ~50-100 мс, Telegram позволяет
-# чаще раза в секунду; 0.55 с — компромисс плавности и 429 (личка).
+# Painter frame: Claude appends word by word every ~50-100 ms, while Telegram allows
+# more than once per second; 0.55 s is a compromise between smoothness and 429 (private chat).
 STREAM_PAINT_TICK_SEC = _env_number("STREAM_PAINT_TICK_SEC", 0.55, min_value=0)
 STREAM_PAINT_TICK_GROUP_SEC = _env_number("STREAM_PAINT_TICK_GROUP_SEC", 1.8, min_value=0)
 STREAM_TYPING_TICK_SEC = _env_number("STREAM_TYPING_TICK_SEC", 0.5, min_value=0)
-# Потолок довывода — в секундах, а не в тиках: с 8 тиками хвост длинного
-# ответа вываливался прыжками по 300-500 символов (прод 11.11.2026: 6201
-# символов, max_step=326), а Claude печатает длинный ответ ровно, пока печатает.
+# The completion cap is in seconds, not ticks: with 8 ticks, the tail of a long
+# the answer arrived in jumps of 300-500 characters (production 11.11.2026: 6201
+# characters, max_step=326), while Claude prints a long answer exactly as it types it.
 STREAM_TYPING_MAX_CATCHUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_SEC", 20, min_value=1)
-# В группе лок чата общий: 20 секунд довывода одного длинного ответа
-# задерживали бы всех, поэтому там потолок короче.
+# In a group the chat lock is shared: 20 seconds of tail display for one long response
+# would delay everyone, so the cap is shorter there.
 STREAM_TYPING_MAX_CATCHUP_GROUP_SEC = _env_number("STREAM_TYPING_MAX_CATCHUP_GROUP_SEC", 8, min_value=1)
-# Шаг довывода — это пауза ПЛЮС правка: через реле она стоит 0,5-0,7 с, и
-# считать бюджет только по сну значило бы уйти за дедлайн сообщения
-# (ревью 11.11.2026: 40 тиков по 0,5 с = 20 с сна это ~40 с стеновых).
+# A finish-generation step is a pause PLUS an edit: through the relay it costs
+# 0.5-0.7 seconds, and
+# counting the budget only by sleep would exceed the message deadline
+# (review 11.11.2026: 40 ticks × 0.5s = 20s of sleep, about 40s wall-clock).
 STREAM_TYPING_STEP_RTT_SEC = _env_number("STREAM_TYPING_STEP_RTT_SEC", 0.7, min_value=0)
-# FIRST_CHUNK_TIMEOUT_SEC — пол ожидания первого куска (см.
-# lumen_model_speed.first_chunk_limit_sec): быструю зависшую модель бросаем рано.
-# Предел только укорачивает ожидание: первым сработает минимум из двух таймаутов.
-# 12 с держали «Думаю…» при зависшей голове; для текста хватает 5 с — медленные
-# модели уже покрыты адаптивным floor из EMA×2.5, которое здесь только floor.
+# FIRST_CHUNK_TIMEOUT_SEC is half the wait for the first chunk (see
+# lumen_model_speed.first_chunk_limit_sec): drop a quickly stalled model early.
+# The limit only shortens the wait: whichever of the two timeouts expires first wins.
+# 12 s kept "Thinking..." displayed for a stalled head; 5 s is enough for text — slow
+# models are already covered by the adaptive floor of EMA×2.5, which acts only as a floor here.
 FIRST_CHUNK_TIMEOUT_SEC = _env_number("FIRST_CHUNK_TIMEOUT_SEC", 5, min_value=1)
-# Пока куски прибывают, бюджет стрима продлевается: прод 11.11.2026 резал
-# 5700-символьный ответ на 35-й секунде («Route time budget exhausted»), и
-# человек видел «Соединение прервалось». Потолок держим ниже 60 с — дольше релей
-# (proxy/proxy.ts) обрывает upstream сам.
-# Верхняя граница 59: дольше держать лок чата нельзя, дефолт 55 — запас.
+# While chunks arrive, the stream budget is extended: on 11.11.2026, production cut off
+# a 5,700-character response at second 35 (“Route time budget exhausted”), and
+# the user saw "Connection interrupted". Keep the ceiling below 60 s; beyond that the relay
+# (proxy/proxy.ts) cuts off the upstream itself.
+# Upper limit 59: the chat lock cannot be held longer; the default 55 leaves headroom.
 STREAM_ROUTE_MAX_SEC = _env_number("STREAM_ROUTE_MAX_SEC", 55, min_value=10, max_value=59)
-# Остановка ответа командой /stop: выключатель, как у остальных новых слоёв.
+# Stopping a response with /stop: a feature switch, like the other new layers.
 STOP_COMMAND_ENABLED = (os.getenv("STOP_COMMAND_ENABLED", "1") or "").strip().lower() not in ("0", "false", "off")
-# Stop-контроль включён всегда: отдельная reply-кнопка не раздувает правки
-# ответа и остаётся доступной даже у длинного сообщения.
+# The Stop control is always enabled: a separate reply button does not inflate edits
+# the answer and remains available even for a long message.
 STOP_BUTTON_ENABLED = True
 STREAM_ROUTE_STALL_GRACE_SEC = _env_number("STREAM_ROUTE_STALL_GRACE_SEC", 20, min_value=2)
-# Анимация ожидания в плейсхолдере до первого куска: полсекунды статичное "…",
-# дальше кадр каждые _DOTS_TICK_SEC (в пределах лимита правок Telegram).
+# Waiting animation in the placeholder before the first chunk: half a second of static "...",
+# then a frame every _DOTS_TICK_SEC (within Telegram edit limit).
 _DOTS_START_AFTER_SEC = 0.5
 _DOTS_TICK_SEC = 0.3
 _DOTS_FRAMES = (".", "..", "…")
-# RICH_MESSAGES_ENABLED — отправка финальных ответов через sendRichMessage /
-# editMessageText+rich_message (Bot API 10.1+: таблицы, заголовки, математика).
-# Kill-switch на случай проблем с рендером на старых клиентах: 0 — вернуться
-# на обычный HTML-путь без редеплоя кода (только рестарт). Стрим-правки всегда
-# идут обычным HTML (транзиент), рич применяется только к финальным текстам.
+# RICH_MESSAGES_ENABLED — sending final answers via sendRichMessage /
+# editMessageText+rich_message (Bot API 10.1+: tables, headings, math).
+# Kill switch for rendering problems on old clients: 0 — revert
+# to the ordinary HTML path without redeploying code (restart only). Streaming changes always
+# use regular HTML (transient); rich formatting applies only to final texts.
 RICH_MESSAGES_ENABLED = os.getenv("RICH_MESSAGES_ENABLED", "1") == "1"
-# Лимит длины текста для /tts — без него пользователь мог отправить огромный
-# текст, что вызывало бы очень долгий прогон Gemini TTS + ffmpeg на один запрос.
+# Text length limit for /tts — without it, the user could send a huge
+# text that would trigger a very long Gemini TTS + ffmpeg run for a single request.
 TTS_MAX_CHARS = _env_number("TTS_MAX_CHARS", 800, cast=int, min_value=1)
-# Потолок одного синтеза TTS. Раньше его не было вообще: синхронный вызов Gemini
-# уходил в поток без таймаута и без http_options у клиента, и зависший Google
-# держал лок чата бесконечно (аудит 26.09.2026).
+# Cap for a single TTS synthesis. Previously there was none at all: a
+# synchronous Gemini call
+# went into streaming without a timeout and without http_options on the client, and a stuck Google
+# held the chat lock indefinitely (audit 26.09.2026).
 TTS_SYNTH_TIMEOUT_SEC = _env_number("TTS_SYNTH_TIMEOUT_SEC", 60, min_value=1)
-# Общий дедлайн на все чанки мультичанкового TTS: зависший синтез иначе держал
-# per-chat lock без края (аудит D2, 30.09.2026). Худший чанк ~100с (60 синтез +
-# 30 ffmpeg + 10 probe), типичные 5 чанков укладываются с запасом.
+# A common deadline for all chunks of multi-chunk TTS: a hung synthesis otherwise held
+# per-chat lock without a bound (audit D2, 30.09.2026). Worst chunk ~100s (60 synthesis +
+# 30 ffmpeg + 10 probe); five typical chunks fit with room to spare.
 TTS_TOTAL_BUDGET_SEC = _env_number("TTS_TOTAL_BUDGET_SEC", 240, min_value=30)
-# Дневные лимиты на пользователя (по user_id): всего сообщений, из них через
-# Gemini (ссылки/YouTube/медиа/свежесть с поиском), отдельно озвучка /tts и картинки
-# /draw. 5, а не 3: генерация итеративна («не то, перерисуй»), а бережёт бюджет не эта
-# цифра, а IMAGE_DAILY_LIMIT ниже (аудит 09.11.2026).
+# Daily per-user limits (by user_id): total messages, including those through
+# Gemini (links/YouTube/media/freshness with search), plus /tts voiceover and images
+# /draw. 5, not 3: generation is iterative ("not that, redraw it"), and the stage does not preserve the budget
+# digit, while IMAGE_DAILY_LIMIT is lower (audit 09.11.2026).
 DAILY_USER_MESSAGE_LIMIT = _env_number("DAILY_USER_MESSAGE_LIMIT", 30, cast=int, min_value=1)
 DAILY_USER_GEMINI_LIMIT = _env_number("DAILY_USER_GEMINI_LIMIT", 5, cast=int, min_value=1)
 DAILY_USER_TTS_LIMIT = _env_number("DAILY_USER_TTS_LIMIT", 5, cast=int, min_value=1)
@@ -677,8 +677,7 @@ DAILY_USER_DRAW_LIMIT = _env_number("DAILY_USER_DRAW_LIMIT", 5, cast=int, min_va
 
 
 def _parse_gemini_daily_limits(raw: str) -> dict[str, int]:
-    """Разбирает GEMINI_DAILY_LIMITS вида "model=limit,model=limit" (RPD из
-    дашборда AI Studio, у каждой модели свой). Мусор молча пропускает."""
+    """Parses GEMINI_DAILY_LIMITS in "model=limit,model=limit" form (RPD from the AI Studio dashboard; each model has its own). Silently skips garbage."""
     out: dict[str, int] = {}
     for chunk in (raw or "").split(","):
         name, sep, val = chunk.partition("=")
@@ -694,105 +693,108 @@ def _parse_gemini_daily_limits(raw: str) -> dict[str, int]:
     return out
 
 
-# Пусто — как раньше: у Gemini общего лимита нет, показываем только расход.
+# Empty, as before: Gemini has no overall limit, so show only usage.
 GEMINI_DAILY_LIMITS: dict[str, int] = _parse_gemini_daily_limits(os.getenv("GEMINI_DAILY_LIMITS", ""))
 _PROCESS_START_MONOTONIC = time.monotonic()
-# ── Тайминги автоматического маршрутизатора моделей (см. секцию "автоматический
-# выбор модели" ниже) ──
-# Без ретраев одной модели: любая ошибка — сразу следующая в маршруте; общий бюджет ROUTE_TOTAL_BUDGET_SEC держит лок чата от минутного зависания.
+# ── Automatic model router timings (see the "automatic
+# model selection" below) ──
+# No retries of the same model: any error immediately advances to the next in the route; the overall ROUTE_TOTAL_BUDGET_SEC keeps the chat lock from hanging for minutes.
 ROUTE_MODEL_TIMEOUT_SEC = _env_number("ROUTE_MODEL_TIMEOUT_SEC", 22, min_value=1)
-# ROUTE_TOTAL_BUDGET_SEC — общий бюджет на ВЕСЬ маршрут одного сообщения. Без него
-# каскадный сбой у многих моделей растягивал бы один ответ на минуты под локом чата.
+# ROUTE_TOTAL_BUDGET_SEC is the overall budget for the ENTIRE route of one message. Without it,
+# a cascading failure across many models would stretch one answer to minutes under the chat lock.
 ROUTE_TOTAL_BUDGET_SEC = _env_number("ROUTE_TOTAL_BUDGET_SEC", 40, min_value=1)
-# MESSAGE_TOTAL_BUDGET_SEC — потолок на всё сообщение (лок + поиск + маршрут).
-# Этапы ниже берут min(свой таймаут, остаток), иначе их сумма выходила за бюджет.
+# MESSAGE_TOTAL_BUDGET_SEC is the ceiling for the entire message (lock + search + route).
+# The stages below take min(their timeout, the remainder); otherwise their sum exceeded the budget.
 MESSAGE_TOTAL_BUDGET_SEC = _env_number("MESSAGE_TOTAL_BUDGET_SEC", 90, min_value=10)
-# HISTORY_SUMMARY_BUDGET_SEC — потолок саммаризации истории: без него висящие
-# вызовы держали бы лок чата десятки секунд уже после готового ответа.
+# HISTORY_SUMMARY_BUDGET_SEC caps history summarization: without it, hung
+# calls would hold the chat lock for tens of seconds after the answer was ready.
 HISTORY_SUMMARY_BUDGET_SEC = _env_number("HISTORY_SUMMARY_BUDGET_SEC", 30, min_value=1)
-# Общий бюджет /draw 120с: иначе 5 моделей × 90с давали до 7.5 мин висящего "Генерирую" (ревью 28.08.2026).
+# Shared /draw budget of 120s: otherwise 5 models × 90s produced up to 7.5 minutes of a hanging "Generating" message (review 28.08.2026).
 DRAW_TOTAL_BUDGET_SEC = _env_number("DRAW_TOTAL_BUDGET_SEC", 120, min_value=1)
-# Таймаут одной попытки провайдера картинок: 40с были рассчитаны на «модель думает»,
-# а недоступный хост вешал ровно столько на каждого человека до перехода на резерв
-# (прод 09.11.2026: Cloudflare молча дропал коннект из контейнера, 46с до картинки).
+# Timeout for one image-provider attempt: 40s was calculated for "model thinking,"
+# and an unavailable host hung for exactly that long for each user before switching to the reserve
+# (production 09.11.2026: Cloudflare silently dropped container connections,
+#     46 s before the image arrived).
 IMAGE_ATTEMPT_TIMEOUT_SEC = _env_number("IMAGE_ATTEMPT_TIMEOUT_SEC", 20, min_value=1)
-# Перевод не-латинского промпта на английский перед генерацией: sana теряет кириллицу
-# в '?' (пруф 09.11.2026). Сбой перевода не роняет картинку — уходит оригинал.
+# Translate the non-Latin prompt into English before generation: sana loses Cyrillic
+# into '?' (proof 09.11.2026). A translation failure does not break the image: the original is sent.
 DRAW_TRANSLATE_TIMEOUT_SEC = _env_number("DRAW_TRANSLATE_TIMEOUT_SEC", 12, min_value=1)
-# Замер с Space 10.11.2026: короткий запрос к голове Munito отвечает 6-9 с,
-# поэтому кап подготовки 12 с (8 с обрезал реальный ответ за 8,3 с), а разрешения
-# местоимения 10 с (6 с давал TimeoutError, и ветка молча выпадала в текст).
+# Space measurement 10.11.2026: a short request to the Munito head takes 6–9 s,
+# and pronoun-heavy prompts took 10 s. The preparation cap is 12 s; an 8 s cap
+# cut off a real response at 8.3 s, raised TimeoutError and silently fell back to text.
 DRAW_PROMPT_PREP_TIMEOUT_SEC = _env_number("DRAW_PROMPT_PREP_TIMEOUT_SEC", 12, min_value=1)
 DRAW_CONTEXT_TIMEOUT_SEC = _env_number("DRAW_CONTEXT_TIMEOUT_SEC", 10, min_value=1)
-# Глобальный дневной бюджет картинок: 10 000 бесплатных Neuron Cloudflare в сутки.
-# flux-2-klein-4b стоит 104 Neuron за картинку 1024x1024 (~96 в день), правка
-# добавляет ~21 Neuron за входной мегапиксель, поэтому 80 с запасом: иначе к
-# ~97-й генерации Cloudflare отдаёт 429 про исчерпанный allocation, а человек
-# видит «сервис недоступен» (замер 10.11.2026). Без счётчика каждый новый
-# человек бился бы в провайдера, у которого день кончился.
+# Global daily image budget: 10,000 free Cloudflare Neurons per day.
+# flux-2-klein-4b costs 104 Neurons per 1024x1024 image (~96/day); an edit
+# adds about 21 Neurons per input megapixel. Around the 97th generation, Cloudflare
+# returns 429 for an exhausted allocation while the person sees "service unavailable"
+# (measurement 10.11.2026). Without a counter, every new request would keep hitting
+# a provider whose daily allocation is already over.
 IMAGE_DAILY_LIMIT = _env_number("IMAGE_DAILY_LIMIT", 80, cast=int, min_value=1)
-# Бюджет картинок в Neuron: 80 генераций × 104.2 = 8336 из 10 000 бесплатных,
-# 8300 оставляет запас; правка весит 1 + 0.2 на МП входа (аудит 16.11.2026).
+# Image budget in Neuron: 80 generations × 104.2 = 8336 out of 10,000 free,
+# 8300 leaves headroom; an edit weighs 1 + 0.2 per input MP (audit 16.11.2026).
 IMAGE_DAILY_NEURONS = _env_number("IMAGE_DAILY_NEURONS", 8300, cast=int, min_value=1)
-# Картинка — самый дорогой по памяти и по бюджету вызов в боте, поэтому общий
-# семафор: раньше параллельные /draw из разных чатов складывали в RAM до 30 МБ каждый
-# без предела (аудит 09.11.2026, тот же класс, что MEDIA_GLOBAL_CONCURRENCY).
+# An image is the bot's most expensive call in memory and budget. Previously, parallel
+# /draw calls from different chats each put up to 30 MB into RAM without a shared limit;
+# the semaphore bounds that peak (audit 09.11.2026, same class as MEDIA_GLOBAL_CONCURRENCY).
 IMAGE_GLOBAL_CONCURRENCY = _env_number("IMAGE_GLOBAL_CONCURRENCY", 2, min_value=1)
-# Сколько ждать свободный слот генерации: весь DRAW_TOTAL_BUDGET_SEC на очередь
-# тратить нельзя — человек отказывается от картинки раньше, чем её нарисует очередь.
+# How long to wait for a generation slot. The queue wait cannot consume the entire
+# DRAW_TOTAL_BUDGET_SEC: the person cancels before the queue reaches their image.
 IMAGE_QUEUE_TIMEOUT_SEC = _env_number("IMAGE_QUEUE_TIMEOUT_SEC", 10, min_value=1)
-# Сколько после генерации «добавь звезду»/«сделай синим» ещё относится к этой
-# картинке: без окна слабый глагол искал бы фото до бесконечности (прод 10.11.2026).
+# How long after generation "add a star"/"make it blue" still refers to this
+# image: without a window, a weak verb would search for a photo indefinitely (prod 10.11.2026).
 DRAW_EDIT_CONTEXT_TTL_SEC = _env_number("DRAW_EDIT_CONTEXT_TTL_SEC", 600, min_value=1)
-# Пауза на провайдера после его 429/402 FREE_LIMIT: Pollinations отдаёт Retry-After
-# ~35с, дефолт 60с с запасом. Без паузы следующий человек повторял бы те же попытки.
+# Provider pause after its 429/402 FREE_LIMIT: Pollinations returns Retry-After
+# ~35s, default 60s with headroom. Without a pause, the next person would repeat the same attempts.
 IMAGE_PROVIDER_COOLDOWN_SEC = _env_number("IMAGE_PROVIDER_COOLDOWN_SEC", 60, min_value=1)
-# CHAT_LOCK_TIMEOUT_SEC — сколько ждём лок чата, прежде чем ответить «занято».
-# Обратная сторона: пока ждём, юзер видит тишину. Поэтому держим НЕ выше хардкода
-# ожидания пользователя, а лок при этом остаётся защищаемым: работа под локом
-# ограничена собственным бюджетом и всегда try/finally его отпускает
-# (враждебное ревью 27.09.2026: значение 150с молчало почти 2.5 минуты).
-# Лок НЕ берут только слэш-команды (/draw, /tts — их хендлеры зарегистрированы
-# раньше общего @dp.message). Триггерные фразы («нарисуй», «озвучь») идут через
-# _handle_message_core ПОД локом: отрисовка держит его до DRAW_TOTAL_BUDGET_SEC,
-# озвучка — до конца синтеза. Это осознанно (один чат — одно дело за раз), но
-# второй вопрос во время длинной отрисовки честно получит «занято» через 45с.
+# CHAT_LOCK_TIMEOUT_SEC — how long to wait for the chat lock before replying “busy.”
+# The downside: while waiting, the user sees silence. Therefore do not keep it above the hardcoded
+# user wait while the lock remains protected: work under the lock
+# bounded by its own budget and always releases it in try/finally
+# (hostile review 27.09.2026: the value 150 s stayed silent for almost 2.5 minutes).
+# Only slash commands (/draw, /tts — their handlers are registered
+# the general @dp.message handler). Trigger phrases ("draw", "voice") go through
+# _handle_message_core UNDER the lock: rendering holds it until DRAW_TOTAL_BUDGET_SEC,
+# speech — until synthesis finishes. This is deliberate (one chat, one task at a time), but
+# the second question during a long draw honestly receives "busy" after 45 s.
 CHAT_LOCK_TIMEOUT_SEC = _env_number("CHAT_LOCK_TIMEOUT_SEC", 45, min_value=1)
-# Сколько сообщений одного чата могут ЖДАТЬ лок одновременно. Раньше сотня
-# сообщений занимала все 100 in-flight слотов, и другие чаты получали 503
-# (аудит 28.10.2026). Четвёртый и следующие сразу получают «занято».
+# How many messages from one chat may WAIT for the lock at once. Previously, a hundred
+# messages occupied all 100 in-flight slots, and other chats received 503
+# (audit 28.10.2026). The fourth and subsequent callers immediately get "busy".
 _MAX_CHAT_LOCK_WAITERS = 3
 _chat_lock_waiters: dict[int, int] = {}
-# Пассивный фон группы ждёт лок отдельным счётчиком: он ничего не отвечает,
-# не занимает место в очереди людей и не получает «занято». Иначе реплики в
-# занятом чате заполняли кап людей, и адресованный вопрос отшивался (прод 18.11.2026).
+# Passive group background waits for the lock with a separate counter: it does not reply,
+# does not take a place in the people queue and does not receive "busy". Otherwise, replies in
+# a busy chat filled the people cap, and an addressed question was rejected (prod 18.11.2026).
 _MAX_CHAT_LOCK_BACKGROUND_WAITERS = 20
 _chat_lock_background_waiters: dict[int, int] = {}
-# INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — сколько main() при остановке ждёт штатного
-# завершения fire-and-forget задач перед отменой остатка (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое).
+# INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC — how long main() waits for a graceful
+# Wait for fire-and-forget tasks to finish before canceling the rest (Sentry LUMEN-2: the event loop killed them during network calls on redeploy).
 INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC = _env_number("INFLIGHT_TASKS_SHUTDOWN_TIMEOUT_SEC", 10, min_value=0)
 TG_MAX_LEN = 4096
-# Upload-ботов Telegram режет 50 МБ — слишком большие варианты качества пропускаем до скачивания.
+# Telegram upload bots are capped at 50 MB; skip oversized quality variants
+# before downloading.
 TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
-# Слайдшоу TikTok — до 35 штук, media group — по 10: шлём весь пост несколькими вызовами.
-# Величина самого чанка живёт в lumen_tiktok.TELEGRAM_MEDIA_GROUP_CHUNK (единственный
-# источник правды; дубль здесь был мёртвым — аудит 26.09.2026).
+# TikTok slideshow: up to 35 items, media group: 10 at a time; send the whole post in several calls.
+# The chunk size itself lives in lumen_tiktok.TELEGRAM_MEDIA_GROUP_CHUNK (the only
+# source of truth; the duplicate here was dead — audit 26.09.2026).
 TIKTOK_SLIDESHOW_MAX_ITEMS = 35
-# Лимит ffprobe/ffmpeg-процессов: без него слайдшоу кладёт CPU контейнера (ревью 28.08.2026).
-# 2 слота, а не 4: живой слайд держит в слоте ДВА процесса параллельно
-# (ffprobe + ffmpeg в _probe_and_thumbnail_from_path), иначе потолок = 8 процессов
-# на двух ядрах Space плюс временный файл до 50 МБ на каждый (аудит 01.11.2026).
+# Throttle ffprobe/ffmpeg subprocesses: concurrent media processing can exhaust
+#     CPU (measurement 28.08.2026).
+# 2 slots, not 4: a live slide holds TWO processes simultaneously in one slot
+# (ffprobe + ffmpeg in _probe_and_thumbnail_from_path); otherwise the cap is 8 processes.
+# on two Space cores plus a temporary file of up to 50 MB per core (audit 01.11.2026).
 TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY = _env_number("TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY", 2, cast=int, min_value=1)
 _tiktok_probe_semaphore = asyncio.Semaphore(TIKTOK_VIDEO_SLIDE_PROBE_CONCURRENCY)
-# Лимит скачивания слайдов 8: 35 слайдов иначе занимают весь пул сессии (limit=40) и стопорят другие чаты (аудит 04.09.2026).
+# Slide download limit is 8: 35 slides would otherwise occupy the entire session pool (limit=40) and stall other chats (audit 04.09.2026).
 TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY = _env_number("TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY", 8, cast=int, min_value=1)
 _tiktok_slide_download_semaphore = asyncio.Semaphore(TIKTOK_SLIDE_DOWNLOAD_CONCURRENCY)
-# Общий кап RAM на один пост: 35 слайдов по 75МБ в памяти (до ~2.6ГБ) роняли
-# контейнер для всех чатов (аудит D1, 30.09.2026). Обычный пост весит до 50МБ.
+# Shared RAM cap per post: 35 slides at 75MB in memory (up to ~2.6GB) crashed
+# container for all chats (audit D1, 30.09.2026). An ordinary post weighs up to 50MB.
 TIKTOK_SLIDESHOW_MAX_BYTES = _env_number("TIKTOK_SLIDESHOW_MAX_BYTES", 200 * 1024 * 1024, cast=int, min_value=1024 * 1024)
 
-# Состояние/квоты/локи живут в lumen_chat_state.py (P2): здесь только реэкспорт
-# имён (те же объекты — тесты мутируют bot.chat_state/bot.GLOBAL_QUOTA как раньше).
+# State/quotas/locks live in lumen_chat_state.py (P2): here only the re-export
+# of names (the same objects — tests mutate bot.chat_state/bot.GLOBAL_QUOTA as before).
 import lumen_chat_state
 from lumen_chat_state import (
     chat_state,
@@ -857,6 +859,8 @@ from lumen_chat_state import (
     _record_stats_event,
     _image_usage_total,
     _image_budget_exhausted,
+    _reserve_image_neurons,
+    _release_image_neurons,
     _image_neurons_total,
     recover_global_quota,
     _image_provider_block_reason,
@@ -868,6 +872,7 @@ from lumen_chat_state import (
     USER_DAILY_KEY,
     _user_daily_entry,
     _user_daily_peek,
+    _user_daily_admission_blocked,
     _user_daily_limit,
     _user_daily_total_exhausted,
     _user_daily_gemini_exhausted,
@@ -882,9 +887,9 @@ from lumen_chat_state import (
     _resolve_nick,
 )
 
-# Простой трекер для rate limiting и очередь кнопок-уточнений живут в
-# lumen_limits.py (P2): скаляры читаем из модуля-владельца, а не копируем —
-# копия в bot.X молча расходилась бы с патчами тестов (аудит A5-8).
+# The simple rate-limit tracker and the clarification-button queue live in
+# lumen_limits.py (P2): read scalars from their owning module rather than copying them—
+# copy in bot.X would silently diverge from test patches (audit A5-8).
 from lumen_limits import (
     user_rate_limits,
     _cleanup_rate_limit_dict,
@@ -893,7 +898,7 @@ from lumen_limits import (
     _enforce_pending_picks_cap,
 )
 
-# ── Инициализация клиентов внутри цикла обработки событий (решает RuntimeError) ──
+# Initialize clients inside the event-processing loop (fixes RuntimeError).
 bot: Bot | None = None
 dp = Dispatcher()
 client: genai.Client | None = None
@@ -901,7 +906,7 @@ client: genai.Client | None = None
 _http_session: aiohttp.ClientSession | None = None
 _chat_locks: dict[int, asyncio.Lock] = {}
 
-# Транспорт — в lumen_transport_calls.py.
+# Transport belongs in lumen_transport_calls.py.
 from lumen_telegram_transport import (
     PROXY_AUTH_HEADER,
     _TelegramProxyCircuitBreaker,
@@ -911,9 +916,9 @@ from lumen_telegram_transport import (
 TELEGRAM_PROXY_TRIP_THRESHOLD = _env_number("TELEGRAM_PROXY_TRIP_THRESHOLD", 3, cast=int, min_value=1)
 _tg_proxy_breaker = _TelegramProxyCircuitBreaker(cooldown_sec=TELEGRAM_PROXY_COOLDOWN_SEC, trip_threshold=TELEGRAM_PROXY_TRIP_THRESHOLD)
 
-# конвертация markdown в html, утилиты json
+# Markdown-to-HTML conversion, JSON utilities
 
-# Конвертация markdown/LaTeX/таблиц в Telegram HTML — чистые функции в lumen_formatting.py.
+# Conversion of markdown/LaTeX/tables to Telegram HTML — pure functions in lumen_formatting.py.
 from lumen_formatting import _split_text_chunks
 
 _PRUNE_SENTINEL = object()
@@ -932,7 +937,7 @@ def _json_prune_defaults(val: Any) -> Any:
         return [v for v in (_json_prune_defaults(i) for i in val) if v is not _PRUNE_SENTINEL]
     return val
 
-# Транспортные вызовы живут в lumen_transport_calls.py (P2).
+# Transport calls live in lumen_transport_calls.py (P2).
 from lumen_transport_calls import (
     _get_telegram_session,
     _rotate_telegram_proxy,
@@ -940,11 +945,14 @@ from lumen_transport_calls import (
     _close_sessions,
     _handle_proxy_failure,
     _tg_call,
+    _TG_UNKNOWN,
+    _tg_outcome_unknown,
+    _tg_cancelled_unknown,
     telegram_api_call,
 )
 
-# Отправка (rich/гости/ч-text) живёт в lumen_rich.py, скачивание медиа — в
-# lumen_media_flow.py (P2): здесь только реэкспорт имён.
+# Sending (rich/guests/ch-text) lives in lumen_rich.py, media downloading in
+# lumen_media_flow.py (P2): here it is only a re-export of names.
 from lumen_rich import (
     is_guest_message,
     _answer_guest_text,
@@ -967,11 +975,11 @@ from lumen_media_flow import (
     _fresh_generation_ref,
 )
 
-# разбор ошибок
+# error parsing
 
-# список моделей
+# model list
 #
-# Конфигурация моделей и маршрутизация — в lumen_router_config.py (импорт на месте прежнего GEMINI_MODELS; только реально используемые имена).
+# Model configuration and routing live in lumen_router_config.py (imported where the former GEMINI_MODELS was; only names actually used).
 from lumen_router_config import (
     DEFAULT_GEMINI_MODEL,
     _check_unconfirmed_model_quotas,
@@ -981,7 +989,7 @@ from lumen_router_config import (
     _is_quarantined,
     _quarantine_status,
 )
-# Слой ошибок живёт в lumen_errors.py (P2): здесь только реэкспорт имён.
+# The error layer lives in lumen_errors.py (P2): only name re-exports are here.
 from lumen_errors import (
     _error_text,
     _error_status,
@@ -996,18 +1004,18 @@ from lumen_errors import (
     _MODEL_ERROR_FALLBACK_MSG,
 )
 
-# Форма chat_state[chat_id] — TypedDict ChatState в lumen_chat_state.py.
+# The shape of chat_state[chat_id] is the ChatState TypedDict in lumen_chat_state.py.
 
-# Буферы альбомов/медиа-групп
+# Buffers for albums/media groups
 _mg_buffers: dict[str, list[Message]] = {}
 _mg_tasks: dict[str, asyncio.Task] = {}
-# Живых медиагрупп единицы (каждая живёт 0.8с); сотни distinct mgid — флуд.
-# Потолок только против раздувания задач и памяти, легитимные альбомы не задевает.
+# There are only a few live media groups (each lives 0.8s); hundreds of distinct mgid values are a flood.
+# The cap only prevents task and memory bloat; it does not affect legitimate albums.
 _MG_TRACK_CAP = 200
 
 def _mg_evict_if_full() -> None:
-    """Вытесняет старейшие медиагруппы сверх потолка (задача отменяется —
-    её сообщения уже утеряны флудом, ждать нечего)."""
+    """Evict the oldest media groups above the cap (the task is canceled —
+    its messages have already been lost to the flood, so there is nothing to wait for)."""
     while len(_mg_buffers) > _MG_TRACK_CAP:
         oldest = next(iter(_mg_buffers))
         _mg_buffers.pop(oldest, None)
@@ -1015,21 +1023,23 @@ def _mg_evict_if_full() -> None:
         if task is not None and not task.done():
             task.cancel()
 
-# _inflight_tasks — общий набор fire-and-forget задач (Sentry LUMEN-2: event loop убивал их посреди сетевых вызовов при редеплое); main() дренирует при остановке.
+# _inflight_tasks is the shared set of fire-and-forget tasks (Sentry LUMEN-2: the
+# event loop killed them during network calls on redeploy); main() drains them on
+# shutdown.
 _inflight_tasks: set[asyncio.Task] = set()
 
 def _track_inflight_task(task: asyncio.Task) -> asyncio.Task:
-    """Регистрирует fire-and-forget таску для graceful shutdown — см. комментарий
-    у _inflight_tasks выше. Возвращает ту же таску, чтобы вызов можно было
-    обернуть прямо вокруг asyncio.create_task(...) без лишней временной переменной."""
+    """Registers a fire-and-forget task for graceful shutdown — see the comment
+    by _inflight_tasks above. Returns the same task so the call can wrap
+    asyncio.create_task(...) directly, without an extra temporary variable."""
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
     return task
 
-# HTTP-слой (app, секрет-гейты, /healthz, /admin_keys, /webhook_url, /webhook,
-# /diag, /export_state) живёт в lumen_admin.py (P2): здесь только реэкспорт имён,
-# чтобы `bot.X` в тестах и main() не менялись. Секреты выводятся здесь же ниже —
-# тесты патчат bot.WEBHOOK_SECRET/bot.ADMIN_PANEL_KEY напрямую.
+# HTTP layer (app, secret gates, /healthz, /admin_keys, /webhook_url, /webhook,
+# /diag, /export_state) lives in lumen_admin.py (P2): here only the names are re-exported,
+# so that `bot.X` in tests and main() do not change. Secrets are printed here below —
+# tests patch bot.WEBHOOK_SECRET/bot.ADMIN_PANEL_KEY directly.
 from lumen_admin import (
     app,
     _check_bearer_token,
@@ -1043,21 +1053,21 @@ from lumen_admin import (
     devtrace,
 )
 
-# ADMIN_SECRET_SEED — независимая соль для секретов (иначе всё выводилось из BOT_TOKEN и ротировалось только с ним). Пустой seed при пустом токене — случайный секрет процесса, а не захардкоженная строка.
+# ADMIN_SECRET_SEED — an independent salt for secrets (otherwise everything was derived from BOT_TOKEN and rotated only with it). An empty seed with an empty token means a random process secret, not a hardcoded string.
 _ADMIN_SECRET_SEED_ENV = os.getenv("ADMIN_SECRET_SEED", "").strip()
 if not _ADMIN_SECRET_SEED_ENV and BOT_TOKEN and (os.getenv("SPACE_ID") or os.getenv("SPACE_HOST")):
-    # В проде слабый фолбэк запрещён: утечка токена иначе даёт /export_state
-    # и подделку апдейтов. На HF Space сид задан; потеря конфигурации должна
-    # ронять старт, а не молча ослаблять админку (аудит 28.10.2026).
+    # Weak fallback is forbidden in production: otherwise a token leak leads to /export_state
+    # and update forgery. The seed is set on HF Space; losing configuration should
+    # crash startup rather than silently weaken the admin panel (28.10.2026 audit).
     raise RuntimeError(
         "ADMIN_SECRET_SEED is required in production (HF Space): without it "
         "WEBHOOK_SECRET/ADMIN_PANEL_KEY are derived from BOT_TOKEN."
     )
 _ADMIN_SECRET_SEED = _ADMIN_SECRET_SEED_ENV or BOT_TOKEN or secrets.token_hex(32)
 if not _ADMIN_SECRET_SEED_ENV and BOT_TOKEN:
-    # Не поломка, а громкое предупреждение в локальной разработке: ключи
-    # выводятся из токена бота, поэтому утечка токена = выгрузка всех чатов
-    # и подделка апдейтов (аудит 26.09.2026).
+    # This is not a failure, but a loud warning in local development: the keys
+    # are derived from the bot token, so a token leak means exposure of all chats
+    # and forged updates (audit 26.09.2026).
     log.warning(
         "[setup] ADMIN_SECRET_SEED is not set — WEBHOOK_SECRET/ADMIN_PANEL_KEY are derived from BOT_TOKEN. "
         "A leaked bot token then exposes /export_state and /webhook. Set ADMIN_SECRET_SEED as an HF Space secret.",
@@ -1065,17 +1075,17 @@ if not _ADMIN_SECRET_SEED_ENV and BOT_TOKEN:
 WEBHOOK_SECRET = hashlib.sha256(_ADMIN_SECRET_SEED.encode()).hexdigest()[:32]
 ADMIN_PANEL_KEY = hashlib.sha256(_ADMIN_SECRET_SEED.encode() + b"admin_panel").hexdigest()[:24]
 
-# guest_message — валидное поле Update из Bot API (guest mode: changelog и
-# раздел Update на core.telegram.org/bots/api, проверено 2026-09-21).
-# Удаление отсюда было ошибкой аудита AUD-J-001 (проверка от 2026-09-19
-# устарела): без этого типа бот не получает гостевые апдейты.
+# guest_message is a valid Update field from the Bot API (guest mode: changelog and
+# the Update section at core.telegram.org/bots/api, verified 2026-09-21).
+# Removing this was an AUD-J-001 audit error (check dated 2026-09-19
+# is outdated): without this update type, the bot does not receive guest updates.
 ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "guest_message"]
 
-# хранение состояния и квот
+# state and quota storage
 
 
-# Опциональное хранилище Upstash Redis (см. README). Заданы оба значения — пишем
-# туда вместо диска контейнера; не заданы — всё как раньше, без изменений.
+# Optional Upstash Redis storage (see README). When both values are set, write
+# there instead of the container disk; if unset, everything remains unchanged.
 UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL", "").strip().rstrip("/")
 UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
 USE_UPSTASH = bool(UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN)
@@ -1086,7 +1096,7 @@ log.info(
     "Upstash Redis" if USE_UPSTASH else f"локальный файл в {_STATE_DIR} (см. README про эфемерность на HF Spaces)"
 )
 
-# Хранилище — в lumen_state_storage.py + lumen_chat_state.py.
+# Storage is in lumen_state_storage.py + lumen_chat_state.py.
 from lumen_state_storage import (
     CHAT_STATE_SCHEMA_VERSION,
     _serialize_chat_state,
@@ -1095,15 +1105,15 @@ from lumen_state_storage import (
 )
 
 
-# `_urllib_request` в коде bot.py больше не используется — клиент Upstash переехал в
-# lumen_state_storage.py. Остаётся ради тестов, которые патчат `bot._urllib_request.urlopen`
-# (как и CHAT_STATE_SCHEMA_VERSION — см. пояснение про __all__ у первого блока в начале файла).
+# `_urllib_request` is no longer used in bot.py — the Upstash client moved to
+# lumen_state_storage.py. Kept for tests that patch `bot._urllib_request.urlopen`
+# (Like CHAT_STATE_SCHEMA_VERSION; see the explanation of __all__ in the first block at the top of the file.)
 __all__ = [
     "_urllib_request",
     "CHAT_STATE_SCHEMA_VERSION",
     "user_rate_limits",
-    # Имена из lumen_admin.py (app, гейты, эндпоинты) код bot.py сам не читает
-    # (main() берёт только app) — они нужны как `bot.X` существующим тестам.
+    # Names from lumen_admin.py (app, gates, endpoints) are not read directly by bot.py
+    # (main() takes only app) — existing tests need them as `bot.X`.
     "app",
     "_check_bearer_token",
     "_check_admin_key",
@@ -1114,27 +1124,27 @@ __all__ = [
     "probe_url",
     "export_state",
     "devtrace",
-    # Имена из lumen_streaming.py код bot.py сам не читает — они нужны как `bot.X`
-    # существующим тестам и `_run_route` ниже.
+    # Names from lumen_streaming.py are not read by bot.py itself — they are needed as `bot.X`
+    # existing tests and `_run_route` below.
     "_tick_waiting_dots",
     "_pieces_with_waiting_feedback",
     "_munito_stream_pieces",
     "_run_streaming_reply",
     "_try_gemini_streaming",
     "_try_munito_streaming",
-    # Точка подмены тестов (см. monkeypatch в tests/) — сам код bot.py её
-    # больше не читает напрямую после выноса стриминга.
+    # Test substitution point (see monkeypatch in tests/); bot.py itself
+    # no longer reads directly after streaming was moved out.
     "_model_first_chunk_limit",
-    # Константы-фолбэки тестов (читаются как bot._IDENTITY_LEAK_FALLBACK).
+    # Test fallback constants (read as bot._IDENTITY_LEAK_FALLBACK).
     "_IDENTITY_LEAK_FALLBACK",
-    # Имена из lumen_tiktok_flow.py код bot.py сам не читает — они нужны как
-    # `bot.X` существующим тестам и `_handle_message_core` ниже.
+    # Names from lumen_tiktok_flow.py are not read by bot.py itself; they are needed as
+    # `bot.X` for existing tests and `_handle_message_core` below.
     "_send_tiktok_music",
     "handle_tiktok_sound",
     "_fetch_tikwm_media_data_with_proxy_fallback",
     "_try_send_tiktok_slideshow",
     "handle_tiktok",
-    # Механика lumen_tiktok.py как `bot.X` для существующих тестов.
+    # The mechanics of lumen_tiktok.py as `bot.X` for existing tests.
     "_original_sound_label",
     "_chunk_tiktok_media_items",
     "_looks_like_video_bytes",
@@ -1150,8 +1160,8 @@ __all__ = [
     "_probe_and_thumbnail_from_bytes",
     "_resolve_tiktok_short",
     "_fetch_tikwm_media_data",
-    # Имена из lumen_routes.py код bot.py сам не читает — они нужны как `bot.X`
-    # существующим тестам и `_handle_message_core` ниже.
+    # bot.py does not read names from lumen_routes.py itself — they are needed as `bot.X`
+    # existing tests and `_handle_message_core` below.
     "MunitoAPIError",
     "_munito_request",
     "_attempt_timeout",
@@ -1170,14 +1180,15 @@ __all__ = [
     "_route_error_reply_text",
     "RouteBudgetExceededError",
     "_run_route",
-    # Порядки моделей и чистка истории читаются тестами как bot.X.
+    # Model orders and history cleanup are read by tests as bot.X.
     "_MUNITO_ORDER",
     "_history_user_text",
     "_clean_history_entry",
-    # Пространство имён genai-типов для тестов (bot.types.Content/...).
+    # Namespace for genai types in tests (bot.types.Content/...).
     "types",
-    # Имена из lumen_chat_state.py код bot.py сам не читает — они нужны как
-    # `bot.X` существующим тестам.
+    # bot.py does not read the names from lumen_chat_state.py itself; they are
+    # needed as
+    # `bot.X` for existing tests.
     "MAX_TOTAL_MEMORY_MESSAGES",
     "HISTORY_SUMMARIZE_KEEP",
     "_CHATS_DIR",
@@ -1208,17 +1219,18 @@ __all__ = [
     "_stats_entry",
     "_record_stats_event",
     "_last_storage_write_ts",
-    # Локи чатов код bot.py берёт через acquire_chat_lock; оба имени ниже —
-    # только для `bot.X` в тестах.
+    # bot.py obtains chat locks through acquire_chat_lock; both names below are
+    # only for `bot.X` in tests.
     "get_chat_lock",
     "acquire_chat_lock",
-    # Прямые имена lumen_state_storage для тестов.
+    # Direct lumen_state_storage names for tests.
     "_serialize_chat_state",
     "_current_quota_day",
     "_quota_day_reset_in_sec",
     "USER_DAILY_KEY",
     "_user_daily_entry",
     "_user_daily_peek",
+    "_user_daily_admission_blocked",
     "_user_daily_limit",
     "_user_daily_total_exhausted",
     "_user_daily_gemini_exhausted",
@@ -1228,7 +1240,11 @@ __all__ = [
     "_refund_user_daily",
     "_user_key_for_message",
     "_user_daily_reset_in",
-    # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
+    # Unknown-outcome transport contract — for `bot.X` in tests (R4-03).
+    "_TG_UNKNOWN",
+    "_tg_outcome_unknown",
+    "_tg_cancelled_unknown",
+    # Names of the other extracted modules are only for `bot.X` in tests.
     "GEMINI_TTS_MODELS",
     "_cloudflare_text_to_image",
     "_cloudflare_edit_to_image",
@@ -1253,6 +1269,8 @@ __all__ = [
     "_record_quota_usage",
     "_image_usage_total",
     "_image_budget_exhausted",
+    "_reserve_image_neurons",
+    "_release_image_neurons",
     "_image_neurons_total",
     "recover_global_quota",
     "_image_provider_block_reason",
@@ -1265,7 +1283,7 @@ __all__ = [
     "_resolve_nick",
     "_pending_picks",
     "_enforce_pending_picks_cap",
-    # Имена из lumen_errors.py код bot.py сам не читает — только `bot.X` в тестах.
+    # The bot code does not read names from lumen_errors.py itself — tests only use `bot.X`.
     "_error_text",
     "_error_status",
     "_classify_model_error",
@@ -1277,7 +1295,7 @@ __all__ = [
     "_gemini_error_msg",
     "get_system_prompt",
     "_MODEL_ERROR_FALLBACK_MSG",
-    # Имена остальных вынесенных модулей — только для `bot.X` в тестах.
+    # Names of the other extracted modules are only for `bot.X` in tests.
     "ParseMode",
     "_split_text_chunks",
     "is_guest_message",
@@ -1341,7 +1359,7 @@ __all__ = [
     "_reject_rate_limited_message",
     "_resolve_incoming_media",
     "_process_raw_update",
-    # Имена транспортных вызовов и _notify_owner — только для `bot.X` в тестах.
+    # Transport call names and _notify_owner are only for `bot.X` in tests.
     "_get_telegram_session",
     "_rotate_telegram_proxy",
     "_get_http_session",
@@ -1352,16 +1370,16 @@ __all__ = [
     "_notify_owner",
 ]
 
-# Троттлинг для уведомления владельца о полном исчерпании квоты Gemini (см.
-# _handle_message_core) — без него один и тот же алерт улетал бы на КАЖДОЕ
-# сообщение, требующее Gemini, пока квота не восстановится (может быть весь день).
+# Throttling for notifying the owner that the Gemini quota is fully exhausted (see
+# _handle_message_core) — without it, the same alert would be sent for EVERY
+# a message requiring Gemini until the quota recovers (it may take all day).
 GEMINI_EXHAUSTED_ALERT_COOLDOWN_SEC = 3600.0
 
 
 
-# генерация изображений (Cloudflare Workers AI + резерв Pollinations)
+# image generation (Cloudflare Workers AI + Pollinations reserve)
 #
-# Генерация картинок — в lumen_images.py (чистые функции, сессию передаёт вызывающий код).
+# Image generation belongs in lumen_images.py (pure functions; the caller passes the session).
 from lumen_images import (
     ImageBudgetExhaustedError,
     ImageModerationError,
@@ -1377,39 +1395,40 @@ from lumen_images import (
     size_for_reference,
 )
 
-# Имена провайдеров и ошибок нужны только тестам как `bot.X` (см. пояснение
-# про __all__ у первого блока в начале файла).
+# Provider and error names are needed only by tests as `bot.X` (see the explanation
+# see __all__ in the first block at the start of the file).
 __all__ += ["ImageProviderError", "ImageRateLimitedError", "ImageBudgetExhaustedError", "ImageModerationError"]
 
-# Чистые утилиты медиа — в lumen_media.py; сетевая часть остаётся здесь
-# (ей нужны сессия, BOT_TOKEN и bot.get_file).
+# Pure media utilities belong in lumen_media.py; the network part remains here
+# (it needs a session, BOT_TOKEN, and bot.get_file).
 from lumen_media import (
     _sanitize_mime_type,
     _mime_suffix,
     _msg_media_source,
     _ensure_prompt_text,
 )
-# (импорт lumen_lang — вверху файла, рядом с system_prompt: _MODEL_ERROR_MESSAGES
-# выше по файлу уже использует его на уровне модуля)
-# загрузка медиа
+# (import lumen_lang is at the top of the file, next to system_prompt: _MODEL_ERROR_MESSAGES
+# already uses it at module level above in the file),
+# media loading
 
 
 
 
-# Списки моделей и здоровье роута живут в lumen_router_config.py — здесь только
-# код, который реально ходит в API.
+# Model lists and route health live in lumen_router_config.py — here only
+# the code that actually calls the API.
 
-# ─────────────────── защита от утечки провайдера/модели и промт-инъекций ───────────────────
-# Детекторы утечек/инъекций — чистые функции в lumen_security.py (импортируем только используемое).
+# ─────────────────── protection against provider/model leaks and prompt injection ───────────────────
+# Leak/injection detectors are pure functions in lumen_security.py (import only what
+#     is used).
 from lumen_security import (
     _IDENTITY_LEAK_FALLBACK,
 )
-# (_INJECTION_PROBE_REPLY здесь больше не импортируется: ответ на провокации
-# теперь берётся из lumen_lang.py по языку чата — см. ключ injection_probe_reply)
+# (_INJECTION_PROBE_REPLY is no longer imported here: the response to provocations
+# is now taken from lumen_lang.py according to the chat language — see the injection_probe_reply key)
 
 
-# LLM-маршрутизация живёт в lumen_routes.py (P2): здесь только реэкспорт
-# имён, чтобы `bot.X` в тестах и `_handle_message_core` не менялись.
+# LLM routing lives in lumen_routes.py (P2): this is only a re-export
+# names, so `bot.X` in tests and `_handle_message_core` do not change.
 from lumen_routes import (
     MunitoAPIError,
     _munito_request,
@@ -1431,10 +1450,10 @@ from lumen_routes import (
     _run_route,
 )
 
-# скачивание тикток
+# downloading TikTok
 #
-# Механика загрузчика — в lumen_tiktok.py, оркестрация — в lumen_tiktok_flow.py.
-# Имена ниже нужны как `bot.X` существующим тестам, поэтому тоже здесь.
+# Downloader mechanics — in lumen_tiktok.py, orchestration — in lumen_tiktok_flow.py.
+# The names below are needed as `bot.X` by existing tests, so they are here too.
 from lumen_tiktok import (
     _original_sound_label,
     _chunk_tiktok_media_items,
@@ -1455,12 +1474,12 @@ from lumen_tiktok import (
     _looks_like_resolved_tiktok_url,
 )
 
-# Нужна только регрессионным тестам как `bot._looks_like_resolved_tiktok_url`
-# (см. пояснение про __all__ у первого блока в начале файла).
+# Needed only by regression tests as `bot._looks_like_resolved_tiktok_url`
+# (see the explanation of __all__ by the first block at the start of the file).
 __all__ += ["_looks_like_resolved_tiktok_url"]
 
-# TikTok-оркестрация живёт в lumen_tiktok_flow.py (P2): здесь только реэкспорт
-# имён, чтобы `bot.X` в тестах и `_handle_message_core` не менялись.
+# TikTok orchestration lives in lumen_tiktok_flow.py (P2); here there is only a re-export
+# names, so that `bot.X` in tests and `_handle_message_core` do not change.
 from lumen_tiktok_flow import (
     _send_tiktok_music,
     handle_tiktok_sound,
@@ -1470,26 +1489,26 @@ from lumen_tiktok_flow import (
 )
 
 
-# Скорость отдачи текста — свойство бэкенда, а не модели, поэтому замер по факту
-# на каждом стриме + EMA (см. lumen_typing_pace.py). Новая модель калибруется
-# сама за первые ответы, вручную обновлять ничего не нужно.
+# Text delivery speed is a backend property, not a model property, so measure it directly
+# on every stream + EMA (see lumen_typing_pace.py). A new model is calibrated
+# learns them from the first answers; nothing needs manual updating.
 
-# Самокалибрующаяся оценка задержек моделей — см. докстринг lumen_model_speed.py.
-# Здесь осталось только имя-точка подмены тестов; само измерение уехало в
-# lumen_routes.py/lumen_streaming.py вместе с вызывающим кодом.
+# Self-calibrating model latency estimate — see the lumen_model_speed.py docstring.
+# Only the test replacement name placeholder remains here; the measurement itself moved to
+# lumen_routes.py/lumen_streaming.py together with the calling code.
 from lumen_model_speed import (
     first_chunk_limit_sec as _model_first_chunk_limit,
 )
 
-# Точка подмены сна довывода: tests/conftest.py глушит, иначе сьют тормозит.
+# Seam for replacing completion sleep: tests/conftest.py patches it, or the suite slows down.
 _typing_sleep = asyncio.sleep
 
-# Точка подмены анимации точек — намеренно БЕЗ autouse: no-op сломал бы проверки последовательностей правок.
+# The typing-animation substitution point is intentionally NOT autouse: a no-op would break the edit-sequence assertions.
 _dots_sleep = asyncio.sleep
 
 
-# Стриминг живёт в lumen_streaming.py (P2): здесь только реэкспорт имён,
-# чтобы `bot.X` в тестах и `_run_route` не менялись.
+# Streaming lives in lumen_streaming.py (P2): here, only name re-exports,
+# so `bot.X` in tests and `_run_route` do not change.
 from lumen_streaming import (
     _tick_waiting_dots,
     _pieces_with_waiting_feedback,
@@ -1499,8 +1518,8 @@ from lumen_streaming import (
     _try_munito_streaming,
 )
 
-# Чистые функции парсинга — в lumen_message_parse.py. clean_mention остаётся
-# здесь: ей нужен BOT_USERNAME из этого модуля.
+# Pure parsing functions — in lumen_message_parse.py. clean_mention remains
+# here: it needs BOT_USERNAME from this module.
 from lumen_message_parse import (
     DRAW_TRIGGER_PREFIXES,
     strip_group_wake_word,
@@ -1520,22 +1539,22 @@ from lumen_message_parse import (
     match_pick_request,
 )
 
-# Нужны только тестам как `bot.X` (см. пояснение про __all__ у первого блока
-# в начале файла).
+# Needed only by tests as `bot.X` (see the explanation of __all__ in the first block
+# at the top of the file).
 __all__ += ["_looks_like_media_reference", "_mime_matches_media_category"]
 
 def clean_mention(text: str) -> str:
     return re.sub(rf"@{re.escape(BOT_USERNAME)}", "", text, flags=re.IGNORECASE).strip()
 
-# Триггеры, маркеры реплая, категории медиа и пометка "файла нет" живут в
-# lumen_message_parse.py (импорт выше) — здесь остаются только clean_mention
-# (нужен BOT_USERNAME) и message_mentions_bot ниже.
+# Triggers, reply markers, media categories, and the "no file" mark live in
+# lumen_message_parse.py (imported above) — only clean_mention remains here
+# (requires BOT_USERNAME) and message_mentions_bot below.
 
-# Защита от промт-инъекций (входной префильтр) вынесена в lumen_security.py вместе
-# с защитой от утечки идентичности (см. импорт рядом с _detect_identity_leak выше).
+# Prompt-injection protection (input prefilter) has been moved to lumen_security.py together
+# with protection against identity leaks (see the import next to _detect_identity_leak above).
 
 def message_mentions_bot(message: Message) -> bool:
-    # chat None (сырой апдейт без чата) — упоминания искать негде, апдейт не роняем.
+    # chat None (a raw update without a chat) — there is nowhere to look for mentions; do not crash the update.
     if message.chat is None:
         return False
     if message.chat.type == ChatType.PRIVATE:
@@ -1548,10 +1567,10 @@ def message_mentions_bot(message: Message) -> bool:
               return True
     return False
 
-# команды бота
+# bot commands
 
-# Команды/TTS/Draw/pick — в lumen_commands.py; здесь только импорт имён
-# и регистрация хендлеров явными register (тот же порядок, то же поведение).
+# Commands/TTS/Draw/pick live in lumen_commands.py; this only imports their names
+# and handler registration use explicit register calls (same order, same behavior).
 from lumen_commands import (
     cmd_start,
     cmd_stop,
@@ -1579,8 +1598,8 @@ from lumen_commands import (
     _send_pick_question,
     handle_pick_callback,
 )
-# /help — алиас /start: по привычке человек просит справку именно так, а без
-# алиаса его текст уезжал в модель (решение владельца 11.11.2026). В меню не дублируем.
+# /help is an alias for /start: people habitually ask for help this way, and without it
+# of the alias, its text was sent to the model (owner decision 11.11.2026). It is not duplicated in the menu.
 dp.message.register(cmd_start, Command("start", "help"))
 dp.message.register(cmd_draw, Command("draw"))
 dp.callback_query.register(handle_draw_more_callback, F.data == "draw:more")
@@ -1599,26 +1618,26 @@ dp.message.register(cmd_banlist, Command("banlist"))
 dp.callback_query.register(handle_pick_callback, F.data.startswith("pick:"))
 
 
-# ─────────────────── автоматический выбор модели (роутер) ───────────────────
-# Маршрут строится заново на каждое сообщение; Gemini только под поиск/ссылки/YouTube — его квота самая дефицитная.
+# ─────────────────── automatic model selection (router) ───────────────────
+# The route is rebuilt for every message; Gemini is used only for search/links/YouTube because its quota is the tightest.
 
 
-# ── Кнопки-уточнения (pick-сценарии) ──
-# Вопрос с кнопками вместо гадания модели для вкусовых запросов без деталей
-# ("посоветуй фильм"). Опции заданы кодом (PICK_TABLE в lumen_lang.py), модель
-# варианты не генерирует — слабые их калечат. В кнопках без эмодзи.
+# ── Clarification buttons (pick scenarios) ──
+# A question with buttons instead of model guesswork for taste requests without details
+# ("recommend a movie"). Options are defined in code (PICK_TABLE in lumen_lang.py); the model
+# does not generate options — weak verbs mangle them. No emoji in buttons.
 PICK_BUTTONS_ENABLED = os.getenv("PICK_BUTTONS_ENABLED", "1") == "1"
-# PICK_TTL_SEC/MAX_PENDING_PICKS/_pending_picks/_purge/_enforce — в lumen_limits.py,
-# импортированы выше рядом с rate limit (P2), здесь используются напрямую.
+# PICK_TTL_SEC/MAX_PENDING_PICKS/_pending_picks/_purge/_enforce are in lumen_limits.py,
+# imported above next to rate limit (P2); they are used directly here.
 
 
 
 
 
 
-# обработка сообщений
+# message handling
 
-# Ядро обработки сообщений живёт в lumen_message_core.py (P2).
+# Message handling core lives in lumen_message_core.py (P2).
 
 @dp.errors()
 async def global_error_handler(event: Any) -> bool:
@@ -1627,13 +1646,13 @@ async def global_error_handler(event: Any) -> bool:
 
 @dp.message()
 async def handle_message(message: Message) -> None:
-    # Метка чата на всех строках обработки (см. _LOG_CHAT); сброс в finally —
-    # иначе значение утечёт в следующий апдейт этого же процесса.
+    # The chat marker on every handling line (see _LOG_CHAT); reset in finally —
+    # otherwise the value would leak into the next update in the same process.
     token = _LOG_CHAT.set(f"chat={message.chat.id if message.chat else 0}")
     utoken = _LOG_USER.set(f"user={message.from_user.id if getattr(message, 'from_user', None) else 0}")
-    # Потолок сообщения ставится здесь: альбомные задачи наследуют контекст.
+    # The message ceiling is set here: album tasks inherit the context.
     dtoken = _MSG_DEADLINE.set(time.monotonic() + MESSAGE_TOTAL_BUDGET_SEC)
-    # Сброс на входе: значение не имеет права утечь в следующий апдейт.
+    # Reset on entry: the value must not leak into the next update.
     ctoken = _ANSWER_COUNTED.set(False)
     try:
         await _handle_message(message)
@@ -1645,10 +1664,10 @@ async def handle_message(message: Message) -> None:
 
 
 async def _handle_message(message: Message) -> None:
-    # Владельческая блокировка: ни ответа, ни контекста группы, ни счётчиков —
-    # отсекаем раньше всего, включая медиагруппы и пассивный фон. Пост канала
-    # (sender_chat без from_user) тоже автор: иначе бан обходится каналом
-    # (ревью 17.11.2026).
+    # Owner lock: no reply, no group context, no counters —
+    # cut off at the earliest point, including media groups and passive background. A channel post
+    # (sender_chat without from_user) is also an author: otherwise a ban is bypassed through a channel
+    # (review 17.11.2026).
     _author = message.from_user if message.from_user is not None else getattr(message, "sender_chat", None)
     if _author is not None and getattr(_author, "id", None) is not None and _is_banned(_author.id):
         return
@@ -1665,16 +1684,16 @@ async def _handle_message(message: Message) -> None:
     is_private = message.chat.type == ChatType.PRIVATE if message.chat else True
     is_guest = is_guest_message(message)
     mentioned = message_mentions_bot(message)
-    # «Люмен, …» — тоже обращение: без этого такой вопрос шёл бы тихим фоном
-    # и не получал честное «занято» в занятом чате (wake-word 18.11.2026).
+    # 'Lumen, ...' is also an address: without this, such a question would go through quiet background
+    # and did not get an honest "busy" reply in a busy chat (wake-word 18.11.2026).
     if (
         not mentioned and not is_private and not is_guest
         and message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
         and not getattr(message, "forward_origin", None)
     ):
         mentioned = group_wake_request(message.text or message.caption or "")[0]
-    # Входящее медиа логируем всегда: молчаливый дроп (прод 23.09.2026) иначе
-    # не диагностировать вообще.
+    # Always log incoming media: otherwise a silent drop (production 23.09.2026)
+    # not diagnose anything at all.
     _in_src = _msg_media_source(message)
     if _in_src is not None:
         log.info(
@@ -1682,19 +1701,20 @@ async def _handle_message(message: Message) -> None:
             chat_id, type(_in_src).__name__, bool(message.text or message.caption),
         )
 
-    # Неупомянутая группа — тоже путь, трогающий чат: тот же лок и дедлайн,
-    # иначе фон писал историю параллельно с ответом (ревью 17.11.2026).
-    # background=True: фон не отвечает «занято» и не занимает очередь людей
-    # (прод 18.11.2026: «День у день» посреди ответа получал адресованное «занято»).
+    # An unaddressed group is also a chat-touching path: the same lock and deadline,
+    # otherwise background wrote history in parallel with the answer (review 17.11.2026).
+    # background=True: background work does not reply "busy" and does not take a people queue slot
+    # (production 18.11.2026: "Day by day" in the middle of an answer received an
+    #     addressed "busy" reply).
     if not is_private and not is_guest and not mentioned:
         await _run_under_chat_lock(message, lambda: _handle_message_core(message), background=True)
         return
 
-    # Лок, кап ожидающих и потолок сообщения — в общем помощнике, чтобы этот путь,
-    # альбом и гость не расходились в защитх (аудит 28.10.2026 + 01.11.2026).
+    # The lock, waiter cap, and message deadline belong in the shared helper so this path,
+    # album and guest diverged in their protections (audit 28.10.2026 + 01.11.2026).
     await _run_under_chat_lock(message, lambda: _handle_message_core(message))
 
-# вебхук и запуск
+# webhook and startup
 from lumen_message_core import (
     _process_media_group_buffers,
     _record_passive_group_context,
@@ -1709,22 +1729,23 @@ from lumen_message_core import (
     _process_raw_update,
 )
 
-# setWebhook: попыток с экспоненциальным бэкоффом от базы (аудит D4, 30.09.2026).
+# setWebhook: attempts with exponential backoff starting from a base (audit D4, 30.09.2026).
 SETWEBHOOK_MAX_ATTEMPTS = 5
 SETWEBHOOK_BACKOFF_SEC = 5.0
 
-# /webhook отвечает 503, пока старт не загрузил состояние: иначе апдейт,
-# пришедший во время загрузки, создаёт пустой чат и перезаписывает удалённую
-# историю/индекс (аудит 28.10.2026).
+# /webhook returns 503 until startup has loaded state: otherwise an update
+# arriving during loading creates an empty chat and overwrites the deleted
+# history/index (28.10.2026 audit).
 _state_ready = True
 
 
-# Локали профиля — те же, что у меню команд (тот же гейт ISO 639-1, тот же «fil»
-# вне списка). Десять «самых ходовых» оставили бы тайца, урду и зулу с английским
-# «О себе», хотя описания команд на их языке есть (проверено 11.11.2026).
+# Profile locales are the same as for the command menu (the same ISO 639-1 gate, the same "fil"
+# outside the list). Keeping only the ten "most popular" languages would leave
+# Thai, Urdu, and Zulu with English
+# "About," even though command descriptions exist in their languages (verified 11.11.2026).
 PROFILE_LANGS: tuple[str, ...] = (DEFAULT_LANG,) + tuple(COMMAND_LOCALES)
 
-# ключ STRINGS -> (метод Bot, имя аргумента с текстом)
+# the STRINGS key -> (Bot method, text argument name)
 _PROFILE_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("profile_name", "set_my_name", "name"),
     ("profile_short", "set_my_short_description", "short_description"),
@@ -1732,23 +1753,23 @@ _PROFILE_FIELDS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-# Очередь полей профиля: PROFILE_LANGS × 3 поля = 72 вызова. Семьдесят два вызова
-# параллельно (как было) ловят flood control: прод 11.11.2026 после деплоя получил
-# шторм «Flood control exceeded on method 'SetMyName'. Retry in 79522 seconds» с
-# 17:44 до 17:47 — и у живых людей в эти минуты рвались ответы. Поэтому очередь
-# раздаётся по одному вызову с паузой, а на первом же отказе встает: долбить
-# Telegram нельзя, остаток добирает часовой цикл.
-# Второй вывод того же замера: штраф копят повторные записи, а перезапуск
-# Space после деплоя писал все поля заново. Отсюда два правила — не слать
-# локализованное поле, если текст совпадает с дефолтным (имя «Lumen» одинаков
-# во всех паках: 19 вызовов SetMyName сворачиваются в один), и сверять с
-# Telegram перед записью: то, что уже стоит, не пишется вовсе.
+# Profile field queue: PROFILE_LANGS × 3 fields = 72 calls. Seventy-two calls
+# in parallel (as before), they hit flood control: prod 11.11.2026 received
+# storm “Flood control exceeded on method 'SetMyName'. Retry in 79522 seconds” with
+# 17:44 to 17:47 — and real users' responses broke during those minutes. Therefore the queue
+# is sent one call at a time with a pause, and stops at the first failure; do not hammer
+# Telegram is not possible; the hourly cycle handles the remainder.
+# Second conclusion from the same measurement: repeated writes accumulate the penalty, while a restart
+# the Space rewrote every field after deployment. Hence two rules: do not send
+# a localized field if the text matches the default (the name “Lumen” is the same
+# across all packs: 19 SetMyName calls collapse into one), and compare with
+# Telegram before writing: anything already present is not written at all.
 _profile_queue: list[tuple[str, dict[str, str]]] = []
 _PROFILE_CALL_GAP_SEC = 0.6
 _PROFILE_STARTUP_FIELDS = 20
 _profile_sleep = asyncio.sleep
-# К каждому set* есть пара get*: чтение почти не лимитировано, а повторная запись
-# одного и того же значения стоит того же лимита, что и первая.
+# Every set* has a matching get*: reads are barely rate-limited, while repeated writes
+# of the same value costs the same limit allowance as the first.
 _PROFILE_READ_METHODS = {
     "set_my_name": ("get_my_name", "name"),
     "set_my_short_description": ("get_my_short_description", "short_description"),
@@ -1762,8 +1783,8 @@ def _profile_payloads() -> list[tuple[str, dict[str, str]]]:
         where = {} if lang == DEFAULT_LANG else {"language_code": lang}
         for key, method_name, arg_name in _PROFILE_FIELDS:
             value = _lang_t(lang, key)
-            # Языку без собственного текста Telegram показывает значение по
-            # умолчанию: отдельная запись ничего не меняет, а лимит съедает.
+            # For a language without its own text, Telegram shows the value for
+            # by default: a separate record changes nothing, but consumes the limit.
             if lang != DEFAULT_LANG and value == _lang_t(DEFAULT_LANG, key):
                 continue
             payloads.append((method_name, {arg_name: value, **where}))
@@ -1775,8 +1796,7 @@ def _profile_field_value(kwargs: dict[str, str]) -> str:
 
 
 async def _profile_pending_payloads() -> list[tuple[str, dict[str, str]]]:
-    """Поля, которых в Telegram ещё нет. Ошибка чтения записи не блокирует: лучше
-    лишняя правка, чем профиль, застрявший в тексте из BotFather."""
+    """Fields Telegram does not yet have. A read error is non-blocking: an extra edit is better than a profile stuck in text from BotFather."""
     pending: list[tuple[str, dict[str, str]]] = []
     for method_name, kwargs in _profile_payloads():
         read = _PROFILE_READ_METHODS.get(method_name)
@@ -1798,9 +1818,7 @@ async def _profile_pending_payloads() -> list[tuple[str, dict[str, str]]]:
 
 
 async def _register_bot_profile(limit: int | None = None) -> int:
-    """Имя и «О себе» в профиле бота задаются из кода, а не только BotFather:
-    иначе тексты расходятся с lumen_lang и не закрыты тестами. Ничего не кидает:
-    профиль не влияет на приём сообщений, ронять из-за него старт нельзя."""
+    """The bot profile name and “About” text are set from code, not only through BotFather; otherwise they drift from lumen_lang and are not covered by tests. Nothing is raised: the profile does not affect message reception, so startup must not fail because of it."""
     global _profile_queue
     if bot is None:
         log.warning("[webhook] Bot profile skipped: bot instance is not initialized")
@@ -1815,8 +1833,11 @@ async def _register_bot_profile(limit: int | None = None) -> int:
     while _profile_queue and (limit is None or done < limit):
         method_name, kwargs = _profile_queue[0]
         try:
-            # retries=0: на flood control повтор только ухудшает штраф.
-            ok = await _tg_call(getattr(bot, method_name), **kwargs, call_timeout=15.0, retries=0) is not None
+            # retries=0: retrying on flood control only worsens the penalty.
+            # R4-03 (audit 26.11.2026): an unknown result is not success — the profile write
+            # is idempotent and will be rescheduled on the next startup; false-ok would suppress retries.
+            _profile_res = await _tg_call(getattr(bot, method_name), **kwargs, call_timeout=15.0, retries=0)
+            ok = _profile_res is not None and not _tg_outcome_unknown(_profile_res)
         except Exception as exc:
             log.warning(
                 "[webhook] %s failed (%s): %s",
@@ -1839,12 +1860,12 @@ async def _register_bot_profile(limit: int | None = None) -> int:
 
 async def _webhook_startup() -> None:
     global _state_ready
-    # Синхронное дисковое чтение в потоке: иначе старт стопорит приём /webhook.
+    # Synchronous disk read in a thread: otherwise startup blocks /webhook reception.
     await asyncio.to_thread(load_state_from_disk)
     _state_ready = True
     log.info("Bot startup: webhook mode.")
-    # На Space кап можно переопределить env: без этой строки в логах не видно,
-    # какой лимит реально работает (разбор 26.10.2026).
+    # On Space, the cap can be overridden by env: without this line, the logs do not show
+    # which limit actually works (26.10.2026 analysis).
     log.info(
         "[setup] TikTok limits: post=%.0fMB, slide=%.0fMB, slide concurrency=%d, Telegram upload=%.0fMB",
         TIKTOK_SLIDESHOW_MAX_BYTES / (1024 * 1024),
@@ -1853,8 +1874,8 @@ async def _webhook_startup() -> None:
         TELEGRAM_BOT_API_UPLOAD_LIMIT_BYTES / (1024 * 1024),
     )
     _check_unconfirmed_model_quotas()
-    # запросы ДО того, как Telegram попробует провалидировать доступность
-    # /webhook при регистрации через setWebhook.
+    # requests BEFORE Telegram tries to validate availability
+    # /webhook when registered through setWebhook.
     await asyncio.sleep(1.5)
 
     space_host = os.getenv("SPACE_HOST", "").strip()
@@ -1866,8 +1887,8 @@ async def _webhook_startup() -> None:
 
     log.info("[webhook] Space URL: https://%s", space_host)
     log.info("[webhook] Webhook endpoint: %s", webhook_url)
-    # Полные секреты в логи не печатаем, только отпечаток; полные — через
-    # /admin_keys с Bearer BOT_TOKEN (токен в URL оседает в логах прокси).
+    # Do not print full secrets to logs, only a fingerprint; full ones go through
+    # /admin_keys with Bearer BOT_TOKEN (a token in the URL remains in proxy logs).
     log.info('[webhook] WEBHOOK_SECRET (fingerprint): %s', _redact_secret(WEBHOOK_SECRET))
     log.info(
         '[admin] Full keys (WEBHOOK_SECRET/ADMIN_PANEL_KEY): curl -H "Authorization: Bearer <your BOT_TOKEN>" https://%s/admin_keys',
@@ -1881,7 +1902,7 @@ async def _webhook_startup() -> None:
         BotCommand(command="reset", description=_lang_t(DEFAULT_LANG, "cmd_desc_reset")),
         BotCommand(command="lang", description=_lang_t(DEFAULT_LANG, "cmd_desc_lang")),
     ]
-    # Описания команд на языке клиента; падение одного языка не роняет остальные.
+    # Command descriptions in the client’s language; one language failing does not break the others.
     localized_commands = [
         (
             code,
@@ -1915,10 +1936,10 @@ async def _webhook_startup() -> None:
         except Exception as exc:
             log.warning("[webhook] deleteWebhook failed (will need manual setup): %s", exc)
 
-        # setWebhook с ретраями и экспоненциальным бэкоффом: провал без ретрая
-        # оставлял тихий мёртвый бот (аудит D4, 30.09.2026). После исчерпания —
-        # RuntimeError наверх: main останавливает сервер и выходит кодом 1,
-        # чтобы платформа перезапустила контейнер, а не служила пустоту.
+        # setWebhook uses retries with exponential backoff: without them, a failure left
+        # a silent, dead bot (audit D4, 30.09.2026). After exhaustion, propagate RuntimeError
+        # so main stops the server and exits with code 1; the platform then restarts the
+        # container instead of serving an empty webhook.
         webhook_ok = False
         backoff = SETWEBHOOK_BACKOFF_SEC
         for attempt in range(1, SETWEBHOOK_MAX_ATTEMPTS + 1):
@@ -1927,9 +1948,9 @@ async def _webhook_startup() -> None:
                     telegram_api_call("setWebhook", {
                         "url": webhook_url,
                         "secret_token": WEBHOOK_SECRET,
-                        # drop_pending_updates=True — решение владельца (27.09.2026): после
-                        # простоя не отвечать пачкой на старые сообщения. Цена — сообщения,
-                        # пришедшие пока бот лежал, теряются.
+                        # drop_pending_updates=True — the owner's decision (27.09.2026): after
+                        # downtime from replying in a burst to old messages. The cost is messages,
+                        # updates that arrived while the bot was down are lost.
                         "drop_pending_updates": True,
                         "allowed_updates": ALLOWED_UPDATES,
                     }, request_timeout=15.0),
@@ -1948,7 +1969,7 @@ async def _webhook_startup() -> None:
         if webhook_ok:
             log.info("[webhook] Webhook registered successfully: %s", webhook_url)
         else:
-            # Секрет в лог не подставляем — готовая ссылка живёт в /webhook_url (Bearer ADMIN_PANEL_KEY, не query).
+            # Do not put the secret in the log; the ready-made link lives in /webhook_url (Bearer ADMIN_PANEL_KEY, not query).
             log.error(
                 '[webhook] setWebhook failed after %d attempts — register it manually via: curl -H "Authorization: Bearer <ADMIN_PANEL_KEY>" https://.../webhook_url (get ADMIN_PANEL_KEY via curl -H "Authorization: Bearer <BOT_TOKEN>" .../admin_keys if you don\'t have it handy)',
                 SETWEBHOOK_MAX_ATTEMPTS,
@@ -1964,9 +1985,9 @@ async def _webhook_startup() -> None:
             }
             for code, cmds in localized_commands
         ]
-        # 24 локали последовательно — это 5-12 с холодного старта через прокси.
-        # Регистрируем с ограниченной параллельностью: меню не влияет на ответы,
-        # но не хочется упираться в flood-контроль Telegram.
+        # 24 locales sequentially — that is 5-12 s of cold start through the proxy.
+        # Register with limited concurrency: the menu does not affect replies,
+        # but there is no desire to hit Telegram's flood control.
         _commands_sem = asyncio.Semaphore(4)
 
         async def _register_commands(cmd_payload: dict) -> None:
@@ -1990,10 +2011,10 @@ async def _webhook_startup() -> None:
             log.info("[webhook] Bot commands set successfully.")
         else:
             log.warning("[webhook] Bot commands were not set for any language.")
-        # Профиль не влияет на приём сообщений, поэтому его провал не должен
-        # уходить в main(): любая ошибка старта там = выход контейнера с кодом 1.
-        # На старте — только первые поля: остальные добирает часовой цикл, иначе
-        # 72 вызова подряд ловят flood control (прод 11.11.2026).
+        # The profile does not affect message reception, so its failure must not
+        # go to main(): any startup error there means the container exits with code 1.
+        # At startup, only the first fields: the hourly cycle adds the rest, otherwise
+        # 72 consecutive calls hit flood control (production 11.11.2026).
         with contextlib.suppress(Exception):
             await _register_bot_profile(limit=_PROFILE_STARTUP_FIELDS)
         return webhook_ok
@@ -2003,34 +2024,34 @@ async def _webhook_startup() -> None:
         raise RuntimeError("setWebhook failed after retries — refusing to serve a dead webhook")
 
     log.info("[webhook] Bot is running in webhook mode. Updates arrive via POST /webhook")
-    # Суточные перепроверки моделей в часовом цикле: истёкшее промо иначе видно
-    # только после рестарта.
-    # Сутки — те же, что у квоты (America/Los_Angeles), а не UTC контейнера
-    # (ревью 17.11.2026).
+    # Daily model rechecks in the hourly loop: otherwise an expired promotion is visible
+    # only after a restart.
+    # The day matches the quota day (America/Los_Angeles), not the container's UTC
+    # (review 17.11.2026).
     _last_daily_check_date = _current_quota_day()
     while True:
         await asyncio.sleep(3600)
         try:
             _cleanup_rate_limit_dict()
             _evict_orphan_chat_locks()
-            # Поля профиля, недобраниые на старте или вставшие на flood control:
-            # часовой цикл добирает очередь медленно, вне пути живого ответа.
+            # Profile fields not received at startup or inserted during flood control:
+            # the hourly cycle drains the queue slowly, outside the live-answer path.
             await _register_bot_profile()
-            # Счётчики квоты — на каждом часовом тике, а не только раз в сутки: без
-            # сообщений ленивая проверка в _quota_entry не срабатывает и /stats врёт.
+            # Quota counters — on every hourly tick, not just once a day: without
+            # messages, the lazy check in _quota_entry does not fire and /stats lies.
             _reset_quota_if_new_day()
             today = _current_quota_day()
             if today != _last_daily_check_date:
                 _last_daily_check_date = today
                 _check_unconfirmed_model_quotas()
         except Exception:
-            # Упавший тик не убивает цикл: иначе чистки и квоты вставали бы навсегда.
+            # A failed tick does not kill the loop: otherwise cleanup and quotas would stall forever.
             log.exception("[webhook] Hourly maintenance tick failed, next tick in an hour")
 
 async def _drain_inflight_tasks() -> None:
-    """Даёт фоновым задачам апдейтов шанс завершиться штатно при остановке
-    (LUMEN-2: loop убивал их посреди сетевых вызовов при редеплое). Не успели —
-    отменяем и дожидаемся самой отмены."""
+    """Gives background update tasks a chance to finish cleanly during shutdown
+    (LUMEN-2: the loop killed them in the middle of network calls during a
+    redeploy). Any that do not finish are cancelled, and cancellation is awaited."""
     pending = [t for t in _inflight_tasks if not t.done()]
     if not pending:
         return
@@ -2043,8 +2064,8 @@ async def _drain_inflight_tasks() -> None:
         await asyncio.gather(*still_pending, return_exceptions=True)
 
 def _require_bot_token() -> str:
-    # Пустой токен раньше умирал внутри Bot() с TokenValidationError и рестартами:
-    # выходим сразу с понятной причиной.
+    # An empty token previously died inside Bot() with TokenValidationError and caused restarts:
+    # exit immediately with a clear reason.
     if not BOT_TOKEN:
         log.error("[setup] BOT_TOKEN пуст — задайте BOT_TOKEN/TELEGRAM_BOT_TOKEN и перезапустите.")
         raise SystemExit(1)
@@ -2053,9 +2074,9 @@ def _require_bot_token() -> str:
 
 @contextlib.contextmanager
 def _capture_signals_gracefully(server: Any):
-    """SIGTERM/SIGINT: uvicorn по умолчанию пере-поднимает сигнал после
-    serve(), и finally с финальным сбросом состояния не выполняется
-    (аудит 28.10.2026). Перехватываем сигнал и только просим сервер выйти."""
+    """SIGTERM/SIGINT: uvicorn re-raises the signal after
+    serve() by default, so finally with the final state flush does not run
+    (audit 28.10.2026). Intercept the signal and only ask the server to exit."""
     if threading.current_thread() is not threading.main_thread():
         yield
         return
@@ -2081,8 +2102,8 @@ async def main() -> None:
     _require_bot_token()
 
     global _media_base_url
-    # Сессия с принудительным IPv4 и таймаутами под HF Space. Голова aiogram —
-    # только здоровый релей без лимита тела (иначе видео падает на 4,5 МБ).
+    # A session with forced IPv4 and timeouts for HF Space. The aiogram head —
+    # only a healthy relay without a body limit (otherwise the video fails at 4.5 MB).
     _media_base_url = await _choose_telegram_media_base() or TELEGRAM_API_BASE_URL
     log.info("[telegram] Media relay in use: %s", _proxy_host(_media_base_url) or "direct")
     if _media_base_url != "https://api.telegram.org":
@@ -2096,8 +2117,8 @@ async def main() -> None:
             proxy_secret=LUMEN_PROXY_SECRET, proxy_base_urls=_TELEGRAM_PROXY_CANDIDATES,
         )
     bot = Bot(token=BOT_TOKEN, session=sess)
-    # v1beta: system_instruction («Developer instruction») и response_modalities
-    # на v1 отвечают «not enabled for api version v1» (прод 17.11.2026).
+    # v1beta: system_instruction (“Developer instruction”) and response_modalities
+    # on v1 respond "not enabled for api version v1" (prod 17.11.2026).
     client = genai.Client(
         api_key=GEMINI_API_KEY,
         http_options=types.HttpOptions(api_version="v1beta"),
@@ -2108,23 +2129,23 @@ async def main() -> None:
     flush_task = asyncio.create_task(_flush_dirty_state(), name="state_flush")
     media_watchdog = asyncio.create_task(_telegram_media_relay_watchdog(), name="media_relay_watchdog")
     srv_config = uvicorn.Config(
-        # log_level=None: uvicorn с любым уровнем сам выставляет uvicorn.access
-        # обратно в INFO и перебивает глушение в _setup_logging — health-check
-        # GET / шёл в лог раз в минуту (прод 27.10.2026).
+        # log_level=None: uvicorn itself enables uvicorn.access at any level
+        # back to INFO and overrides suppression in _setup_logging — health-check
+        # GET / was logged once a minute (production 27.10.2026).
         app=app, host="0.0.0.0", port=7860, log_level=None, loop="asyncio", log_config=None,
     )
     server = uvicorn.Server(srv_config)
-    # Не даём uvicorn пере-поднять SIGTERM после serve(): иначе финальный
-    # сброс состояния и закрытие сессий не выполняются.
+    # Do not let uvicorn re-raise SIGTERM after serve(): otherwise the final
+    # state reset and session closure are not performed.
     server.capture_signals = lambda: _capture_signals_gracefully(server)
     try:
         serve_task = asyncio.create_task(server.serve(), name="uvicorn_serve")
         done, _pending = await asyncio.wait(
             {startup_task, serve_task}, return_when=asyncio.FIRST_COMPLETED,
         )
-        # Стартап бесконечный (часовой цикл в хвосте): завершился — значит упал.
-        # Раньше падение было тихим (await только в finally) — процесс служил
-        # /webhook, который Telegram не вызывал (аудит D4, 30.09.2026).
+        # Startup is infinite (the hourly loop is at the end): if it ended, it crashed.
+        # A failure was previously silent (await only in finally); the process kept serving
+        # /webhook that Telegram did not call (audit D4, 30.09.2026).
         if startup_task in done and not startup_task.cancelled():
             exc = startup_task.exception()
             if exc is not None:
@@ -2133,8 +2154,8 @@ async def main() -> None:
                 with contextlib.suppress(Exception, asyncio.CancelledError):
                     await serve_task
                 raise SystemExit(1) from exc
-        # Сервер упал первым (порт занят, падение uvicorn): без этой ветки
-        # исключение терялось и процесс тихо выходил с кодом 0.
+        # The server crashed first (port occupied, uvicorn failure): without this branch
+        # the exception was lost and the process silently exited with code 0.
         if serve_task in done and not serve_task.cancelled():
             exc = serve_task.exception()
             if exc is not None:
@@ -2155,17 +2176,17 @@ async def main() -> None:
              await flush_task
         with contextlib.suppress(asyncio.CancelledError):
              await media_watchdog
-        # Незавершённым апдейтам — шанс закончиться ДО сброса состояния/закрытия сессий (иначе правки chat_state терялись, сеть рвалась — LUMEN-2).
+        # Give unfinished updates a chance to finish BEFORE resetting state/closing sessions (otherwise chat_state edits were lost and the connection dropped — LUMEN-2).
         await _drain_inflight_tasks()
-        # Финальный синхронный сброс — не ждём следующего тика периодического
-        # флаша (раз в FLUSH_INTERVAL_SEC), иначе последние изменения между
-        # последним тиком и остановкой процесса терялись бы при рестарте.
-        # Флаги — канонически в lumen_chat_state (P2): множества общие объектом,
-        # bool-флаги читаем из модуля, т.к. bot-привязки после выноса stale.
-        # Синхронная запись в потоке: loop уже дренирует задачи, висеть нельзя.
-        # Стартовая загрузка могла не удаться частично: чаты сохраняем (это
-        # единственная копия новых сообщений), а индекс и квота внутри сами
-        # пропускаются, чтобы не затереть удалённые данные (аудит A5-2).
+        # The final synchronous flush — do not wait for the next periodic
+        # flush (once per FLUSH_INTERVAL_SEC); otherwise the latest changes between
+        # the final tick and process shutdown would be lost on restart.
+        # Flags live canonically in lumen_chat_state (P2): the sets are shared by object.
+        # Read bool flags from the module because bot bindings became stale after extraction.
+        # Synchronous write in a thread: the loop is already draining tasks, so it cannot hang.
+        # Startup loading may have partially failed: we preserve the chats (this
+        # sole copy of new messages), while the index and quota internally
+        # are skipped so deleted data is not overwritten (audit A5-2).
         if _dirty_chat_ids or lumen_chat_state._index_dirty or _pending_chat_deletions:
             try:
                 await asyncio.wait_for(asyncio.to_thread(_flush_state_now), timeout=15.0)

@@ -1,5 +1,4 @@
-"""
-lumen_rich.py — отправка сообщений: гости, Rich Messages, чанкинг.
+"""lumen_rich.py — message sending: guests, Rich Messages, chunking.
 """
 from __future__ import annotations
 
@@ -29,14 +28,14 @@ from lumen_formatting import (
 
 log = logging.getLogger("bot")
 
-# Ответы со ссылками должны оставаться компактными, как в Claude: Telegram
-# иначе раздувает их preview-карточкой во весь блок (прод 23.11.2026).
+# Answers with links must stay compact, as in Claude: Telegram
+# otherwise inflates them with a preview card across the whole block (prod 23.11.2026).
 NO_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 
 def _rich_html_with_limit(text: str) -> str:
-    """Rich с учётом всего сообщения: если разбиение таблицы раздуло HTML,
-    повторяем конвертацию без split, сохраняя саму таблицу (prod 24.11.2026)."""
+    """Rich formatting for the entire message: if splitting a table inflated the HTML,
+    repeat the conversion without split while preserving the table itself (prod 24.11.2026)."""
     import bot
     rich_html = _md_to_rich_html(text)
     if _tg_len(rich_html) > bot.TG_MAX_LEN:
@@ -57,7 +56,8 @@ async def _answer_guest_text(message: Message, text: str) -> None:
     res_id = hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:32]
     res_art = InlineQueryResultArticle(
         id=res_id, title=bot._t(message.chat.id, "inline_answer_title"),
-        input_message_content=InputTextMessageContent(message_text=payload, parse_mode="HTML"),
+        input_message_content=InputTextMessageContent(message_text=payload, parse_mode="HTML",
+                                                       link_preview_options=NO_LINK_PREVIEW),
     )
     try:
         await bot.telegram_api_call("answerGuestQuery", {
@@ -68,29 +68,45 @@ async def _answer_guest_text(message: Message, text: str) -> None:
         log.warning("[guest] Failed answering guest: %s", exc)
 
 def _is_real_telegram_message(res: Any) -> bool:
-    """Только реальный Message (int message_id): фейки тестов тихо уходят на legacy."""
+    """Only a real Message (int message_id): test fakes quietly fall back to legacy behavior."""
     return isinstance(res, Message)
 
 
+def _edit_with_not_modified_success(editor: Any, msg: Message) -> Any:
+    """Not-modified is a semantic success, not a reason to remove formatting.
+    The transport returns None for this response too, so catch the exception locally
+    before _tg_call (R5-12, audit 26.11.2026).
+    """
+    async def edit(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await editor(*args, **kwargs)
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return msg
+            raise
+    return edit
+
+
 def _answer_sender(message: Message):
-    """Куда отправлять ответ: в личке — обычное сообщение без цитаты-реплая,
-    как в Claude; в группе — reply для контекста. Тестовые фейки без реального
-    aiogram Bot получают reply (прежнее поведение)."""
+    """Where to send the answer: in a private chat — a normal message without a quoted reply,
+    as in Claude; in a group — a reply for context. Test fakes without a real
+    aiogram Bot receive a reply (previous behavior)."""
     import bot
     chat = getattr(message, "chat", None)
     if (getattr(chat, "type", None) == ChatType.PRIVATE
             and isinstance(getattr(bot, "bot", None), Bot)):
         async def _send(text: str, **kwargs: Any):
-            # Текст — отдельным kwarg: partial(chat_id=...) + позиционный текст
-            # давал "multiple values for argument 'chat_id'" и убивал стрим
-            # с ответами в личке (прод 28.10.2026).
+            # Text as a separate kwarg: partial(chat_id=...) + positional text
+            # caused "multiple values for argument 'chat_id'" and killed the stream
+            # with responses in DMs (production 28.10.2026).
             return await bot.bot.send_message(chat_id=chat.id, text=text, **kwargs)
         return _send
     return message.reply
 
 
 async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bool, **kwargs: Any) -> Any:
-    """Рич-отправка; при неуспехе — None и legacy. Трединг только первого чанка, иначе каждый кусок пиликает отдельно."""
+    """Rich send; definite failure returns None, unknown delivery preserves the sentinel.
+    Only the first chunk is threaded, so each piece does not make a separate notification sound."""
     import bot
     if not bot.RICH_MESSAGES_ENABLED:
         return None
@@ -109,11 +125,13 @@ async def _try_send_rich(message: Message, rich_html: str, *, is_first_chunk: bo
         sender, chat_id=message.chat.id, rich_message=InputRichMessage(html=rich_html),
         reply_parameters=reply_parameters, call_timeout=call_timeout, **kwargs,
     )
+    if bot._tg_outcome_unknown(res):
+        return res
     return res if bot._is_real_telegram_message(res) else None
 
 
-async def _try_edit_rich(msg: Message | None, rich_html: str, **kwargs: Any) -> bool:
-    """Рич-правка; True только при успехе, иначе legacy. Фейки без int id отсекаются."""
+async def _try_edit_rich(msg: Message | None, rich_html: str, **kwargs: Any) -> Any:
+    """Rich edit; True on success, None/False on definite failure, sentinel on unknown delivery."""
     import bot
     if not bot.RICH_MESSAGES_ENABLED or msg is None:
         return False
@@ -126,9 +144,12 @@ async def _try_edit_rich(msg: Message | None, rich_html: str, **kwargs: Any) -> 
     kwargs.pop("parse_mode", None)
     call_timeout = kwargs.pop("call_timeout", 15.0)
     res = await bot._tg_call(
-        editor, text=None, rich_message=InputRichMessage(html=rich_html),
+        _edit_with_not_modified_success(editor, msg),
+        text=None, rich_message=InputRichMessage(html=rich_html),
         chat_id=chat_id, message_id=message_id, call_timeout=call_timeout, **kwargs,
     )
+    if bot._tg_outcome_unknown(res):
+        return res
     return bot._is_real_telegram_message(res)
 
 
@@ -144,15 +165,15 @@ async def _send_text(message: Message, text: str, parse_html: bool = True, **kwa
     for i, chunk in enumerate(chunks):
         chunk_kwargs = kwargs if i == len(chunks) - 1 else {k: v for k, v in kwargs.items() if k != "reply_markup"}
         if i > 0:
-            # Пауза между кусками — против флуд-контроля за серию подряд.
+            # A pause between chunks prevents flood control from a consecutive series.
             await bot._typing_sleep(bot.STREAM_TYPING_TICK_SEC)
         if parse_html and bot.RICH_MESSAGES_ENABLED:
-            # Сначала рич (таблицы/заголовки/математика), при любом неуспехе —
-            # обычный HTML-путь ниже. Reply threading — только у первого чанка.
-            # При выключенном риче не тратим время на конвертацию (0.3-0.7 мс/чанк).
-            # Длина рич-HTML не проверялась: чанк в пределах 4096 по markdown
-            # раздувался разметкой и получал 400 с молчаливым фолбэком на HTML
-            # (внешний аудит 16.11.2026). Слишком длинный шлём сразу обычным путём.
+            # Try rich content first (tables/headings/math); on any failure,
+            # the regular HTML path below. Reply threading — only for the first chunk.
+            # When Rich is disabled, do not spend time on conversion (0.3-0.7 ms/chunk).
+            # Rich HTML length was not checked: a chunk within the 4096 markdown limit
+            # became bloated with markup and got a 400 with a silent fallback to HTML
+            # (external audit 16.11.2026). Send an overly long item immediately via the normal path.
             rich_html = _rich_html_with_limit(chunk)
             if _tg_len(rich_html) <= bot.TG_MAX_LEN:
                 rich_res = await bot._try_send_rich(message, rich_html, is_first_chunk=(i == 0), **chunk_kwargs)
@@ -208,18 +229,23 @@ async def _edit_message_quietly(msg: Message | None, text: str, **kwargs: Any) -
         return False
     kwargs.setdefault("link_preview_options", NO_LINK_PREVIEW)
     try:
-        # Порядок: рич → HTML → голый текст; таблицы видны только через рич.
+        # Order: rich → HTML → plain text; tables are visible only through rich.
         rich_html = _rich_html_with_limit(text)
-        if (bot.RICH_MESSAGES_ENABLED and _tg_len(rich_html) <= bot.TG_MAX_LEN
-                and await bot._try_edit_rich(msg, rich_html, **kwargs)):
-            return True
+        if bot.RICH_MESSAGES_ENABLED and _tg_len(rich_html) <= bot.TG_MAX_LEN:
+            rich_res = await bot._try_edit_rich(msg, rich_html, **kwargs)
+            if rich_res is True:
+                return True
+            if bot._tg_outcome_unknown(rich_res):
+                # Callers use a boolean `if not edited` check: unknown must close the retry
+                # path, otherwise a legacy HTML/plain duplicate follows an accepted Rich response.
+                return True
         kwargs.setdefault("parse_mode", ParseMode.HTML)
-        res = await bot._tg_call(msg.edit_text, _md_to_html(text), **kwargs)
+        res = await bot._tg_call(_edit_with_not_modified_success(msg.edit_text, msg), _md_to_html(text), **kwargs)
         if res is not None:
             return True
         kwargs["parse_mode"] = None
-        # Последний рубеж — голый текст БЕЗ markdown-синтаксиса (см.
-        # _strip_markdown): сырые `**` в чате хуже потери жирности.
+        # The last line of defense — plain text WITHOUT markdown syntax (see
+        # _strip_markdown): raw `**` in chat is worse than losing bold.
         res = await bot._tg_call(msg.edit_text, _strip_markdown(text), **kwargs)
         return res is not None
     except Exception:

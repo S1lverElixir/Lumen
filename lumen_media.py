@@ -1,10 +1,10 @@
-"""
-lumen_media.py — чистые утилиты медиа: mime-типы, file_id, суффиксы файлов,
-источник медиа из сообщения, текст-подсказка для вложения без подписи.
+"""lumen_media.py contains pure media utilities: MIME types, file_id, file suffixes,
+a media source from a message, and prompt text for an attachment without a caption.
 
-Сетевая часть сознательно остаётся в lumen_media_flow.py (_download_telegram_file_bytes,
-_fetch_media, _save_media_to_history): у неё зависимость от рантайма, вынос
-дал бы циклический импорт или проброс половины bot.py параметрами.
+The network part deliberately stays in lumen_media_flow.py
+(_download_telegram_file_bytes, _fetch_media, _save_media_to_history): it depends
+on the runtime, and moving it would cause a circular import or require passing
+half of bot.py as parameters.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def _is_gemini_supported_mime(mime: str) -> bool:
     return False
 
 def _sanitize_mime_type(file_path: str | None, mime: str | None, default_fallback: str = "application/octet-stream") -> str:
-    # guess_type врёт по-разному на Linux/Windows — каноникализируем известные варианты.
+    # guess_type misreports differently on Linux/Windows; canonicalize known variants.
     canonical = {
         "video/x-msvideo": "video/avi",
         "video/x-m4v": "video/mp4",
@@ -62,7 +62,7 @@ def _sanitize_mime_type(file_path: str | None, mime: str | None, default_fallbac
                 ".gif": "image/gif",
                 ".mp4": "video/mp4",
                 ".mov": "video/quicktime",
-                # .m4v/.avi — в поддерживаемые Gemini: иначе sanitize выдавал mime, который сам же отвергал.
+                # .m4v/.avi are supported by Gemini; otherwise sanitize returned a MIME type that it then rejected itself.
                 ".m4v": "video/mp4",
                 ".avi": "video/avi",
                 ".mp3": "audio/mpeg",
@@ -113,7 +113,7 @@ def _media_file_id_and_mime(source: Any) -> tuple[str, str, str]:
         if class_name == "PhotoSize":
             mime = "image/jpeg"
         elif class_name == "Sticker":
-            # Стикер — маркер категории "image/webp": формат downstream не важен, байты как картинку не шлём.
+            # A sticker is an "image/webp" category marker: the downstream format does not matter; do not send its bytes as an image.
             mime = "image/webp"
         elif class_name == "Voice":
             mime = "audio/ogg"
@@ -129,8 +129,8 @@ def _mime_suffix(mime: str, filename: str = "") -> str:
         suffix = Path(filename).suffix
         if suffix:
              return suffix
-    # Чужой subtype в имя tmp-файла не пускаем ("image/../../x" давал странный
-    # путь): только [a-z0-9], остальное — нейтральный .bin.
+    # Do not allow a foreign subtype in the tmp filename ("image/../../x" produced a strange
+    # path): only [a-z0-9], everything else gets a neutral .bin.
     def _safe_sub(sub: str, known: dict[str, str]) -> str:
         if sub in known:
             return known[sub]
@@ -140,7 +140,7 @@ def _mime_suffix(mime: str, filename: str = "") -> str:
     m = (mime or "").lower()
     if m.startswith("image/"):
         return _safe_sub(m.split("/", 1)[1], {"jpeg": ".jpg", "jpg": ".jpg", "png": ".png", "gif": ".gif", "webp": ".webp"})
-    # Расширение по содержимому (AUD-E-005): ".mp3 для всего" врало.
+    # Extension from content (AUD-E-005): ".mp3 for everything" was a lie.
     if m.startswith("audio/"):
         sub = m.split("/", 1)[1].split(";")[0].strip()
         return _safe_sub(sub, {
@@ -167,9 +167,9 @@ def _msg_media_source(message: Any) -> Any | None:
     return None
 
 def _media_prompt_language_suffix(lang: str | None) -> str:
-    """Инструкция ответить на языке чата: внутренние промпты английские,
-    иначе модель без подписи отвечала по-русски всем 24 прочим языкам.
-    Без явного языка суффикса нет — решает системный промпт."""
+    """Instruction to answer in the chat's language: internal prompts are English;
+    otherwise, an unlabeled model answered in Russian for all 24 other languages.
+    Without an explicit language, there is no suffix — the system prompt decides."""
     if not lang:
         return ""
     try:

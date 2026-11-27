@@ -1,13 +1,13 @@
-"""Живой замер зоны 2: модель сама решает искать там, где регекс молчит.
+"""Live measurement of zone 2: the model decides for itself where to search when the regex is silent.
 
-Корпус 35/20 меряет только регекс. Здесь те же 20 «не искать» формулировок
-проходят через настоящий планирующий вызов агентного цикла: считается, на скольких
-из них модель заказала поиск. Цифра больше нуля — лишние планирующие вызовы и
-сетевые поиски на болтовне.
+The 35/20 corpus measures only the regex. Here the same 20 “do not search” phrasings
+go through a real agent-loop planning call: the metric is how many of them
+the model ordered a search for. A number above zero means extra planning calls and
+network searches for small talk.
 
-Ключ только из окружения или .env, значение нигде не печатается.
-Запуск:  python eval/zone2_probe.py
-Переменная LUMEN_ENV_DIR — где искать .env при запуске из worktree.
+The key comes only from the environment or .env; its value is never printed.
+Run:  python eval/zone2_probe.py
+LUMEN_ENV_DIR specifies where to find .env when running from a worktree.
 """
 from __future__ import annotations
 

@@ -1,6 +1,5 @@
-"""
-lumen_errors.py — разбор ошибок моделей и тексты для пользователя:
-классификация rate_limit/paid/forbidden, локализованные шаблоны, промпт с датой.
+"""lumen_errors.py parses model errors and provides user-facing text:
+    rate_limit/paid/forbidden classification, localized templates, and a dated prompt.
 """
 from __future__ import annotations
 
@@ -13,16 +12,16 @@ from zoneinfo import ZoneInfo
 from lumen_lang import DEFAULT_LANG, t as _lang_t
 from system_prompt import SYSTEM_PROMPT
 
-# OpenAI-совместимые провайдеры отдают плейсхолдер вместо ответа: choices непустые,
-# текста нет. Прод 17.09.2026 лечил только пустой choices — литерал "Empty response"
-# продолжал уходить в чат (выборка бэкапа 05.11.2026: 7 таких в одном диалоге).
-# "none"/"n/a" из набора убраны: это законные короткие ответы (что вернёт функция
-# без return) — модель получала карантин, человек отказ (ревью 17.11.2026).
+# OpenAI-compatible providers return a placeholder instead of an answer: choices is non-empty,
+# text. Prod 17.09.2026 fixed only empty choices — the literal "Empty response"
+# continued reaching the chat (backup sample 05.11.2026: 7 cases in one conversation).
+# "none"/"n/a" were removed from the set: they are valid short answers (what the function returns
+# without return) gave the model a quarantine and the user a refusal (review 17.11.2026).
 _EMPTY_LIKE_TEXTS = frozenset({"empty response", "no response", "no answer"})
 
 
 def _is_empty_like(text: Any) -> bool:
-    """Пустой ответ или системный плейсхолдер вместо него."""
+    """An empty response or a system placeholder in its place."""
     if not isinstance(text, str):
         return not text
     cleaned = text.strip().lower().rstrip(".!")
@@ -33,8 +32,8 @@ log = logging.getLogger("bot")
 def _error_text(e: Exception) -> str:
     return " ".join(p for p in [str(e), str(getattr(e, "message", "")), str(getattr(e, "detail", ""))] if p).strip()
 
-# Только явные шаблоны ("HTTP 503", "status_code=429", "error 400"): голое число
-# в тексте ("429 токенов") статусом не считаем — давало ложную классификацию.
+# Only explicit patterns ("HTTP 503", "status_code=429", "error 400"): a bare number
+# in text ('429 tokens') is not treated as a status; this caused false classification.
 _STATUS_RE = re.compile(
     r"(?i)(?:http|status(?:[_ \-]?code)?|статус(?:[_ \-]?код)?"
     r"|error(?:[_ \-]?code)?|ошибка|code|код)[_ \-]*[:=]?\s*(\d{3})\b"
@@ -58,8 +57,8 @@ def _error_status(e: Exception, text: str) -> int | None:
 
 def _classify_model_error(status: int | None, text: str) -> str:
     low = text.lower()
-    # Статус 402 важнее словарных токенов: «billing quota exceeded» уходил в
-    # rate_limit и маскировал исчерпанный платный тариф (ревью 17.11.2026).
+    # Status 402 takes priority over dictionary tokens: “billing quota exceeded” went to
+    # rate_limit and masked an exhausted paid plan (review 17.11.2026).
     if status == 402:
         return "paid"
     if status == 429 or any(tok in low for tok in ("resource_exhausted", "too many requests", "rate limit", "quota", "лимит")):
@@ -72,8 +71,8 @@ def _classify_model_error(status: int | None, text: str) -> str:
         return "unavailable"
     return "other"
 
-# Единая таблица текстов вместо двух копий классификации: правили одну и забывали вторую.
-# Тексты без имён провайдеров/моделей и без /model|/provider: для пользователя есть только Lumen (см. ИДЕНТИЧНОСТЬ).
+# A single text table instead of two copies of the classification: one was edited and the other forgotten.
+# Texts without provider/model names and without /model|/provider: for the user, there is only Lumen (see IDENTITY).
 _MODEL_ERROR_FALLBACK_MSG = _lang_t(DEFAULT_LANG, "model_err_fallback")
 
 def _model_error_text(kind: str, lang: str = DEFAULT_LANG) -> str:
@@ -86,25 +85,25 @@ def _model_error_text(kind: str, lang: str = DEFAULT_LANG) -> str:
     return _lang_t(lang, key)
 
 def _or_error_msg(e: Exception, lang: str = DEFAULT_LANG) -> str:
-    # Без сырого текста API: там HTML/JSON и внутренности (то же в _gemini_error_msg).
+    # No raw API text: it contains HTML/JSON and internals (same in _gemini_error_msg).
     txt = _error_text(e).strip() or e.__class__.__name__
     status = _error_status(e, txt)
     return _model_error_text(_classify_model_error(status, txt), lang)
 
 class GeminiAllModelsExhaustedError(RuntimeError):
-    """Поднимается, когда 429/RESOURCE_EXHAUSTED получен подряд от всех моделей
-    из цепочки фоллбека — то есть реально весь бесплатный лимит API-ключа исчерпан,
-    а не просто конкретная модель временно занята."""
+    """Raised when every model in the fallback chain returns 429/RESOURCE_EXHAUSTED
+    in succession, meaning the API key's entire free quota is actually exhausted,
+    not merely that one particular model is temporarily busy."""
     def __init__(self, exhausted_models: list[str]) -> None:
         self.exhausted_models = exhausted_models
         super().__init__(f"All Gemini models exhausted quota: {', '.join(exhausted_models)}")
 
 
 class UserFacingInputError(ValueError):
-    """Готовый пользовательский текст (проверен при написании): показывается как есть."""
+    """Finished user-facing text (proofread when written): displayed as-is."""
 
 def _next_fallback_model(tried_models: set[str], chain: list[str]) -> str | None:
-    """Первая непробованная из цепочки: один источник вместо трёх копий в ask_gemini."""
+    """The first untried provider in the chain: one source instead of three copies in ask_gemini."""
     return next((m for m in chain if m not in tried_models), None)
 
 def _gemini_error_msg(e: Exception, model_id: str, lang: str = DEFAULT_LANG) -> str:
@@ -116,16 +115,16 @@ def _gemini_error_msg(e: Exception, model_id: str, lang: str = DEFAULT_LANG) -> 
     status = _error_status(e, txt)
     kind = _classify_model_error(status, txt)
     log.debug("[gemini] _gemini_error_msg: model=%s kind=%s status=%s", model_id, kind, status)
-    # Без имён моделей и сырого API: утечка бренда и мусор (HTML/токены) в диалоге.
+    # Without model names and raw API output: no brand leaks or junk (HTML/tokens) in the dialog.
     return _model_error_text(kind, lang)
 
 
 
 def get_system_prompt(model_id: str | None = None) -> str:
-    # model_id не читается осознанно: промпт един для всех, иначе расхождение identity (ревью 28.08.2026).
-    # Зона — та же, что у пометки свежих вопросов (lumen_message_core._fresh_date_context):
-    # голый datetime.now() даёт UTC контейнера и «который час» отвечался на 3 часа
-    # раньше Москвы, а шапка требует верить только ей (аудит 01.11.2026).
+    # model_id is deliberately not read: the prompt is common to all; otherwise identity would diverge (review 28.08.2026).
+    # The zone is the same as for the fresh-question marker (lumen_message_core._fresh_date_context):
+    # a bare datetime.now() gives the container's UTC, and “what time is it” was off by 3 hours
+    # earlier than Moscow, and the header requires trusting only it (audit 01.11.2026).
     now = datetime.now(ZoneInfo("Europe/Moscow"))
     now_str = now.strftime("%d %B %Y (current time: %H:%M Europe/Moscow)")
     now_year = now.year

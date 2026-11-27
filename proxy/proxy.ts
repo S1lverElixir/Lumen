@@ -77,26 +77,41 @@ export function warnOnTruncation(
 ): ReadableStream<Uint8Array> | null {
   if (!stream) return stream;
   let total = 0;
-  let truncated = false;
-  return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      if (truncated) {
-        // Режим "close": остаток вычитывается и выбрасывается, поток закроется
-        // сам на конце апстрима — тело не растёт, ошибки клиенту нет.
-        return;
-      }
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        truncated = true;
-        console.warn(`[proxy] ${host} response truncated at ${maxBytes} bytes`);
-        if (mode === "error") {
-          controller.error(new BodyTooLargeError(`Response exceeds ${maxBytes} byte cap`));
+  const reader = stream.getReader();
+  // Явный reader вместо pipeThrough: на пределе апстрим ОТМЕНЯЕТСЯ, а не
+  // досчитывается до EOF — иначе перегруженная страница продолжала жрать
+  // трафик и квоту Deno после обрезки (R6-02, аудит 26.11.2026).
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
         }
-        return;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          console.warn(`[proxy] ${host} response truncated at ${maxBytes} bytes`);
+          if (mode === "error") {
+            await reader.cancel();
+            controller.error(new BodyTooLargeError(`Response exceeds ${maxBytes} byte cap`));
+          } else {
+            await reader.cancel();
+            controller.close();
+          }
+          return;
+        }
+        controller.enqueue(value);
+      } catch (err) {
+        await reader.cancel().catch(() => {});
+        controller.error(err);
       }
-      controller.enqueue(chunk);
     },
-  }));
+    cancel(reason) {
+      // Клиент ушёл раньше капа — апстрим тоже закрываем.
+      return reader.cancel(reason);
+    },
+  });
 }
 
 export function limitStreamBytes(
@@ -290,6 +305,15 @@ export function isPrivateAddress(ip: string): boolean {
   if (site === 0x3fan || site === 0x3fbn) return true; // fe80::/10 и fec0::/10
   if ((n >> 120n) === 0xffn) return true; // ff00::/8 multicast
   if ((n >> 64n) === 0x100n) return true; // 100::/64 discard
+  // R6-05: special-purpose внутри 2000::/3 (IANA IPv6 Address Registry) — раньше
+  // проходили как публичные и пропускали SSRF-проверку /read.
+  if ((n >> 96n) === 0x20010db8n) return true; // 2001:db8::/32 documentation
+  if ((n >> 80n) === 0x200100020000n) return true; // 2001:2::/48 benchmarking
+  if ((n >> 100n) === 0x2001001n) return true; // 2001:10::/28 ORCHID (RFC 7285)
+  if ((n >> 100n) === 0x2001002n) return true; // 2001:20::/28 ORCHIDv2 (RFC 9375, ревью 26.11.2026)
+  if (n === 0x20010001000000000000000000000001n) return true; // 2001:1::1/128 RTBH
+  if ((n >> 124n) === 0b0011n) return true; // 3000::-3fff:: (IANA GSE, зарезервирован)
+  if ((n >> 96n) === 0x26204f80n) return true; // 2620:4f80::/32 DCTP (ревью 26.11.2026)
   return false;
 }
 
@@ -332,14 +356,29 @@ export async function resolveReadTarget(
   return { ok: true, url: parsed.toString() };
 }
 
-async function handleReadPage(
+export async function handleReadPage(
   req: Request,
   url: URL,
   fetchImpl: typeof fetch,
   resolveDnsImpl?: (name: string, type: "A" | "AAAA") => Promise<string[]>,
+  readTimeoutMs: number = READ_PAGE_TIMEOUT_MS,
 ): Promise<Response> {
   if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
-  const target = await resolveReadTarget(url.searchParams.get("url") ?? "", resolveDnsImpl);
+  // R6-04 (аудит 26.11.2026): дедлайн считается с начала запроса — раньше
+  // AbortSignal.timeout создавался после DNS, и медленный резолв не ограничивался.
+  const deadline = AbortSignal.timeout(readTimeoutMs);
+  // R6-01: резолв здесь и резолв внутри fetchImpl — два разных ответа; честный
+  // pin (fetch на проверенный IP с Host/SNI по имени) Deno fetch не умеет, а
+  // ручной HTTP-клиент поверх connectTls несоразмерен задаче — окно ребиндинга
+  // остаётся узким (между проверкой и коннектом) и задокументирован в отчёте.
+  if (deadline.aborted) return new Response("Read timed out", { status: 504 });
+  const target = await Promise.race<ReadTarget | "timeout">([
+    resolveReadTarget(url.searchParams.get("url") ?? "", resolveDnsImpl),
+    // Ревью 26.11.2026 (R6-04): проверка после резолва не спасает от
+    // зависшего Deno.resolveDns — гонка DNS и дедлайна обязательна.
+    new Promise<"timeout">((res) => deadline.addEventListener("abort", () => res("timeout"), { once: true })),
+  ]);
+  if (target === "timeout") return new Response("Read timed out", { status: 504 });
   if (!target.ok) return new Response(target.message, { status: target.status });
   let upstream: Response;
   try {
@@ -349,7 +388,7 @@ async function handleReadPage(
       headers: { "user-agent": "Lumen/1.0", "accept": "text/html,text/plain;q=0.9,*/*;q=0.1" },
       // Редирект мог бы вывести за пределы проверенного адреса.
       redirect: "error",
-      signal: AbortSignal.timeout(READ_PAGE_TIMEOUT_MS),
+      signal: deadline,
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "TimeoutError") {
@@ -359,8 +398,16 @@ async function handleReadPage(
   }
   const rawType = upstream.headers.get("content-type") ?? "";
   const type = rawType.split(";")[0].trim().toLowerCase();
-  if (!READ_ALLOWED_TYPES.has(type)) return new Response("Unsupported content type", { status: 415 });
-  if (upstream.status !== 200) return new Response("Upstream status " + upstream.status, { status: 502 });
+  if (!READ_ALLOWED_TYPES.has(type)) {
+    // R6-03: отказ обязан закрывать апстрим — иначе непрочитанное тело висело
+    // на соединении и держало квоту Deno.
+    await upstream.body?.cancel();
+    return new Response("Unsupported content type", { status: 415 });
+  }
+  if (upstream.status !== 200) {
+    await upstream.body?.cancel();
+    return new Response("Upstream status " + upstream.status, { status: 502 });
+  }
   // charset пробрасывается: страницы в windows-1251 иначе декодировались угадыванием.
   return new Response(
     warnOnTruncation(upstream.body, READ_PAGE_MAX_BYTES, new URL(target.url).host, "close"),

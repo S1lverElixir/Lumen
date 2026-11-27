@@ -1,7 +1,6 @@
-"""
-test_bot_routes.py — Маршрутизация LLM: классификация ошибок, ask_gemini/ask_munito, _run_route.
+"""test_bot_routes.py — LLM routing: error classification, ask_gemini/ask_munito, _run_route.
 
-Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
+Split from test_bot.py (P2 audit); shared fakes are in bot_test_helpers.py.
 """
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -63,7 +62,7 @@ def test_error_status_returns_none_when_no_code_found():
     ("error 500", 500),
 ])
 def test_error_status_matches_status_templates(text, expected):
-    # Сторож к A8-04: явные HTTP/status-шаблоны продолжают распознаваться.
+    # Guard for A8-04: explicit HTTP/status patterns must still be recognized.
     assert bot._error_status(_FakeExc(text), text) == expected
 
 
@@ -74,16 +73,16 @@ def test_error_status_matches_status_templates(text, expected):
     "no numbers here",
 ])
 def test_error_status_ignores_bare_numbers(text):
-    # Регрессия A8-04: голое число без шаблона — не статус («429 токенов» давало ложный 429).
+    # Regression A8-04: a bare number without a template is not a status ("429 tokens" produced a false 429).
     assert bot._error_status(_FakeExc(text), text) is None
 
 
 def test_gemini_error_msg_rate_limit():
-    # РЕГРЕССИЯ (аудит техдолга): раньше здесь проверялось "модель через /model" —
-    # команда /model давно удалена (см. README, "Automatic model routing"),
-    # и подсказывать её в тексте ошибки было прямой ошибкой для пользователя.
-    # _gemini_error_msg/_or_error_msg теперь используют общие provider-neutral
-    # шаблоны (см. _MODEL_ERROR_MESSAGES) без упоминания несуществующих команд.
+    # REGRESSION (technical-debt audit): this previously checked "model via /model"—
+    # the /model command was removed long ago (see README, "Automatic model routing"),
+    # and suggesting it in the error text was a direct disservice to the user.
+    # _gemini_error_msg/_or_error_msg now use shared provider-neutral
+    # templates (see _MODEL_ERROR_MESSAGES) without mentioning nonexistent commands.
     exc = _FakeStatusExc("rate limit exceeded", status_code=429)
     msg = bot._gemini_error_msg(exc, "gemini-3.5-flash")
     assert "/model" not in msg and "/provider" not in msg
@@ -91,8 +90,8 @@ def test_gemini_error_msg_rate_limit():
 
 
 def test_user_mime_label_never_becomes_markup():
-    # Клиентский mime в тексте ошибки не должен рендериться как ссылка или тег
-    # (подтверждённая находка run-2, low), но обычные типы с параметрами живы.
+    # A client-side MIME type in error text must not render as a link or tag
+    # (confirmed run-2 finding, low), but ordinary types with parameters are alive.
     import lumen_formatting
     import lumen_routes
     label = lumen_routes._user_mime_label
@@ -107,16 +106,16 @@ def test_user_mime_label_never_becomes_markup():
 
 
 def test_gemini_error_msg_value_error_passthrough():
-    # Только UserFacingInputError используется в ask_gemini как готовый
-    # пользовательский текст — остальной ValueError идёт общим шаблоном.
+    # Only UserFacingInputError is used in ask_gemini as a ready
+    # user text; all other ValueError errors use the common template.
     assert bot._gemini_error_msg(bot.UserFacingInputError("кастомная ошибка"), "gemini-3.5-flash") == "кастомная ошибка"
     assert bot._gemini_error_msg(ValueError("/secret/path model-xyz"), "gemini-3.5-flash") != "/secret/path model-xyz"
 
 
 def test_gemini_error_msg_all_models_exhausted():
-    # РЕГРЕССИЯ (аудит техдолга): раньше здесь проверялось "/provider" — команда
-    # удалена, реального способа переключиться на резервный провайдер вручную
-    # больше нет, поэтому предлагать её в тексте ошибки было ошибкой.
+    # REGRESSION (tech-debt audit): this previously checked '/provider'; the command
+    # removed, with no actual way to switch manually to the reserve provider
+    # no longer exists, so offering it in the error text was a mistake.
     exc = bot.GeminiAllModelsExhaustedError(["gemini-3.5-flash", "gemini-2.5-flash"])
     msg = bot._gemini_error_msg(exc, "gemini-3.5-flash")
     assert "/provider" not in msg
@@ -125,9 +124,9 @@ def test_gemini_error_msg_all_models_exhausted():
 
 
 def test_or_error_msg_rate_limit():
-    # РЕГРЕССИЯ (аудит техдолга): "/provider" убран из текста (команда удалена),
-    # а формулировка "резервного провайдера" тоже убрана — с автоматическим
-    # роутером OpenRouter часто оказывается ПЕРВЫМ, а не резервным кандидатом.
+    # REGRESSION (technical debt audit): "/provider" was removed from the text (the command was deleted),
+    # and the wording "fallback provider" was also removed—with automatic
+    # the OpenRouter router often turns out to be FIRST, not a reserve candidate.
     exc = _FakeStatusExc("rate limit exceeded", status_code=429)
     msg = bot._or_error_msg(exc)
     assert "/provider" not in msg and "резервн" not in msg.lower()
@@ -142,18 +141,18 @@ def test_or_error_msg_unavailable():
 
 
 def test_model_error_text_shared_between_providers():
-    # Единый источник правды для текста ошибок (см. аудит техдолга) — Gemini и
-    # OpenRouter должны показывать ОДИНАКОВЫЙ текст на одинаковый класс ошибки,
-    # а не рассинхронизированные формулировки в двух местах.
+    # Single source of truth for error text (see the technical-debt audit) — Gemini and
+    # OpenRouter should show IDENTICAL text for the same error class,
+    # rather than inconsistent wording in two places.
     gem_exc = _FakeStatusExc("resource_exhausted", status_code=429)
     or_exc = _FakeStatusExc("rate limit exceeded", status_code=429)
     assert bot._gemini_error_msg(gem_exc, "gemini-3.5-flash") == bot._or_error_msg(or_exc, "text")
 
 
 def test_user_facing_error_texts_hide_models_and_stay_informal():
-    # Легенда единого Lumen (сентябрь 2026): пользовательские тексты не должны
-    # упоминать "модели" во множественном числе и обращаться на "вы" — см.
-    # ИДЕНТИЧНОСТЬ и ОБРАЩЕНИЕ в system_prompt.py.
+    # The single Lumen legend (September 2026): user texts must not
+    # mention “models” in the plural and address the person as “you” — see
+    # IDENTITY and ADDRESS in system_prompt.py.
     for key in ("rate_limit", "paid", "forbidden", "unavailable"):
         msg = bot._model_error_text(key)
         assert "модел" not in msg.lower()
@@ -189,9 +188,9 @@ def test_ask_gemini_happy_path_returns_text_and_updates_history():
 
 
 def test_ask_gemini_scrubs_identity_leak_before_storing_history():
-    # Регрессия на весь смысл выходного фильтра: если системный промпт всё же обойдён
-    # через инъекцию и модель раскрыла реальную личность — ни пользователь, ни история
-    # чата не должны увидеть/сохранить исходный (утекший) текст, только fallback.
+    # Regression covering the entire purpose of the output filter: if the system prompt is nevertheless bypassed
+    # through injection, and the model revealed a real identity — neither the user nor the history
+    # in the chat must not see/save the original (leaked) text, only the fallback.
     chat_id = 999003
 
     def fake_generate_content(*, model, contents, config=None):
@@ -214,10 +213,10 @@ def test_ask_gemini_scrubs_identity_leak_before_storing_history():
 
 @pytest.mark.parametrize("mode", ["text", "vision"])
 def test_empty_model_chain_falls_back_to_current_order_head(monkeypatch, mode):
-    # РЕГРЕССИЯ (24.07.2026): раньше запасным вариантом на случай пустого model_chain
-    # стоял захардкоженный литерал мёртвой модели. Порядок подменяем своим списком:
-    # тест падает, если дефолт снова вернут в виде литерала, а не чтения головы
-    # _MUNITO_ORDER (у Munito текст и vision в одной цепочке).
+    # REGRESSION (24.07.2026): previously the fallback option for an empty model_chain
+    # a hardcoded literal for a dead model. Replace the order with our own list:
+    # the test fails if the default is restored as a literal instead of a read from the head
+    # _MUNITO_ORDER (Munito has text and vision in one chain).
     import lumen_routes
     chat_id = 999401
 
@@ -238,8 +237,8 @@ def test_empty_model_chain_falls_back_to_current_order_head(monkeypatch, mode):
 
 
 def test_run_route_falls_back_to_second_provider_when_first_fully_fails():
-    # Ключевое требование: если весь маршрут первого провайдера отказал —
-    # роутер должен попробовать резерв в ДРУГОМ провайдере, а не сдаваться сразу.
+    # Key requirement: if the entire first-provider route failed,
+    # the router should try the reserve with a DIFFERENT provider rather than give up immediately.
     chat_id = 999301
 
     async def failing_munito_text(*args, **kwargs):
@@ -280,8 +279,8 @@ def test_run_route_raises_when_both_providers_fail():
     bot.ask_gemini = failing_gemini
     try:
         route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"), ("gemini", "gemini-3.1-flash-lite")]
-        # Поднимается последняя ошибка маршрута: пользователю её текст маппит
-        # _route_error_reply_text, поэтому важен именно последний провайдер.
+        # The last route error is raised; its text is mapped for the user
+        # _route_error_reply_text, so the last provider is what matters.
         with pytest.raises(RuntimeError, match="тоже сломано"):
             asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=False))
         assert tried == ["munito", "gemini"]
@@ -291,9 +290,9 @@ def test_run_route_raises_when_both_providers_fail():
 
 
 def test_shared_history_between_gemini_and_munito(monkeypatch):
-    # Регрессия на требование "общая память между Gemini и текстовым провайдером,
-    # чтобы не чувствовалось переключение между моделями" — раньше у каждого
-    # провайдера была своя ОТДЕЛЬНАЯ история (gemini_history/or_history).
+    # Regression for the requirement "shared memory between Gemini and the text provider,
+    # so the switch between models is not noticeable" — previously each
+    # the provider had its own SEPARATE history (gemini_history/or_history).
     chat_id = 999201
 
     def fake_generate_content(*, model, contents, config=None):
@@ -315,7 +314,7 @@ def test_shared_history_between_gemini_and_munito(monkeypatch):
 
         history = bot.chat_state[chat_id]["history"]
         contents = [h["content"] for h in history]
-        # Обе записи должны быть в ОДНОЙ и той же истории, а не в раздельных
+        # Both records must be in ONE and the same history, not in separate
         assert "Первый вопрос (через Gemini)" in contents
         assert "Ответ от Gemini" in contents
         assert "Второй вопрос (через Munito)" in contents
@@ -327,9 +326,9 @@ def test_shared_history_between_gemini_and_munito(monkeypatch):
 
 
 def test_ask_gemini_retries_without_tools_on_malformed_function_call():
-    # Регрессионный тест: после выноса _build_gemini_call_config переменная kwargs,
-    # на которую опирался этот retry-путь, была удалена — retry_gconfig теперь
-    # строится через gconfig.model_copy(update={"tools": None}).
+    # Regression test: after extracting _build_gemini_call_config, the kwargs variable
+    # that this retry path relied on was removed; retry_gconfig now
+    # is built via gconfig.model_copy(update={"tools": None}).
     chat_id = 999002
     call_configs = []
 
@@ -347,9 +346,9 @@ def test_ask_gemini_retries_without_tools_on_malformed_function_call():
         answer = asyncio.run(bot.ask_gemini(chat_id, "Сколько будет 2+2?"))
         assert answer == "Ответ без инструментов"
         assert len(call_configs) == 2
-        # первый вызов — с tools (у DEFAULT_GEMINI_MODEL включён url_context)
+        # the first call uses tools (url_context is enabled in DEFAULT_GEMINI_MODEL)
         assert getattr(call_configs[0], "tools", None)
-        # второй (после ретрая) — уже без tools
+        # the second (after retry) — now without tools
         assert getattr(call_configs[1], "tools", None) is None
     finally:
         bot.client = original_client
@@ -357,8 +356,9 @@ def test_ask_gemini_retries_without_tools_on_malformed_function_call():
 
 
 def test_extract_gemini_answer_skips_retry_when_route_budget_spent():
-    # Повтор после битого вызова не ждёт полные TELEGRAM_AI_TIMEOUT поверх
-    # истраченного бюджета — иначе маршрут держит lock чата за ROUTE_TOTAL_BUDGET_SEC.
+    # A retry after a broken call must not wait the full TELEGRAM_AI_TIMEOUT on top of
+    # spent budget; otherwise the route holds the chat lock for
+    # ROUTE_TOTAL_BUDGET_SEC.
     async def must_not_run(*, model, contents, config=None):
         raise AssertionError("retry must not run on spent budget")
 
@@ -374,17 +374,17 @@ def test_extract_gemini_answer_skips_retry_when_route_budget_spent():
             deadline=time.monotonic() - 1.0,
         ))
         assert time.monotonic() - started < 5
-        # Раньше здесь возвращалась непустая "[Ответ заблокирован...]", которую
-        # ask_gemini принимал за успех (враждебное ревью 27.09.2026) — теперь пусто,
-        # и маршрут идёт на следующую модель.
+        # A nonempty "[Response blocked...]" used to be returned here, which
+        # ask_gemini accepted as success (hostile review 27.09.2026)—now empty,
+        # and the route moves to the next model.
         assert ans == ""
     finally:
         bot.client = original_client
 
 
 def test_extract_gemini_answer_returns_empty_for_blocked_response():
-    # Блокировка (SAFETY) — не ответ: пустая строка двигает цепочку дальше,
-    # а не подсовывает пользователю русскую техническую заглушку (аудит 27.10.2026).
+    # A block (SAFETY) is not an answer: an empty string advances the chain,
+    # rather than slipping the user a Russian technical stub (audit 27.10.2026).
     resp = _FakeGeminiResponse(text="", candidates=[_FakeCandidate(finish_reason="SAFETY")])
     ans = asyncio.run(bot._extract_gemini_answer_text(
         resp, model_id="gemini-3.8-flash", call_contents=[], gconfig=None,
@@ -393,7 +393,7 @@ def test_extract_gemini_answer_returns_empty_for_blocked_response():
 
 
 def test_extract_gemini_answer_retries_without_tools_on_tool_only_response():
-    # Прод 07.10.2026: модель вернула только function_call без текста, юзер видел "[Tool call: ...]".
+    # Production 07.10.2026: the model returned only function_call without text, and the user saw "[Tool call: ...]".
     from types import SimpleNamespace
     fn_part = SimpleNamespace(
         text="",
@@ -423,9 +423,10 @@ def test_extract_gemini_answer_retries_without_tools_on_tool_only_response():
 
 @pytest.mark.parametrize("retry_outcome", ["raises", "empty"])
 def test_extract_gemini_answer_failed_retry_goes_to_next_model(retry_outcome):
-    # Повтор после битого вызова сам упал (а не просто не влез в бюджет) или
-    # вернул пусто — отдаём пусто, чтобы маршрут ушёл на следующую модель.
-    # Раньше пользователь получал "[Ответ заблокирован...]" как готовый ответ.
+    # The retry after a broken call failed itself (rather than merely exceeding the
+    # budget), or
+    # returned empty — return empty so the route moves to the next model.
+    # Previously, the user received "[Response blocked...]" as a finished answer.
     async def retry_raises(*, model, contents, config=None):
         raise RuntimeError("transient 500 on retry")
 
@@ -448,8 +449,8 @@ def test_extract_gemini_answer_failed_retry_goes_to_next_model(retry_outcome):
 
 
 def test_run_route_reorders_slow_head_down(monkeypatch):
-    # Интеграция reorder в _run_route: модель с измеренными 100с уходит вниз,
-    # ask вызывается уже с переупорядоченной цепочкой.
+    # Integrate reorder into _run_route: a model with a measured 100s
+    # ask is already called with a reordered chain.
     import lumen_model_speed
 
     seen = []
@@ -475,10 +476,10 @@ def test_run_route_reorders_slow_head_down(monkeypatch):
 
 @pytest.mark.parametrize("empty_payload", [None, "Empty response", "  empty response. ", "No response"])
 def test_chain_empty_response_falls_through_to_next_model(monkeypatch, empty_payload):
-    # Прод-кейс 17.09.2026: пользователь дважды увидел буквальное "Empty
-    # response" — пустой ответ обязан двигать цепочку дальше, а не идти в чат.
-    # Плейсхолдер провайдера (непустая строка) ловится тем же условием:
-    # выборка бэкапа 05.11.2026 — 7 таких ответов в одном диалоге.
+    # Prod case 17.09.2026: the user twice saw the literal "Empty
+    # response" — an empty response must advance the chain rather than go to the chat.
+    # A provider placeholder (non-empty string) is caught by the same condition:
+    # the 05.11.2026 backup sample — 7 such answers in one dialog.
     import lumen_routes
     calls = []
 
@@ -504,8 +505,8 @@ def test_chain_empty_response_falls_through_to_next_model(monkeypatch, empty_pay
 
 
 def test_munito_provenance_names_model_and_truncation(monkeypatch):
-    # Выборка бэкапа 05.11.2026: у прежних провайдеров в provenance писалась None —
-    # след нельзя было привязать к модели, а обрыв по потолку вывода не был виден нигде.
+    # Backup sample from 05.11.2026: previous providers wrote None to provenance —
+    # could not be tied to a model, and an output-cap truncation was invisible everywhere.
     chat_id = 999399
 
     async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
@@ -525,8 +526,8 @@ def test_munito_provenance_names_model_and_truncation(monkeypatch):
 
 
 def test_chain_safety_label_only_response_moves_to_next_model(monkeypatch):
-    # Прод-кейс из бэкапа 05.11.2026: весь ответ пользователя — 39 символов
-    # «User Safety: safe» от модели-головы; непустая строка проходила проверку.
+    # Prod case from the 05.11.2026 backup: the user's entire answer was 39 characters
+    # "User Safety: safe" from the head model; a nonempty string passed the check.
     import lumen_routes
 
     async def fake_request(payload, deadline):
@@ -543,11 +544,11 @@ def test_chain_safety_label_only_response_moves_to_next_model(monkeypatch):
 
 
 def test_chain_recomputes_reasoning_effort_after_model_fallback(monkeypatch):
-    # Замер 12.11.2026: google/gemma-4-12b отвечает 400 на reasoning_effort, а
-    # четыре текстовые головы его принимают. Поле, посчитанное один раз на весь
-    # маршрут, уезжал бы и туда, и туда: на gemma — гарантированный 400, на
-    # голову — ответ вовсе без усилия. Поэтому extras пересчитываются на модель
-    # попытки (extra_payload_fn), и этот тест фиксирует именно пересчёт.
+    # Measurement 12.11.2026: google/gemma-4-12b returns 400 for reasoning_effort, while
+    # four text heads accept it. A field computed once for the entire
+    # route, it would go both ways: on gemma — a guaranteed 400, on
+    # head, producing an answer with no effort at all. Therefore extras are recalculated per model
+    # the attempt (extra_payload_fn), and this test locks in the recalculation.
     import lumen_routes
     from lumen_router_config import _munito_payload_extras
 
@@ -569,7 +570,7 @@ def test_chain_recomputes_reasoning_effort_after_model_fallback(monkeypatch):
             extra_payload_fn=lambda model: _munito_payload_extras("medium", model),
         ))
     finally:
-        # Реальные id моделей в общем состоянии тестовой сессии не остаются.
+        # Real model IDs do not remain in the shared test-session state.
         lumen_router_config._QUARANTINE.pop(("munito", gemma), None)
         lumen_router_config._QUARANTINE.pop(("munito", head), None)
         bot.GLOBAL_QUOTA.setdefault("munito", {}).pop(gemma, None)
@@ -582,8 +583,8 @@ def test_chain_recomputes_reasoning_effort_after_model_fallback(monkeypatch):
 
 
 def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
-    # Три пустых подряд в одну голову — карантин (реальная регрессия: мёртвая голова
-    # жевала бы каждую попытку до конца суток вместо объезда после третьей).
+    # Three consecutive empty responses from one head trigger quarantine (a real regression: a dead head
+    # would chew on every attempt until the end of the day instead of backing off after the third).
     import lumen_routes
 
     async def fake_request(payload, deadline):
@@ -601,8 +602,8 @@ def test_chain_empty_responses_feed_quarantine_counter(monkeypatch):
 
 
 def test_chain_garbled_response_delivered_but_feeds_quarantine(monkeypatch):
-    # Каша доставляется как раньше (без подмены), но в счётчик идёт: три таких —
-    # и голова в карантине.
+    # Junk is delivered as before (without substitution), but counts toward the counter: three such —
+    # and the head is in quarantine.
     import lumen_routes
     mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
     assert len(mush) >= 100
@@ -622,8 +623,8 @@ def test_chain_garbled_response_delivered_but_feeds_quarantine(monkeypatch):
 
 
 def test_chain_echoed_mix_does_not_feed_quarantine(monkeypatch):
-    # Тот же mush, но токены уже были в запросе: модель повторила за
-    # пользователем — это эхо, карантин не кормим (иначе любой клал бы модели).
+    # The same mush, but the tokens were already in the request: the model repeated after
+    # by a user — that is an echo; do not feed quarantine (otherwise anyone could disable models).
     import lumen_routes
     mush = "результат: " + "dataданные fileфайл testтест " + "продолжение " + "я" * 80
     user_text = "повтори за мной: dataданные fileфайл testтест и дальше своими словами"
@@ -644,19 +645,19 @@ def test_chain_echoed_mix_does_not_feed_quarantine(monkeypatch):
 
 
 def test_attempt_timeout_caps_by_remaining_route_budget():
-    # Регрессия (аудит 26.09.2026): каждая попытка ждала полные ROUTE_MODEL_TIMEOUT_SEC,
-    # поэтому маршрут держал лок чата до 40+22с вместо заявленных 40с.
+    # Regression (audit 26.09.2026): every attempt waited the full ROUTE_MODEL_TIMEOUT_SEC,
+    # so the route held the chat lock for 40+22s instead of the stated 40s.
     assert bot._attempt_timeout(bot, None) == bot.ROUTE_MODEL_TIMEOUT_SEC
     assert bot._attempt_timeout(bot, time.monotonic() + 300.0) == bot.ROUTE_MODEL_TIMEOUT_SEC
     tight = bot._attempt_timeout(bot, time.monotonic() + 4.0)
     assert 0.5 <= tight <= 4.0
-    # Истёкший бюджет — быстрый отказ, а не ещё 22с ожидания.
+    # An expired budget means a fast failure, not another 22 s of waiting.
     assert bot._attempt_timeout(bot, time.monotonic() - 5.0) <= 1.0
 
 
 def test_ask_gemini_attempt_respects_short_budget(monkeypatch):
-    # Короткий бюджет маршрута: основная попытка не должна съесть весь остаток
-    # целиком — иначе ответ приходит после ROUTE_TOTAL_BUDGET_SEC.
+    # Short route budget: the main attempt must not consume the entire remainder
+    # entirely — otherwise the answer arrives after ROUTE_TOTAL_BUDGET_SEC.
     from collections import deque
     chat_id = 999208
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
@@ -674,8 +675,8 @@ def test_ask_gemini_attempt_respects_short_budget(monkeypatch):
         started = time.monotonic()
         with pytest.raises(bot.RouteBudgetExceededError):
             asyncio.run(bot.ask_gemini(chat_id, "привет", model_chain=["m1", "m2"], deadline=time.monotonic() + 0.6))
-        # Попытка обрезалась остатком бюджета, дальше маршрут сразу остановился —
-        # главное, он не ушёл далеко за объявленный бюджет.
+        # The attempt was cut off by the remaining budget, and the route stopped immediately —
+        # main thing is that it did not go far beyond the declared budget.
         elapsed = time.monotonic() - started
         assert elapsed < 3, f"маршрут с бюджетом 0.6с обязан остановиться быстро: {elapsed:.1f}с"
         assert calls == ["m1"]
@@ -685,9 +686,9 @@ def test_ask_gemini_attempt_respects_short_budget(monkeypatch):
 
 
 def test_is_gemini_daily_quota_recognizes_google_per_day_metric():
-    # Google пишет суточную квоту слитно в имени метрики
-    # (GenerateRequestsPerDayPerProjectPerModel) — без токена perday она
-    # выглядела бы минутным всплеском и получала бы короткую остывку.
+    # Google writes the daily quota without a space in the metric name
+    # (GenerateRequestsPerDayPerProjectPerModel); without a perday token it
+    # would look like a minute-level burst and receive a short cooldown.
     assert bot._is_gemini_daily_quota(
         "Quota exceeded for quota metric 'GenerateRequestsPerDayPerProjectPerModel'"
     ) is True
@@ -740,9 +741,9 @@ def test_run_route_streams_munito_when_route_head_is_munito():
 
 
 def test_run_route_streams_fallback_model_after_head_stream_failure(monkeypatch):
-    # Прод 28.10.2026: стрим пропадал целиком, когда головная модель падала
-    # до первого куска, — резервные отвечали обычным вызовом. Теперь поток
-    # пробуется и на них, с переиспользованием того же пузырька.
+    # Production 28.10.2026: the stream disappeared entirely when the primary model failed
+    # before the first chunk, — the reserves replied with a regular call. Now the stream
+    # tried on them too, reusing the same bubble.
     chat_id = 999304
     placeholder = _FakeSentMessage()
     calls = []
@@ -767,7 +768,7 @@ def test_run_route_streams_fallback_model_after_head_stream_failure(monkeypatch)
         assert sent is True
         assert [model for model, _, _ in calls] == ["gemini-3.8-flash", "deepseek-ai/deepseek-v4.1-flash-1017"]
         assert calls[1][1] is placeholder
-        # Таймер ожидания общий на маршрут: переход к резерву не откатывает его в 0.
+        # The wait timer is shared across the route: switching to the reserve does not reset it to 0.
         assert calls[0][2] is not None and calls[0][2] == calls[1][2]
     finally:
         bot.chat_state.pop(chat_id, None)
@@ -777,7 +778,8 @@ def test_run_route_falls_back_from_failed_munito_stream_to_non_streaming():
     chat_id = 999306
 
     async def fake_munito_stream_fail(cid, prompt, message, model_id, deadline=None, status=None, **kwargs):
-        return None, None  # ранний сбой без плейсхолдера (например, message.reply сам не удался)
+        return None, None  # an early failure without a placeholder (for example, message.reply itself
+        # failed)
 
     calls = []
 
@@ -794,9 +796,9 @@ def test_run_route_falls_back_from_failed_munito_stream_to_non_streaming():
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert ans == "Ответ без стрима"
         assert sent is False
-        # Обычный вызов идёт по всему блоку: модель, у которой стрим упал раньше
-        # показа, пробуется без потока — иначе сломанный SSE провайдера оставлял
-        # бы чат без ответа вовсе (аудит 28.10.2026).
+        # An ordinary call traverses the entire block: a model whose stream failed earlier
+        # after display, retry without streaming; otherwise a provider's broken SSE left
+        # would leave the chat with no response at all (audit 28.10.2026).
         assert calls[0] == ["deepseek-ai/deepseek-v4.1-flash-1017", "deepseek-ai/deepseek-v4-flash"]
     finally:
         bot._try_munito_streaming = original_stream
@@ -804,11 +806,11 @@ def test_run_route_falls_back_from_failed_munito_stream_to_non_streaming():
 
 
 def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
-    # Регрессия на реальный найденный при тестировании баг: раньше при неудачном
-    # стриме плейсхолдер "…" тут же удалялся, а следующая модель отправляла
-    # совсем новое сообщение — визуально выглядело как "точки исчезли, потом
-    # из ниоткуда появился ответ одним блоком". Теперь плейсхолдер должен
-    # переиспользоваться (редактироваться) финальным ответом резервной модели.
+    # Regression for a real bug found during testing: previously, after a failed
+    # during streaming, the "…" placeholder was immediately deleted, while the next model sent
+    # an entirely new message — visually it looked like "the dots disappeared, then
+    # an answer appeared out of nowhere in a single block.” The placeholder must now
+    # be reused (edited) by the reserve model's final response.
     chat_id = 999307
     placeholder = _FakeSentMessage()
 
@@ -826,8 +828,8 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
         route = [("munito", "deepseek-ai/deepseek-v4.1-flash-1017"), ("munito", "deepseek-ai/deepseek-v4-flash")]
         ans, sent = asyncio.run(bot._run_route(chat_id, "привет", route, message=None, allow_stream=True))
         assert ans == "Ответ от резервной модели"
-        # sent=True означает, что ответ уже "доставлен" через правку плейсхолдера,
-        # а не через отдельный новый _safe_reply в _handle_message_core.
+        # sent=True means the answer has already been "delivered" by editing the placeholder,
+        # rather than through a separate new _safe_reply in _handle_message_core.
         assert sent is True
         assert placeholder.deleted is False
         assert placeholder.edits[-1][0] == "Ответ от резервной модели"
@@ -837,8 +839,8 @@ def test_run_route_reuses_stream_placeholder_when_fallback_succeeds():
 
 
 def test_run_route_reuse_has_no_thought_block_in_private_chat(monkeypatch):
-    # Простой ответ после раннего сбоя стрима тоже остаётся без синтетической
-    # строки «Думаю N c»; activity-блок нужен только реальным этапам.
+    # A plain response after an early stream failure also remains without a synthetic
+    # lines like "Thinking Ns"; the activity block is needed only for real stages.
     chat_id = 999322
     placeholder = _FakeSentMessage()
     incoming = _FakeIncomingMessage(chat_id)
@@ -888,9 +890,10 @@ def test_run_route_deletes_orphaned_placeholder_when_whole_route_fails():
 
 
 def test_build_gemini_call_config_with_system_instruction_model_unaffected():
-    # Модели С system_instruction (не no_system) вообще не проходят через ветку fake
-    # identity-обмена — регрессия на то, что правка выше не задела этот путь: contents
-    # должен остаться нетронутым, а полный текст идёт через system_instruction, как раньше.
+    # Models WITH system_instruction (not no_system) do not go through the fake
+    # branch at all
+    # Identity fields travel in the body, not the headers: contents
+    # must remain untouched, while the full text goes through system_instruction, as before.
     contents = [bot.types.Content(role="user", parts=[bot.types.Part.from_text(text="привет")])]
     call_contents, gconfig = bot._build_gemini_call_config(bot.DEFAULT_GEMINI_MODEL, contents)
     assert call_contents is contents
@@ -917,7 +920,7 @@ def test_build_gemini_call_config_does_not_override_thinking_on_heavy_query():
 
 
 def test_ask_gemini_daily_quota_marks_model_exhausted_and_switches():
-    # Суточная квота Google помечает модель до утра и уводит маршрут на следующую.
+    # Google daily quota marks the model until morning and moves the route to the next one.
     chat_id = 999010
     calls = []
 
@@ -947,9 +950,9 @@ def test_ask_gemini_daily_quota_marks_model_exhausted_and_switches():
 
 
 def test_ask_gemini_burst_429_only_cools_down_the_model():
-    # Регрессия (враждебное ревью 27.09.2026): ЛЮБОЙ 429 у Gemini ставил суточную
-    # метку, и один всплеск минутного лимита убирал модель из роута до полуночи.
-    # Минутный лимит должен давать только короткую остывку.
+    # Regression (hostile review 27.09.2026): ANY Gemini 429 set a daily
+    # marker, and one burst of the per-minute limit removed the model from the route until midnight.
+    # The per-minute limit should cause only a short cooldown.
     chat_id = 999013
     calls = []
 
@@ -974,7 +977,7 @@ def test_ask_gemini_burst_429_only_cools_down_the_model():
         entry = bot.GLOBAL_QUOTA["gemini"]["gemini-3.6-flash"]
         assert entry["exhausted_at"] is None, "минутный всплеск не должен запирать модель до утра"
         assert entry["cooldown_until"] > time.time()
-        # Остывка истекает сама — сутки ждать не нужно.
+        # The cooldown expires on its own — no need to wait a day.
         entry["cooldown_until"] = time.time() - 1.0
         assert lumen_router_config._is_quota_exhausted("gemini", "gemini-3.6-flash") is False
     finally:
@@ -984,9 +987,9 @@ def test_ask_gemini_burst_429_only_cools_down_the_model():
 
 
 def test_chat_completion_chain_cools_down_model_on_429():
-    # Нестриминговый текстовый провайдер обязан писать cooldown после 429 — зеркало
-    # стриминга, иначе _is_quota_exhausted его не видит и модель долбят заново.
-    # У Munito лимиты оконные, поэтому остывка, а не суточная метка.
+    # A non-streaming text provider must write cooldown after 429—a mirror
+    # streaming, otherwise _is_quota_exhausted does not see it and the model is hammered again.
+    # Munito limits are windowed, so use cooldown rather than a daily mark.
     import lumen_routes
     exc_cls = bot.MunitoAPIError
 
@@ -1011,11 +1014,11 @@ def test_chat_completion_chain_cools_down_model_on_429():
 
 
 def test_chat_completion_chain_cools_down_model_on_unavailable():
-    # Прод 05.10.2026: модели линейки Gemini 3.x отдавали 503 и повторялись на каждом
-    # сообщении — до 22 секунд и нескольких попыток впустую. 503 не квота, но
-    # модель на QUOTA_RATE_LIMIT_COOLDOWN_SEC пропускать надо. Падает на старом
-    # коде, где "unavailable" не оставлял метки. Прод 05.11.2026: у Munito те же 503
-    # «no free capacity» на бесплатном тарифе.
+    # Prod 05.10.2026: Gemini 3.x models returned 503 and retried on every
+    # message, up to 22 seconds and several wasted attempts. 503 is not a quota, but
+    # the model on QUOTA_RATE_LIMIT_COOLDOWN_SEC must be allowed through. It fails on an old
+    # code where "unavailable" left no marks. Production 05.11.2026: Munito had the same 503
+    # "no free capacity" on the free tier.
     import lumen_routes
     exc_cls = bot.MunitoAPIError
 
@@ -1038,8 +1041,8 @@ def test_chat_completion_chain_cools_down_model_on_unavailable():
 
 
 def test_ask_gemini_503_cools_model_down_instead_of_retrying_every_message():
-    # Тот же сценарий на текстовом пути Gemini: 503 от головы цепочки обязан
-    # оставить остывку, иначе модель долбится заново на каждом обращении.
+    # The same scenario on Gemini's text path: a 503 from the chain head must
+    # keep the cooldown; otherwise the model retries on every request.
     chat_id = 999018
     calls = []
 
@@ -1096,8 +1099,8 @@ def test_ask_gemini_raises_all_models_exhausted_when_entire_chain_429s():
 
 
 def test_ask_gemini_minute_429s_do_not_raise_empty_exhausted():
-    # Одни минутные всплески: суточного исчерпания не было — последний 429
-    # идёт как есть, а не пустой "исчерпано всё".
+    # Only minute-long spikes: the daily quota was not exhausted — the last 429
+    # is passed through as-is, rather than an empty "everything exhausted".
     chat_id = 999017
 
     class _Minute429(Exception):
@@ -1121,10 +1124,10 @@ def test_ask_gemini_minute_429s_do_not_raise_empty_exhausted():
 
 
 def test_ask_gemini_falls_back_to_next_model_on_timeout():
-    # Прежняя версия использовала блокирующий time.sleep в async-фейке и один и тот
-    # же текст ответа для обеих моделей: таймаут никогда не срабатывал, фолбэка не
-    # было, а тест всё равно проходил (враждебное ревью 27.09.2026). Теперь фейк
-    # асинхронный, тексты разные, проверяются оба вызова и время.
+    # The previous version used blocking time.sleep in an async fake and the same
+    # the same response text for both models: the timeout never fired, and the fallback did not
+    # was present, yet the test still passed (adversarial review 27.09.2026). Now the fake
+    # is asynchronous, the texts differ, and both calls and timing are checked.
     chat_id = 999012
     calls = []
     original_timeout = bot.ROUTE_MODEL_TIMEOUT_SEC
@@ -1133,8 +1136,8 @@ def test_ask_gemini_falls_back_to_next_model_on_timeout():
         calls.append(model)
         if model == "gemini-3.6-flash":
             await asyncio.sleep(5.0)
-        # Нейтральные тексты без имён моделей: имя модели в ответе триггерит
-        # скраб утечек личности и подменяет ответ заглушкой.
+        # Neutral texts without model names: a model name in the answer triggers
+        # a personal-data leak scrubber and replaces the response with a stub.
         return _FakeGeminiResponse(text="Первый ответ" if model == "gemini-3.6-flash" else "Второй ответ")
 
     fake_client = MagicMock()
@@ -1200,8 +1203,8 @@ def test_ask_gemini_raises_when_route_budget_exceeded():
 @pytest.mark.parametrize(("status_code", "message"), [(429, "rate limit exceeded"), (403, "forbidden")])
 def test_chain_switches_model_on_provider_error(status_code, message):
     import lumen_routes
-    # И оконный 429, и "постоянная" на вид 403 не обрывают переход к следующей
-    # модели: ровно одна попытка на модель, независимо от классификации ошибки.
+    # Both a windowed 429 and an apparently permanent 403 continue to the next
+    # of the model: exactly one attempt per model, regardless of error classification.
     async def fake_request(payload, deadline):
         if payload["model"] == "probe/model-a":
             raise bot.MunitoAPIError(message, status_code=status_code)
@@ -1218,10 +1221,10 @@ def test_chain_switches_model_on_provider_error(status_code, message):
 
 def test_chain_whole_failure_raises_last_model_error():
     import lumen_routes
-    # Вся цепочка легла — наверх идёт ошибка ПОСЛЕДНЕЙ модели (её маппит
-    # _route_error_reply_text), а не первой: пользователь должен видеть статус
-    # резерва, а не голову. Регрессия: возврат первой ошибки показал бы «модель
-    # недоступна», когда резерв был жив и падал по другой причине.
+    # The whole chain failed—the LAST model's error propagates upward (its mapper
+    # _route_error_reply_text), not the first one: the user must see the status
+    # fallback, not the head. Regression: returning the first error would show 'model
+    # unavailable" when the fallback was alive and failed for another reason.
     async def fake_request(payload, deadline):
         raise bot.MunitoAPIError(f"сбой {payload['model']}", status_code=500)
 
@@ -1234,7 +1237,7 @@ def test_chain_whole_failure_raises_last_model_error():
 
 
 def test_ask_munito_multimodal_sends_all_album_images_not_just_first(monkeypatch):
-    # Внешний аудит: уходила только первая фотография альбома, остальные 2–9 молча терялись.
+    # External audit: only the first photo in an album was sent; the remaining 2-9 were silently lost.
     chat_id = 999411
     captured = {}
 
@@ -1256,7 +1259,7 @@ def test_ask_munito_multimodal_sends_all_album_images_not_just_first(monkeypatch
 
 
 def test_ask_munito_multimodal_skips_video_slides_for_gemini(monkeypatch):
-    # Видео-слайды OpenAI-формат Munito не принимает — их забирает Gemini-ветка, сюда едут только картинки.
+    # Patch the OpenAI-compatible Munito before the Gemini model, while leaving the /draw chain unchanged.
     chat_id = 999412
     captured = {}
 
@@ -1277,7 +1280,7 @@ def test_ask_munito_multimodal_skips_video_slides_for_gemini(monkeypatch):
 
 
 def test_ask_munito_multimodal_rejects_video_only_album(monkeypatch):
-    # Только видео без картинок — нечего слать в Munito: ошибка уводит маршрут в Gemini.
+    # Video only, with no images — nothing to send to Munito: an error sends the route to Gemini.
     chat_id = 999413
     calls = []
 
@@ -1318,7 +1321,7 @@ def test_route_error_reply_text_maps_known_exception_types():
 
 
 def test_provider_request_scrubs_api_key_from_network_exception_message(monkeypatch):
-    # Defense-in-depth у текстового провайдера: ключ не светится в тексте ошибок.
+    # Defense in depth for the text provider: the key must not appear in error text.
     fake_key = "fake-munito-key-123"
 
     class _FakeSessionRaisingWithKey:
@@ -1352,7 +1355,7 @@ def test_system_prompt_en_keeps_key_guards():
         "prohibited substances",
     ):
         assert guard in system_prompt.SYSTEM_PROMPT
-    # Границы продукта 10.2026: возврат к "minimal filters" с разрешением явного контента прошёл бы старые проверки.
+    # Product boundaries as of 10.2026: reverting to "minimal filters" while allowing explicit content would pass the old checks.
     for gone in (
         "minimal filters",
         "You may discuss adult topics, sexual content",
@@ -1365,8 +1368,8 @@ def test_get_system_prompt_header_english():
 
 
 def test_ask_munito_text_success_records_munito_quota(monkeypatch):
-    # Успешный ответ пишется в квоту "munito", как у остальных провайдеров:
-    # /stats и /diag читают именно её.
+    # A successful response is charged to the "munito" quota, as with other providers:
+    # /stats and /diag read exactly this.
     from collections import deque
     chat_id = 999701
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
@@ -1385,10 +1388,11 @@ def test_ask_munito_text_success_records_munito_quota(monkeypatch):
 
 
 def test_ask_munito_text_falls_back_to_next_model_and_is_dispatched(monkeypatch):
-    # Что защищает: провайдер munito в _run_route — и в обычном пути (ask_munito_text),
-    # и в стрим-пробе (_streamable/_try_stream). Регрессия: без текстового пути
-    # ("munito", …) весь обычный текст валился бы в Gemini-резерв и сжигал его дневную
-    # квоту, а без "_streamable" чат терял посимвольный вывод на Munito.
+    # What this protects: the munito provider in _run_route, on both the regular
+    # path (ask_munito_text)
+    # and in the streaming probe (_streamable/_try_stream). Regression: without a text path
+    # ("munito", …), all ordinary text would fall through to the Gemini reserve and burn its daily
+    # quota, while without "_streamable" the chat lost character-by-character output on Munito.
     from collections import deque
     chat_id = 999703
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
@@ -1414,10 +1418,10 @@ def test_ask_munito_text_falls_back_to_next_model_and_is_dispatched(monkeypatch)
 
 
 def test_ask_munito_text_sends_reasoning_effort_and_omits_it_when_unset(monkeypatch):
-    # protected поведение: low-effort доезжает до тела запроса на текстовом пути.
-    # Регрессия: поле заведут в одном месте (стрим) и потеряют в другом — тогда
-    # обычные ответы по-прежнему сжигают reasoning-токены, а пустой answer от Qwen
-    # возвращается.
+    # protected behavior: low-effort reaches the request body on the text path.
+    # Regression: a field added in one place (streaming) and lost in another would mean
+    # ordinary answers still consume reasoning tokens, while an empty answer from Qwen
+    # is returned.
     from collections import deque
     bodies = []
 
@@ -1438,8 +1442,9 @@ def test_ask_munito_text_sends_reasoning_effort_and_omits_it_when_unset(monkeypa
 
 
 def test_munito_request_requires_key_and_maps_provider_error(monkeypatch):
-    # Без ключа — понятная ошибка вместо сетевого вызова, а ответ API не показывается
-    # пользователю сырым (внутри может быть что угодно, включая чужие данные).
+    # Without a key, return a clear error instead of making a network call, and do
+    # not expose the API response
+    # raw to the user (it may contain anything, including external data).
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
     with pytest.raises(bot.MunitoAPIError):
         asyncio.run(bot._munito_request("chat/completions", "POST", json_body={"model": "x"}))
@@ -1452,8 +1457,8 @@ def test_munito_request_requires_key_and_maps_provider_error(monkeypatch):
 
 
 def test_model_attempt_counters_track_chain_success_and_failure(monkeypatch):
-    # 08.10.2026: по счётчикам model_attempts/model_failures виден реальный КПД
-    # маршрута (раньше делили ответы на попытки только вручную по логам).
+    # 08.10.2026: the model_attempts/model_failures counters show the real success rate
+    # of the route (previously, answers were split into attempts manually from logs).
     from collections import deque
     chat_id = 999707
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
@@ -1476,7 +1481,7 @@ def test_model_attempt_counters_track_chain_success_and_failure(monkeypatch):
 
 
 def test_shared_chain_raises_budget_error_without_second_attempt(monkeypatch):
-    # Общий цикл не должен тратить вторую попытку, если бюджет маршрута истёк.
+    # The common loop must not spend a second attempt if the route budget has expired.
     from collections import deque
     chat_id = 999704
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
@@ -1522,7 +1527,7 @@ def _fake_groq_audio_session(response_json, status=200):
 
 
 def test_transcribe_audio_success_does_not_pollute_quota(monkeypatch):
-    # Служебный вызов — в квоту не пишем: /stats и триггеры exhausted только про ответы людям.
+    # A service call is not charged to quota: /stats and exhausted triggers concern only answers to people.
     monkeypatch.setattr(bot, "_get_http_session", _fake_groq_audio_session({"text": "  привет мир  "}))
     monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
     bot.GLOBAL_QUOTA.setdefault("groq", {}).pop("whisper-large-v3-turbo", None)
@@ -1534,7 +1539,7 @@ def test_transcribe_audio_success_does_not_pollute_quota(monkeypatch):
 
 
 def test_record_quota_usage_service_flag_skips_counter():
-    # Обычный вызов считает, служебный — нет (саммари/транскрибация).
+    # An ordinary call is counted; an internal call is not (summaries/transcription).
     bot.GLOBAL_QUOTA.setdefault("groq", {}).pop("svc-probe-model", None)
     try:
         bot._record_quota_usage("groq", "svc-probe-model", service=True)
@@ -1546,8 +1551,8 @@ def test_record_quota_usage_service_flag_skips_counter():
 
 
 def test_record_quota_usage_clears_cooldown_and_exhausted_marks():
-    # Успешный ответ снимает и суточную метку, и остывку: иначе модель, однажды
-    # упёршаяся в лимит, несла бы метку даже после живых ответов.
+    # A successful response clears both the daily mark and the cooldown; otherwise a model that once
+    # that hit the limit would keep the mark even after live answers.
     bot.GLOBAL_QUOTA.setdefault("groq", {}).pop("cool-probe-model", None)
     try:
         bot._mark_quota_exhausted("groq", "cool-probe-model")
@@ -1562,14 +1567,14 @@ def test_record_quota_usage_clears_cooldown_and_exhausted_marks():
 
 
 def test_transcribe_audio_empty_result_is_none(monkeypatch):
-    # Пустая расшифровка — как неудача: вызывающий код идёт прежним путём.
+    # An empty transcription counts as failure: the caller follows the previous path.
     monkeypatch.setattr(bot, "_get_http_session", _fake_groq_audio_session({"text": "   "}))
     monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
     assert asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123)) is None
 
 
 def test_transcribe_audio_truncates_huge_transcript(monkeypatch):
-    # Час речи без обрезки упёрся бы в лимиты моделей ниже по маршруту.
+    # An hour of speech without trimming would hit the limits of models farther down the route.
     monkeypatch.setattr(bot, "_get_http_session", _fake_groq_audio_session({"text": "слово " * 2000}))
     monkeypatch.setattr(bot, "GROQ_API_KEY", "fake-key")
     text = asyncio.run(bot._transcribe_audio(b"ogg-bytes", "audio/ogg", 123))
@@ -1596,9 +1601,9 @@ def test_transcribe_audio_http_error_is_none(monkeypatch):
 
 
 def test_transcribe_audio_scrubs_key_from_failure_log(monkeypatch, caplog):
-    # Удаление Groq-чата не снимает защиту от утечки ключа: Whisper пишет в лог текст
-    # сетевого исключения, и без подмены туда попал бы GROQ_API_KEY (его в логах
-    # читает кто угодно — хостинг Spaces, агрегаторы).
+    # Deleting the Groq chat does not disable key-leak protection: Whisper logs text
+    # a network exception, and without the replacement GROQ_API_KEY would get in there (it is in logs
+    # can be read by anyone — Spaces hosting, aggregators).
     import logging
 
     async def raising_session():
@@ -1615,7 +1620,7 @@ def test_transcribe_audio_scrubs_key_from_failure_log(monkeypatch, caplog):
 
 
 def test_transcribe_audio_uses_remaining_budget_not_full_timeout(monkeypatch):
-    # Аудит A4-03: Whisper ждал полный ROUTE_MODEL_TIMEOUT_SEC вне бюджета маршрута.
+    # Audit A4-03: Whisper waited for the full ROUTE_MODEL_TIMEOUT_SEC outside the route budget.
     captured = {}
 
     class _FakeResp:
@@ -1650,8 +1655,8 @@ def test_transcribe_audio_uses_remaining_budget_not_full_timeout(monkeypatch):
 
 
 def test_transcribe_audio_capped_by_own_limit(monkeypatch):
-    # Аудит A2-12: транскрибация ждала остаток всего бюджета и морила модель —
-    # теперь отдельный меньший лимит поверх остатка.
+    # A2-12 audit: transcription waited for the remainder of the entire budget and starved the model —
+    # now a separate smaller limit on top of the remainder.
     import lumen_routes
     captured = {}
 
@@ -1687,8 +1692,8 @@ def test_transcribe_audio_capped_by_own_limit(monkeypatch):
 
 
 def test_munito_text_trims_history_with_summary_not_silent_cut(monkeypatch):
-    # Аудит A4-05: история резалась молчаливым срезом вместо _trim_history с саммари.
-    # Регрессия: саммари выпиливают (дорогой вызов) — и дальние ходы исчезают без следа.
+    # Audit A4-05: history was silently sliced instead of using _trim_history with a summary.
+    # Regression: summaries get cut (an expensive call) — and then long turns disappear without a trace.
     import lumen_chat_state
     chat_id = 999811
     answer = "ответ"
@@ -1722,8 +1727,8 @@ def test_munito_text_trims_history_with_summary_not_silent_cut(monkeypatch):
 
 
 def test_openai_turn_messages_carry_summary_authors_and_past_photo(monkeypatch):
-    # Память для модели: сводка в системном промпте, автор/время у реплик,
-    # прошлое фото отдельной репликой — модель видит его без слова «фото».
+    # Memory for the model: the summary in the system prompt, author/time for replies,
+    # the past photo as a separate reply — the model sees it without the word “photo.”
     chat_id = 999812
     state = bot.get_state(chat_id)
     now = time.time()
@@ -1759,8 +1764,8 @@ def test_openai_turn_messages_carry_summary_authors_and_past_photo(monkeypatch):
 
 
 def test_openai_turn_messages_respects_attach_past_and_skip(monkeypatch):
-    # Явная ссылка «покажи фото» уже едет текущим вложением: дубль прошлого фото
-    # не прикладываем; чужие file_id из текущего запроса тоже пропускаем.
+    # An explicit "show a photo" reference already travels as the current attachment: a duplicate of the previous photo
+    # do not attach them; also skip other people's file_id values from the current request.
     chat_id = 999815
     state = bot.get_state(chat_id)
     now = time.time()
@@ -1796,7 +1801,7 @@ def test_openai_turn_messages_respects_attach_past_and_skip(monkeypatch):
 
 
 def test_trimmed_summary_is_accepted_by_the_next_request(monkeypatch):
-    # Сводка не теряется между обрезкой и следующим запросом: она лежит в системе.
+    # The summary is not lost between truncation and the next request: it is kept in the system.
     import lumen_chat_state
     chat_id = 999816
     state = bot.get_state(chat_id)
@@ -1827,9 +1832,9 @@ def test_gemini_call_config_includes_memory_summary():
 
 @pytest.mark.parametrize("mode", ["text", "vision"])
 def test_munito_keeps_media_note_out_of_history(monkeypatch, mode):
-    # Пометка одноразовая (как у ask_gemini): в историю — чистый текст, иначе старые
-    # пометки всплывут в следующих ходах. У vision-ветки своя строка записи истории,
-    # поэтому проверяем оба входа.
+    # The marker is one-time (like ask_gemini): history gets clean text, otherwise old
+    # markers will surface on subsequent turns. The vision branch has its own history write line,
+    # so we check both inputs.
     async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "ответ"}}]}
 
@@ -1849,7 +1854,7 @@ def test_munito_keeps_media_note_out_of_history(monkeypatch, mode):
 
 
 def test_run_route_cleans_placeholder_on_cancel(monkeypatch):
-    # Аудит A4-06: отмена посреди ответа оставляла "…" в чате навсегда.
+    # Audit A4-06: cancellation mid-answer left "…" in the chat forever.
     placeholder = _FakeSentMessage()
 
     async def failed_stream(*args, **kwargs):
@@ -1874,7 +1879,8 @@ def test_run_route_cleans_placeholder_on_cancel(monkeypatch):
 
 
 def test_run_route_records_user_daily_on_gemini_success():
-    # Новое: _run_route — единственная воронка учёта; успех Gemini растит оба счётчика.
+    # Regression: _run_route ignored its head argument; Gemini therefore failed
+    #     over to itself.
     from types import SimpleNamespace
     chat_id = 999305
     incoming = _FakeIncomingMessage(chat_id)
@@ -1899,7 +1905,7 @@ def test_run_route_records_user_daily_on_gemini_success():
 
 
 def test_run_route_failure_records_no_user_daily():
-    # Новое, пара к предыдущему: неудачный вызов не считается.
+    # New, paired with the previous one: a failed call does not count.
     from types import SimpleNamespace
     chat_id = 999306
     incoming = _FakeIncomingMessage(chat_id)
@@ -1922,9 +1928,10 @@ def test_run_route_failure_records_no_user_daily():
 
 
 def test_run_route_keeps_route_block_order(monkeypatch):
-    # Что защищает: маршрут исполняется блоками в том порядке, как собран, а блоки
-    # одного провайдера не склеиваются в один вызов (аудит 27.10.2026: склейка
-    # уводила резерв вперёд независимого провайдера и съедала бюджет).
+    # What it protects: the route executes blocks in their assembled order, and blocks
+    # from one provider are not merged into one call (audit 27.10.2026: merging
+    # moved the fallback ahead of an independent provider and consumed its
+    # budget.
     import lumen_model_speed
     calls = []
 
@@ -1963,10 +1970,10 @@ def test_run_route_keeps_route_block_order(monkeypatch):
 
 
 def test_run_route_munito_answer_does_not_spend_gemini_user_limit():
-    # Что защищает: дневной лимит Gemini у пользователя. Регрессия: ответ Munito
-    # засчитался бы как Gemini, и несколько обычных сообщений запирали голос/видео
-    # и ссылки на сутки (аудит 27.10.2026 был про Gemma, с 05.11.2026 тот же смысл
-    # у Munito: он не тратит квоту Google).
+    # What it protects: the user's daily Gemini limit. Regression: a Munito answer
+    # would count as Gemini, and a few ordinary messages would lock voice/video
+    # and links for a day (the 27.10.2026 audit concerned Gemma; since 05.11.2026 the same meaning
+    # at Munito: it does not spend Google's quota).
     from types import SimpleNamespace
     chat_id = 999311
     incoming = _FakeIncomingMessage(chat_id)
@@ -1993,25 +2000,25 @@ def test_run_route_munito_answer_does_not_spend_gemini_user_limit():
 
 
 def test_handled_message_grows_provider_quota_user_daily_and_stats(rate_guard_setup, monkeypatch):
-    # Что защищает: воронку учёта после обработанного сообщения (квота
-    # провайдера + user_daily + суточные счётчики /stats одним проходом).
-    # Регрессия: тихий no-count при рефакторинге (не та модель, service-флаг не
-    # там, потеря вызова) — /stats показывает вечные нули, хотя ботом пользуются.
-    # Старые тесты мокают _run_route целиком (расход не проверяют) или проверяют
-    # только ask-уровень без user_daily/stats.
+    # What it protects: the accounting funnel after a processed message (quota
+    # provider + user_daily + daily /stats counters in one pass).
+    # Regression: a silent no-count after refactoring (the wrong model, a service flag not
+    # there, a lost call) — /stats shows permanent zeros even though people use the bot.
+    # Old tests mock the entire _run_route (they do not check usage) or check
+    # only the ask level, without user_daily/stats.
     from collections import deque
     message = rate_guard_setup()
     message.text = "привет, как дела?"
     monkeypatch.setattr(bot, "get_state", lambda cid: {"history": [], "ctx": deque()})
-    # Стриминг в тестах без сети: гасим попытки, дальше обычный текстовый путь.
+    # Streaming in tests without network: suppress attempts, then use the regular text path.
     monkeypatch.setattr(bot, "_try_gemini_streaming", AsyncMock(return_value=(None, None)))
     monkeypatch.setattr(bot, "_try_munito_streaming", AsyncMock(return_value=(None, None)))
 
     async def fake_munito_request(path, method="GET", *, json_body=None, deadline=None, **kwargs):
         return {"choices": [{"message": {"content": "Привет! Как сам?"}}]}
 
-    # Ключ включает Munito: без него _build_route отдаёт весь текст Gemini, и расход
-    # текстового провайдера перестал бы проверяться.
+    # The key includes Munito: without it, _build_route sends the entire text to Gemini, and usage
+    # of the text provider would stop being checked.
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     monkeypatch.setattr(bot, "_munito_request", fake_munito_request)
     before = dict(bot._stats_entry())
@@ -2022,12 +2029,12 @@ def test_handled_message_grows_provider_quota_user_daily_and_stats(rate_guard_se
         assert total_used == 1
         entry = bot.GLOBAL_QUOTA.get("user_daily", {}).get("456")
         assert entry is not None and entry["total"] == 1
-        # 05.11.2026: дневной лимит Gemini растёт только на ответы Gemini.
+        # 05.11.2026: the Gemini daily limit grows only for Gemini answers.
         assert entry["gemini"] == 0
         after = bot._stats_entry()
         assert after["messages_received"] - before.get("messages_received", 0) == 1
         assert after["answers_sent"] - before.get("answers_sent", 0) == 1
-        # Munito отвечает головой: резерв не вызывался, переключений нет.
+        # Munito answers with the head: the reserve was not called, and there are no switches.
         assert after.get("fallbacks", 0) == before.get("fallbacks", 0)
         assert after.get("all_failed", 0) == before.get("all_failed", 0)
     finally:
@@ -2035,9 +2042,10 @@ def test_handled_message_grows_provider_quota_user_daily_and_stats(rate_guard_se
 
 
 def test_run_route_counts_fallback_and_total_failure(monkeypatch):
-    # Что защищает: счётчики переключений на резерв и полного отказа маршрута.
-    # Регрессия: отказ провайдера не считается (забытый вызов в except) — /stats
-    # врёт про надёжность. Старые тесты проверяют только сам фолбэк/исключение.
+    # What this protects: counters of fallback switches and total route failure.
+    # Regression: a provider refusal is not counted (a forgotten call in except), so
+    # /stats
+    # lies about reliability. Old tests checked only the fallback/exception itself.
     from types import SimpleNamespace
     chat_id = 999307
     incoming = _FakeIncomingMessage(chat_id)
@@ -2064,7 +2072,7 @@ def test_run_route_counts_fallback_and_total_failure(monkeypatch):
     assert mid.get("all_failed", 0) == before.get("all_failed", 0)
 
     monkeypatch.setattr(bot, "ask_gemini", failing_gemini)
-    # Наверх идёт ошибка последнего блока: её маппит _route_error_reply_text.
+    # The last block's error propagates upward: _route_error_reply_text maps it.
     with pytest.raises(RuntimeError, match="и резерв сломан"):
         asyncio.run(bot._run_route(chat_id, "привет", route, incoming, allow_stream=False))
     after = bot._stats_entry()
@@ -2076,9 +2084,9 @@ def test_run_route_counts_fallback_and_total_failure(monkeypatch):
 
 
 def test_answers_are_counted_once_per_update(monkeypatch):
-    # Аудит 16.11.2026: ретрай после [[SEARCH]], повтор за свежестью и
-    # автопродолжение входят в _run_route повторно, и каждый успешный проход
-    # добавлял +1 к суточному лимиту. 30 сообщений съедались за 15.
+    # Audit 16.11.2026: a retry after [[SEARCH]], a freshness retry, and
+    # auto-continuation re-enter _run_route, and every successful pass
+    # added +1 to the daily limit. 30 messages were consumed in 15.
     from types import SimpleNamespace
 
     chat_id = 999308
@@ -2089,8 +2097,8 @@ def test_answers_are_counted_once_per_update(monkeypatch):
     saved_stats = dict(bot.GLOBAL_QUOTA.get("stats") or {})
 
     async def scenario() -> None:
-        # Оба прохода — в одной задаче, как в проде: contextvar живёт в контексте
-        # обработчика, а не в отдельном asyncio.run.
+        # Both passes run in one task, as in production: contextvar lives in the context
+        # of the handler, rather than in a separate asyncio.run.
         token = bot._ANSWER_COUNTED.set(False)
         try:
             await bot._run_route(chat_id, "раз", route, incoming)
@@ -2109,10 +2117,267 @@ def test_answers_are_counted_once_per_update(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
+def test_concurrent_text_messages_share_one_daily_slot(rate_guard_setup, monkeypatch):
+    # R2-09: separate chats could both pass the last-slot peek before either recorded success.
+    uid = 456
+    first = rate_guard_setup()
+    second = rate_guard_setup()
+    second.chat.id = 124
+    first.text = second.text = "привет"
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr("lumen_message_core.web_search_is_enabled", lambda: False)
+    calls = []
+
+    async def scenario() -> None:
+        async def fake_route(chat_id, ai_prompt, route, message, **kwargs):
+            calls.append(chat_id)
+            await asyncio.sleep(0)
+            bot._record_user_daily(uid)
+            return "ok", True
+
+        monkeypatch.setattr(bot, "_run_route", fake_route)
+        await asyncio.gather(
+            bot._handle_message_core(first, skip_rate_limit=True),
+            bot._handle_message_core(second, skip_rate_limit=True),
+        )
+
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+    try:
+        asyncio.run(scenario())
+        assert len(calls) == 1
+        entry = bot._user_daily_peek(uid)
+        assert entry is not None and entry["total"] == 1
+        bot._safe_reply.assert_awaited_once()
+        assert "Daily message limit" in bot._safe_reply.await_args.args[1]
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(123, None)
+        bot.chat_state.pop(124, None)
+
+
+def test_text_success_consumes_reserved_total_and_gemini_once(rate_guard_setup, monkeypatch):
+    # The existing deep success hook must consume the reservation, not add a second total.
+    message = rate_guard_setup()
+    message.text = "привет"
+    uid = message.from_user.id
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr("lumen_message_core.web_search_is_enabled", lambda: False)
+
+    async def fake_route(chat_id, ai_prompt, route, incoming, **kwargs):
+        bot._record_user_daily(uid, gemini=True)
+        bot._record_user_daily(uid, gemini=True)
+        return "ok", True
+
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+    try:
+        asyncio.run(bot._handle_message_core(message, skip_rate_limit=True))
+        entry = bot._user_daily_peek(uid)
+        assert entry is not None
+        assert (entry["total"], entry["gemini"]) == (1, 1)
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(123, None)
+
+
+def test_sequential_direct_core_calls_consume_one_reservation_each(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "привет"
+    uid = message.from_user.id
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 2)
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr("lumen_message_core.web_search_is_enabled", lambda: False)
+
+    async def fake_route(chat_id, ai_prompt, route, incoming, **kwargs):
+        if not bot._ANSWER_COUNTED.get():
+            bot._ANSWER_COUNTED.set(True)
+            bot._record_user_daily(uid)
+        return "ok", True
+
+    monkeypatch.setattr(bot, "_run_route", fake_route)
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+    token = bot._ANSWER_COUNTED.set(True)
+    try:
+        async def scenario():
+            await bot._handle_message_core(message, skip_rate_limit=True)
+            await bot._handle_message_core(message, skip_rate_limit=True)
+
+        asyncio.run(scenario())
+        entry = bot._user_daily_peek(uid)
+        assert entry is not None and entry["total"] == 2
+    finally:
+        bot._ANSWER_COUNTED.reset(token)
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(123, None)
+
+
+def test_text_model_failure_refunds_reservation(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "привет"
+    uid = message.from_user.id
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr("lumen_message_core.web_search_is_enabled", lambda: False)
+
+    async def fail_route(*args, **kwargs):
+        raise RuntimeError("probe model failure")
+
+    monkeypatch.setattr(bot, "_run_route", fail_route)
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+    try:
+        asyncio.run(bot._handle_message_core(message, skip_rate_limit=True))
+        entry = bot._user_daily_peek(uid)
+        assert entry is not None and entry["total"] == 0
+        replacement = bot._reserve_user_daily(uid, total=1)
+        assert replacement is not None
+        bot._refund_user_daily(uid, reservation=replacement, total=1)
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(123, None)
+
+
+def test_text_cancellation_refunds_reservation(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "привет"
+    uid = message.from_user.id
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr("lumen_message_core.web_search_is_enabled", lambda: False)
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+
+        async def wait_forever(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(bot, "_run_route", wait_forever)
+        task = asyncio.create_task(bot._handle_message_core(message, skip_rate_limit=True))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+    try:
+        asyncio.run(scenario())
+        entry = bot._user_daily_peek(uid)
+        assert entry is not None and entry["total"] == 0
+        replacement = bot._reserve_user_daily(uid, total=1)
+        assert replacement is not None
+        bot._refund_user_daily(uid, reservation=replacement, total=1)
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(123, None)
+
+
+def test_denied_text_reservation_skips_model_and_search(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "что нового сегодня"
+    uid = message.from_user.id
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr("lumen_message_core.web_search_is_enabled", lambda: True)
+    reserve_calls = []
+
+    def deny_reservation(user_id, *, total):
+        reserve_calls.append((user_id, total))
+        return None
+
+    model = AsyncMock()
+    search = AsyncMock()
+    monkeypatch.setattr(bot, "_reserve_user_daily", deny_reservation)
+    monkeypatch.setattr(bot, "_run_route", model)
+    monkeypatch.setattr("lumen_message_core._gather_web_evidence", search)
+    monkeypatch.setattr("lumen_message_core.fetch_web_snippets", search)
+    before = dict(bot._stats_entry())
+    try:
+        asyncio.run(bot._handle_message_core(message, skip_rate_limit=True))
+        assert reserve_calls == [(uid, 1)]
+        model.assert_not_awaited()
+        search.assert_not_awaited()
+        bot._safe_reply.assert_awaited_once()
+        assert "Daily message limit" in bot._safe_reply.await_args.args[1]
+        after = bot._stats_entry()
+        assert after["messages_received"] == before["messages_received"]
+        assert after["daily_limit_denials"] == before["daily_limit_denials"] + 1
+    finally:
+        bot.chat_state.pop(123, None)
+
+
+def test_text_capacity_refusal_is_not_reported_as_personal_limit(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "привет"
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr(bot, "_reserve_user_daily", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot, "_user_daily_admission_blocked", lambda _uid: True)
+    model = AsyncMock()
+    monkeypatch.setattr(bot, "_run_route", model)
+    try:
+        asyncio.run(bot._handle_message_core(message, skip_rate_limit=True))
+        model.assert_not_awaited()
+        bot._safe_reply.assert_awaited_once()
+        assert bot._safe_reply.await_args.args[1] == bot._model_error_text(
+            "fallback", bot._chat_lang(message.chat.id),
+        )
+    finally:
+        bot.chat_state.pop(123, None)
+
+
+def test_text_reservation_without_running_task_skips_paid_work(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "привет"
+    uid = message.from_user.id
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr("lumen_message_core.web_search_is_enabled", lambda: False)
+    monkeypatch.setattr("lumen_quotas._bind_user_daily_reservation", lambda *args: False)
+    model = AsyncMock()
+    monkeypatch.setattr(bot, "_run_route", model)
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+    try:
+        asyncio.run(bot._handle_message_core(message, skip_rate_limit=True))
+        model.assert_not_awaited()
+        entry = bot._user_daily_peek(uid)
+        assert entry is not None and entry["total"] == 0
+        bot._safe_reply.assert_awaited_once()
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(123, None)
+
+
+def test_text_early_return_after_reservation_refunds(rate_guard_setup, monkeypatch):
+    message = rate_guard_setup()
+    message.text = "что нового сегодня"
+    uid = message.from_user.id
+    monkeypatch.setattr(bot, "DAILY_USER_MESSAGE_LIMIT", 1)
+    monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
+    monkeypatch.setattr("lumen_message_core.web_search_is_enabled", lambda: True)
+    monkeypatch.setattr("lumen_message_core.StatusMessage.start", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        "lumen_message_core._gather_web_evidence",
+        AsyncMock(return_value=([], [], False, {})),
+    )
+    monkeypatch.setattr(bot, "_stream_stop_requested", lambda chat_id: True)
+    monkeypatch.setattr(bot, "_consume_stream_stop", lambda chat_id: None)
+    model = AsyncMock()
+    monkeypatch.setattr(bot, "_run_route", model)
+    bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+    try:
+        asyncio.run(bot._handle_message_core(message, skip_rate_limit=True))
+        model.assert_not_awaited()
+        entry = bot._user_daily_peek(uid)
+        assert entry is not None and entry["total"] == 0
+    finally:
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(123, None)
+
+
 def test_daily_limit_denial_counted_and_refused(rate_guard_setup, monkeypatch):
-    # Что защищает: счётчик отказов по дневному лимиту вместе с самим отказом.
-    # Регрессия: отказ есть, а счётчик не растёт — /stats врёт. Старые тесты
-    # проверяют только тексты отказов и фолбэк на резерв, но не счётчик.
+    # What it protects: the counter of refusals due to the daily limit, along with the refusal itself.
+    # Regression: a refusal exists but the counter does not grow; /stats lies. Old tests
+    # check only refusal texts and fallback to the reserve, but not the counter.
     message = rate_guard_setup()
     message.text = "привет, как дела?"
     monkeypatch.setattr(bot, "_resolve_incoming_media", AsyncMock(return_value=("", None)))
@@ -2132,11 +2397,11 @@ def test_daily_limit_denial_counted_and_refused(rate_guard_setup, monkeypatch):
 
 @pytest.mark.parametrize("with_usage", [True, False])
 def test_gemini_success_logs_token_usage(caplog, with_usage):
-    # Что защищает: единственную точку калибровки лимитов по логам для Gemini
+    # What it protects: the only calibration point for Gemini limits based on logs
     # (usage_metadata.prompt_token_count/candidates_token_count/total_token_count).
-    # Регрессия: тихий дроп usage при рефакторинге ask_gemini — счётчики пропадут из
-    # логов, лимиты не на чем калибровать. Старые тесты проверяют только текст/историю.
-    # Без usage от API строка [usage] не пишется, лог не засоряется пустышками.
+    # Regression: silent loss of usage during the ask_gemini refactor — counters would disappear from
+    # logs, there is nothing to calibrate limits against. Old tests checked only text/history.
+    # Without usage from the API, the [usage] line is not written, so the log is not cluttered with empty entries.
     import logging
     from types import SimpleNamespace
     chat_id = 999901
@@ -2170,10 +2435,10 @@ def test_gemini_success_logs_token_usage(caplog, with_usage):
 
 
 def test_munito_success_logs_token_usage_when_api_returns_it(caplog, monkeypatch):
-    # Что защищает: точку калибровки лимитов для текстового провайдера (поле
-    # usage.prompt_tokens/completion_tokens/total_tokens — общий цикл
-    # _chat_completion_chain). Регрессия: потеря usage при правках цикла. Старые
-    # тесты мокают ответы без usage и строку [usage] не ищут.
+    # What it protects: the limit calibration point for the text provider (field
+    # usage.prompt_tokens/completion_tokens/total_tokens: the shared loop
+    # _chat_completion_chain). Regression: usage was lost during loop changes. Old
+    # tests mock responses without usage and do not look for the [usage] line.
     import logging
     chat_id = 999903
 
@@ -2196,8 +2461,8 @@ def test_munito_success_logs_token_usage_when_api_returns_it(caplog, monkeypatch
 
 
 def test_run_route_empty_stream_after_stop_does_not_spend_slot(monkeypatch):
-    # Аудит 16.11.2026: остановка до первого куска отдавала пустой ответ, но
-    # слот дневного лимита уже списывался.
+    # Audit 16.11.2026: stopping before the first chunk returned an empty response, but
+    # the daily-limit slot had already been deducted.
     chat_id = 999305
     placeholder = _FakeSentMessage()
     recorded = []

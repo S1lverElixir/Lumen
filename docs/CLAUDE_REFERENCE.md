@@ -1,264 +1,267 @@
-# Эталон Claude: что доказано и чем
+# Claude reference: what is proven and how
 
-Собран 16.11.2026 четырьмя независимыми агентами по архивным снимкам официальной
-документации и живым страницам продукта. Каждое утверждение помечено типом:
+Compiled on 16.11.2026 by four independent agents from archived snapshots of official
+documentation and live product pages. Every claim is marked by type:
 
-- `документ` — официальная страница Anthropic/Claude, ссылка и дата снимка;
-- `наблюдение` — то, что видно в коде, логах или живой странице без аккаунта;
-- `предположение` — вывод по механике, прямого утверждения нет. В финале паритета
-  таких быть не должно: либо доказать, либо снять.
+- `document` — an official Anthropic/Claude page, with a link and snapshot date;
+- `observation` — something visible in code, logs, or a live page without an account;
+- `inference` — a conclusion from mechanics, with no direct statement. The final parity
+  record should contain none of these: either prove them or remove them.
 
-Геоблок: `platform.claude.com` из Беларуси отдаёт редирект на
-`anthropic.com/app-unavailable-in-region`. Рабочий путь — архивный снимок:
-`https://web.archive.org/web/<timestamp>/https://platform.claude.com/docs/en/<путь>`.
-Снимки ниже проверены на 200.
+Geographic block: `platform.claude.com` from Belarus redirects to
+`anthropic.com/app-unavailable-in-region`. The working path is an archived snapshot:
+`https://web.archive.org/web/<timestamp>/https://platform.claude.com/docs/en/<path>`.
+The snapshots below were verified to return 200.
 
-## 1. Веб-поиск
+## 1. Web search
 
-Источники: `agents-and-tools/tool-use/web-search-tool` @ 20261115132940 и
+Sources: `agents-and-tools/tool-use/web-search-tool` @ 20261115132940 and
 20260802060611; `build-with-claude/search-results` @ 20261110101637;
 `agents-and-tools/tool-use/server-tools` @ 20261114070156.
 
-`документ`:
+`document`:
 
-- Версии инструмента: `web_search_20250305` (базовая), `web_search_20260209` (плюс
-  динамическая фильтрация кодом), `web_search_20260318` (плюс `response_inclusion`).
-- Параметры: `max_uses` (лимит поисков в ходе; дефолт в документах не назван;
-  неудачные поиски считаются), `allowed_domains`/`blocked_domains` (взаимоисключающие,
-  иначе 400; поддомены входят, путь поддерживается только в поиске), `user_location`
-  (`approximate` плюс минимум одно из city/region/country/timezone),
-  `allowed_callers` (на `_20260209`+ по умолчанию code execution), `response_inclusion`
-  (`full` по умолчанию).
-- Цитаты включены ВСЕГДА: `web_search_result_location` с `url`, `title`,
-  `encrypted_index`, `cited_text` до 150 символов. Поля цитаты не тарифицируются.
-- Результат: `web_search_result` с `url`, `title`, `page_age` (когда сайт обновлён),
-  `encrypted_content` (обязателен к возврату, иначе 400).
-- Ошибки приходят внутри HTTP 200: `too_many_requests`, `invalid_tool_input`,
+- Tool versions: `web_search_20250305` (base), `web_search_20260209` (plus dynamic
+  filtering with code), `web_search_20260318` (plus `response_inclusion`).
+- Parameters: `max_uses` (search limit per turn; the default is not stated in the
+  documentation; failed searches count), `allowed_domains`/`blocked_domains` (mutually
+  exclusive, otherwise 400; subdomains are included, and paths are supported only in
+  search), `user_location` (`approximate` plus at least one of city/region/country/timezone),
+  `allowed_callers` (on `_20260209`+ it defaults to code execution), `response_inclusion`
+  (`full` by default).
+- Citations are ALWAYS included: `web_search_result_location` with `url`, `title`,
+  `encrypted_index`, and `cited_text` up to 150 characters. Citation fields are not billed.
+- Result: `web_search_result` with `url`, `title`, `page_age` (when the site was updated),
+  `encrypted_content` (required in the response, otherwise 400).
+- Errors arrive inside HTTP 200: `too_many_requests`, `invalid_tool_input`,
   `max_uses_exceeded`, `query_too_long`, `request_too_large`, `unavailable`.
-  Пустая выдача — пустой `content`, не ошибка.
-- Длинный ход может вернуться со `stop_reason: "pause_turn"` и продолжиться тем же
-  сообщением с тем же набором tools.
-- Цена: 10 долларов за 1000 поисков плюс токены; результаты в следующих ходах
-  считаются входными токенами; один поиск = одна единица независимо от числа результатов.
-- Когда ищет: свежие события и новости; текущие цены, ставки, счета, статистика;
-  информация об организациях, людях, продуктах, которая могла измениться; явная
-  просьба поискать. Не ищет: устойчивые факты, математика, наука, код; творчество;
-  анализ уже присланного; приветствия. Управляется системным промптом.
-- Объём: «Single-fact queries typically use 1–3 searches; comparative or multientity
-  research can use 10 or more».
-- Динамическая фильтрация (статья `claude.com/resources/articles/
-  improved-web-search-with-dynamic-filtering`, 17.02.2026): модель пишет и исполняет
-  код, который отсеивает выдачу до контекста. Замер: +11 % точности в среднем,
-  −24 % входных токенов. BrowseComp: Sonnet 4.6 33.3→46.6, Opus 4.6 45.3→61.6.
+  Empty results mean empty `content`, not an error.
+- A long turn can return with `stop_reason: "pause_turn"` and continue with the same
+  message and the same tool set.
+- Price: $10 per 1,000 searches plus tokens; results in subsequent turns count as input
+  tokens; one search equals one unit regardless of the number of results.
+- When it searches: current events and news; current prices, rates, balances, and
+  statistics; information about organizations, people, and products that may have
+  changed; an explicit search request. It does not search for stable facts, mathematics,
+  science, or code; creative work; analysis of already supplied material; or greetings.
+  It is controlled by the system prompt.
+- Volume: “Single-fact queries typically use 1–3 searches; comparative or multientity
+  research can use 10 or more”.
+- Dynamic filtering (article `claude.com/resources/articles/
+  improved-web-search-with-dynamic-filtering`, 17.02.2026): the model writes and runs
+  code that filters results before they enter the context. Measurement: +11% average
+  accuracy, −24% input tokens. BrowseComp: Sonnet 4.6 33.3→46.6, Opus 4.6 45.3→61.6.
   DeepsearchQA (F1): Sonnet 52.6→59.4, Opus 69.8→77.3.
 
-Что это значит для Lumen (разрывы):
+What this means for Lumen (gaps):
 
-- Потолок 1 поиск на `medium` и 2 на `high`/`xhigh` ниже даже простого фактического
-  вопроса (1–3). Исправлено 16.11.2026: `medium` 2, `high` 2, `xhigh` 3 при жёстком
-  потолке фазы 45 с; дальнейшее (3 на high) требует пересчёта бюджета сообщения.
-- Цитаты у Claude привязаны к утверждению и несут цитируемый фрагмент; у Lumen —
-  блок «Источники» в конце. Форму решать по эталону с учётом Telegram.
-- Провенанс URL: Claude разрешает чтение только URL из сообщения человека, из
-  клиентских tool results и из прошлых поисков/чтений; URL, придуманный моделью,
-  читать нельзя. Это правило копировать в `read_page`.
-- Ошибки одного источника не должны ронять весь блок: у Claude ошибка живёт внутри
-  результата, у Lumen слои уже изолированы, проверить это тестом.
+- The cap of 1 search at `medium` and 2 at `high`/`xhigh` is below even a simple factual
+  question (1–3). Fixed on 16.11.2026: `medium` 2, `high` 2, `xhigh` 3 with a hard phase
+  cap of 45 s; going further (3 at high) requires recalculating the message budget.
+- Claude's citations are tied to claims and include the quoted fragment; Lumen has a
+  “Sources” block at the end. The form must be decided against the reference while
+  accounting for Telegram.
+- URL provenance: Claude permits reading only URLs from the person's message, client
+  tool results, and previous searches/reads. A URL invented by the model cannot be read.
+  This rule is implemented in `read_page`; only URLs already present in approved context are fetched.
+- A single source failure must not bring down the entire block: Claude keeps the error
+  inside the result, while Lumen's layers are already isolated; verify this with a test.
 
-## 2. Чтение страниц
+## 2. Page reading
 
-Источник: `agents-and-tools/tool-use/web-fetch-tool` @ 20261114173552;
+Source: `agents-and-tools/tool-use/web-fetch-tool` @ 20261114173552;
 `tool-combinations` @ 20261109204930.
 
-`документ`:
+`document`:
 
-- Версии: `web_fetch_20250910`, `_20260209` (динамическая фильтрация), `_20260309`
-  (кэш), `_20260318` (`response_inclusion`).
-- `max_uses` — потолка по умолчанию нет, неудачные чтения считаются.
-- `max_content_tokens` — обрезка текста (не бинарных PDF), лимит приблизительный.
-- `citations` по умолчанию ВЫКЛЮЧЕНЫ, включаются `{"enabled": true}`.
-- Типы содержимого: текст, HTML, PDF. JS-рендеринг не поддерживается.
-- Домены: `allowed_domains`/`blocked_domains` взаимоисключающие; для чтения сверяется
-  только домен, запись с путём не срабатывает.
-- Провенанс URL: нельзя читать URL, встречавшийся только в выводе модели или только
-  в системном промпте. Разрешены сообщение человека, клиентские tool results и прошлые
-  web search/fetch. `url_sources` управляет тремя источниками (`user_input`,
-  `client_tool_results`, `server_tool_results`), по умолчанию все `all`.
-- Стоимость: доплаты нет, только токены. Ориентиры: страница ~10 кБ ≈ 2500 токенов;
-  документация ~100 кБ ≈ 25 000; PDF ~500 кБ ≈ 125 000.
-- Связка с поиском: «search surfaces candidate URLs; fetch retrieves full page
-  content» — сначала выбрать 2–3 сниппета, потом читать.
+- Versions: `web_fetch_20250910`, `_20260209` (dynamic filtering), `_20260309`
+  (cache), `_20260318` (`response_inclusion`).
+- `max_uses` — no default cap; failed reads count.
+- `max_content_tokens` — text truncation (not for binary PDFs); the limit is approximate.
+- `citations` are OFF by default and enabled with `{"enabled": true}`.
+- Content types: text, HTML, PDF. JavaScript rendering is not supported.
+- Domains: `allowed_domains`/`blocked_domains` are mutually exclusive; only the domain
+  is checked for reading, and a path entry does not work.
+- URL provenance: a URL that appeared only in model output or only in the system prompt
+  cannot be read. The person's message, client tool results, and previous web search/fetch
+  are allowed. `url_sources` controls three sources (`user_input`,
+  `client_tool_results`, `server_tool_results`), with all set to `all` by default.
+- Cost: no surcharge, only tokens. Reference points: a page of ~10 KB ≈ 2,500 tokens;
+  documentation of ~100 KB ≈ 25,000; PDF of ~500 KB ≈ 125,000.
+- Search integration: “search surfaces candidate URLs; fetch retrieves full page
+  content” — first select 2-3 snippets, then read.
 
-Что это значит для Lumen: главный разрыв закрыт 16.11.2026. Бот видел только обрезки
-по 300 символов и блок на 2000 символов, теперь в агентном цикле есть `read_page`:
-защищённый маршрут `/read` в прокси (публичный https, проверка адресов после DNS,
-без редиректов, только текст, кап 2 МБ), обрезка текста `READ_PAGE_MAX_CHARS`,
-провенанс URL как у Claude и деградация к сниппетам при любом сбое.
+What this means for Lumen: the main gap was closed on 16.11.2026. The bot previously saw
+only 300-character excerpts and a 2,000-character block; the agent loop now has `read_page`:
+a protected `/read` route in the proxy (public https, address checks after DNS resolution,
+no redirects, text only, 2 MB cap), text truncation via `READ_PAGE_MAX_CHARS`, the same URL
+provenance as Claude, and fallback to snippets on any failure.
 
-## 3. Усилие (effort) и размышление
+## 3. Effort and thinking
 
-Источники: `build-with-claude/effort` @ 20261112131514; `build-with-claude/thinking`
+Sources: `build-with-claude/effort` @ 20261112131514; `build-with-claude/thinking`
 @ 20261113181315; `extended-thinking` @ 20261115091709; `task-budgets` @
 20261111140034; support `using-extended-thinking` @ 20250918072953.
 
-`документ`:
+`document`:
 
-- Пять уровней по убыванию: `max`, `xhigh`, `high`, `medium`, `low`.
-- Дефолт `high` на каждой модели с усилием, кроме Opus 5.5 и Haiku 5.5 — у них `medium`.
-- `max` — без ограничений на токены, есть не у всех моделей; `xhigh` — долгие задачи
-  (30+ минут), тоже не у всех. Не всякая модель с `max` поддерживает `xhigh`.
-- Усилие влияет на ВСЕ токены ответа: текст и объяснения, вызовы инструментов и их
-  аргументы, размышление. «Lower effort also means fewer and terser tool calls»:
-  меньше вызовов, несколько операций в одном, без преамбулы.
-- Длину видимого ответа усилие НЕ регулирует: «Effort controls thinking volume, not
-  visible response length… prompt for length instead» (Opus 5, Fable 5.2).
-- «Effort is a behavioral signal, not a strict token budget».
-- Усилие задаётся в `output_config.effort`; `adaptive` — режим размышления, не уровень.
-- Ручной `thinking: {type: enabled, budget_tokens: N}` на 4.7+ отвергается с 400.
-- Менять усилие посреди разговора можно: новым `output_config` (сбрасывает кэш) или
-  per-message effort (beta-заголовок, кэш сохраняется).
-- `max_tokens` — жёсткий потолок всего вывода (размышление плюс текст); усилие —
-  мягкая рекомендация.
-- Человек видит индикатор «Thinking» с таймером и разворачиваемый блок, по клику —
-  резюме хода мысли. Сырое рассуждение не отдаётся никогда; `display`: `summarized`,
-  `omitted` (дефолт у линейки 5.x), `updates` (beta).
-- Практика: `high` почти везде как старт; `medium` — для Opus 5.5/Haiku 5.5; `xhigh`
-  для кодинга и агентных задач; `max` — редко. Настройки между моделями не переносить,
-  уровни перекалиброваны.
-- Строка «Thought for Ns» в документах не найдена (`наблюдение`): доказан индикатор
-  с таймером и свёрнутый блок, точная формулировка — `предположение`.
+- Five levels in descending order: `max`, `xhigh`, `high`, `medium`, `low`.
+- Default `high` on every model with effort, except Opus 5.5 and Haiku 5.5, which use `medium`.
+- `max` — no token limit, and not available on every model; `xhigh` — long tasks
+  (30+ minutes), also not available on every model. Not every model with `max` supports `xhigh`.
+- Effort affects ALL response tokens: text and explanations, tool calls and their
+  arguments, and thinking. “Lower effort also means fewer and terser tool calls”:
+  fewer calls, several operations in one, and no preamble.
+- Effort does NOT regulate visible response length: “Effort controls thinking volume, not
+  visible response length… prompt for length instead” (Opus 5, Fable 5.2).
+- “Effort is a behavioral signal, not a strict token budget”.
+- Effort is set in `output_config.effort`; `adaptive` is a thinking mode, not a level.
+- Manual `thinking: {type: enabled, budget_tokens: N}` on 4.7+ is rejected with 400.
+- Effort can be changed mid-conversation: through a new `output_config` (which resets
+  the cache) or per-message effort (beta header; the cache is preserved).
+- `max_tokens` is a hard cap on all output (thinking plus text); effort is a soft recommendation.
+- The person sees a “Thinking” indicator with a timer and an expandable block; clicking
+  it shows a summary of the thought process. Raw reasoning is never returned; `display`:
+  `summarized`, `omitted` (default for the 5.x lineup), `updates` (beta).
+- Practice: `high` is the starting point almost everywhere; `medium` for Opus 5.5/Haiku 5.5;
+  `xhigh` for coding and agent tasks; `max` rarely. Settings must not be transferred
+  between models; levels are recalibrated.
+- The string “Thought for Ns” was not found in the documentation (`observation`): an
+  indicator with a timer and an expandable block are proven; the exact wording is an `inference`.
 
-Что это значит для Lumen (главный вывод): шкала сдвинута на шаг вниз. У Claude дефолт
-`high`, у Lumen дефолт `medium`, поэтому модель реже вызывает инструменты и делает
-один поиск там, где Claude сделал бы три. Правка: дефолт `high` для содержательных
-вопросов, `medium` для коротких реплик, `low` для болтовни; `max` не заводить
-(у бесплатных голов на замере `xhigh` уже опустошал вывод на логической задаче).
-Длину ответа усилием не регулировать — только промптом. Это совпадает с текущим
-промптом, проверить, что код не переопределяет длину через усилие.
+What this means for Lumen (main conclusion): the scale is shifted one step down. Claude
+defaults to `high`, while Lumen defaults to `medium`, so the model calls tools less often
+and performs one search where Claude would perform three. Change: default `high` for
+substantive questions, `medium` for short replies, and `low` for small talk; do not introduce
+`max` (on the free heads measured, `xhigh` already depleted the output on a logic problem).
+Do not regulate response length through effort — only through the prompt. This matches
+the current prompt; verify that the code does not override length through effort.
 
-## 4. Изображения и документы на входе
+## 4. Input images and documents
 
-Источники: `build-with-claude/vision` @ 20261110213423; `files` @ 20261114001715;
+Sources: `build-with-claude/vision` @ 20261110213423; `files` @ 20261114001715;
 `pdf-support` @ 20261115194528; support `how-do-usage-and-length-limits-work`.
 
-`документ`:
+`document`:
 
-- Передача: base64, URL, `file_id`. Форматы JPEG/PNG/GIF/WebP, анимация не
-  поддерживается (первый кадр). До 8000×8000 px, 10 МБ base64 (на claude.ai 10 МБ).
-- Число картинок: 20 на сообщение на claude.ai; в API 100 на запрос при окне 200k,
-  600 для остальных; сверх 20 включается более строгий лимит по стороне (~3000 px).
-- «Claude has access to every image from earlier turns, so follow-up questions such
+- Input: base64, URL, `file_id`. Formats JPEG/PNG/GIF/WebP; animation is not supported
+  (first frame). Up to 8000×8000 px, 10 MB in base64 (10 MB on claude.ai).
+- Number of images: 20 per message on claude.ai; 100 per API request with a 200k window,
+  600 for other windows; above 20, a stricter dimension limit applies (~3,000 px).
+- “Claude has access to every image from earlier turns, so follow-up questions such
   as "Are these similar to the first two?" work without including the earlier images
-  again in the new turn». Модель говорит о картинках словами («первые две»).
-- API статусен: клиент переотправляет историю, и картинки снова считаются в лимит.
-- Метаданные картинок модель не получает.
-- Токены: патчи 28×28; длинная сторона до 1568 px (~до 1568 визуальных токенов);
-  высокое разрешение (4.7+) до 2576 px и 4784 токенов.
-- Сжатие контекста заменяет старые ходы текстовым резюме; судьба картинок в
-  документах не описана (`предположение`: остаются только в тексте резюме).
-- PDF: до 600 страниц, 128 МБ на запрос, без пароля; страница идёт и текстом, и
-  изображением; 1500–3000 токенов на страницу плюс стоимость страницы как картинки;
-  у документов есть цитирование, у картинок нет.
+  again in the new turn”. The model refers to images in words (“the first two”).
+- The API is stateless: the client resends history, and images count toward the limit again.
+- The model does not receive image metadata.
+- Tokens: 28×28 patches; long side up to 1,568 px (~up to 1,568 visual tokens);
+  high resolution (4.7+) up to 2,576 px and 4,784 tokens.
+- Context compression replaces old turns with a text summary; the fate of images is
+  not described in the documentation (`inference`: they remain only in the summary text).
+- PDF: up to 600 pages, 128 MB per request, no password; each page is sent as both text
+  and an image; 1,500-3,000 tokens per page plus the page cost as an image; documents
+  support citations, images do not.
 
-Что это значит для Lumen:
+What this means for Lumen:
 
-- Сейчас в контекст едут до двух прошлых фото в пределах 30 сообщений. У Claude —
-  все картинки переписки. Нужен пересмотр с арифметикой токенов: держать `file_id`
-  всех фото, подкладывать больше (например 4–6 последних) и добирать по явной ссылке
-  («то фото», «первое»), а не только по давности.
-- Картинка в ответе на «найди похожие» должна работать без повторной присылки.
-- PDF: у Lumen документы идут через Gemini; проверить страницы/размер и что текст
-  и таблицы не теряются.
+- Up to two earlier photos within 30 messages currently enter the context. Claude has all
+  images in the conversation. This needs review with token arithmetic: retain `file_id`
+  for all photos, include more (for example, the latest 4-6), and add more on an explicit
+  reference (“that photo,” “the first one”), not only based on age.
+- An image in response to “find similar ones” should work without the user sending it again.
+- PDF: Lumen sends documents through Gemini; check page/size limits and that text and
+  tables are not lost.
 
-## 5. Прерывание ответа
+## 5. Response interruption
 
-Источники: Claude Code `interactive-mode` @ живой; Claude Desktop changelog
-v1.32885.1 (18.08.2026) и v4.29.0 (27.10.2026); Claude Tag `how-it-works`.
+Sources: Claude Code `interactive-mode` @ live; Claude Desktop changelog
+v1.32885.1 (18.08.2026) and v4.29.0 (27.10.2026); Claude Tag `how-it-works`.
 
-`документ`:
+`document`:
 
-- Claude Code: `Esc` останавливает текущий ответ или вызов инструмента, «Claude keeps
-  the work done so far»; очередь сообщений сохраняется и уходит сразу.
-- Claude Desktop: Escape в панели закрывает панель, второй Escape останавливает ответ.
-  Исправлено: остановленный первый ответ больше не блокирует чат (v4.29.0), сообщение,
-  отправленное сразу после остановки, не возвращается в поле ввода.
-- Claude Tag в Slack: на индикаторе есть Stop; Claude прекращает работу, сохраняет
-  сессию и пишет строку о том, кто остановил.
-- Официальной статьи про кнопку Stop в claude.ai нет; расход лимита за прерванный
-  ответ в документах не описан (`наблюдение`).
+- Claude Code: `Esc` stops the current response or tool call; “Claude keeps
+  the work done so far”; the message queue is preserved and sent immediately.
+- Claude Desktop: Escape in a panel closes the panel; a second Escape stops the response.
+  Fixed: the stopped first response no longer blocks the chat (v4.29.0), and a message
+  sent immediately after the stop is not returned to the input field.
+- Claude Tag in Slack: the indicator has a Stop button; Claude stops work, preserves the
+  session, and writes a line stating who stopped it.
+- There is no official article about the Stop button in claude.ai; quota consumption for
+  an interrupted response is not described in the documentation (`observation`).
 
-Что это значит для Lumen: прерывание реализовано 16.11.2026 как команда `/stop`
-(кнопка — следующий шаг): флаг на чат, цикл стрима проверяет его до и после каждого
-куска, частичный текст остаётся и ложится в историю, добавляется локализованная
-пометка, автопродолжение не запускается. Остановить может автор вопроса или
-владелец, чужой вызов молча игнорируется; в меню команды нет, выключатель
-`STOP_COMMAND_ENABLED`. Расход квоты за прерванный ответ: стрим до остановки не
-успевает списать лимит (флаг «один апдейт — одно списание» ставится только на
-успешном ответе), и это осознанно: человек не получил полного ответа. Доказательств,
-как поступает Claude, нет — запись в эталоне помечена как наблюдение.
+What this means for Lumen: interruption was implemented on 16.11.2026 as the `/stop`
+command and the always-on inline Stop button: a per-chat flag, with the streaming loop checking
+it before and after each chunk; partial text remains and is stored in history; a localized
+notice is added; automatic continuation is not started. The question's author or the owner
+can stop it; another person's call is silently ignored; the command is not in the menu,
+with the `STOP_COMMAND_ENABLED` switch. Quota consumption for an interrupted response:
+the stream does not have time to charge the limit before the stop (the “one update,
+one charge” flag is set only on a successful response), and this is intentional: the
+person did not receive a complete response. There is no evidence of how Claude handles
+this; the reference entry is marked as an observation.
 
-## 6. Системный промпт Claude.ai
+## 6. Claude.ai system prompt
 
-Источники: `release-notes/system-prompts` @ 20260822083035 (Opus 5, 24.07.2026) и
-markdown-вариант @ 20260625112313; support `personalization`.
+Sources: `release-notes/system-prompts` @ 20260822083035 (Opus 5, 24.07.2026) and
+markdown variant @ 20260625112313; support `personalization`.
 
-`документ`:
+`document`:
 
-- Разметка: XML-теги внутри одного корневого блока, внутри — проза. Порядок Opus 5:
+- Markup: XML tags inside one root block, with prose inside. Opus 5 order:
   `product_information`, `fable_safeguards_routing`, `default_stance`,
-  `refusal_handling` (внутри `critical_child_safety_instructions`),
+  `refusal_handling` (inside `critical_child_safety_instructions`),
   `legal_and_financial_advice`, `tone_and_formatting`, `user_wellbeing`,
   `anthropic_reminders`, `evenhandedness`, `responding_to_mistakes_and_criticism`,
-  `knowledge_cutoff`; вне корня — `tone_preference`.
-- `currentDateTime` подставляется шаблоном.
-- Раздела про веб-поиск и правил цитирования в промпте НЕТ (проверено grep по всем
-  записям 2026 года). Вместо этого `knowledge_cutoff`: если факт может устареть,
-  Claude говорит об этом и направляет человека включить поиск.
-- Правила ответа на языке пользователя в промпте 2026 года НЕТ (было в 2024-м).
-- Клаузы про эмодзи в Opus 5 НЕТ (была в 4.5–4.8: «does not use emojis unless the
-  person asks or their immediately prior message contains one»).
-- Тон и формат: «keeps responses focused, brief, and concise»; «avoids over-formatting
-  with bold emphasis, headers, lists… minimum formatting needed for clarity»;
-  «Bullets are at least 1-2 sentences unless the person requests otherwise»;
-  «Claude never uses bullet points when declining a task»; «warm tone… assumes the
-  person is a capable adult»; запрет слов-филлеров «genuinely/honestly/actually».
-- Проза по умолчанию: «responds in prose rather than lists or bullets unless asked»;
-  списки — только по просьбе или когда контент многосоставный.
-- Таблицы в промпте не упоминаются вовсе (ни предписаны, ни запрещены).
-- Отказы: «defaults to helping», отказ только при конкретном серьёзном вреде;
-  «If Claude finds itself mentally reframing a request to make it appropriate, that
-  reframing is the signal to REFUSE».
-- Файл: «A prompt implying a file is present doesn't mean one is… so Claude checks for
-  itself» — совпадает с правилом Lumen.
-- Артефакты и инструменты: отдельных блоков про artifacts нет; про tools — `tool_search`
-  и порядок «сначала найти инструмент, потом спрашивать человека».
+  `knowledge_cutoff`; `tone_preference` is outside the root.
+- `currentDateTime` is inserted by the template.
+- There is NO web search section or citation rules in the prompt (verified with grep
+  across all 2026 entries). Instead, `knowledge_cutoff`: if a fact may be outdated,
+  Claude says so and directs the person to enable search.
+- There are NO rules for responding in the user's language in the 2026 prompt (there were in 2024).
+- There are NO emoji clauses in Opus 5 (they were in 4.5-4.8: “does not use emojis unless the
+  person asks or their immediately prior message contains one”).
+- Tone and format: “keeps responses focused, brief, and concise”; “avoids over-formatting
+  with bold emphasis, headers, lists… minimum formatting needed for clarity”;
+  “Bullets are at least 1-2 sentences unless the person requests otherwise”;
+  “Claude never uses bullet points when declining a task”; “warm tone… assumes the
+  person is a capable adult”; the filler words “genuinely/honestly/actually” are banned.
+- Prose by default: “responds in prose rather than lists or bullets unless asked”;
+  lists only on request or when the content is composite.
+- Tables are not mentioned in the prompt at all (neither prescribed nor prohibited).
+- Refusals: “defaults to helping”; refusal only for specific serious harm;
+  “If Claude finds itself mentally reframing a request to make it appropriate, that
+  reframing is the signal to REFUSE”.
+- File: “A prompt implying a file is present doesn't mean one is… so Claude checks for
+  itself” — matches Lumen's rule.
+- Artifacts and tools: there are no separate artifact blocks; the tools section has `tool_search`
+  and the order “find the tool first, then ask the person”.
 
-Что это значит для Lumen (этап 7):
+What this means for Lumen (stage 7):
 
-- Lumen держит один плоский английский блок на 137 строк с разделами заголовками.
-  Структуру можно привести к тегам/коротким разделам, но переписывать только с замером
-  персоны: текущая форма даёт 50/50 на 25 вопросах.
-- У Lumen есть явные разделы CURRENT INFORMATION и RESPONSE LANGUAGE, которых у
-  Claude нет. Для Telegram-бота с 25 языками и внешним блоком сниппетов это осознанное
-  отличие: оставить, но проверить, не противоречат ли они друг другу и не дублируют ли
-  правила инструментов.
-- Правило «эмодзи по умолчанию запрещены» у Lumen строже Opus 5 и совпадает с 4.5–4.8.
-  Решение владельца: оставить (текущая персона от этого выигрывает) — записать как
-  принятое отличие, а не разрыв.
-- Проза по умолчанию, минимум форматирования, списки по 1–2 предложения, запрет
-  филлеров, «assume a capable adult» — у Lumen уже есть; сверить формулировки.
-- Запрет списков в отказе у Lumen не сформулирован: добавить, если замер покажет,
-  что модель перечисляет причины отказа.
-- Длину ответа задаёт промпт, а не усилие: у Lumen это уже так, проверить код.
+- Lumen uses one flat English block of 137 lines with sections and headings.
+  The structure could be changed to tags or short sections, but only with persona
+  measurements: the current form scores 50/50 on 25 questions.
+- Lumen has explicit CURRENT INFORMATION and RESPONSE LANGUAGE sections that Claude
+  does not. For a Telegram bot with 25 languages and an external snippet block, this is
+  an intentional difference: keep them, but verify that they do not contradict each
+  other or duplicate tool rules.
+- Lumen's “emojis are prohibited by default” rule is stricter than Opus 5 and matches
+  4.5-4.8. Owner decision: keep it (the current persona benefits from it) and record it
+  as an accepted difference, not a gap.
+- Prose by default, minimal formatting, lists of 1-2 sentences, no filler, and “assume a
+  capable adult” are already in Lumen; compare the wording.
+- Lumen has no explicit ban on lists in refusals: add one if measurements show that the
+  model lists reasons for refusing.
+- The prompt controls response length, not effort: this is already true in Lumen;
+  verify the code.
 
-## 7. Что осталось непроверенным
+## 7. What remains unverified
 
-- Официальной статьи про кнопку Stop в claude.ai нет; расход квоты за прерванный ответ
-  не описан.
-- Судьба картинок при сжатии контекста в документах не описана.
-- Дефолт `max_uses` у web_search в документах не назван; лимит результатов на один
-  поиск и таймауты там же не описаны.
-- Дефолт `max_content_tokens` у web_fetch не назван (в примере 100000, это пример).
-- Точный текст «Thought for Ns» не подтверждён документами.
-- Актуальные бесплатные тарифы Tavily/Brave/Exa и возможность регистрации из Беларуси
-  требуют отдельной проверки перед покупкой ключа.
+- There is no official article about the Stop button in claude.ai; quota consumption for
+  an interrupted response is not described.
+- The fate of images during context compression is not described in the documentation.
+- The default `max_uses` for web_search is not stated in the documentation; per-search
+  result limits and timeouts are not described there either.
+- The default `max_content_tokens` for web_fetch is not stated (100000 in the example is just an example).
+- The exact text “Thought for Ns” is not confirmed by the documentation.
+- Current free tiers for Tavily/Brave/Exa and the ability to register from Belarus require
+  separate verification before buying a key.

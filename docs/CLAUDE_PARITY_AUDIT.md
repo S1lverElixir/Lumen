@@ -1,550 +1,541 @@
-# Claude-паритет: аудит всех пользовательских поверхностей (11.11.2026)
+# Claude parity: audit of all user-facing surfaces (11.11.2026)
 
-Проверялось всё, что видит человек в Telegram: команды и их описания, профиль бота,
-каждая фиксированная строка во всех 25 языках, каждый статус-этап и анимация,
-системный промпт построчно, путь веб-поиска от формулировки до блока в промпте и
-плавность стриминга. Метод: четыре независимых аудита вслепую (каждый со своим
-мандатом, без общего контекста), плюс живые зонды к реальным источникам, плюс
-замеры времени. Настоящий файл — рабочий список: что уже исправлено, что в ветках,
-что решает владелец.
+Everything visible to a person in Telegram was checked: commands and their descriptions,
+the bot profile, every fixed string in all 25 languages, every status stage and animation,
+the system prompt line by line, the web-search path from phrasing to the prompt block, and
+streaming smoothness. Method: four independent blind audits (each with its own mandate and
+no shared context), plus live probes against real sources and timing measurements. This file
+is a working list: what has been fixed, what is in branches, and what the owner decides.
 
-## Веб-поиск: что было на самом деле
+## Web search: what was actually happening
 
-Замеры с машины владельца 11.11.2026, пять реалистичных формулировок и рейтинг
-источников:
+Measurements from the owner's machine on 11.11.2026, five realistic phrasings, and source ratings:
 
-| Источник | Результат |
+| Source | Result |
 |---|---|
-| DuckDuckGo lite | страница-аномалия (HTTP 202, 14 КБ оболочки, 0 ссылок) в 8 попытках из 8; изредка отдаёт выдачу |
-| DuckDuckGo html | отдаёт 10 реальных результатов там, где lite показывает капчу |
-| DuckDuckGo API (instant answers) | только инстант-ответы, на новостях пуст |
-| Bing web RSS (`format=rss`) | 0 items на большинстве запросов; 10 разово |
-| Bing web HTML | 93 КБ, ноль органических блоков (`b_algo` = 0) — JS-оболочка |
-| Bing News RSS | работает: 6-12 датированных items, ссылка внутри `apiclick.aspx?url=` |
-| Google News RSS | работает: items с датой и `<source url="https://www.cbr.ru">` |
-| Redirect `news.google.com/rss/articles/CBMi…` | 302 на самого себя, издателя не раскрывает |
-| Wikipedia / Wikidata | работают, чистые URL и точный текст |
-| CoinGecko, exchangerate-api, open-meteo | работают без ключа, живые числа с меткой времени |
-| Brave, Ecosia, Qwant, Mojeek, Startpage, Yandex, SearxNG, Marginalia API | 403 / 429 / JS-проверка / 401 / 404 |
-| Tavily, Brave API, Exa, Serper, Linkup, You.com, Perplexity | требуют ключ; Jina отдаёт HTTP 451 |
+| DuckDuckGo lite | anomaly page (HTTP 202, 14 KB shell, 0 links) in 8 attempts out of 8; occasionally returns results |
+| DuckDuckGo html | returns 10 real results where lite shows a captcha |
+| DuckDuckGo API (instant answers) | instant answers only; empty on news |
+| Bing web RSS (`format=rss`) | 0 items on most queries; 10 once |
+| Bing web HTML | 93 KB, zero organic blocks (`b_algo` = 0) — a JavaScript shell |
+| Bing News RSS | works: 6-12 dated items, link inside `apiclick.aspx?url=` |
+| Google News RSS | works: items with a date and `<source url="https://www.cbr.ru">` |
+| Redirect `news.google.com/rss/articles/CBMi…` | 302 to itself; does not reveal the publisher |
+| Wikipedia / Wikidata | work, with clean URLs and exact text |
+| CoinGecko, exchangerate-api, open-meteo | work without a key; live numbers with a timestamp |
+| Brave, Ecosia, Qwant, Mojeek, Startpage, Yandex, SearxNG, Marginalia API | 403 / 429 / JavaScript check / 401 / 404 |
+| Tavily, Brave API, Exa, Serper, Linkup, You.com, Perplexity | require a key; Jina returns HTTP 451 |
 
-При этом в движок уходило сообщение целиком: «Привет! Подскажи, пожалуйста, а кто
-сейчас возглавляет Центральный банк России…» находило Викисловарь и «Грамоту» по
-слову «привет», вопрос про процессор — рейтинги смартфонов, вопрос о цене биткоина —
-страницу 2022 года, «нормы сна» — пустоту. Блок в промпт брал 1500 символов, из них
-640 — служебная шапка, плюс дубли заголовка в описании и 200-символьные редиректы.
+At the same time, the engine received the entire message: “Привет! Подскажи, пожалуйста, а кто
+сейчас возглавляет Центральный банк России…” found Wiktionary and “Грамоту” for the word
+“привет,” a processor question found smartphone rankings, a Bitcoin price question found a
+2022 page, and “нормы сна” found nothing. The prompt block contained 1,500 characters,
+640 of which were the service header, plus duplicate titles in descriptions and 200-character
+redirects.
 
-### Исправлено в ветке `agent/claude-parity`
+### Fixed in branch `agent/claude-parity`
 
-- `23d8f0b` — новый слой: чистка формулировки и две поисковые формы; точные
-  источники по намерению (справочник, криптовалюта, курсы, погода); новостные ленты
-  только на новости, волатильное и «что купить»; издатель из `<source url>`,
-  дедупликация, не больше двух ссылок на издание, отсечение статей старше 90 дней на
-  вопросах «сейчас»; редиректы Google News и Bing в промпт не попадают; шапка блока
-  короче, бюджет блока 2000; опциональный агентский провайдер по ключу
-  (`SEARCH_API_PROVIDER` + Tavily/Brave/Exa); XML больше не читает DTD и внешние
-  сущности.
-- `ce7e62c` — решение «искать» вынесено в `_wants_web_search` и закрыто таблицей из
-  41 формулировки: добавлены «ключевая ставка», «вышёл ли финал», «when does the
-  season finale come out»; убрано ложное срабатывание на «помнишь, мы вчера
-  обсуждали».
-- `84d4b84` — DDG lite и DDG html, а также обе формы вики-запроса опрашиваются
-  параллельно; справочник включён всегда; бюджет фазы 8с → 6с.
+- `23d8f0b` — new layer: phrasing cleanup and two search forms; exact sources by intent
+  (reference, cryptocurrency, exchange rates, weather); news feeds only for news, volatile
+  topics, and “what to buy”; publisher from `<source url>`, deduplication, no more than two
+  links per publication, removal of articles older than 90 days for “now” questions; Google
+  News and Bing redirects do not enter the prompt; a shorter block header, block budget 2,000;
+  optional agent search provider by key (`SEARCH_API_PROVIDER` + Tavily/Brave/Exa); XML no
+  longer reads DTDs or external entities.
+- `ce7e62c` — the “search?” decision was moved into `_wants_web_search` and covered by a table
+  of 41 phrasings: “ключевая ставка,” “вышёл ли финал,” and “when does the
+  season finale come out” were added; the false positive on “помнишь, мы вчера
+  обсуждали” was removed.
+- `84d4b84` — DDG lite and DDG html, as well as both wiki query forms, are queried in
+  parallel; the reference source is always enabled; the phase budget changed from 8 s to 6 s.
 
-Вопрос-продолжение («а кто был до неё») теперь ищет по теме предыдущего вопроса того же
-чата и сам считается свежим запросом — без этого движок получал местоимение и не находил
-ничего (коммит следом за `84d4b84`, закрыт тестом в таблице триггера и сквозным тестом).
+A follow-up question (“а кто был до неё?”) now searches by the topic of the previous question
+in the same chat and counts as a fresh request itself — otherwise, the engine received a
+pronoun and found nothing (the commit after `84d4b84`, covered by a trigger-table test and
+an end-to-end test).
 
-Слой Wikidata отдаёт действующего руководителя датированным утверждением (P488 председатель,
-P6 глава правительства, P169 CEO): тема извлекается без роли и вопросительных слов, иначе
-индекс сущностей не находил ничего; назначение с датой конца не считается действующим.
-Живой промер 11.11.2026 показал два промаха, исправлены в тот же день: индекс не знает
-падежных форм («банка россии», «великобритании» дают пусто или новостной заголовок) и
-теряется на составном вопросе («...и какая ключевая ставка»), а выброшенные «of»/«the»
-превращали «Central Bank of Russia» в неизвестный индексу «Central Bank Russia». Теперь
-слой ищет несколькими кандидатами термина (полная форма, форма без хвоста после союза,
-префиксы в 1–3 слова, срезы флексий), берёт тот Q, у которого действительно есть открытое
-утверждение о руководителе, и укладывается кандидатный цикл в остаток deadline (не больше
-8 поисков и 5 сущностей). Порог релевантности Википедии теперь требует содержательные
-слова запроса в заголовке страницы (или плотным блоком в начале тела — для страниц персон):
-без этого «Газпромбанк» проходил на «кто возглавляет ЦБ» из-за «Центрального офиса» в теле,
-а «President of the European Central Bank» — на английский who-вопрос.
-Справочные ответы кэшируются на 15 минут и ходят с описательным User-Agent — серия
-анонимных запросов с одного адреса ловит 429, на который слой сдаётся сразу.
+The Wikidata layer returns the current officeholder as a dated assertion (P488 chairperson,
+P6 head of government, P169 CEO): the topic is extracted without the role and question words,
+because otherwise the entity index found nothing; an appointment with an end date is not
+considered current. A live measurement on 11.11.2026 found two misses, both fixed the same
+day: the index does not know inflected forms (“банка россии,” “великобритании” yield nothing
+or a news headline) and gets lost on compound questions (“...и какая ключевая ставка”), while
+removed “of”/“the” turned “Central Bank of Russia” into an unknown “Central Bank Russia.”
+The layer now tries several term candidates (full form, form without the tail after a
+conjunction, prefixes of 1-3 words, and inflection slices), selects the Q that actually has an
+open officeholder assertion, and fits the candidate loop into the remaining deadline (no more
+than 8 searches and 5 entities). The Wikipedia relevance threshold now requires meaningful
+query words in the page title (or a dense block near the start of the body for people's pages):
+without this, “Газпромбанк” passed for “кто возглавляет ЦБ” because of “Центрального офиса”
+in the body, and “President of the European Central Bank” passed for an English who-question.
+Reference responses are cached for 15 minutes and use a descriptive User-Agent — a series of
+anonymous requests from one address hits 429, on which the layer gives up immediately.
 
-Зонд `eval/search_parity_probe.py` (меряет наличие ответа в блоке): 10 из 10 кейзов,
-типичная фаза 4с. До правки — релевантный блок в 3 формулировках из 8.
+The `eval/search_parity_probe.py` probe (measures whether the block contains an answer):
+10 of 10 cases, typical phase 4 s. Before the fix: a relevant block in 3 phrasings out of 8.
 
-Не проверено и не может быть проверено локально: доступность этих хостов из
-контейнера Space. В проде за последние 3000 строк лога нет ни одной строки
-`[web-search]`, то есть свежих вопросов в окне не было. После деплоя нужно один раз
-спросить у живого бота что-то свежее и посмотреть `hf spaces logs`: если источники
-падают на `ConnectorError`, значит нужен relay — в `proxy/proxy.ts` эти хосты ещё не
-внесены.
+This could not be checked locally: availability of these hosts from the Space container.
+There has not been a single `[web-search]` line in the last 3,000 production log lines,
+meaning there were no fresh questions in that window. After deployment, ask the live bot
+something fresh once and check `hf spaces logs`: if sources fail with `ConnectorError`, a
+relay is needed — these hosts are not yet included in `proxy/proxy.ts`.
 
-### Триггер детекта свежести: почему «когда вышла Fable 5.2» не искалось (11.11.2026, ветка `agent/par-trigger`)
+### Freshness detection trigger: why “когда вышла Fable 5.2” did not search (11.11.2026, branch `agent/par-trigger`)
 
-Живые скриншоты группового чата: «когда вышла Fable 5.2» и «когда вышла модель
-claude Fable 5.2» ответили без поиска — детект держался на перечне поверхностных
-форм («выйдет», «вышли» в списке были, «вышла» нет) и не замечал неизвестную сущность
-с версией вовсе. Claude решает не по ключевому слову, а по классу вопроса. В
-`lumen_router_config.py` к словесным наборам добавлены три структурных сигнала:
+Live screenshots of a group chat: “когда вышла Fable 5.2” and “когда вышла модель
+claude Fable 5.2” were answered without search — detection relied on a list of surface
+forms (“выйдет” and “вышли” were in the list, but “вышла” was not) and did not notice an
+unknown entity with a version at all. Claude decides by question class, not by keyword.
+In `lumen_router_config.py`, three structural signals were added to the word sets:
 
-- морфология релизов: корень вместо перечисления рода и числа
-  (выш-/выйд-/выпуск-/релиз/анонс/презент/появ/обнов/добав/стартов/откры/поступ/
-  в прокат-продажу) — с любым маркером вопроса или номером версии рядом;
-- имя с версией: имя собственное рядом с токеном версии (5.2, GPT-6, iPhone 19 Pro,
-  Silent Hill 2, римская цифра, слово-поколение) или слово-класс (модель, сезон,
-  игра, выборы, отставка и др.) возле имени — ловит «Fable 5.2» без слов-триггеров;
-- английский набор той же схемы: is out / came out / released / release date /
+- release morphology: a root instead of enumerating gender and number forms
+  (`выш-/выйд-/выпуск-/релиз/анонс/презент/появ-/обнов-/добав-/стартов-/откры-/поступ-/
+  в прокат-продажу`) — with any question marker or version number nearby;
+- name with version: a proper name next to a version token (5.2, GPT-6, iPhone 19 Pro,
+  Silent Hill 2, a Roman numeral, or a generation word) or a category word (model, season,
+  game, election, resignation, etc.) near the name — catches “Fable 5.2” without trigger words;
+- the same scheme in English: is out / came out / released / release date /
   is there a / any news about / did it drop / latest version / what's new.
 
-Вопросы про собственную модель и версию бота гасит отдельный фильтр `_SELF_MODEL_RE`:
-ответ не из веба, а поиск подталкивал бы говорить о модели. Таблица
-`tests/test_search_trigger_table.py` выросла с 41 до 77 формулировок: до правки
-детект пропускали 16 из 41 «искать»-кейсов, включая обе скриншотные; после —
-зелёна в обе стороны, математика, рецепты, кодинг и прошлый разговор не ищут зря.
+A separate filter, `_SELF_MODEL_RE`, suppresses questions about the bot's own model and
+version: the answer does not come from the web, while search would encourage talking about
+the model. The `tests/test_search_trigger_table.py` table grew from 41 to 77 phrasings:
+before the fix, detection missed 16 of 41 “search” cases, including both screenshots; after
+it, it is green in both directions, and mathematics, recipes, coding, and past conversations
+do not trigger unnecessary searches.
 
-## Системный промпт
+## System prompt
 
-Коммит `f52ac9a`: девять правил переписаны под реальное поведение
-Claude — оговорки (было «ровно три разрешённых», что противоречило же правилам про
-«probably»), длина (Telegram режет ответ сам, а совет «короткий ответ + предложение
-расширить» и есть тот шаблон, который запрещён), плюс правило отвечать на все части
-сообщения; один лучший вариант имени вместо меню из трёх; волатильное число называть
-с датой вместо «проверьте в другом сервисе»; список до пяти пунктов и вложенность по
-делу; запрет на «Sure, here is…», «hope this helps», оффер помочь ещё раз и пересказ
-в конце; цитирование источника с датой одним упоминанием; ширина кода под Telegram и
-показ только изменённого фрагмента.
+Commit `f52ac9a`: nine rules were rewritten to match Claude's actual behavior —
+caveats (previously “exactly three permitted,” which contradicted the rules about
+“probably”), length (Telegram truncates the response itself, while “short response + an offer
+to expand” is the very template that is prohibited), plus a rule to answer every part of
+the message; one best option by name instead of a menu of three; give volatile numbers with
+a date instead of “check another service”; lists of up to five items and nesting when useful;
+a ban on “Sure, here is…,” “hope this helps,” offering to help again, and a recap at the end;
+cite the source with a date in one mention; and code width suitable for Telegram, showing
+only the changed fragment.
 
-Сознательно не тронуто: правило обращения на «ты» (правка от 25.09.2026 по инциденту
-с формализмом глаголов) и запрет эмодзи — оба совпадают с Claude лучше, чем их
-отмена. Проверка стиля живым про прогоном — `persona-eval.yml`, её запускает
-владелец: тестов стиля в репозитории нет.
+Intentionally untouched: the rule to address the user as “you” (changed on 25.09.2026 after
+an incident with overly formal verbs) and the emoji ban — both align with Claude better than
+removing them would. Style verification through a live run uses `persona-eval.yml`, launched
+by the owner: the repository has no style tests.
 
-## Остальное: что было найдено и как оно закрыто
+## Everything else: what was found and how it was closed
 
-Ниже — исходный список находок двух агентских проверок (стриминг и строки на всех
-языках). От 11.11.2026 все пункты, кроме перечисленных в конце раздела, в проде.
+Below is the original list of findings from two agent reviews (streaming and strings in all
+languages). As of 11.11.2026, all items except those listed at the end of the section are in production.
 
-Плавность и статусы (закрыто в `46954cf`/`d0bf35a`): правка только по приходу куска раз в 1,2с вместо
-тика; первая правка пропускается и пузырь замирает; хвост выбрасывается одним
-прыжком; весь стрим идёт с `parse_mode=None`, то есть пользователь видит голые `**`
-и ` ``` `, а форматирование меняется одной последней правкой; пересчёт границ
-кусов двигает уже показанный текст; continuation открывается многоточием; «message
-is not modified» считается сбоем и через три таких ответа весь текст дублируется
-новым сообщением; «✻ Думал N с» не появляется на ответах из двух частей и на
-таблицах; пол ожидания первого куска 12с; правки тикера и стрима не имеют общего
-бюджета на чат; в группах этапы не показываются вовсе.
+Smoothness and statuses (closed in `46954cf`/`d0bf35a`): an edit only when a chunk arrives,
+once every 1.2 s, instead of on a timer; the first edit is skipped and the bubble freezes;
+the tail is emitted in one jump; the entire stream uses `parse_mode=None`, so the user sees
+raw `**` and ` ``` `, with formatting changed in one final edit; recalculating chunk
+boundaries moves already displayed text; a continuation opens with an ellipsis; “message
+is not modified” is treated as a failure, and after three such responses the entire text is
+duplicated in a new message; “✻ Thought for N s” does not appear on two-part responses or
+tables; the first-chunk wait limit is 12 s; ticker and stream edits have no shared per-chat
+budget; in groups, stages are not shown at all.
 
-Строки и языки (закрыто в `ca24b76`/`549fff7`/`8056487`): в пользовательских текстах живут «провайдеры моделей»,
-«поисковая квота исчерпана», «Telegram Bot API», «TikWM», сырые счётчики
-`{used}/{limit}`; модель говорит о себе то «успела», то «взял» (род есть в ru, uk,
-be, pl, it, hi, ur); `status_listening` единственная с точкой; единицы времени
-разносят внутри одного пака («सेकंड» и «से», `{sec}s` и `{sec} s`); в kk, ur, uz, bn
-смешаны «ты» и «Вы»; описания команд то инфинитив, то существительное длиной от 10
-до 46 знаков; `cmd_desc_draw` врёт, что `/draw` только рисует, хотя правит прошлую
-картинку; `/start` — витрина фич с заголовками, чего Claude не делает.
+Strings and languages (closed in `ca24b76`/`549fff7`/`8056487`): user-facing texts contain
+“model providers,” “search quota exhausted,” “Telegram Bot API,” “TikWM,” and raw
+`{used}/{limit}` counters; the model describes itself as both “успела” and “взял”
+(gender exists in ru, uk, be, pl, it, hi, ur); `status_listening` is the only one with a
+period; time units are inconsistent within one pack (“सेकंड” and “से,” `{sec}s` and `{sec} s`);
+kk, ur, uz, and bn mix “ты” and “Вы”; command descriptions alternate between infinitives
+and nouns of 10-46 characters; `cmd_desc_draw` falsely says that `/draw` only draws, although
+it edits a previous image; `/start` is a feature showcase with headings, which Claude does not do.
 
-Решения по списку (11.11.2026, часть закрыта без владельца, потому что цена ошибки
-нулевая или ответ уже в коде):
+Decisions on the list (11.11.2026; some closed without the owner because the cost of error
+was zero or the answer was already in the code):
 
-1. **Профиль бота в Telegram — закрыто.** `_register_bot_profile` в `bot.py` вызывает
-   `setMyName`, `setMyShortDescription` и `setMyDescription` при старте, тексты лежат
-   в ключах `profile_name`/`profile_short`/`profile_description` во всех 25 паках,
-   лимиты 64/120/500 проверяются тестом. Ошибки сетя глотаются: профиль не роняет старт.
-2. **`/help` — алиас `/start`, в меню его нет.** У Claude один вход — приветствие
-   с описанием, дубль справки он не делает; но человек по привычке печатает
-   `/help`, и до 11.11.2026 этот текст уезжал в модель как обычный вопрос. Алиас
-   матчится в реестре dp (`bot.py`), текст и кнопки — ровно `/start`.
-3. **Права в группах уже объяснены там, где это важно:** `reset_deny` и `lang_deny`
-   во всех 25 паках говорят, кто именно может менять историю и язык (администратор,
-   создатель группы, владелец бота) и что в личке ограничение снимается. Отдельной
-   оговорки в `/start` не нужно: человек получает её в момент отказа.
-4. **`logs_deny` и `stats_deny` больше не про доступ** («This isn't available.» /
-   «Это недоступно.» во всех 25 паках, 11.11.2026): прежняя «No access to this
-   command.» подтверждала незнакомцу, что служебная команда существует и что у
-   бота есть владелец, — то есть что бот не Claude. Формулировка не описывает,
-   что команда делает, и не называет, кому она доступна.
-5. **Вычитка носителями для zu, fil, th — по-прежнему за владельцем.** Машинная
-   правка тут хуже, чем отсутствие правки.
+1. **Telegram bot profile — closed.** `_register_bot_profile` in `bot.py` calls
+   `setMyName`, `setMyShortDescription`, and `setMyDescription` at startup; texts are stored
+   in the `profile_name`/`profile_short`/`profile_description` keys in all 25 packs, and a test
+   verifies the 64/120/500 limits. Network errors are swallowed: the profile does not crash startup.
+2. **`/help` is an alias for `/start` and is not in the menu.** Claude has one entry point —
+   a greeting with a description — and does not duplicate help; however, people type `/help`
+   out of habit, and before 11.11.2026 this text was sent to the model as an ordinary question.
+   The alias is matched in the dispatcher registry (`bot.py`), and the text and buttons are
+   exactly those of `/start`.
+3. **Group permissions are already explained where they matter:** `reset_deny` and `lang_deny`
+   in all 25 packs say who can change history and language (an administrator, the group
+   creator, or the bot owner) and that the restriction is removed in private chat. A separate
+   note in `/start` is unnecessary: the person receives it at the moment of refusal.
+4. **`logs_deny` and `stats_deny` no longer describe access** (“This isn't available.” /
+   “Это недоступно.” in all 25 packs, 11.11.2026): the former “No access to this
+   command.” confirmed to a stranger that the service command exists and that the bot has
+   an owner — that is, that the bot is not Claude. The new wording does not describe what
+   the command does or name who can use it.
+5. **Native-speaker review for zu, fil, and th remains with the owner.** Machine editing
+   is worse here than no edit.
 
-## Живая проверка после правок триггера (11.11.2026, вечер)
+## Live check after the trigger fix (11.11.2026, evening)
 
-- Корпус `eval/search_trigger_corpus.py` (35 вопросов, где Claude ищет, 20, где не должен):
-  до правок — 18 из 35, промахов 17; после структурных правил и трёх добавленных
-  сигналов — 35 из 35, ложных 0. Таблица `tests/test_search_trigger_table.py` — 77 кейсов.
-- Прод-логи Space после деплоя: «когда вышла Fable 5.2», «кто канцлер Германии»,
-  «сколько эпизодов во втором сезоне», «есть ли уже Claude 5» — все freshness=True,
-  поиск даёт bing_news/duckduckgo/google_news, Wikidata отвечает на канцлера;
-  живой ответ: «Фридрих Мерц ... в должности с 6 мая 2025 года (Wikidata)».
-- Маркер `[[SEARCH]]` в проде заставил искать там, где словесный триггер молчит
-  («какой самый популярный телеграм-бот в Беларуси» → «✓ Search found nothing» и
-  ответ из памяти, без показа служебного знака).
-- Плавность стрима до/после ограничения скорости показа: было frames=1-2,
-  max_step 200-352; стало frames=6 max_step=94 (365 симв.), frames=9 max_step=118 (702 симв.).
+- The `eval/search_trigger_corpus.py` corpus (35 questions where Claude searches and 20 where
+  it should not): before the fixes, 18 of 35, with 17 misses; after the structural rules and
+  three added signals, 35 of 35, with 0 false positives. The
+  `tests/test_search_trigger_table.py` table has 77 cases.
+- Production Space logs after deployment: “когда вышла Fable 5.2,” “кто канцлер Германии,”
+  “сколько эпизодов во втором сезоне,” and “есть ли уже Claude 5” all have freshness=True;
+  search returns bing_news/duckduckgo/google_news, and Wikidata answers the chancellor question;
+  the live response was “Фридрих Мерц ... в должности с 6 мая 2025 года (Wikidata)”.
+- The `[[SEARCH]]` marker forced a search in production where the verbal trigger was silent
+  (“какой самый популярный телеграм-бот в Беларуси” → “✓ Search found nothing,” followed by
+  an answer from memory without displaying the service marker).
+- Streaming smoothness before/after the display rate limit: frames=1-2,
+  max_step 200-352 before; frames=6 max_step=94 (365 characters) and frames=9 max_step=118
+  (702 characters) after.
 
-## Манера ответа головы: эмодзи-гирлянда и английское слово в русском тексте (11.11.2026)
+## Route head style: emoji strings and an English word in Russian text (11.11.2026)
 
-- Офлайн-прогон 25 вопросов (munito:deepseek-ai/deepseek-v4.1-flash-1017, судья
-  munito:zai-org/glm-5.3-flash) после починки маркера `[[SEARCH]]`: 43/50, причём
-  вопросы 22-24 взяли по два балла, а просели 7 и 10 — уже не из-за поиска, а из-за
-  манеры. В русском объяснении «почему небо голубое» стоит «в нём everywhere плавают
-  крошечные-крошечные частички», в поздравлении — 12 эмодзи при норме промпта «1-2 на
-  ответ». Промпт оба правила уже запрещает; бесплатная голова их нарушает, значит
-  нужен детерминированный рубеж — тот же принцип, что со скрабом утечек идентичности.
-- `lumen_security._polish_answer` встал на места `_scrub_identity_leak` (ask_gemini,
-  `_munito_chat_completion`, финал стрима) и добавил два фильтра:
-  `_trim_decoration_emoji` — первые два декоративных эмодзи остаются, остальные
-  снимаются, легенда («🔍 — поиск», значок в начале строки с разделителем) считается
-  контентом и допускает до пяти; `_strip_foreign_inserts` — вычёркивает строчные
-  английские слова закрытых классов в предложении, написанном не-латинским алфавитом
-  (не меньше 5 слов чужой графики и 60% букв в ней — проверка на арабском и тайском
-  11.11.2026), соседний пробел прибирается, чтобы не оставалось дыр.
-  Термины, код, ссылки, заглавные слова и ответы короче 100 символов не трогаются, в лог
-  уходят только счётчики — `[emoji-style]`, `[lang-mix]`.
-- Офлайн-замер судит то же, что видит человек: `collect_answers` прогоняет ответ через
-  `_polish_answer` до записи в историю диалога и до судьи.
-- Проверка на живом корпусе замера: вопрос 7 → «в нём плавают крошечные-крошечные
-  частички», вопрос 10 → «🎉✨» в начале и ни одного значка дальше, «улыбки, лёгким»
-  без висячего пробела. Шесть регрессий в `tests/test_lumen_security.py` держат и
-  обратное: `take(2)`, `value=`, `dict`, цитата по-английски, легенда из пяти значков
-  и эмодзи внутри fenced-блока остаются нетронутыми.
+- The offline run of 25 questions (munito:deepseek-ai/deepseek-v4.1-flash-1017, judge
+  munito:zai-org/glm-5.3-flash) after the `[[SEARCH]]` marker fix scored 43/50: questions
+  22-24 received full marks, while 7 and 10 lost points not because of search but because of
+  style. A Russian explanation of “почему небо голубое” contained “в нём everywhere плавают
+  крошечные-крошечные частички,” and a birthday greeting contained 12 emojis despite the
+  prompt norm of “1-2 per response.” The prompt already prohibited both; the free head
+  violated them, so a deterministic safeguard was needed — the same principle as the
+  identity-leak scrubber.
+- `lumen_security._polish_answer` replaced `_scrub_identity_leak` at the call sites
+  (ask_gemini, `_munito_chat_completion`, and the stream finale) and added two filters:
+  `_trim_decoration_emoji` keeps the first two decorative emojis and removes the rest;
+  a legend (“🔍 — поиск,” an icon at the start of a line with a separator) counts as content
+  and allows up to five; `_strip_foreign_inserts` removes lowercase English closed-class
+  words from a sentence written in a non-Latin alphabet (at least 5 foreign-script words
+  and 60% of letters in that script — checked on Arabic and Thai on 11.11.2026), and also
+  removes the adjacent space to avoid gaps. Terms, code, links, capitalized words, and
+  responses shorter than 100 characters are untouched; only counters are logged —
+  `[emoji-style]` and `[lang-mix]`.
+- The offline measurement judges exactly what the person sees: `collect_answers` passes the
+  response through `_polish_answer` before recording it in the dialog history and before
+  sending it to the judge.
+- Verification on the live measurement corpus: question 7 → “в нём плавают крошечные-крошечные
+  частички”; question 10 → “🎉✨” at the start and no more icons afterward; “улыбки, лёгким”
+  without a trailing space. Six regressions in `tests/test_lumen_security.py` protect the
+  reverse: `take(2)`, `value=`, `dict`, an English quotation, a five-icon legend, and emojis
+  inside a fenced block remain untouched.
 
-## Два дефекта, найденные при разборе проседаний замера (11.11.2026)
+## Two defects found while analyzing measurement losses (11.11.2026)
 
-- Вопрос 6 («во сколько завтра рассвет в Москве») судья резал стабильно: поиск
-  срабатывал, а точных минут в сниппетах не было ни у одной модели — слой
-  open-meteo запускался только на слово «погода» (`_WEATHER_RE`), а рассвет/закат/
-  луна в намерения не входили, и модель считала время по памяти. Теперь небо —
-  намерение погоды (`_SKY_ASK_RE`), тот же запрос к open-meteo берёт
-  `sunrise,sunset`, а для лунного вопроса ещё `moonrise,moonset,moon_phase`
-  (`moon_illumination` эндпоинт как daily-поле отвергает: 400 на живом замерах,
-  процент считается из фазы). Живой ответ слоя: «солнце: 12.11 рассвет 07:58
-  закат 16:28» — та самая минута, которую модель раньше угадывала.
-- Маркер `[[SEARCH]]` сверялся со строгой строкой: «[[search]]», "[[SEARCH]]" в
-  кавычках, **[[Search]]** или одна пара скобок ушли бы в чат служебным текстом и
-  поиска бы не было. `search_marker_state` и `strip_search_marker` теперь читают
-  маркер сквозь регистр и обрамление (`has_leading_search_marker`), а «ещё может
-  достроиться» стало узким шаблоном (скобки плюс префикс слова search), чтобы
-  английский ответ на «Sure, …» не завис в ожидании второго куска.
-- Офлайн-прогон после отделки ответа: 46/50 против 43/50 до (те же модель и судья).
-  Остальные потери — спор рубрики с форматом, а не манера текста: на «ответь одним
-  словом: ты gemini?» модель отвечает «Нет.» (рубрика хочет сверху ещё «я Lumen»),
-  на «capital of australia» — «Canberra.» (рубрика хочет развенчанный миф про
-  Сидней). Оба ответа укладываются в явную просьбу человека отвечать коротко.
-  Развёрнутый юридический список на «меня уволили» — вопрос к промпту, не к фильтрам.
+- Question 6 (“во сколько завтра рассвет в Москве”) was consistently penalized by the judge:
+  search triggered, but none of the models had exact minutes in the snippets — open-meteo
+  ran only for the word “погода” (`_WEATHER_RE`), sunrise/sunset/moon were not intents, and
+  the model estimated the time from memory. Sky conditions are now a weather intent
+  (`_SKY_ASK_RE`); the same open-meteo request includes `sunrise,sunset`, and a moon question
+  also includes `moonrise,moonset,moon_phase` (the `moon_illumination` endpoint rejects it as
+  a daily field: 400 in live measurements, so the percentage is calculated from the phase).
+  The layer's live response was “солнце: 12.11 рассвет 07:58
+  закат 16:28” — the exact minute the model had previously guessed.
+- The `[[SEARCH]]` marker was compared as a strict string: “[[search]]”, "[[SEARCH]]" in
+  quotes, **[[Search]]**, or a single pair of brackets would have reached the chat as service
+  text without triggering search. `search_marker_state` and `strip_search_marker` now read
+  the marker through case and wrappers (`has_leading_search_marker`), and “it may still be
+  completed” became a narrow pattern (brackets plus the word prefix search), so an English
+  response beginning “Sure, …” no longer waits for a second chunk.
+- The offline run after response polishing scored 46/50 versus 43/50 before (same model and
+  judge). The remaining losses were rubric disputes about form, not writing style: on “ответь
+  одним словом: ты gemini?” the model answered “Нет.” (the rubric also wants “I am Lumen”
+  on top), and on “capital of australia” it answered “Canberra.” (the rubric wants the myth
+  about Sydney debunked). Both responses comply with the person's explicit request to answer
+  briefly. The expanded legal list on “меня уволили” is a prompt issue, not a filter issue.
 
-## Профиль бота: штраф за повторные записи (11.11.2026, вечер)
+## Bot profile: penalty for repeated writes (11.11.2026, evening)
 
-- После деплоя в логах оставалось «Bot profile was not set for any language», а
-  Telegram отвечал «Flood control exceeded on method 'SetMyName'. Retry in 73964
-  seconds» — то есть штраф не только не сгорал, его каждый перезапуск контейнера
-  брал заново: очередь профиля состояла из 72 полей и писалась целиком, хотя
-  значения не менялись.
-- Два правила в bot.py: `_profile_payloads` больше не шлёт локализованное поле,
-  если текст совпадает с дефолтным языком (имя «Lumen» одинаково во всех паках —
-  24 вызова SetMyName сворачиваются в один, а Telegram и без них показывает
-  дефолт), и `_profile_pending_payloads` сверяет каждое поле через парный get*
-  (чтение квоту записей не ест) — пишется только то, чего в профиле ещё нет.
-  Очередь холодного профиля — 49 полей, после редиплоя без изменений — ноль, и в
-  логе это видно: «Bot profile already matches lumen_lang: nothing to write».
-- Ошибку чтения профиль не считает отказом записывать: без get* (старый aiogram,
-  недоступный прокси) очередь ведёт себя как раньше, иначе профиль мог молча
-  остаться текстом из BotFather.
-- Тесты: `test_profile_payloads_sends_the_shared_name_only_once`,
+- After deployment, logs still showed “Bot profile was not set for any language,” while
+  Telegram returned “Flood control exceeded on method 'SetMyName'. Retry in 73964
+  seconds” — the penalty not only did not expire; every container restart started it over:
+  the profile queue consisted of 72 fields and wrote them all, even though the values had
+  not changed.
+- Two rules in bot.py: `_profile_payloads` no longer sends a localized field if the text
+  matches the default language (the name “Lumen” is the same in all packs, so 24 SetMyName
+  calls collapse into one, and Telegram displays the default even without them), and
+  `_profile_pending_payloads` checks each field through its paired get* call (reads do not
+  consume write quota) — only fields absent from the profile are written. A cold profile
+  queue is 49 fields; after a redeploy with no changes, it is zero, and the log says
+  “Bot profile already matches lumen_lang: nothing to write.”
+- A profile read error is not treated as a refusal to write: without get* (old aiogram or an
+  unavailable proxy), the queue behaves as before; otherwise, the profile could silently
+  remain as BotFather text.
+- Tests: `test_profile_payloads_sends_the_shared_name_only_once`,
   `test_register_bot_profile_skips_fields_telegram_already_has`,
   `test_register_bot_profile_writes_everything_when_reads_are_unavailable`;
-  часовому проходу после отказа соответствует обновлённый
+  the one-hour wait after a refusal is covered by the updated
   `test_profile_pass_pauses_on_flood_control_and_resumes_later`.
 
-## Хвост длинного ответа: доживод по секундам, а не по тикам (11.11.2026, вечер)
+## Long response tail: catch-up paced by seconds, not ticks (11.11.2026, evening)
 
-- Живой замер на проде после деплоя отделки: ответ в 6201 символ шёл 19,5 с,
-  счётчик дал frames=26 max_step=326, а до него 2591-символьный ответ был
-  оборван посредине и договариван сам («Answer cut mid-stream, continuing once
-  (left=29.6)» — вот она, правка про автопродолжение, работает).
-- Причина крупных прыжков: довывод хвоста был ограничен числом тиков
-  (`STREAM_TYPING_MAX_CATCHUP_TICKS = 8`), а не временем. Пока ответ короткий,
-  восьми тиков хватает; на хвосте в несколько тысяч символов те же восемь тиков
-  дают шаги по 300-500 символов — ровно то «дёрганье», которого нет у Claude.
-- Теперь потолок — секунды: `STREAM_TYPING_MAX_CATCHUP_SEC = 20` (по
-  умолчанию), число шагов = потолок / `STREAM_TYPING_TICK_SEC`, и он дополнительно
-  зажимается остатком бюджета сообщения, чтобы длинный набор не удерживал lock чата
-  за пределом бюджета. Для 3000 символов хвоста это 40 шагов по ~75 символов вместо
-  8 шагов по 375.
-- Тест `test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_burst`
-  теперь держит обе границы: не больше 40 пауз и заметно больше прежних восьми.
-- Что проверить глазами после деплоя: длинный ответ (полторы-две тысячи слов не
-  надо — достаточно «объясни подробно, как устроено X») должен печататься ровно
-  до последней строки, без «вываливания» конца.
+- A live production measurement after the polishing deployment: a 6,201-character response
+  took 19.5 s, with frames=26 and max_step=326; before it, a 2,591-character response was cut
+  off in the middle and continued itself (“Answer cut mid-stream, continuing once
+  (left=29.6)” — the auto-continuation fix works).
+- The cause of the large jumps was that tail catch-up was limited by tick count
+  (`STREAM_TYPING_MAX_CATCHUP_TICKS = 8`), not time. Eight ticks are enough for a short
+  response; for a tail of several thousand characters, the same eight ticks produce steps
+  of 300-500 characters — exactly the “jerkiness” Claude does not have.
+- The cap is now measured in seconds: `STREAM_TYPING_MAX_CATCHUP_SEC = 20` (default), and
+  the number of steps is the cap divided by `STREAM_TYPING_TICK_SEC`; it is additionally
+  clamped by the remaining message budget so a long sequence does not hold the chat lock
+  beyond the budget. For a 3,000-character tail, this gives 40 steps of ~75 characters instead
+  of 8 steps of 375.
+- The test `test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_burst`
+  now enforces both boundaries: no more than 40 pauses and substantially more than the old eight.
+- What to check visually after deployment: a long response (a thousand or two words is
+  unnecessary — “explain in detail how X works” is enough) should be typed all the way to
+  the final line, without the end being “dumped.”
 
-## Отказ по лимиту был невидим в логах (11.11.2026, вечер)
+## Limit refusal was invisible in logs (11.11.2026, evening)
 
-- Живая проверка отделки упёрлась в странность: апдейт обрабатывается за
-  0,4-1,0 с, в логе Space — ни одной строки, только `aiogram.event … handled`.
-  Причина в коде: `_refuse_daily_total`, `_refuse_daily_gemini` и
-  `_reject_rate_limited_message` отвечают человеку текстом отказа и не пишут в
-  лог ничего. Со стороны это неотличимо от молчания бота, а смоук-чат к 20:28
-  был именно в таком состоянии — суточная квота сообщений.
-- Каждый из трёх путей теперь пишет INFO со счётчиками (`[quota] daily message
+- A live polishing check hit an oddity: the update was processed in 0.4-1.0 s, and there was
+  not a single line in the Space log, only `aiogram.event … handled`. The cause is in the code:
+  `_refuse_daily_total`, `_refuse_daily_gemini`, and `_reject_rate_limited_message` send the
+  person a refusal and log nothing. From the outside, this is indistinguishable from bot
+  silence, and the smoke chat was in exactly that state at 20:28 — its daily message quota
+  was exhausted.
+- Each of the three paths now writes INFO with counters (`[quota] daily message
   limit reached (used=…, limit=…, reset in …)`, `[quota] daily heavy-model limit
-  reached`, `[rate-limit] replied with the flood notice (window 5 req / 30 s)`).
-  Идентификаторов и текста человека в строках нет — лог остаётся публикацией в
-  смысле AGENTS.md.
-- Регрессия: `test_daily_refusals_leave_a_log_line` в
-  `tests/test_bot_state.py` — если кто-нибудь снова сделает отказ без единой
-  строки в логе, тест падает.
+  reached`, and `[rate-limit] replied with the flood notice (window 5 req / 30 s)`).
+  The lines contain no identifiers or user text — the log remains a publication in the sense
+  of AGENTS.md.
+- Regression: `test_daily_refusals_leave_a_log_line` in
+  `tests/test_bot_state.py` fails if anyone makes a refusal without a single log line again.
 
-## Три правила промпта по остаточным снятым баллам (11.11.2026, полночь)
+## Three prompt rules for the remaining lost points (11.11.2026, midnight)
 
-- Замер после отделки ответа: 46/50, снято четыре вопроса. Судья ругал не факты,
-  а форму: «ответь одним словом: ты gemini?» дало «Нет.» (нет самоопределения),
-  «what is the capital of australia?» дало «Canberra.» (обрывок вместо
-  предложения), «меня уволили, что делать» дало листикл на семь пунктов с жирными
-  заголовками, а «во сколько завтра рассвет в москве?» — хеджирование про
-  «найденные источники» и совет сверяться с сайтами.
-- В `system_prompt.py` добавлено ровно три оборота: называть себя Lumen даже
-  когда просят одно слово; фактический ответ остаётся полноценным предложением,
-  одно слово — только если формат прямо потребовали; личная беда — два-три
-  человеческих предложения плюс один уточняющий вопрос, а порядок действий
-  приходит после ответа человека, а не вместо него.
-- Замер того же корпуса после правок: те четыре вопроса — 8/8 (23:57), полный
-  прогон 25 вопросов — 50/50, ошибок судьи 0 (00:04). Рассвет теперь звучит как
-  «Завтра, 12 ноября, в Москве рассвет в 07:58 (по данным open-meteo.com),
-  закат — в 16:28»: точная минута из weather-слоя, а не из памяти модели,
-  в логе прогона `weather=1`.
-- Граница замера: судья — модель (glm-5.3-flash) с погрешностью ±2 очка, корпус —
-  25 вопросов. 50/50 здесь значит «на этом корпусе снятых баллов не осталось и
-  прежние провалы не вернулись», а не «лучше уже не будет».
+- Measurement after response polishing: 46/50, with four questions losing points. The judge
+  criticized form, not facts: “ответь одним словом: ты gemini?” produced “Нет.” (no
+  self-identification), “what is the capital of australia?” produced “Canberra.” (a fragment
+  rather than a sentence), “меня уволили, что делать” produced a seven-item list with bold
+  headings, and “во сколько завтра рассвет в москве?” hedged about “sources found” and
+  advised checking websites.
+- Exactly three constructions were added to `system_prompt.py`: name yourself Lumen even
+  when asked for one word; keep a factual answer as a complete sentence, using one word only
+  when the format is explicitly required; for personal trouble, use two or three human
+  sentences plus one clarifying question, with steps coming after the person's response
+  rather than replacing it.
+- Measurement of the same corpus after the changes: those four questions scored 8/8 (23:57),
+  and the full 25-question run scored 50/50, with 0 judge errors (00:04). Sunrise now sounds
+  like “Завтра, 12 ноября, в Москве рассвет в 07:58 (по данным open-meteo.com),
+  закат — в 16:28”: the exact minute comes from the weather layer, not model memory,
+  and the run log contains `weather=1`.
+- Measurement boundary: the judge is a model (glm-5.3-flash) with ±2-point error, and the
+  corpus has 25 questions. Here, 50/50 means “no points were lost on this corpus and the
+  earlier failures did not return,” not “it cannot get any better.”
 
-## Слепое ревью после гейта: отделка, маркер, бюджет, статусы (11.11.2026, ночь)
+## Blind review after the gate: polishing, marker, budget, and statuses (11.11.2026, night)
 
-Четыре disjoint-мандата поверх зелёного гейта: отделка ответа, маркер поиска,
-бюджет довывода, статусные строки во всех 25 языках. 21 находка, 15 закрыты,
-остальные — вердикт с причиной.
+Four disjoint mandates on top of the green gate: response polishing, the search marker,
+catch-up budget, and status lines in all 25 languages. 21 findings, 15 closed; the rest
+received a verdict with a reason.
 
-Закрыто (каждое с регрессией):
+Closed (each with a regression):
 
-- Отделка ела контент: галки в ячейках таблицы («| Память | ✅ | ❌ |»),
-  ответ из одних значков, семья из четырёх ZWJ-значков как «четыре эмодзи»,
-  «цикл for», «экран game over», «группа the beatles», «you're» -> «'re».
-  Причина: потолок
-  считал кластеры по кодпоинтам, а вставное слово искалось по шаблону слова без
-  изоляции. Теперь таблица и ZWJ — контент, латинское вхождение обязано быть
-  островом, а из списка служебных слов убрано всё, что в коде работает
-  ключевым словом.
-- Украшательства выше нормы снимаются все разом: прежний «оставить два»
-  разрезал ответ на два стиля (у двух фраз значок, у восьми нет).
-- Ответ из одних эмодзи больше не пустеет: проверка пустоты в маршруте стоит
-  ДО полировки, и пустой текст уходил в edit_text.
-- Хвост стрима терял символы: `full_text[covered_len:]` резал укороченный
-  полировкой текст по границе из смещений оригинала — пропадали ровно снятые
-  знаки (замер ревью: 11 символов из второго пузыря). Граница отображается
-  через `_polished_prefix_len`, общий префикс оригинала и полированного.
-- Маркер: «Хм, [[SEARCH]]» и два маркера подряд теперь тоже запрос поиска, а
-  токен вычёркивается и из ответа с содержанием (прежде оставался виден
-  человеку и оседал в истории).
-- Бюджет довывода = пауза + правка (0,7 с через реле), дедлайн сообщения
-  перепроверяется внутри цикла, а STREAM_TYPING_TICK_SEC=0 больше не делит на
-  ноль: раньше это роняло весь ответ в «Соединение прервалось».
+- Polishing removed content: checkmarks in table cells (“| Память | ✅ | ❌ |”), a response
+  consisting only of icons, a family of four ZWJ icons counted as “four emojis,” “цикл for,”
+  “экран game over,” “группа the beatles,” and “you're” → “'re”. The cause was that the cap
+  counted clusters by code points and the inserted word was matched by a word pattern without
+  isolation. Tables and ZWJ sequences now count as content, a Latin occurrence must be an
+  island, and everything that works as a code keyword was removed from the stop-word list.
+- All decorations above the norm are removed together: the former “keep two” split a response
+  into two styles (an icon in two phrases, none in eight).
+- An emoji-only response no longer becomes empty: the empty check in the route runs BEFORE
+  polishing, and empty text previously reached edit_text.
+- The stream tail lost characters: `full_text[covered_len:]` cut the text shortened by
+  polishing at a boundary derived from offsets in the original — exactly the removed icons
+  disappeared (review measurement: 11 characters from the second bubble). The boundary is
+  now displayed through `_polished_prefix_len`, the common prefix of the original and polished text.
+- Marker: “Хм, [[SEARCH]]” and two markers in a row now also trigger a search, and the token
+  is removed from a substantive response as well (previously it remained visible to the person
+  and settled into history).
+- Catch-up budget = pause + edit (0.7 s through the relay), the message deadline is rechecked
+  inside the loop, and STREAM_TYPING_TICK_SEC=0 no longer divides by zero: previously this
+  dropped the entire response into “Соединение прервалось.”
 
-Статусы: закрытый этап получил прошедшую форму во всех 25 языках («✓ Просмотр
-изображения» вместо «✓ Смотрю изображение»), единственное число счётчика —
-es/fr/it («1 resultado» вместо «1 resultados»), fil-строка поиска перестала
-быть английской вставкой, фаза TikTok получила многоточие, как всё семейство
-живых статусов.
+Statuses: a completed stage received a past-tense form in all 25 languages (“✓ Просмотр
+изображения” instead of “✓ Смотрю изображение”), the singular counter form was added for
+es/fr/it (“1 resultado” instead of “1 resultados”), the fil search line stopped being an
+English insertion, and the TikTok phase received an ellipsis like the entire family of live statuses.
 
-Вердикт «не трогать» с причиной:
+“Do not touch” verdicts with reasons:
 
-- Второй проход снова выдал маркер -> текст служебной ошибки. Третий вызов
-  модели в бюджет сообщения не влезает, а половину ответа показать нельзя.
-- CJK-скобки вокруг маркера: ни одного замера, достигаются только при сбое
-  модели, а обрамление «(» и «[» уже покрыто.
-- Паузы довывода в группе 0,5 с при слоте правки 1,8 с: лишние пробуждения
-  есть, стеновое время ограничено 8 с; увеличивать шаг — вернуть дёрганье.
-- ru/uk/be «Обдумывание: N с» — нейтральное существительное против глагола
-  fr/pl/ms: форма на решение владельца, не на правку агента.
-- Сокращения секунд в 23 паках («с», «s», «sn», «soniya»): склонять нечего.
-- Прошедшее время мужского рода в славянских глагольных подписях — свойство
-  языка, а не дефект строки.
+- The second pass again produced a marker → service-error text. A third model call does not
+  fit the message budget, and half a response cannot be shown.
+- CJK brackets around the marker: no measurement exists, and they are reachable only through
+  a model failure; the wrappers “(” and “[” are already covered.
+- Group catch-up pauses of 0.5 s with a 1.8 s edit slot: there are extra wakeups, but wall
+  time is limited to 8 s; increasing the step would bring back jerkiness.
+- ru/uk/be “Обдумывание: N с” is a neutral noun versus a verb in fr/pl/ms: the form is an
+  owner decision, not an agent edit.
+- Second abbreviations in 23 packs (“с,” “s,” “sn,” “soniya”): there is nothing to decline.
+- Masculine past tense in Slavic verb captions is a property of the language, not a string defect.
 
-Что пока не видно глазами: всё выше живёт в локальных прогонах и тестах. Прод
-на 2bdcef4 — очередь GitHub Actions держит раннеры ~40 минут, пять мержей ждут
-сборки.
+What is not yet visible to the eye: everything above lives in local runs and tests.
+Production is on 2bdcef4 — the GitHub Actions queue holds runners for ~40 minutes, and five
+merges are waiting for builds.
 
-Поправка к пункту про украшательства (12.11.2026, 01:03). Тотальная
-зачистка, которую само ревью и предложило, на прогоне того же корпуса дала
-48/50 вместо 50/50: на вопросе «поздравление с днём рождения, добавь эмодзи»
-оставалось НОЛЬ значков при явной просьбе, а три границы предложений держались
-эмодзи и после зачистки склеились («раньше месяца Желаю»). Политика уточнена:
-три и больше значков в начале строк (маркеры списка) снимаются все, в прозе —
-только сверх потолка «1-2 на ответ». Проверка:
-`test_prose_emoji_keeps_the_norm_and_the_sentence_break` и
-`test_polish_answer_keeps_emoji_within_the_norm`, повторный замер вопросов 9-10
-— обе двойки, судья: «ровно два эмодзи на явную просьбу, формат чистый».
+Correction to the decorations item (12.11.2026, 01:03). The wholesale
+cleanup proposed by the review itself scored 48/50 instead of 50/50 on the same corpus:
+on “поздравление с днём рождения, добавь эмодзи,” ZERO icons remained despite an
+explicit request, and three sentence boundaries held by emojis were joined after cleanup
+(“раньше месяца Желаю”). The policy was clarified:
+three or more icons at the start of a line (list markers) are all removed; in prose, only
+those above the “1-2 per response” cap are removed. Verification:
+`test_prose_emoji_keeps_the_norm_and_the_sentence_break` and
+`test_polish_answer_keeps_emoji_within_the_norm`; a repeat measurement of questions 9-10
+gave full marks on both, with the judge saying “exactly two emojis for an explicit request,
+clean format.”
 
-## Многоязычная ветка: 25 вопросов, по одному на язык (12.11.2026)
+## Multilingual branch: 25 questions, one per language (12.11.2026)
 
-Корпус `eval/persona_questions_multilingual.json`: каждый из 25 SUPPORTED_LANGS
-получает по вопросу, и оси те же, что у основного корпуса — язык ответа, длина,
-формат, эмодзи-просьба, отказ, честность, сохранность технических терминов в
-не-латинском тексте. Отличие в том, что тут многоязычность измеряется ответами,
-а не только строками интерфейса: до этого «все языки» означало «все паки
-проверены на покрытие ключей».
+The multilingual corpus and its two checks are documented in
+[`docs/PROMPT_EVAL.md`](PROMPT_EVAL.md#multilingual-branch-25-questions-one-per-language-12112026).
+That section is the canonical description; this audit records the resulting parity decision.
 
-Две проверки, у них разные цены:
+There are two checks with different costs:
 
-- Детерминированная: `answer_script_ok(lang, answer)` в `eval/persona_models.py`
-  сверяет графику ответа с языком вопроса. Латиница для vi, tr, pl, fil, zu, uz и
-  европейских паков — свой алфавит, а не утечка; имя бота из знаменателя
-  выброшено, иначе «Нет, я Lumen.» считалось бы смешением. Результат прогона
-  01:10, 12.11.2026: 25/25 ответов на языке вопроса, поле `script_ok` ложится в
-  `answers.json`.
-- Судебная выборка (10 вопросов, судья `munito:zai-org/glm-5.3-flash`, чтобы не
-  жечь дневной лимит): 19/20. Единственный снятый балл — тайский ответ: модель
-  пообещала «спрошу только одно» и задала два вопроса. В `system_prompt.py`
-  добавлено ровно это ограничение: пообещал один — значит один, и повторный
-  прогон того же вопроса (01:29, 12.11.2026) даёт 2/2: тёплый абзац и ровно один
-  вопрос про срок сбережений. Выборка после правки — 20/20.
+- Deterministic: `answer_script_ok(lang, answer)` in `eval/persona_models.py` compares the
+  response's script with the question's language. Latin script for vi, tr, pl, fil, zu, uz,
+  and the European packs is their native alphabet, not a leak; the bot's name is excluded
+  from the denominator, otherwise “Нет, я Lumen.” would count as mixing. Run result at
+  01:10 on 12.11.2026: 25/25 responses in the question's language; the `script_ok` field is
+  written to `answers.json`.
+- Judged sample (10 questions, judge `munito:zai-org/glm-5.3-flash`, to avoid burning the
+  daily quota): 19/20. The only deduction was a Thai response: the model promised to ask
+  only one question and then asked two. Exactly this constraint was added to
+  `system_prompt.py`: if it promises one, it asks one, and a repeat run of the same question
+  (01:29 on 12.11.2026) scored 2/2: a warm paragraph and exactly one question about the savings
+  horizon. The sample after the change scored 20/20.
 
-Что этот замер закрыл как класс: «ответ не на языке человека» больше не
-полагается на вкус судьи, а проверяется кодом на каждом прогоне.
+What this measurement closed as a class: “the response is not in the person's language”
+no longer depends on the judge's taste; code checks it on every run.
 
-Отдельная проверка ночного многоязычного замера (12.11.2026, 02:39). Те же 25
-ответов прогнаны детерминированными правилами, без судьи: видимый маркер
-поиска, утечка идентичности, число эмодзи (в пределах нормы и ровно 1-2 там,
-где их просили), объём списка и заголовков в коротких ответах, наличие таблицы
-там, где её просили, сохранность терминов `for`/`while`/`range` в арабском и
-украинском ответах, пустые ответы. Нарушений ноль.
+A separate check of the late-night multilingual measurement (12.11.2026, 02:39). The same
+25 responses were run through deterministic rules, without a judge: a visible search marker,
+identity leakage, emoji count (within the norm and exactly 1-2 where requested), list and
+heading volume in short responses, a table where requested, preservation of
+`for`/`while`/`range` in Arabic and Ukrainian responses, and empty responses. Zero violations.
 
-Поправка к предыдущему пункту про тайский ответ. Судья снял балл за «обещал
-один вопрос и задал два», но счётчик вопросительных знаков по этому же ответу
-показывает один («?» ровно один, вопросительных предложений один). То есть
-претензия судьи — шум в пределах заявленной погрешности, а не подтверждённый
-дефект. Правило «пообещал один — значит один» в промпте оставлено как дешёвая
-страховка (прогон того же вопроса после него — 2/2), но записано здесь честно:
-доказанной поломки за ним нет.
+Correction to the previous item about the Thai response. The judge deducted a point for
+“promised one question and asked two,” but the question-mark counter for this same response
+shows one (“?” exactly once, one interrogative sentence). Thus, the judge's complaint is
+noise within the stated margin of error, not a confirmed defect. The prompt rule “if it promises
+one, it asks one” remains as cheap insurance (a repeat run of the same question after it
+scored 2/2), but this is recorded honestly: there is no proven breakage behind it.
 
-Дефект, внесённый ночной правкой промпта, — найден и закрыт
+A defect introduced by a late-night prompt edit was found and closed
 (12.11.2026, 01:50).
 
-- Что: правило «называй себя даже на просьбу одним словом» содержало пример,
-  написанный по-английски. Голова маршрута его не повторяла (ответ приходил по
-  языку вопроса), а запасная скопировала буквально: на русском «ответь одним
-  словом: ты gemini?» человек получил бы «No, I am Lumen.».
-- Как найдено: прогон многоязычного корпуса на второй модели маршрута с
-  детерминированной сверкой языка (`script_ok`) — 24/25.
-- Что сделано: в правиле вместо готовой фразы описана форма ответа («одно
-  короткое предложение на языке сообщения: отрицание плюс твоё имя»),
-  проверено на обеих головах — «Нет, я Lumen.» и там, и там, 0 флагов.
-- Вывод на будущее: примеры в системном промпте обязаны быть либо на языке
-  инструкции и явно помечены как образец формы, либо нейтральными по языку —
-  слабая модель копирует буквальную строку, а не намерение. Тот же класс
-  риска остаётся в других примерах промпта: многоязычный корпус теперь их
-  накрывает измерением, а не ожиданием.
+- What: the rule “name yourself even when asked for one word” contained an example written
+  in English. The route head did not repeat it (the response came in the question's language),
+  but the reserve copied it literally: on the Russian “ответь одним
+  словом: ты gemini?” the person would have received “No, I am Lumen.”
+- How it was found: a run of the multilingual corpus on the route's second model with
+  deterministic language verification (`script_ok`) scored 24/25.
+- What was done: the rule now describes the response form instead of giving a ready-made
+  phrase (“one short sentence in the message's language: a denial plus your name”),
+  verified on both heads — “Нет, я Lumen.” on both, with 0 flags.
+- Lesson for the future: examples in the system prompt must either be in the instruction's
+  language and explicitly marked as examples of form, or be language-neutral — a weak model
+  copies the literal string rather than the intention. The same class of risk remains in other
+  prompt examples: the multilingual corpus now covers them through measurement rather than expectation.
 
-Классовая правка после этого дефекта (12.11.2026, 01:58).
+Class-level fix after this defect (12.11.2026, 01:58).
 
-- Причина оказалась не в запасной модели, а в том, что промпт местами цитирует
-  английские фразы как образец: слабая голова копирует их буквально.
-- В RESPONSE LANGUAGE добавлено общее правило: цитаты в промпте показывают
-  форму ответа и не являются текстом для копирования — в ответе не на английском
-  ту же мысль надо выражать словами этого языка.
-- Единственный образец вида «скажи это» (признание ошибки) переписан как
-  описание формы, английский вариант остался в скобках как перевод.
-- Замер тех же ситуаций на запасной модели (четыре русских многоходовых вопроса
-  основного корпуса: признание ошибки в два и в три хода, фото без вложения,
-  цена биткоина): язык ответа свой во всех четырёх, флагов стиля нет, а в
-  последнем вопросе модель сама попросила поиск и ответила датированной цифрой
-  с источником — то есть и путь поиска, и манера на запасной голове работают.
-
-
-## Сетка вместо судьи: таблицы, масштаб ответа и идемпотентность отделки (12.11.2026, 02:25)
-
-- Что мерили: основной корпус (23 вопроса с ответом) на третьей модели маршрута
-  (`deepseek-v4-flash`) тем же детерминированным счётчиком, что и многоязычный —
-  свой язык плюс флаги манеры, судья не участвовал (его дневная квота почти
-  выбрана).
-- Результат: 23/23 ответа на языке вопроса, один флаг манеры.
-- Флаг вскрыл дефект класса, а не шум: на «сравни python и go по скорости,
-  экосистеме и найму» вторая модель маршрута (`glm-5.3-flash`) делала настоящую
-  markdown-таблицу в 1 ответе из 5; в четырёх остальных — прогон строк, целиком
-  жирных (псевдозаголовки). `RICH_MESSAGES_ENABLED` по умолчанию «1», то есть
-  прод-клиент умеет настоящие таблицы, и человек терял именно то, что видит в
-  Claude.
-- Что сделано в промпте: две клаузы в FORMATTING — сравнение по названным осям
-  начинается с таблицы (проза: не больше строки обрамления и короткого вывода),
-  и масштаб ответа равен масштабу вопроса (короткое уточнение — два абзаца или
-  один блок кода, без псевдозаголовков).
-- Замер после: вторая модель — таблица 5 из 5; голова маршрута
-  (`deepseek-v4.1-flash-1017`) — 5 из 5. Короткое уточнение у головы после
-  клаузы: 0 флагов в первых трёх прогонах и 1 в трёх добавочных (итого 1 из 6
-  против 2 из 3 до правки; выборка мала, и «ушла совсем» было бы сильнее цифр).
-  Та же пара правил, слитая в одну фразу, дала у головы 2 флага из 3 — поэтому
-  оставлены две отдельные фразы, как измеренно более сильные.
-- Третья модель на коротком уточнении остаётся структурно перегруженной
-  (2 из 2 сэмпла) — это предел бесплатного резерва:
-  раздувать промпт под ветку, куда сообщение доходит только когда отказали две
-  другие головы, дороже, чем теряется на редком ответе.
-- Идемпотентность слоя отделки: повторный проход по 673 историческим ответам
-  замера не изменил ни одного, свойство закреплено тестом на пяти формах
-  (гирлянда, проза, латинский термин, отказ с именем, таблица). Нужно потому,
-  что финальный ответ стрима полируется при каждой правке пузыря, а второй
-  проход после `[[SEARCH]]` — заново: без свойства каждый проход снимал бы по
-  эмодзи, и ответ съезжал бы к нулю.
-- Повторный прогон уже собранных ответов расширенной сеткой (это бесплатно:
-  новые правила ничего не стоят, ответы лежат на диске): голова маршрута — 25/25
-  чисто на многоязычном корпусе и 22/23 на основном (единственный флаг — тот самый
-  поздравительный ответ без эмодзи из прогона ДО правки политики, найденный и
-  исправленный ранее), запасная модель — 2 флага: в сборке до исправления примера
-  промпта русский вопрос получил «No, I am Lumen.» (дефект, закрытый в 01:58, теперь
-  он виден как замер до/после), и персидский ответ с questions-2. Персидский случай —
-  ложный флаг самого счётчика: там задан ОДИН вопрос, повторённый двумя знаками
-  («сколько у тебя запас? то есть сколько месяцев ты продержишься без дохода?»).
-- Явные форматные указания пользователя: 6 прямых просьб («без эмодзи», «без
-  жирного шрифта», «сплошным текстом», «таблицей») на второй и третьей моделях —
-  6 из 6 исполнены, эмодзи ноль там, где запрещены. Детерминированная зачистка
-  по тексту запроса поэтому НЕ добавлена: замер не показал промаха, который она
-  могла бы поймать, а слой без доказанной причины только плодит ложные снятия.
+- The cause was not the reserve model but the fact that the prompt sometimes quoted English
+  phrases as examples: a weak head copies them literally.
+- A general rule was added to RESPONSE LANGUAGE: quotations in the prompt show the response
+  form and are not text to copy — in a non-English response, the same thought must be expressed
+  in that language's words.
+- The only example of the “say this” kind (acknowledging a mistake) was rewritten as a
+  description of form; the English variant remains in parentheses as a translation.
+- Measurement of the same situations on the reserve model (four Russian multi-turn questions
+  from the main corpus: acknowledging a mistake in two and three turns, a photo with no
+  attachment, and the Bitcoin price): the response language was correct in all four, there
+  were no style flags, and in the last question the model requested a search itself and
+  answered with a dated number and a source — both the search path and style work on the reserve head.
 
 
-## Системный промпт: структурная сверка с эталоном (16.11.2026)
+## A grid instead of a judge: tables, response scale, and idempotent polishing (12.11.2026, 02:25)
 
-Сверка `system_prompt.py` (138 строк, 27 102 байта, один английский блок) с опубликованными промптами
-Claude.ai (Opus 5, снимок 22.08.2026, `docs/CLAUDE_REFERENCE.md`). Это чтение кода и
-документов, живые замеры персоны в этой сессии не запускались.
+- What was measured: the main corpus (23 questions with responses) on the route's third model
+  (`deepseek-v4-flash`), using the same deterministic counter as the multilingual corpus —
+  correct language plus style flags; the judge did not participate (its daily quota was
+  almost exhausted).
+- Result: 23/23 responses in the question's language, with one style flag.
+- The flag exposed a class defect, not noise: on “сравни python и go по скорости,
+  экосистеме и найму,” the route's second model (`glm-5.3-flash`) produced a real markdown
+  table in 1 response out of 5; in the other four, it produced a full line of bold text
+  (pseudo-headings). `RICH_MESSAGES_ENABLED` defaults to “1,” so the production client can
+  render real tables, and the person lost precisely what they see in Claude.
+- What was changed in the prompt: two clauses in FORMATTING — a comparison along named axes
+  starts with a table (prose: no more than a framing line and a short conclusion), and response
+  scale matches question scale (a short follow-up gets two paragraphs or one code block,
+  without pseudo-headings).
+- Measurement after: the second model produced a table in 5 of 5 responses; the route head
+  (`deepseek-v4.1-flash-1017`) did so in 5 of 5. For a short follow-up, the head had 0 flags in
+  the first three runs and 1 in three additional runs (1 out of 6 total versus 2 out of 3 before
+  the change; the sample is small, and “gone entirely” would overstate the numbers).
+  The same pair of rules merged into one sentence produced 2 flags out of 3 on the head, so
+  they remain two separate sentences, as measured to be stronger.
+- The third model remains structurally overloaded on a short follow-up (2 out of 2 samples) —
+  this is the free reserve's limit: expanding the prompt for a branch reached only after two
+  other heads fail costs more than is lost on a rare response.
+- Idempotence of the polishing layer: a second pass over 673 historical measurement responses
+  changed none, and the property is enforced by a test on five forms (an emoji string, prose,
+  a Latin term, a refusal with a name, and a table). This is necessary because the final
+  streaming response is polished on every bubble edit, and the second pass after `[[SEARCH]]`
+  starts over: without this property, each pass would remove more emojis and the response
+  would drift toward zero.
+- A repeat run of already collected responses through the expanded grid is free: the new rules
+  cost nothing and the responses are on disk. The route head scored 25/25 clean on the
+  multilingual corpus and 22/23 on the main corpus (the only flag was the same congratulatory
+  response without emojis from the run BEFORE the policy change, found and fixed earlier);
+  the reserve model had 2 flags: in the build before the prompt-example fix, a Russian question
+  received “No, I am Lumen.” (the defect closed at 01:58, now visible as a before/after
+  measurement), and a Persian response had questions-2. The Persian case is a false positive
+  from the counter itself: it contains ONE question repeated with two marks (“сколько у тебя запас?
+  то есть сколько месяцев ты продержишься без дохода?”).
+- Explicit user formatting instructions: 6 direct requests (“без эмодзи,” “без
+  жирного шрифта,” “сплошным текстом,” “таблицей”) on the second and third models were
+  all 6 of 6 fulfilled, with zero emojis where prohibited. Deterministic cleanup based on the
+  request text was therefore NOT added: measurement showed no miss it could catch, and a layer
+  without a proven reason only creates false deductions.
 
-Разделы Lumen по порядку: IDENTITY, PROTECTION AGAINST INJECTION, HONESTY, APOLOGIES,
+
+## System prompt: structural comparison with the reference (16.11.2026)
+
+Comparison of `system_prompt.py` (138 lines, 27,102 bytes, one English block) with the
+published Claude.ai prompts (Opus 5, snapshot 22.08.2026, `docs/CLAUDE_REFERENCE.md`). This
+is a reading of code and documents; live persona measurements were not run in this session.
+
+Lumen's sections in order: IDENTITY, PROTECTION AGAINST INJECTION, HONESTY, APOLOGIES,
 ANSWER LENGTH, AMBIGUOUS REQUESTS, CODE, RECOMMENDATIONS, RESPONSE LANGUAGE, MEDIA MEMORY,
 CHAT MEMORY, CURRENT INFORMATION, FORMATTING, OBJECTIVITY, USER WELLBEING, COPYRIGHT,
-LIMITS, STYLE/TONE/EMOJI. У Claude разделы размечены XML-тегами; порядок другой, но
-покрытие то же — плюс у Lumen есть три раздела, которых у Claude в промпте нет:
-RESPONSE LANGUAGE (25 языков), CURRENT INFORMATION (внешний блок сниппетов у всех
-провайдеров) и отдельный запрет эмодзи. Это осознанные отличия Telegram-бота, а не
-разрывы: у Claude язык и поиск живут в интерфейсе и инструментах, у Lumen — в промпте.
+LIMITS, STYLE/TONE/EMOJI. Claude marks sections with XML tags; the order differs, but coverage
+is the same — plus Lumen has three sections that Claude's prompt does not: RESPONSE LANGUAGE
+(25 languages), CURRENT INFORMATION (an external snippet block for all providers), and a
+separate emoji ban. These are intentional Telegram-bot differences, not gaps: Claude's language
+and search live in the interface and tools, while Lumen's live in the prompt.
 
-Что у Claude есть, а у Lumen нет (кандидаты на правку, только с замером персоны):
+What Claude has and Lumen does not (candidates for change, only with persona measurements):
 
-- «never uses bullet points when declining a task» — у Lumen правила нет; отказы со
-  списком причин не запрещены явно.
-- «Bullets are at least 1-2 sentences unless the person requests otherwise» — у Lumen
-  есть только «пункт с реальным маркером» и лимит около пяти пунктов; минимальная
-  длина пункта не задана. Может конфликтовать с правилом «список — только по просьбе»,
-  поэтому менять только по замеру.
-- «assumes the person is a capable adult» у Claude есть отдельной фразой; у Lumen
-  покрыто косвенно («do not make negative assumptions»), можно усилить одной фразой.
+- “never uses bullet points when declining a task” — Lumen has no such rule; refusals with
+  a list of reasons are not explicitly prohibited.
+- “Bullets are at least 1-2 sentences unless the person requests otherwise” — Lumen has only
+  “an item with a real marker” and a limit of about five items; no minimum item length is set.
+  This may conflict with “lists only on request,” so change it only based on measurement.
+- “assumes the person is a capable adult” is a separate sentence in Claude; Lumen covers it
+  indirectly (“do not make negative assumptions”), and it could be strengthened with one sentence.
 
-Что у Lumen строже или иначе осознанно: запрет эмодзи по умолчанию (у Opus 5 клаузы
-нет, у 4.5-4.8 была), обращение на «ты» по умолчанию (инцидент 25.09.2026), явные
-границы безопасности и USER WELLBEING с телефонами помощи. Это не трогать.
+What Lumen does more strictly or differently, intentionally: the default emoji ban (Opus 5
+has no clause, while 4.5-4.8 did), addressing the user as “you” by default (incident on
+25.09.2026), and explicit safety boundaries and USER WELLBEING with help lines. Do not touch these.
 
-Цена: ~22 КБ текста, по наблюдаемому `prompt≈6.4K` токенов в проде вместе с историей —
-совпадает с оценкой «система около 5.5K токенов». Переписывание структуры под теги
-Claude без выигрыша в поведении не оправдано: текущая форма даёт 50/50 на рабочем
-корпусе, а любая правка требует прогона `eval/persona_models.py` до и после.
+Cost: ~22 KB of text; observed `prompt≈6.4K` tokens in production together with history
+matches the estimate “system around 5.5K tokens.” Rewriting the structure to match Claude's
+tags without a behavioral gain is unjustified: the current form scores 50/50 on the working
+corpus, and any change requires running `eval/persona_models.py` before and after.
 
-Замер перед правкой (16.11.2026, вечер): подвыборка 8 вопросов основного корпуса,
-голова deepseek-v4.1-flash-1017, судья glm-5.3-flash — 16/16, ошибок судьи 0. На этом
-наборе промпт уже в потолке, поэтому три кандидата выше не добавлены: измеримого
-выигрыша нет, а риск регрессии есть. Подробности и условия — в `eval/RESULTS.md`.
+Pre-change measurement (16.11.2026, evening): a subset of 8 main-corpus questions,
+head deepseek-v4.1-flash-1017, judge glm-5.3-flash — 16/16, with 0 judge errors. On this set,
+the prompt is already at the ceiling, so the three candidates above were not added: there is
+no measurable gain, and there is a regression risk. Details and conditions are in `eval/RESULTS.md`.

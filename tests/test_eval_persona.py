@@ -1,14 +1,12 @@
-"""Сверка набора вопросов замера персоны (eval/persona_questions.json) с рубрикой PROMPT_EVAL.md.
+"""Cross-check the persona measurement questions (eval/persona_questions.json) against the PROMPT_EVAL.md rubric.
 
-Зачем тест: вопросы и их рубрика живут в разных файлах, и без сверки номера
-разъезжаются — оценка ставится не по тому критерию.
+Why this test: questions and their rubric live in separate files; without a cross-check, their numbers drift and the wrong criterion is scored.
 
-Что ломает тест: новый или удалённый вопрос без правки рубрики, или вопрос без поля expect.
+What breaks it: adding or removing a question without updating the rubric, or a question missing the expect field.
 
-Почему существующие тесты не ловят: это данные, а не код, и проверяет их только этот файл.
+Why existing tests miss it: this is data, not code, and only this file checks it.
 
-Тесты на реплику Gemma-identity-обмена в eval/persona_models.py удалены 05.11.2026 вместе
-с самой Gemma из маршрута: боевой функции, с которой сверялась копия, больше нет.
+Tests for the Gemma identity-exchange replica in eval/persona_models.py were removed on 05.11.2026 along with Gemma itself: the production function the replica was checked against no longer exists.
 """
 
 import os
@@ -18,7 +16,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def test_persona_questions_cover_eval_rubric():
-    # Набор вопросов замера должен совпадать с рубрикой PROMPT_EVAL.md по номерам.
+    # The benchmark question set must match the PROMPT_EVAL.md rubric by number.
     import json
 
     data = json.loads((REPO / "eval" / "persona_questions.json").read_text(encoding="utf-8"))
@@ -29,8 +27,8 @@ def test_persona_questions_cover_eval_rubric():
 
 
 def test_multilingual_questions_cover_every_supported_language():
-    # Ветка замера «каждый ответ как у Claude» на всех языках: без сверки
-    # язык тихо выпадает из проверки, а владелец считает его проверенным.
+    # The measurement branch "every answer like Claude" across all languages: without comparison
+    # the language silently drops out of the check, while the owner considers it verified.
     import json
 
     import lumen_lang
@@ -44,11 +42,11 @@ def test_multilingual_questions_cover_every_supported_language():
         assert question.get("expect"), f"вопрос {question['id']} без ожидания"
         assert question.get("turns"), f"вопрос {question['id']} без текста"
 def test_answer_script_check_follows_the_question_language(monkeypatch):
-    # Детерминированная сверка языка ответа (замер 12.11.2026 по всем
-    # SUPPORTED_LANGS): ответ не на языке человека — это провал паритета,
-    # и судья его ловит не всегда. Отдельная проверка имени бота: «Нет, я
-    # Lumen.» — русский ответ, а не смешение алфавитов.
-    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    # Deterministic check of the answer language (12.11.2026 measurement across all
+    # SUPPORTED_LANGS): answering in a language other than the user’s is a parity failure,
+    # the judge does not always catch it. A separate bot-name check: "No, I
+    # Lumen." — a Russian response, not a mixture of alphabets.
+    # syspath_prepend cleans up after itself: the eval path does not leak into neighboring tests (F-167).
     monkeypatch.syspath_prepend(str(REPO / "eval"))
     import persona_models
 
@@ -65,24 +63,24 @@ def test_answer_script_check_follows_the_question_language(monkeypatch):
     assert persona_models.answer_script_ok("en", "The capital of Australia is Canberra.") is True
     assert persona_models.answer_script_ok("ru", "") is False
 def test_sanitize_no_proxy_drops_bracketed_ipv6_only(monkeypatch):
-    # Глобальный NO_PROXY владельца с «[::1]» ломает любой httpx-вызов замера
-    # (судья Gemini падал с InvalidURL: Invalid port, 12.11.2026). Чистка
-    # обязана снять только скобочные записи и оставить обычные правила.
-    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    # The owner's global NO_PROXY containing "[::1]" breaks any httpx call used for measurement
+    # (the Gemini judge failed with InvalidURL: Invalid port, 12.11.2026). Cleanup
+    # must remove only parenthesized entries and leave ordinary rules.
+    # syspath_prepend cleans up after itself: the eval path does not leak into neighboring tests (F-167).
     monkeypatch.syspath_prepend(str(REPO / "eval"))
     import persona_models
 
-    # monkeypatch сохраняет исходное значение и вернёт его на teardown (F-167).
+    # monkeypatch saves the original value and restores it during teardown (F-167).
     monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,[::1],.example.com")
     touched = persona_models.sanitize_no_proxy()
     assert touched == ["NO_PROXY"]
     assert os.environ["NO_PROXY"] == "localhost,127.0.0.1,.example.com"
     assert persona_models.sanitize_no_proxy() == []
 def test_style_flags_catches_the_real_manner_defects(monkeypatch):
-    # Дешёвая детерминированная сетка на ответ: маркер протокола в тексте,
-    # гирлянда эмодзи вместо 1-2 по просьбе, список там, где просили прозу,
-    # съеденный полировкой термин. Это ловит то, что судья пропускает.
-    # syspath_prepend откатывает за собой: путь eval не протекает в соседние тесты (F-167).
+    # A cheap deterministic grid for the response: a protocol marker in the text,
+    # a string of emoji instead of the requested 1-2, a list where prose was requested,
+    # a term removed by polishing. This catches what the judge misses.
+    # syspath_prepend rolls back after itself: the eval path does not leak into neighboring tests (F-167).
     monkeypatch.syspath_prepend(str(REPO / "eval"))
     import persona_models
 
@@ -103,3 +101,21 @@ def test_style_flags_catches_the_real_manner_defects(monkeypatch):
     assert "questions-0<asked" in persona_models.style_flags({"id": 17, "style": {"questions_min": 1}}, "Вот скрипт.")
     assert any(f.startswith("len-") for f in persona_models.style_flags({"id": 6, "style": {"chars_max": 5}}, "длинный ответ"))
     assert "empty" in persona_models.style_flags({"id": 2}, "   ")
+
+
+def test_judge_score_parser_rejects_missing_or_ambiguous_scores(monkeypatch):
+    # R3-10 (review 27.11.2026): prose containing a digit or a missing score used to
+    # fabricate a measurement; only an explicit integer in the 0..2 JSON object is valid.
+    monkeypatch.syspath_prepend(str(REPO / "eval"))
+    import persona_models
+
+    assert persona_models.parse_score('{"score": 0, "reason": "fail"}') == (0, "fail")
+    assert persona_models.parse_score('{"score": "2"}') == (2, "")
+    for raw in (
+        '{"reason": "criterion 1 missing"}', "not JSON, criterion 2 mentioned",
+        "true", "1.9", '{"score": true}', '{"score": 1.9}', '{"score": 3}',
+        '[]', '{"score": -1}', 'prefix {"score": 2} suffix',
+        'Here is the score:\n{"score": 1, "reason": "ok"}\nDone.',
+        '```json\n{"score": 2}\n```', '{"score": 2}{"score": 1}',
+    ):
+        assert persona_models.parse_score(raw)[0] is None, raw

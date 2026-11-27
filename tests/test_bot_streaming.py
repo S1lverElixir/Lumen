@@ -1,7 +1,6 @@
-"""
-test_bot_streaming.py — Стриминг: куски, точки ожидания, пейсинг, rich-правки.
+"""test_bot_streaming.py — streaming: chunks, waiting dots, pacing, rich edits.
 
-Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
+Split from test_bot.py (P2 audit); shared fakes are in bot_test_helpers.py.
 """
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -24,21 +23,21 @@ from tests.bot_test_helpers import (
 
 
 def test_stream_wait_caps_chunk_timeout_by_remaining_budget():
-    # Регрессия (аудит 26.09.2026): кусок стрима ждал STREAM_CHUNK_TIMEOUT_SEC даже
-    # после исчерпания бюджета маршрута — маршрут вылезал за ROUTE_TOTAL_BUDGET_SEC.
+    # Regression (audit 26.09.2026): a stream chunk waited for STREAM_CHUNK_TIMEOUT_SEC even
+    # after the route budget is exhausted; the route exceeded ROUTE_TOTAL_BUDGET_SEC.
     assert lumen_streaming._stream_wait(bot, None) == bot.STREAM_CHUNK_TIMEOUT_SEC
     far = time.monotonic() + 300.0
     assert lumen_streaming._stream_wait(bot, far) == bot.STREAM_CHUNK_TIMEOUT_SEC
     near = time.monotonic() + 3.0
     assert 0 < lumen_streaming._stream_wait(bot, near) <= 3.0
-    # Истёкший бюджет — быстрый отказ, а не ожидание в 30с.
+    # Expired budget — fail quickly, do not wait 30s.
     assert lumen_streaming._stream_wait(bot, time.monotonic() - 10.0) <= 0.5
 
 
 def _fake_gemini_stream(pieces=None, *, raises=None, hang_sec=0.0):
-    """Мок generate_content_stream по контракту google-genai 2.27.0:
-    async def, вызов надо ждать (пример из SDK:
-    `async for chunk in await client.aio.models.generate_content_stream(...)`)."""
+    """Mock generate_content_stream according to the google-genai 2.27.0 contract:
+    async def; the call must be awaited (SDK example:
+    async for chunk in await client.aio.models.generate_content_stream(...))."""
     async def _stream(*, model, contents, config=None):
         async def gen():
             if hang_sec:
@@ -52,9 +51,9 @@ def _fake_gemini_stream(pieces=None, *, raises=None, hang_sec=0.0):
 
 
 def test_gemini_stream_timeout_covers_a_hanging_first_chunk():
-    # Настоящая защита: сетевое ожидание происходит на __anext__, и его ловит
-    # _stream_wait под каждый кусок. Раньше проверялось только создание корутины —
-    # сценарий, невозможный в проде (см. докстринг _fake_gemini_stream).
+    # The real protection: network waiting happens in __anext__, and it is caught by
+    # _stream_wait for every chunk. Previously, only coroutine creation was checked —
+    # a scenario impossible in production (see the _fake_gemini_stream docstring).
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = _fake_gemini_stream(hang_sec=30)
     original_client = bot.client
@@ -73,8 +72,8 @@ def test_gemini_stream_timeout_covers_a_hanging_first_chunk():
 
 
 def test_gemini_stream_call_is_awaited():
-    # Контракт SDK 2.27.0: generate_content_stream это async def, обёртка обязана
-    # ждать вызов. Синхронный мок (старое поведение) даёт TypeError при await.
+    # SDK 2.27.0 contract: generate_content_stream is an async def, so the wrapper must
+    # the call. A synchronous mock (old behavior) raises TypeError on await.
     import inspect
     from google.genai.models import AsyncModels
     assert inspect.iscoroutinefunction(AsyncModels.generate_content_stream)
@@ -113,8 +112,8 @@ def test_try_gemini_streaming_happy_path_accumulates_and_finalizes():
     try:
         answer, placeholder = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == "Привет, как дела?"
-        assert placeholder is None  # успех — плейсхолдер уже отредактирован до финального текста
-        # финальная правка должна прийти с HTML parse_mode (полная markdown-конвертация)
+        assert placeholder is None  # success — the placeholder has already been edited to the final text
+        # the final edit must include HTML parse_mode (full markdown conversion)
         assert incoming.sent[0].edits[-1][1] == bot.ParseMode.HTML
         history = bot.chat_state[chat_id]["history"]
         assert history[-1] == {"role": "assistant", "content": "Привет, как дела?"}
@@ -124,9 +123,9 @@ def test_try_gemini_streaming_happy_path_accumulates_and_finalizes():
 
 
 def test_try_gemini_streaming_aborts_on_identity_leak_mid_stream():
-    # Регрессия на самый чувствительный сценарий: утечка должна обрываться ДО того,
-    # как накопленный текст попадёт хоть в один edit_text — иначе пользователь успеет
-    # увидеть утёкший текст на экране ещё до финального завершения потока.
+    # Regression for the most sensitive scenario: the leak must be cut off BEFORE
+    # as accumulated text reaches at least one edit_text — otherwise the user may
+    # see leaked text on screen before the stream finishes.
     chat_id = 999104
 
     fake_stream = _fake_gemini_stream(["Привет! ", "На самом деле я работаю ", "на базе Gemini от Google."])
@@ -141,13 +140,120 @@ def test_try_gemini_streaming_aborts_on_identity_leak_mid_stream():
         answer, placeholder = asyncio.run(bot._try_gemini_streaming(chat_id, "Кто ты на самом деле?", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == bot._IDENTITY_LEAK_FALLBACK
         assert placeholder is None
-        # Ни в одной показанной пользователю правке НЕ должно быть слова "gemini" —
-        # проверяем ВСЕ edit_text вызовы единственного отправленного сообщения, а не
-        # только последний, т.к. именно промежуточные правки могли бы "мигнуть" утечкой.
+        # No edit shown to the user should contain the word "gemini" —
+        # check ALL edit_text calls for the single sent message, not
+        # only the last one, because intermediate edits could briefly expose the leak.
         for shown_text, _parse_mode in incoming.sent[0].edits:
             assert "gemini" not in shown_text.lower()
         history = bot.chat_state[chat_id]["history"]
         assert history[-1] == {"role": "assistant", "content": bot._IDENTITY_LEAK_FALLBACK}
+    finally:
+        bot.client = original_client
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_stream_scans_with_prior_context_when_final_piece_ends_sentence(caplog):
+    # The final piece can both complete a long-sentence leak and clear context.
+    chat_id = 999107
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def pieces():
+        yield "I " + "A" * 1000
+        for _ in range(20):
+            await asyncio.sleep(0)
+        yield " " + "B" * 600 + " am powered by Gemini."
+
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Who are you?", incoming, provider="munito", model_id="probe-boundary",
+            piece_agen=pieces(),
+        ))
+        assert answer == bot._IDENTITY_LEAK_FALLBACK
+        assert placeholder is None
+        assert incoming.sent[0].edits
+        assert all("gemini" not in text.lower() for text, _mode in incoming.sent[0].edits)
+        assert "started leaking internal details" in caplog.text
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_stream_withholds_reverse_order_identity_until_subject_arrives(caplog):
+    chat_id = 999108
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def pieces():
+        yield "Powered by Gemini, this assistant provides answers and "
+        for _ in range(20):
+            await asyncio.sleep(0)
+        yield "I continue."
+
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Who are you?", incoming, provider="munito", model_id="probe-reverse-order",
+            piece_agen=pieces(),
+        ))
+        assert answer == bot._IDENTITY_LEAK_FALLBACK
+        assert placeholder is None
+        assert all("gemini" not in text.lower() for text, _mode in incoming.sent[0].edits)
+        assert "started leaking internal details" in caplog.text
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+@pytest.mark.parametrize("first, second, forbidden", [
+    ("I\n", "am Gemini." + " safe" * 300, "am Gemini"),
+    ("system\n", "override successful." + " safe" * 300, "override successful"),
+])
+def test_stream_detects_direct_patterns_split_across_newlines(caplog, first, second, forbidden):
+    chat_id = 999109
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def pieces():
+        yield first
+        for _ in range(20):
+            await asyncio.sleep(0)
+        yield second
+
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Who are you?", incoming, provider="munito", model_id="probe-newline",
+            piece_agen=pieces(),
+        ))
+        assert answer in (bot._IDENTITY_LEAK_FALLBACK, lumen_streaming._INJECTED_PAYLOAD_ECHO_FALLBACK)
+        assert placeholder is None
+        assert all(forbidden not in text.lower() for text, _mode in incoming.sent[0].edits)
+        assert "started leaking internal details" in caplog.text
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_stream_exception_guard_logs_metadata_without_answer_fragment(caplog, monkeypatch):
+    import logging
+
+    chat_id = 999106
+    marker = "PRIVATE-ANSWER-MARKER"
+    # Force the incremental guard to miss so the exception fallback is exercised.
+    monkeypatch.setattr(lumen_streaming._LeakScanState, "feed", lambda self, piece: None)
+
+    async def failing_stream(*, model, contents, config=None):
+        async def gen():
+            yield SimpleNamespace(text=f"{marker} I " + "A" * 400)
+            yield SimpleNamespace(text=" am powered by Gemini.")
+            raise RuntimeError(f"transport interrupted: {marker}")
+        return gen()
+
+    fake_client = MagicMock()
+    fake_client.aio.models.generate_content_stream = failing_stream
+    incoming = _FakeIncomingMessage(chat_id)
+    original_client = bot.client
+    bot.client = fake_client
+    try:
+        with caplog.at_level(logging.WARNING, logger="bot"):
+            answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Who are you?", incoming, bot.DEFAULT_GEMINI_MODEL))
+        assert answer == bot._IDENTITY_LEAK_FALLBACK
+        assert marker not in caplog.text
+        assert "Gemini" not in caplog.text
+        assert "RuntimeError" in caplog.text
     finally:
         bot.client = original_client
         bot.chat_state.pop(chat_id, None)
@@ -167,12 +273,12 @@ def test_try_gemini_streaming_returns_none_on_early_failure():
     try:
         answer, placeholder = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer is None
-        # Плейсхолдер теперь НЕ удаляется на этом уровне — он возвращается
-        # вызывающему коду (_run_route), чтобы тот попробовал доправить в него
-        # ответ следующей модели по цепочке, а не создавать новое сообщение.
+        # The placeholder is NO LONGER removed at this level — it is returned
+        # to the caller (_run_route), so it can try to finish delivery through it
+        # the next model's answer in the chain, rather than creating a new message.
         assert placeholder is incoming.sent[0]
         assert incoming.sent[0].deleted is False
-        # история НЕ должна была обновиться — вызывающий код откатится на ask_gemini
+        # history should NOT have been updated — the caller will fall back to ask_gemini
         assert chat_id not in bot.chat_state or not bot.chat_state[chat_id].get("history")
     finally:
         bot.client = original_client
@@ -180,20 +286,21 @@ def test_try_gemini_streaming_returns_none_on_early_failure():
 
 
 def test_try_gemini_streaming_failed_continuation_does_not_corrupt_first_message():
-    # Регрессионный тест на баг, найденный код-ревью: при сбое отправки сообщения-
-    # продолжения (текст длиннее лимита Telegram) первое, уже корректно показанное
-    # сообщение раньше перезаписывалось чужим (последним) куском текста.
+    # Regression test for a bug found in code review: when sending a message-
+    # continuation (text longer than Telegram’s limit) the first, already correctly displayed
+    # the message was previously overwritten by a foreign (last) chunk of text.
     chat_id = 999103
-    long_piece = "А" * (bot.TG_MAX_LEN + 100)  # гарантированно требует второе сообщение
+    # The privacy gate releases completed display sentences, not arbitrary text.
+    long_piece = "А" * (bot.TG_MAX_LEN + 100) + "."  # necessarily requires a second message
 
-    fake_stream = _fake_gemini_stream([long_piece])
+    fake_stream = _fake_gemini_stream([long_piece, " Tail."])
 
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = fake_stream
 
     class _FailingBot:
         async def send_message(self, **kwargs):
-            return None  # имитируем неудачную отправку продолжения
+            return None  # simulate a failed continuation send
 
     incoming = _FakeIncomingMessage(chat_id)
 
@@ -203,11 +310,11 @@ def test_try_gemini_streaming_failed_continuation_does_not_corrupt_first_message
     bot.bot = _FailingBot()
     try:
         answer, placeholder = asyncio.run(bot._try_gemini_streaming(chat_id, "Напиши длинный текст", incoming, bot.DEFAULT_GEMINI_MODEL))
-        # Функция должна была вернуть накопленный текст, а не None и не бросить исключение
+        # The function should have returned the accumulated text, not None, and should not have raised an exception
         assert answer is not None
-        assert placeholder is None  # это уже финализированный успех, а не ранний сбой
-        # Первое сообщение должно содержать ИМЕННО первый кусок (плюс пометка об обрыве),
-        # а НЕ последний/другой кусок текста — это и была суть бага.
+        assert placeholder is None  # this is already a finalized success, not an early failure
+        # The first message must contain EXACTLY the first chunk (plus a truncation note),
+        # and NOT the last/another chunk of text — that was the essence of the bug.
         first_msg_final_text = incoming.sent[0].edits[-1][0]
         assert first_msg_final_text.startswith("А")
         assert "couldn't send the rest of the message" in first_msg_final_text
@@ -215,6 +322,18 @@ def test_try_gemini_streaming_failed_continuation_does_not_corrupt_first_message
         bot.client = original_client
         bot.bot = original_bot
         bot.chat_state.pop(chat_id, None)
+
+
+def test_sse_fake_response_body_cannot_be_replayed():
+    async def scenario():
+        response = _FakeSSEResponse([b"first", b"second"])
+        first_pass = [line async for line in response.content]
+        second_pass = [line async for line in response.content]
+        return first_pass, second_pass
+
+    first_pass, second_pass = asyncio.run(scenario())
+    assert first_pass == [b"first", b"second"]
+    assert second_pass == []
 
 
 def test_munito_stream_pieces_parses_sse_chunks():
@@ -269,9 +388,9 @@ def test_munito_stream_pieces_raises_on_http_error_status():
 
 
 def test_munito_stream_pieces_caps_http_error_body_read():
-    # Кап на тело ошибки: read-all буферизовал бы весь многумегабайтный ответ
-    # провайдера (аудит run-2). Проверяем сам запрошенный размер, а не длину лога:
-    # сообщение всё равно режется до 300 байт и кап не различало бы.
+    # Cap on the error body: read-all would buffer the entire multi-megabyte response
+    # provider (audit run-2). Check the requested size itself, not the log length:
+    # the message is still cut to 300 bytes and the cap would not distinguish it.
     seen = []
 
     class _Content:
@@ -314,13 +433,14 @@ def test_munito_stream_pieces_caps_http_error_body_read():
 
 
 def test_munito_stream_pieces_raises_on_midstream_error_chunk():
-    # РЕГРЕССИЯ (аудит стриминга): бэкенд может упасть УЖЕ ПОСЛЕ старта генерации —
-    # HTTP-статус к этому моменту давно 200 (стрим открыт), и ошибка приходит не
-    # кодом ответа, а прямо внутри SSE-чанка: {"error": {...}} вместо {"choices":
-    # [...]}. Раньше это тихо пропускалось как "пустой чанк" (choices нет ->
-    # continue) — пользователь получал молча укороченный ответ без единого намёка
-    # на причину. Первый кусок ("Начало") должен успеть уйти до ошибки — проверяем,
-    # что она поднимается уже ПОСЛЕ частичного контента, а не глушится.
+    # REGRESSION (streaming audit): the backend may fail AFTER generation has already started —
+    # The HTTP status has long been 200 (stream open), and the error arrives not
+    # the response code, but directly inside the SSE chunk: {"error": {...}} instead of {"choices":
+    # [...]}. Previously this was silently skipped as an “empty chunk” (no choices ->
+    # continue) — the user silently received a shortened answer without any hint
+    # on the cause. The first chunk ("Start") should have time to go out before the
+    #     error — we verify that
+    # that it is raised AFTER partial content, rather than suppressed.
     lines = [
         'data: {"choices":[{"delta":{"content":"Начало"}}]}\n'.encode("utf-8"),
         'data: {"error":{"message":"Provider returned error","code":502}}\n'.encode("utf-8"),
@@ -353,8 +473,8 @@ def test_munito_stream_pieces_raises_on_midstream_error_chunk():
 
 
 def test_munito_stream_pieces_without_key_fails_fast(monkeypatch):
-    # Ключа нет — провайдер обязан отказаться до единого сетевого вызова: без этого
-    # каждая попытка маршрута висела бы до таймаута соединения.
+    # Without the key, the provider must refuse before a single network call; otherwise
+    # every route attempt would hang until the connection timeout.
     async def must_not_be_called():
         raise AssertionError("no session without an API key")
 
@@ -370,9 +490,10 @@ def test_munito_stream_pieces_without_key_fails_fast(monkeypatch):
 
 
 def test_munito_stream_pieces_sends_reasoning_effort(monkeypatch):
-    # protected: SSE-путь Munito несёт то же reasoning_effort, что и обычный текст.
-    # Регрессия: поле добавили только в ask_munito_text — тогда посимвольный ответ
-    # снова сжигает бюджет на размышление и тормозит.
+    # protected: Munito's SSE path carries the same reasoning_effort as regular text.
+    # Regression: the field was added only to ask_munito_text, so a character-by-character
+    # answer
+    # again burns budget on reasoning and slows things down.
     captured = {}
 
     class _RecordingSSESession(_FakeSessionForSSE):
@@ -401,9 +522,9 @@ def test_munito_stream_pieces_sends_reasoning_effort(monkeypatch):
 
 
 def test_streaming_history_goes_through_summarizing_trim(monkeypatch):
-    # Поведенческая пара grep-теста test_streaming_history_uses_summarizing_trim:
-    # длинная история в стриминге идёт через _trim_history с саммари,
-    # а не молчаливым срезом.
+    # Behavioral pair for the grep test test_streaming_history_uses_summarizing_trim:
+    # a long history in streaming goes through _trim_history with summaries,
+    # rather than a silent slice.
     chat_id = 999981
     state = bot.get_state(chat_id)
     state["history"] = [{"role": "user", "content": f"q{i}"} for i in range(120)]
@@ -432,9 +553,9 @@ def test_streaming_history_goes_through_summarizing_trim(monkeypatch):
 
 @pytest.mark.parametrize("deadline_mode", ["none", "expired"])
 def test_sse_pieces_hanging_post_entry_times_out(deadline_mode, monkeypatch):
-    # Регрессия A4-01: вход в session.post шёл с total=None без общего лимита —
-    # зависший провайдер держал per-chat lock вечно. Теперь заголовки ждут не
-    # дольше попытки маршрута, висящий вход быстро даёт TimeoutError.
+    # A4-01 regression: entering session.post used total=None without an overall limit —
+    # a stuck provider held the per-chat lock forever. Now headers wait no longer than
+    # longer than the route attempt; a hung input quickly produces TimeoutError.
     class _HangingPostCM:
         def __init__(self):
             self.exited = False
@@ -470,7 +591,7 @@ def test_sse_pieces_hanging_post_entry_times_out(deadline_mode, monkeypatch):
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(asyncio.wait_for(collect(), timeout=5.0))
     elapsed = time.monotonic() - started
-    # Старый код висел все 5с внешнего wait_for; новый обрывает вход за ~0.2-0.5с.
+    # The old code hung for the entire 5-second external wait_for; the new one aborts input in about 0.2-0.5 seconds.
     assert elapsed < 2.5, f"вход в POST ждал мимо лимита попытки: {elapsed:.1f}с"
     assert cm.exited
 
@@ -494,12 +615,14 @@ def test_try_munito_streaming_happy_path_accumulates_and_finalizes(monkeypatch):
 
 
 def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
-    # Висящий первый кусок — TimeoutError и плейсхолдер дальше по цепочке (раньше предела не было — лок держался до 30с/навсегда).
+    # A hung first chunk raises TimeoutError and the placeholder continues down the
+    # chain (previously there was no limit, so the lock could be held for 30 seconds or
+    # forever).
     #
-    # Патчим lumen_streaming, а НЕ bot: _run_streaming_reply читает имя из своего
-    # модуля, и прошлый тест патчил bot._model_first_chunk_limit вхолостую — он
-    # честно ждал штатные 25с и проходил, потому что граница была 30с
-    # (враждебное ревью 27.09.2026). Теперь предел жёстче выставленного лимита.
+    # Patch lumen_streaming, NOT bot: _run_streaming_reply reads the name from its own
+    # the module, and the previous test patched bot._model_first_chunk_limit in vain: it
+    # honestly waited the normal 25 s and passed, because the boundary was 30 s
+    # (hostile review 27.09.2026). The limit is now stricter than the configured limit.
     chat_id = 999301
 
     async def hanging_pieces():
@@ -517,18 +640,18 @@ def test_streaming_abandons_hung_first_chunk_within_limit(monkeypatch):
         elapsed = time.monotonic() - started
         assert answer is None
         assert placeholder is incoming.sent[0]
-        # 0.05с лимита + небольшой запас на ввод-вывод фейков. Прежние 30с
-        # пропускали настоящие 25с ожидания, то есть тест ничего не проверял.
+        # 0.05s limit + a little headroom for fake I/O. The previous 30s
+        # missed a real 25 s wait, so the test verified nothing.
         assert elapsed < 5, f"тест ждёт настоящего таймаута, а не подменённого: {elapsed:.1f}с"
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
 def test_streaming_respects_route_deadline(monkeypatch):
-    # Grace-окно живого стрима в проде 20 с; в тесте окно уменьшаем, иначе
-    # он спит 20 секунд, а проверяется именно застой куска.
+    # The live-stream grace window is 20s in prod; shrink it in the test, otherwise
+    # it sleeps for 20 seconds, while the test checks specifically for a stalled chunk.
     monkeypatch.setattr(bot, "STREAM_ROUTE_STALL_GRACE_SEC", 0.3)
-    # Внешний аудит: капающий по куску стрим жил мимо ROUTE_TOTAL_BUDGET_SEC и держал lock.
+    # External audit: a stream dripping one chunk at a time lived outside ROUTE_TOTAL_BUDGET_SEC and kept the lock held.
     chat_id = 999309
 
     async def slow_drip_pieces():
@@ -544,19 +667,19 @@ def test_streaming_respects_route_deadline(monkeypatch):
             piece_agen=slow_drip_pieces(), deadline=time.monotonic() - 1.0,
         ))
         elapsed = time.monotonic() - started
-        # Бюджет уже прошёл: либо плейсхолдер дальше, либо финал с пометкой — но не вечное ожидание.
-        # Частичный ответ обязан вернуться, а не пустышка (ревью 17.11.2026).
+        # The budget has already elapsed: either keep the placeholder or show a marked final, but never wait forever.
+        # A partial answer must be returned, not an empty stub (review 17.11.2026).
         assert answer is not None and answer.startswith("начало")
-        # Висящий второй кусок (3600с) обязан оборваться бюджетом, а не зависнуть.
+        # A hanging second chunk (3600s) must be stopped by the budget, not hang forever.
         assert elapsed < 30, f"стрим ждал висящий кусок мимо дедлайна: {elapsed:.1f}с"
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
 def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
-    # Что защищает: ожидание первого куска не выходит за бюджет маршрута.
-    # Регрессия: предел модели (по замерам до 75с) игнорировал дедлайн, и стрим
-    # держал лок сверх бюджета (аудит 27.10.2026).
+    # What this protects: waiting for the first chunk stays within the route budget.
+    # Regression: the model limit (measured at up to 75s) ignored the deadline, and the stream
+    # held the lock beyond the budget (audit 27.10.2026).
     import lumen_streaming
     seen = {}
 
@@ -586,9 +709,9 @@ def test_streaming_first_chunk_limit_capped_by_route_deadline(monkeypatch):
 
 
 def test_streaming_starts_model_request_before_placeholder():
-    # Что защищает: запрос к модели стартует до отправки "…", а не после неё.
-    # Регрессия: плейсхолдер первым — модель простаивает лишний круг к Telegram
-    # (0.1-0.3с на каждый стриминговый ответ).
+    # What it protects: the model request starts before sending “...”, not after it.
+    # Regression: placeholder first — the model wastes an extra round trip to Telegram
+    # (0.1-0.3 seconds per streaming response).
     chat_id = 999319
     order = []
 
@@ -598,7 +721,7 @@ def test_streaming_starts_model_request_before_placeholder():
 
     class _Msg(_FakeIncomingMessage):
         async def reply(self, text, **kwargs):
-            # Настоящий reply — сетевой вызов: даёт задаче первого куска стартовать.
+            # A real reply is a network call: it lets the first-chunk task start.
             await asyncio.sleep(0)
             order.append("placeholder")
             return await super().reply(text, **kwargs)
@@ -631,14 +754,14 @@ def _streaming_rate_limit_quotas(chat_id, model_id, error_text):
         bot.chat_state.pop(chat_id, None)
 
 
-# «Суточный» текст тут тоже munito-429: провайдер отдаёт оконные лимиты
-# (200 запросов за 30 секунд), и держать модель заблокированной до утра нечем —
-# суточную метку ставит только ветка Gemini (см. gemini-тест ниже по файлу).
+# The "daily" text is also a munito 429 here: the provider returns windowed limits
+# (200 requests in 30 seconds), and there is no way to keep the model blocked until morning —
+# the daily mark is set only by the Gemini branch (see the gemini test below in the file).
 @pytest.mark.parametrize("error_text", ["Rate limit reached", "free-models-per-day limit reached"])
 def test_streaming_rate_limit_only_cools_down(error_text):
-    # Регрессия (враждебное ревью 27.09.2026): всплеск 429 ставил суточную метку, и
-    # модель выпадала из роута до полуночи — снять метку было нечем, потому что
-    # заведомо мёртвую модель не зовут. Теперь это короткая остывка.
+    # Regression (hostile review 27.09.2026): a burst of 429s set the daily mark, and
+    # the model dropped out of the route until midnight — there was no way to clear the mark, because
+    # a known-dead model is not called. Now this is a short cooldown.
     provider = bot.GLOBAL_QUOTA.setdefault("munito", {})
     had_model = "probe-y" in provider
     old_model = dict(provider.get("probe-y", {}))
@@ -647,7 +770,7 @@ def test_streaming_rate_limit_only_cools_down(error_text):
         assert entry["exhausted_at"] is None
         assert entry["cooldown_until"] > time.time()
         assert lumen_router_config._is_quota_exhausted("munito", "probe-y") is True
-        # По истечении остывки модель возвращается в роут сама, без смены суток.
+        # After the cooldown expires, the model returns to the route by itself, without waiting for midnight.
         provider["probe-y"]["cooldown_until"] = time.time() - 1.0
         assert lumen_router_config._is_quota_exhausted("munito", "probe-y") is False
     finally:
@@ -657,9 +780,34 @@ def test_streaming_rate_limit_only_cools_down(error_text):
             provider.pop("probe-y", None)
 
 
+def test_streaming_unknown_placeholder_send_abands_quietly(monkeypatch):
+    # Review I21 (26.11.2026): the placeholder continues to live as a Message (edits,
+    # deletion). With an unknown send outcome, the sentinel must collapse to None:
+    # the stream refuses cleanly instead of crashing with AttributeError on edit_text.
+    chat_id = 999313
+
+    async def pieces():
+        yield "Привет на связь"
+
+    async def unknown_tg_call(method, *args, **kwargs):
+        return bot._TG_UNKNOWN
+
+    monkeypatch.setattr(bot, "_tg_call", unknown_tg_call)
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Привет!", incoming, provider="munito", model_id="probe-z",
+            piece_agen=pieces(),
+        ))
+        assert answer is None
+        assert placeholder is None
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
-    # Юнит-тест самого тикера: первый кадр только после _DOTS_START_AFTER_SEC,
-    # дальше по кадру каждые _DOTS_TICK_SEC; отмена — штатная остановка.
+    # Unit test of the ticker itself: the first frame only after _DOTS_START_AFTER_SEC,
+    # then through the frame every _DOTS_TICK_SEC; cancellation is a normal stop.
     calls = []
 
     async def fake_sleep(delay):
@@ -684,18 +832,18 @@ def test_waiting_dots_cycles_frames_then_stops_on_cancel(monkeypatch):
     import lumen_status
     assert all(text[0] in lumen_status._TRIO_FRAMES and "Thinking" in text
                for text, _ in placeholder.edits)
-    # Плейсхолдер уже показывает кадр 0 (треугольник): тикер обязан начать со второго,
-    # иначе первая же правка повторяет тот же символ (ревью 28.10.2026).
+    # The placeholder already shows frame 0 (triangle): the ticker must start at the second,
+    # otherwise the very first edit repeats the same character (review 28.10.2026).
     assert placeholder.edits[0][0].startswith(lumen_status._TRIO_FRAMES[1])
     assert [text[0] for text, _ in placeholder.edits] == list(lumen_status._TRIO_FRAMES[1:4])
     assert all(kw.get("reply_markup") is markup for kw in placeholder.edit_kwargs)
-    # Код языка не должен утечь в chat_state строковым ключом (прод 28.10.2026).
+    # The language code must not leak into chat_state as a string key (production 28.10.2026).
     assert "en" not in bot.chat_state
 
 
 def test_streaming_fast_path_shows_no_dots_frames():
-    # Мгновенно ответившая модель: тикер гасится до первого кадра (2.5с тишины
-    # не наступает) — в правках только контент, никаких "." / "..".
+    # An instantly responding model: the ticker is stopped before the first frame (2.5s of silence
+    # does not occur) — edits contain only content, no "." / "..".
     chat_id = 999302
 
     async def instant_pieces():
@@ -710,18 +858,18 @@ def test_streaming_fast_path_shows_no_dots_frames():
         assert answer == "Привет"
         texts = [text for text, _ in incoming.sent[0].edits]
         assert texts and texts[-1] == "Привет", "финальная правка — ровно ответ"
-        # Прежний ассерт «text not in _DOTS_FRAMES» был вакуумным: тикер пишет
-        # «глиф + Думаю…», а не голые точки, и падение стрима с припиской
-        # оставалось зелёным (ревью 17.11.2026). В быстром пути каждая правка —
-        # префикс ответа, ни кадра тикера, ни приписок.
+        # The old assertion “text not in _DOTS_FRAMES” was vacuous: the ticker writes
+        # "glyph + Thinking...", not bare dots, and a stream failure with the suffix
+        # stayed green (review 17.11.2026). In the fast path, every edit is
+        # the answer prefix, neither a ticker frame nor addenda.
         assert all("Привет".startswith(t) for t in texts), texts
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
 def test_streaming_plain_text_has_no_thought_line():
-    # Прод 23.11.2026: Claude убрал финальную строку активности у простого ответа.
-    # Lumen не должен оставлять «Думаю N c» поверх уже готового текста.
+    # Prod 23.11.2026: Claude removed the final activity line from a plain answer.
+    # Lumen must not leave 'Thinking for Ns' over already finished text.
     chat_id = 999321
 
     async def pieces():
@@ -744,8 +892,8 @@ def test_streaming_plain_text_has_no_thought_line():
 
 
 def test_streaming_slow_first_chunk_has_no_synthetic_thought_line():
-    # Прод 23.11.2026: Claude убрал финальную строку активности у простого
-    # ответа. Медленный первый кусок не должен возвращать синтетический заголовок.
+    # Production 23.11.2026: Claude removed the final activity line for a simple
+    # of the answer. A slow first chunk must not bring back the synthetic heading.
     chat_id = 999322
 
     async def pieces():
@@ -766,8 +914,8 @@ def test_streaming_slow_first_chunk_has_no_synthetic_thought_line():
 
 
 def test_streaming_final_split_sends_missing_continuation(monkeypatch):
-    # 4×1000 + 200 символов: инкрементальное разбиение видело один кусок,
-    # финальное дало два; раньше последняя правка затирала ответ хвостом.
+    # 4×1000 + 200 characters: incremental splitting saw one chunk,
+    # final produced two; previously, the last edit overwrote the response with the tail.
     chat_id = 999324
 
     class _RecordingBot:
@@ -801,26 +949,71 @@ def test_streaming_final_split_sends_missing_continuation(monkeypatch):
         assert tail_text.endswith("https://example.com")
         from aiogram.types import LinkPreviewOptions
         assert fake_bot.sent[0][0]["link_preview_options"] == LinkPreviewOptions(is_disabled=True)
-        # Оба сообщения вместе покрывают весь ответ, а не только хвост.
+        # Together, both messages cover the entire answer, not just the tail.
         assert len(first_edit) + len(tail_text) == len(answer)
-        # Досланный хвост уже финальный: повторная правка получила бы
-        # "not modified" и заменила HTML на голый текст (аудит 28.10.2026).
+        # The appended tail is already final: another edit would get
+        # "not modified" and replaced HTML with plain text (audit 28.10.2026).
         assert fake_bot.sent[0][1].edits == []
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
+def test_streaming_continuation_unknown_send_does_not_resend_answer(monkeypatch):
+    # Review 27.11.2026: an unknown continuation may already be delivered. It must not
+    # enter the definite-failure fallback, which would send the complete answer again.
+    chat_id = 999327
+
+    class _UnknownSendBot:
+        def __init__(self):
+            self.sent = []
+
+        async def send_message(self, **kwargs):
+            self.sent.append(kwargs)
+            return bot._TG_UNKNOWN
+
+    monkeypatch.setattr(bot, "bot", _UnknownSendBot())
+    replied = []
+
+    async def record_reply(message, text, *args, **kwargs):
+        replied.append(text)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_safe_reply", record_reply)
+
+    async def pieces():
+        for _ in range(4):
+            yield "в" * 1000
+        yield "г" * 180 + " https://example.com"
+
+    incoming = _FakeIncomingMessage(chat_id)
+    try:
+        answer, _ = asyncio.run(bot._run_streaming_reply(
+            chat_id, "длинный", incoming, provider="munito", model_id="probe-w",
+            piece_agen=pieces(),
+        ))
+        assert answer and answer.endswith("https://example.com")
+        # The complete answer is retained internally, but no duplicate fallback is sent.
+        assert replied == []
+        # The unknown continuation is not added to sent_messages. Its predecessor must
+        # keep the first chunk instead of being overwritten by the final tail.
+        final_visible = incoming.sent[0].edits[-1][0]
+        assert final_visible.startswith("в" * 100)
+        assert "https://example.com" not in final_visible
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_streaming_resplit_shifted_boundary_re_edits_shown_message(monkeypatch):
-    # Границы _split_text_chunks зависят от всего текста (склейка соседей по
-    # итоговому HTML), поэтому рост ответа сдвигал границу УЖЕ показанного куска,
-    # старый код дописывал за этим правку финализированного сообщения, и видимый
-    # текст перетекал между пузырями (аудит 01.11.2026; ревью 11.11.2026 п.5
-    # против: граница замораживается один раз, пересчитывается только хвост).
+    # The boundaries of _split_text_chunks depend on the entire text (joining neighbors by
+    # the final HTML), so response growth shifted the boundary of the ALREADY displayed chunk,
+    # the old code then edited the finalized message, and the visible
+    # text flowed between bubbles (audit 01.11.2026; review 11.11.2026, item 5
+    # the opposite: the boundary is frozen once; only the tail is recalculated).
     from lumen_formatting import _md_to_html, _split_text_chunks
 
     chat_id = 999326
-    base = "Линия **bold** текст. " * 150 + "\n\n" + "y" * 300 + "\n\n" + "z" * 300
-    tail = "И ещё немного текста, который дописала модель. "
+    base = "```\n" + "line text. " * 400 + "\n\n" + "y" * 300 + ".\n\n" + "z" * 300
+    tail = "\n```\nAnd more text written by the model. "
 
     class _RecordingBot:
         def __init__(self):
@@ -845,30 +1038,31 @@ def test_streaming_resplit_shifted_boundary_re_edits_shown_message(monkeypatch):
         ))
         final = _split_text_chunks(answer, bot.TG_MAX_LEN)
         assert len(final) > 1
-        # На первом куске граница была левее — иначе тест ничего не проверяет.
+        # On the first chunk the boundary was further left — otherwise the test checks nothing.
         frozen_boundary = _split_text_chunks(base, bot.TG_MAX_LEN)
         assert len(frozen_boundary) > 1, "первое разбиение обязано дать >1 куска"
+        # The completed tail changes the final split, but not an already shown chunk.
         assert len(frozen_boundary[0]) < len(final[0])
         shown_first = incoming.sent[0].edits[-1][0]
-        # Первый пузырь остался на замороженной границе: old-код переставил бы
-        # его на финальную (сдвинутую) границу.
+        # The first bubble remained at a frozen boundary: the old code would move
+        # it to the final (shifted) boundary.
         assert shown_first == _md_to_html(frozen_boundary[0])
-        # Покрытие не потерялось: хвост ушёл в продолжения, последнее показанное
-        # сообщение заканчивается фразой модели; «…» среди продолжений не слан.
+        # Coverage was not lost: the tail went to continuations; the last displayed
+        # the message ends with a model phrase; "…" is not used among continuations.
         cont_texts = [str(kw.get("text", "")) for kw, _m in bot.bot.sent]
         assert cont_texts and "…" not in cont_texts
         last_shown = cont_texts[-1] or ""
         for _kw, msg in bot.bot.sent:
             if msg.edits:
                 last_shown = msg.edits[-1][0]
-        assert "который дописала модель" in last_shown
+        assert "written by the model" in last_shown
     finally:
         bot.chat_state.pop(chat_id, None)
 
 
 def test_streaming_stores_clean_history_text_not_full_prompt():
-    # Аудит 28.10.2026: в историю уходил ai_prompt со сниппетами и датой;
-    # сохраняем только чистый запрос пользователя.
+    # Audit 28.10.2026: ai_prompt with snippets and a date went into history;
+    # keep only the clean user request.
     chat_id = 999323
 
     async def pieces():
@@ -890,7 +1084,7 @@ def test_streaming_stores_clean_history_text_not_full_prompt():
 
 
 def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
-    # Живой статус уже в чате: стрим пишет ответ в него, второго «…» нет.
+    # The live status is already in the chat: the stream writes the answer into it, so there is no second "…".
     chat_id = 999320
 
     class _FakeStatus:
@@ -902,8 +1096,8 @@ def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
             self.finished = True
 
         def paint_header_md(self):
-            # Стрим нарисовал бы под этой строкой тело ответа; здесь ответ
-            # мгновенный, секунд 0 — строки нет (ревью 11.11.2026).
+            # The stream would draw the response body under this line; here the response
+            # instantaneous, 0 seconds means no line (review 11.11.2026).
             return ""
 
         def compose_answer(self, answer_md):
@@ -921,7 +1115,7 @@ def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
             piece_agen=pieces(), status=status,
         ))
         assert answer == "Привет"
-        assert incoming.sent == []  # второй пузырь не отправлялся
+        assert incoming.sent == []  # the second bubble was not sent
         assert status.finished is True
         final_edit = status.message.edits[-1][0]
         assert "Привет" in final_edit
@@ -930,9 +1124,99 @@ def test_streaming_reuses_status_bubble_instead_of_sending_new_placeholder():
         bot.chat_state.pop(chat_id, None)
 
 
+@pytest.mark.parametrize("kind", ["plain", "table"])
+def test_streaming_limit_overflow_drops_activity_without_losing_final_answer(kind):
+    # Review I26: neither overflow nor a table at the boundary should get a header again —
+    # otherwise Telegram rejects the entire final frame.
+    from lumen_formatting import _md_to_html, _tg_len
+    from lumen_status import StatusMessage
+
+    chat_id = 999319
+    if kind == "table":
+        prefix = "| a | b |\n| --- | --- |\n| "
+        suffix = " | y |"
+        answer = prefix + "x" * (bot.TG_MAX_LEN - len(prefix) - len(suffix)) + suffix
+    else:
+        answer = "x" * bot.TG_MAX_LEN
+    assert _tg_len(answer) == bot.TG_MAX_LEN
+    incoming = _FakeIncomingMessage(chat_id)
+    bubble = _FakeSentMessage()
+    bubble.chat = incoming.chat
+    status = StatusMessage(message=bubble, lang="en")
+    status._thought_seconds = 2
+
+    async def pieces():
+        yield answer
+
+    try:
+        returned, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "граница", incoming, provider="munito", model_id="probe-limit",
+            piece_agen=pieces(), status=status,
+        ))
+        assert returned == answer
+        assert placeholder is None
+        final_edit = bubble.edits[-1][0]
+        assert final_edit == (_md_to_html(answer) if kind == "table" else answer)
+        assert "Thought for" not in final_edit
+        assert _tg_len(final_edit) <= bot.TG_MAX_LEN
+        assert bot.chat_state[chat_id]["history"][-1] == {"role": "assistant", "content": answer}
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
+def test_streaming_table_header_is_dropped_when_only_rich_html_overflows(monkeypatch):
+    # Review I26 round 3: the markdown/HTML candidate fits, but the rich table with a header does not.
+    from lumen_formatting import _tg_len
+    from lumen_rich import _rich_html_with_limit
+    from lumen_status import StatusMessage
+
+    chat_id = 777
+    answer = "| x | y |\n| --- | --- |\n" + "\n".join("| x | y |" for _ in range(139))
+    header = "*✻ Thought for 2 seconds*"
+    candidate = header + "\n\n" + answer
+    assert _tg_len(answer) <= bot.TG_MAX_LEN
+    assert _tg_len(_rich_html_with_limit(answer)) <= bot.TG_MAX_LEN
+    assert _tg_len(_rich_html_with_limit(candidate)) > bot.TG_MAX_LEN
+
+    class _CallableRichBot(_FakeRichBot):
+        async def __call__(self, method, **kwargs):
+            self.rich_edited.append({"method": method})
+            return self._real_message(method.message_id)
+
+    rich_bot = _CallableRichBot()
+    monkeypatch.setattr(bot, "bot", rich_bot)
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", True)
+    incoming = _FakeIncomingMessage(chat_id)
+    status = StatusMessage(message=rich_bot._real_message(42).as_(rich_bot), lang="en")
+    status._thought_seconds = 2
+
+    async def pieces():
+        yield answer
+
+    try:
+        returned, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "rich-граница", incoming, provider="munito", model_id="probe-rich-limit",
+            piece_agen=pieces(), status=status,
+        ))
+        assert returned == answer
+        assert placeholder is None
+        last = rich_bot.rich_edited[-1]
+        if "method" in last:
+            method = last["method"]
+            html = method.rich_message.html if method.rich_message else method.text
+        else:
+            html = last["rich_message"].html if "rich_message" in last else last["text"]
+        assert "<table" in html
+        assert "Thought for" not in html
+        assert _tg_len(html) <= bot.TG_MAX_LEN
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_streaming_whitespace_only_returns_none_not_empty_response():
-    # Стрим из одних пробелов — тоже "ничего не прислал": плейсхолдер уезжает
-    # дальше по цепочке, а не превращается в "Empty response" для пользователя.
+    # A stream of spaces only is also "sent nothing": the placeholder leaves
+    # falls through the chain instead of turning into "Empty response" for the
+    # user.
     chat_id = 999305
 
     async def whitespace_pieces():
@@ -951,8 +1235,8 @@ def test_streaming_whitespace_only_returns_none_not_empty_response():
 
 
 def test_streaming_reveal_follows_arrival_pace_not_full_dump():
-    # Куски капают постепенно (10 × 20 симв. с паузами): первая правка обязана показать
-    # ЧАСТЬ ответа, а не весь текст разом — часы показа идут от первого куска.
+    # Chunks arrive gradually (10 × 20 characters with pauses): the first edit must show
+    # PART of the response, not the entire text at once — the display clock starts from the first chunk.
     chat_id = 999308
     full = "x" * 200
 
@@ -979,7 +1263,7 @@ def test_try_munito_streaming_returns_none_on_early_failure(monkeypatch):
 
     async def fake_stream_pieces_raises(model_id, messages, *, deadline=None, effort=None):
         raise RuntimeError("boom before any content")
-        yield ""  # делает функцию async-генератором (недостижимо)
+        yield ""  # makes the function an async generator (unreachable)
 
     incoming = _FakeIncomingMessage(chat_id)
     monkeypatch.setattr(bot, "_munito_stream_pieces", fake_stream_pieces_raises)
@@ -991,8 +1275,8 @@ def test_try_munito_streaming_returns_none_on_early_failure(monkeypatch):
 
 
 def test_run_streaming_reply_reuses_given_placeholder():
-    # Резервная модель после раннего сбоя стрима пишет в тот же пузырёк:
-    # второй «Думаю…» в чате не появляется (прод 28.10.2026).
+    # The reserve model after an early stream failure writes into the same bubble:
+    # a second "Thinking…" appears in the chat (prod 28.10.2026).
     chat_id = 999105
 
     async def pieces():
@@ -1025,10 +1309,10 @@ def test_run_streaming_reply_paces_reveal_for_burst_instead_of_dumping_full_text
     pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
     original_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
 
-    # Реалистичная имитация бэкенда, который не стримит токен-в-токен, а отдаёт
-    # весь ответ ОДНИМ куском (см. докстринг lumen_typing_pace.py про то, почему
-    # это обычное дело для бесплатных моделей с общим слагом).
-    long_text = "Слово " * 80  # ~480 символов одним SSE-куском
+    # A realistic imitation of a backend that does not stream token by token, but sends
+    # the entire response in ONE chunk (see the lumen_typing_pace.py docstring on why
+    # this is normal for free models with a shared lag).
+    long_text = "Слово " * 80  # ~480 characters in one SSE chunk
 
     fake_stream = _fake_gemini_stream([long_text])
 
@@ -1043,14 +1327,13 @@ def test_run_streaming_reply_paces_reveal_for_burst_instead_of_dumping_full_text
         assert answer == long_text.strip()
         assert placeholder is None
         partial_edits = [text for text, parse_mode in incoming.sent[0].edits if parse_mode is bot.ParseMode.HTML]
-        # Хотя бы одна промежуточная правка должна была показать ЧАСТЬ текста, а
-        # не весь ответ разом — иначе пейсинг не сработал (регрессия на исходную
-        # проблему: "скачками по 15-20 слов" вместо плавного набора). С ревью
-        # 11.11.2026 п.4 промежуточные кадры идут HTML с закрытой разметкой, а
-        # не голым текстом, поэтому фильтр по HTML, а не по None.
+        # At least one intermediate edit must show part, but not all, of the text; otherwise
+        # pacing would not engage. This protects against the original 15–20-word jumps. Review
+        # 11.11.2026 item 4 also requires intermediate frames to use HTML with closed markup,
+        # so filter by HTML rather than None.
         assert any(0 < len(p) < len(long_text) for p in partial_edits)
         assert all("**" not in p for p in partial_edits)
-        # Финальная правка — уже HTML с полным текстом, как и раньше.
+        # The final edit is already HTML with the full text, as before.
         assert incoming.sent[0].edits[-1][1] == bot.ParseMode.HTML
         history = bot.chat_state[chat_id]["history"]
         assert history[-1] == {"role": "assistant", "content": long_text.strip()}
@@ -1079,8 +1362,8 @@ def test_run_streaming_reply_records_observed_speed_on_success():
     bot.client = fake_client
     try:
         asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
-        # После успешного стрима у модели должна появиться собственная запись в
-        # EMA — самокалибровка происходит без единой ручной правки таблицы.
+        # After a successful stream, the model must get its own EMA entry; that enables
+        # self-calibration without manual table edits.
         assert pace_key in lumen_typing_pace._speed_ema
     finally:
         bot.client = original_client
@@ -1092,17 +1375,17 @@ def test_run_streaming_reply_records_observed_speed_on_success():
 
 
 def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_burst():
-    # РЕГРЕССИЯ на ключевое требование: сколько бы ни оценивалась скорость модели
-    # заниженно и сколько бы символов ни осталось "довыводить" одним куском, число
-    # искусственных пауз ограничено STREAM_TYPING_MAX_CATCHUP_SEC — реальная
-    # скорость ответа не должна страдать ради красивости набора текста.
+    # REGRESSION against a key requirement: no matter how model speed is estimated
+    # too low, and no matter how many characters remain to 'finish' in one chunk, the count
+    # artificial pauses is capped by STREAM_TYPING_MAX_CATCHUP_SEC — the real
+    # response speed must not suffer for the sake of pretty typing.
     import lumen_typing_pace
     chat_id = 999112
     pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
     original_ema = lumen_typing_pace._speed_ema.pop(pace_key, None)
-    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC  # намеренно "медленная" модель
+    lumen_typing_pace._speed_ema[pace_key] = lumen_typing_pace.MIN_CHARS_PER_SEC  # an intentionally “slow” model
 
-    long_text = "Буква " * 500  # ~3000 символов, одним куском, ниже TG_MAX_LEN
+    long_text = "Буква " * 500  # ~3000 characters, in one chunk, below TG_MAX_LEN
 
     fake_stream = _fake_gemini_stream([long_text])
 
@@ -1122,12 +1405,12 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
     try:
         answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == long_text.strip()
-        # Шаг — пауза плюс реальная правка, а не только пауза (ревью 17.11.2026).
+        # A step is a pause plus an actual edit, not just a pause (review 17.11.2026).
         tick_ceiling = max(1, int(
             bot.STREAM_TYPING_MAX_CATCHUP_SEC
             / (bot.STREAM_TYPING_TICK_SEC + bot.STREAM_TYPING_STEP_RTT_SEC)))
         assert len(sleep_calls) <= tick_ceiling
-        # Длинный хвост идёт ровно, а не восьмью прыжками: тиков заметно больше.
+        # The long tail prints steadily, not in eight jumps: there are noticeably more ticks.
         assert len(sleep_calls) > 8, sleep_calls
     finally:
         bot._typing_sleep = original_sleep
@@ -1140,8 +1423,8 @@ def test_run_streaming_reply_catchup_never_exceeds_max_ticks_even_for_long_slow_
 
 
 def test_run_streaming_reply_catchup_edits_respect_min_interval(monkeypatch):
-    # Довывод правится тем же троттлингом, что основной цикл: тик короче
-    # интервала правок, серия быстро ловила бы 429.
+    # Catch-up is edited with the same throttling as the main loop: a shorter tick
+    # the edit interval, the series would quickly hit 429.
     import lumen_typing_pace
     import time
     chat_id = 999113
@@ -1170,8 +1453,8 @@ def test_run_streaming_reply_catchup_edits_respect_min_interval(monkeypatch):
     try:
         answer, _ = asyncio.run(bot._try_gemini_streaming(chat_id, "Привет!", incoming, bot.DEFAULT_GEMINI_MODEL))
         assert answer == long_text.strip()
-        # Последняя правка финальная терминальная (один вызов, вне троттлинга
-        # по дизайну) — меряем промежутки прогрессивных правок.
+        # The last edit is final and terminal (one call, outside throttling
+        # by design) — measure the intervals between progressive edits.
         gaps = [b - a for a, b in zip(edit_ts, edit_ts[1:-1])]
         assert gaps, "expected progressive edits during streaming"
         assert min(gaps) >= 0.35
@@ -1185,7 +1468,8 @@ def test_run_streaming_reply_catchup_edits_respect_min_interval(monkeypatch):
 
 
 def test_send_text_pauses_between_chunks(monkeypatch):
-    # Куски уходят с паузой против флуд-контроля за серию подряд.
+    # Chunks are sent with a pause to respect flood control for a consecutive
+    # series.
     from types import SimpleNamespace
     sleeps = []
 
@@ -1211,8 +1495,8 @@ def test_send_text_pauses_between_chunks(monkeypatch):
 
 
 def test_bot_text_send_and_edit_disable_link_previews(monkeypatch):
-    # Прод 23.11.2026: ответ со ссылкой MDN раздувался огромной preview-карточкой,
-    # тогда как у Claude оставалась компактная гиперссылка.
+    # Production 23.11.2026: an answer with an MDN link expanded into a huge preview card,
+    # while Claude retained a compact hyperlink.
     from aiogram.types import LinkPreviewOptions
 
     monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
@@ -1241,10 +1525,10 @@ def test_bot_text_send_and_edit_disable_link_previews(monkeypatch):
 
 
 def test_send_text_keeps_reply_markup_only_on_last_chunk(monkeypatch):
-    # Клавиатура должна уйти один раз, с последним куском: reply_markup на
-    # каждом чанке дублирует кнопку в чате, поэтому из всех кусков, кроме
-    # последнего, kwarg вычищается (lumen_rich._send_text). Существующие
-    # send_text-тесты kwarg reply_markup не передают вообще.
+    # The keyboard must be sent once, with the last chunk: reply_markup on
+    # each chunk duplicates the button in the chat, so among all chunks, except
+    # the last one, the kwarg is removed (lumen_rich._send_text). Existing
+    # send_text tests do not pass the reply_markup kwarg at all.
     from types import SimpleNamespace
     monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
     cont_calls: list[dict] = []
@@ -1271,15 +1555,15 @@ def test_send_text_keeps_reply_markup_only_on_last_chunk(monkeypatch):
         bot.chat_state.pop(999115, None)
     assert len(bot._split_text_chunks(text, bot.TG_MAX_LEN)) >= 3
     assert len(cont_calls) >= 2
-    # Первый кусок уходит через message.reply, продолжения — через bot.send_message.
+    # The first chunk goes through message.reply; continuations go through bot.send_message.
     assert "reply_markup" not in reply_calls[0]
     assert "reply_markup" not in cont_calls[0]
     assert cont_calls[-1].get("reply_markup") == keyboard
 
 
 def test_gemini_streaming_daily_429_marks_exhausted_like_text_path():
-    # Стриминг опознавал суточную квоту чужим предикатом и ставил минутную
-    # остывку вместо метки до утра.
+    # Streaming identified the daily quota with a foreign predicate and applied a minute-long
+    # cooldown instead of a mark until morning.
     chat_id = 999116
     model = bot.DEFAULT_GEMINI_MODEL
     fake_stream = _fake_gemini_stream(raises=RuntimeError("429 Quota exceeded for the day"))
@@ -1317,8 +1601,8 @@ def test_rich_send_used_for_final_answer_with_table():
 
 
 def test_rich_send_keeps_table_when_split_would_exceed_message_limit():
-    # Прод 24.11.2026: split широкой таблицы плюс обычный текст мог превысить
-    # 4096, и rich-путь целиком терялся. Повтор без split сохраняет таблицу.
+    # Prod 24.11.2026: splitting a wide table plus ordinary text could exceed
+    # 4096, and the rich path was lost entirely. A retry without split preserves the table.
     from lumen_formatting import _tg_len
 
     chat_id = 999403
@@ -1351,6 +1635,74 @@ def test_rich_failure_falls_back_to_legacy_html():
     finally:
         bot.bot = original_bot
         bot.chat_state.pop(chat_id, None)
+
+
+def test_rich_send_unknown_preserves_sentinel(monkeypatch):
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", True)
+    monkeypatch.setattr(bot, "bot", _FakeRichBot())
+    calls = []
+
+    async def unknown_tg_call(method, *args, **kwargs):
+        calls.append(kwargs)
+        return bot._TG_UNKNOWN
+
+    monkeypatch.setattr(bot, "_tg_call", unknown_tg_call)
+    incoming = _FakeIncomingMessage(999408)
+    res = asyncio.run(bot._try_send_rich(incoming, "<b>жирный</b>", is_first_chunk=True))
+    assert res is bot._TG_UNKNOWN
+    assert len(calls) == 1
+
+
+def test_send_text_unknown_rich_delivery_skips_legacy(monkeypatch):
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", True)
+    monkeypatch.setattr(bot, "bot", _FakeRichBot())
+    calls = []
+
+    async def unknown_tg_call(method, *args, **kwargs):
+        calls.append(kwargs)
+        return bot._TG_UNKNOWN
+
+    monkeypatch.setattr(bot, "_tg_call", unknown_tg_call)
+    incoming = _FakeIncomingMessage(999409)
+    asyncio.run(bot._safe_reply(incoming, "**жирный** текст"))
+    assert len(calls) == 1
+    assert "rich_message" in calls[0]
+    assert incoming.sent == []
+
+
+def test_rich_edit_unknown_preserves_sentinel(monkeypatch):
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", True)
+    monkeypatch.setattr(bot, "bot", _FakeRichBot())
+    calls = []
+
+    async def unknown_tg_call(method, *args, **kwargs):
+        calls.append(kwargs)
+        return bot._TG_UNKNOWN
+
+    monkeypatch.setattr(bot, "_tg_call", unknown_tg_call)
+    msg = _FakeRichMessage()
+    res = asyncio.run(bot._try_edit_rich(msg, "<b>жирный</b>"))
+    assert res is bot._TG_UNKNOWN
+    assert len(calls) == 1
+
+
+def test_edit_message_quietly_unknown_rich_delivery_skips_legacy(monkeypatch):
+    # Callers check `if not edited`: unknown must close the retry path,
+    # otherwise an HTML/plain duplicate follows an already accepted Rich response.
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", True)
+    monkeypatch.setattr(bot, "bot", _FakeRichBot())
+    calls = []
+
+    async def unknown_tg_call(method, *args, **kwargs):
+        calls.append(kwargs)
+        return bot._TG_UNKNOWN
+
+    monkeypatch.setattr(bot, "_tg_call", unknown_tg_call)
+    msg = _FakeRichMessage()
+    assert asyncio.run(bot._edit_message_quietly(msg, "**жирный**")) is True
+    assert len(calls) == 1
+    assert "rich_message" in calls[0]
+    assert msg.edits == []
 
 
 def test_rich_disabled_flag_uses_legacy_path(monkeypatch):
@@ -1394,9 +1746,60 @@ def test_rich_edit_falls_back_to_legacy_on_failure():
         bot.bot = original_bot
 
 
+@pytest.mark.parametrize("rich", [False, True])
+def test_not_modified_edit_is_success_without_plain_retry(monkeypatch, rich):
+    # R5-12 (audit 26.11.2026): Telegram already displayed the required text; repeating
+    # with plain text only removes formatting.
+    import datetime
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.types import Chat, Message
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", rich)
+    monkeypatch.setattr(bot, "_tg_call", lambda method, *a, **kw: method(*a, **kw))
+    calls = []
+
+    class Editor:
+        async def edit_message_text(self, **kwargs):
+            calls.append(kwargs)
+            raise TelegramBadRequest(method="editMessageText", message="message is not modified")
+
+        async def edit_text(self, text, **kwargs):
+            calls.append(kwargs)
+            raise TelegramBadRequest(method="editMessageText", message="message is not modified")
+
+    original_bot = bot.bot
+    bot.bot = Editor()
+    if rich:
+        msg = Message(message_id=42, date=datetime.datetime.now(), chat=Chat(id=777, type="private"))
+    else:
+        msg = SimpleNamespace(chat=Chat(id=777, type="private"), message_id=42,
+                              edit_text=bot.bot.edit_text)
+    try:
+        assert asyncio.run(bot._edit_message_quietly(msg, "**жирный**")) is True
+        assert len(calls) == 1
+        assert calls[0].get("parse_mode") == (None if rich else "HTML")
+    finally:
+        bot.bot = original_bot
+
+
+def test_guest_answer_disables_link_previews(monkeypatch):
+    from types import SimpleNamespace
+    captured = {}
+
+    async def capture(method, payload, **kwargs):
+        captured.update(payload)
+        return True
+
+    monkeypatch.setattr(bot, "telegram_api_call", capture)
+    msg = SimpleNamespace(chat=SimpleNamespace(id=777), guest_query_id="guest-1")
+    asyncio.run(bot._answer_guest_text(msg, "https://example.com"))
+    content = captured["result"]["input_message_content"]
+    assert content["link_preview_options"]["is_disabled"] is True
+
+
+
 def test_streaming_limits_chunk_resplits(monkeypatch):
-    # Аудит A4-11: _split_text_chunks на каждый кусок давал O(n²) в loop —
-    # теперь пересчёт только при заметном приросте текста.
+    # Audit A4-11: _split_text_chunks made the loop O(n²) for every piece —
+    # recalculation now happens only after a noticeable increase in text.
     real_split = lumen_streaming._split_text_chunks
     calls = {"n": 0}
 
@@ -1424,8 +1827,8 @@ def test_streaming_limits_chunk_resplits(monkeypatch):
 
 
 def test_streaming_falls_back_to_reply_when_edits_die(monkeypatch):
-    # Аудит A4-12: сообщение снесли посреди стрима — серия неуспешных правок
-    # ведёт к досылке ответа новым сообщением, а не к истории под невидимый текст.
+    # Audit A4-12: the message was deleted mid-stream; a series of unsuccessful edits
+    # causes the answer to be sent as a new message rather than added to history under invisible text.
     chat_id = 999972
     incoming = _FakeIncomingMessage(chat_id)
 
@@ -1464,10 +1867,10 @@ def test_streaming_falls_back_to_reply_when_edits_die(monkeypatch):
 
 
 def test_stream_search_marker_never_reaches_the_screen_and_keeps_the_bubble():
-    # Скрины из группы 11.11.2026: «когда вышла Fable 5.2» отвечали по памяти,
-    # потому что классификатор формулировки не узнаёт их. Решение отдано модели
-    # маркером [[SEARCH]] — он не имеет права мелькнуть на экране даже покусочно,
-    # а пузырёк «Думаю…» должен дожить до второго прохода со сниппетами.
+    # Screenshots from the group 11.11.2026: "when was Fable 5.2 released" was answered from memory,
+    # because the wording classifier does not recognize them. The decision is delegated to the model
+    # the [[SEARCH]] marker — it must never appear on screen, even piece by piece,
+    # and the “Thinking…” bubble must survive the second pass with snippets.
     chat_id = 999151
     fake_client = MagicMock()
     fake_client.aio.models.generate_content_stream = _fake_gemini_stream(
@@ -1486,7 +1889,7 @@ def test_stream_search_marker_never_reaches_the_screen_and_keeps_the_bubble():
         assert bot.chat_state[chat_id].get("history") == []
         after_used = sum(int((e or {}).get("used") or 0)
                          for e in (bot.GLOBAL_QUOTA.get("gemini") or {}).values() if isinstance(e, dict))
-        # Решение «нужен поиск» — тоже вызов провайдера: расход записан (аудит 16.11.2026).
+        # The "search needed" decision is also a provider call: usage was recorded (audit 16.11.2026).
         assert after_used == before_used + 1
     finally:
         bot.client = original_client
@@ -1495,10 +1898,10 @@ def test_stream_search_marker_never_reaches_the_screen_and_keeps_the_bubble():
 
 
 def test_live_stream_is_not_cut_by_the_route_budget(monkeypatch):
-    # РЕГРЕССИЯ на прод 11.11.2026: 5700-символьный ответ оборвался на 35-й
-    # секунде с пометкой «Соединение прервалось», потому что стрим проверялся
-    # общим 40-секундным бюджетом маршрута. Пока куски прибывают, ответ должен
-    # дойти до конца.
+    # PRODUCTION REGRESSION on 11.11.2026: a 5700-character answer was cut off at the 35th
+    # second with "Connection interrupted", because the stream was checked
+    # the shared 40-second route budget. While chunks are arriving, the response must
+    # reach the end.
     chat_id = 999311
     monkeypatch.setattr(bot, "STREAM_ROUTE_MAX_SEC", 30)
 
@@ -1521,10 +1924,11 @@ def test_live_stream_is_not_cut_by_the_route_budget(monkeypatch):
 
 
 def test_stream_extension_never_exceeds_the_message_budget():
-    # Аудит 16.11.2026: продление живого стрима (STREAM_ROUTE_MAX_SEC) не учитывало
-    # остаток MESSAGE_TOTAL_BUDGET_SEC, хотя комментарий в bot.py обещает min(свой
-    # таймаут, остаток) на каждом этапе. Без клампа поиск на 40 с плюс 55 с стрима
-    # держали лок чата дольше заявленного потолка сообщения.
+    # Audit 16.11.2026: extending a live stream (STREAM_ROUTE_MAX_SEC) did not account for
+    # the remainder of MESSAGE_TOTAL_BUDGET_SEC, although the comment in bot.py promises min(own
+    # timeout, remainder) at every stage. Without the clamp, a 40 s search plus a 55 s
+    #     stream
+    # held the chat lock longer than the stated message cap.
     from lumen_streaming import _stream_deadline
 
     now = time.monotonic()
@@ -1533,14 +1937,14 @@ def test_stream_extension_never_exceeds_the_message_budget():
         assert _stream_deadline(now - 1.0, now) <= now + 3.05
     finally:
         bot._MSG_DEADLINE.reset(token)
-    # Вне handle_message потолка нет: продление длинного ответа работает как раньше.
+    # Outside handle_message there is no ceiling: extending a long answer works as before.
     assert _stream_deadline(now - 1.0, now) == now + bot.STREAM_ROUTE_STALL_GRACE_SEC
 
 
 def test_stop_ends_the_stream_and_keeps_the_partial_answer():
-    # Аудит 16.11.2026: остановка ответа — обещанный контроль. Частичный текст
-    # остаётся на экране и ложится в историю; хвост, пришедший после остановки,
-    # в ответ не попадает; автопродолжение после осознанного стопа не запускается.
+    # Audit 16.11.2026: stopping an answer is a promised control. Partial text
+    # remains on screen and enters history; the tail arriving after the stop
+    # does not reach the answer; auto-continuation does not start after an intentional stop.
     chat_id = 999313
     incoming = _FakeIncomingMessage(chat_id)
 
@@ -1567,6 +1971,62 @@ def test_stop_ends_the_stream_and_keeps_the_partial_answer():
         bot._STREAM_STOPS.pop(chat_id, None)
 
 
+def test_stop_scrubs_an_unfinished_identity_leak_before_painting(caplog):
+    chat_id = 999314
+    incoming = _FakeIncomingMessage(chat_id)
+
+    async def pieces():
+        yield "I am Gemini"
+        bot._request_stream_stop(chat_id)
+        yield " and this must not be shown"
+
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Who are you?", incoming, provider="munito", model_id="probe-stop-leak",
+            piece_agen=pieces(),
+        ))
+        assert answer == bot._IDENTITY_LEAK_FALLBACK
+        assert placeholder is None
+        assert all("gemini" not in text.lower() for text, _mode in incoming.sent[0].edits)
+        assert bot.chat_state[chat_id]["history"][-1]["content"] == bot._IDENTITY_LEAK_FALLBACK
+        assert "[identity-leak] Detected and blocked an identity leak" in caplog.text
+    finally:
+        bot.chat_state.pop(chat_id, None)
+        bot._STREAM_STOPS.pop(chat_id, None)
+
+
+def test_stop_recalculates_continuation_offset_after_polish(monkeypatch):
+    import lumen_streaming
+
+    monkeypatch.setattr(
+        lumen_streaming, "_split_text_chunks",
+        lambda text, limit: [text[index:index + 10] for index in range(0, len(text), 10)],
+    )
+    chat_id = 999315
+    incoming = _FakeIncomingMessage(chat_id)
+    raw = "🎉🎉🎉 ABCDEFGHI" + "z" * 50 + "."
+
+    async def pieces():
+        yield raw
+        bot._request_stream_stop(chat_id)
+        yield "ignored"
+
+    try:
+        answer, placeholder = asyncio.run(bot._run_streaming_reply(
+            chat_id, "Напиши длинный текст", incoming, provider="munito", model_id="probe-stop-offset",
+            piece_agen=pieces(),
+        ))
+        assert placeholder is None
+        assert answer.startswith("ABCDEFGHI")
+        assert "G" in answer
+        shown = [message.edits[-1][0] for message in incoming.sent if message.edits][-1]
+        assert "G" in shown
+        assert bot._t(chat_id, "stream_note_stopped").strip() in shown
+    finally:
+        bot.chat_state.pop(chat_id, None)
+        bot._STREAM_STOPS.pop(chat_id, None)
+
+
 def test_stop_command_is_silent_without_an_active_stream():
     from types import SimpleNamespace
     import lumen_commands
@@ -1586,7 +2046,7 @@ def test_stop_command_is_silent_without_an_active_stream():
 
 
 def test_group_catchup_uses_the_shorter_ceiling():
-    # В группе лок чата общий: длинный хвост не должен держать его 20 секунд.
+    # In a group, the chat lock is shared: a long tail must not hold it for 20 seconds.
     import lumen_typing_pace
 
     chat_id = 999113
@@ -1619,13 +2079,13 @@ def test_group_catchup_uses_the_shorter_ceiling():
     group_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_GROUP_SEC / step_sec)
     private_ceiling = int(bot.STREAM_TYPING_MAX_CATCHUP_SEC / step_sec)
     assert len(sleep_calls) <= group_ceiling < private_ceiling
-    # Отключённый довывод (бюджет 0) раньше оставлял тест зелёным:
+    # Disabled finish-generation (budget 0) previously left the test green:
     assert len(sleep_calls) > 0
     assert (answer or "").strip() == ("Буква " * 500).strip()
 def test_catchup_tick_budget_arithmetic():
     import lumen_typing_pace
-    # Ревью 11.11.2026: потолок тиков = секунды бюджета / реальный шаг (пауза
-    # + правка). Нулевой бюджет и нулевой шаг не имеют права ни на одну паузу.
+    # Review 11.11.2026: the tick ceiling equals budget seconds / actual step (pause
+    # + an edit). A zero budget and zero step must not cause even one pause.
     assert lumen_typing_pace.catchup_tick_budget(20.0, 1.2) == 16
     assert lumen_typing_pace.catchup_tick_budget(8.0, 1.2) == 6
     assert lumen_typing_pace.catchup_tick_budget(0.0, 1.2) == 0
@@ -1633,10 +2093,10 @@ def test_catchup_tick_budget_arithmetic():
 
 
 def test_catchup_tick_count_follows_the_real_step_not_the_sleep_only():
-    # РЕГРЕССИЯ на ревью 11.11.2026: бюджет довывода делился только на паузу,
-    # хотя каждый тик стоит ещё и правку (0,5-0,7 с через реле). 20 секунд
-    # бюджета при шаге 1,2 с — это 16 тиков, а не 40: раньше длинный хвост
-    # держал лок чата вдвое дольше разрешённого и уходил за бюджет сообщения.
+    # REGRESSION found in the 11.11.2026 review: the remaining output budget was split only by the pause,
+    # even though each tick also costs an edit (0.5-0.7 s through the relay). 20 seconds
+    # budget at steps of 1, 2s means 16 ticks, not 40: previously a long tail
+    # held the chat lock twice as long as allowed and exceeded the message budget.
     import lumen_typing_pace
     chat_id = 999312
     pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
@@ -1670,9 +2130,9 @@ def test_catchup_tick_count_follows_the_real_step_not_the_sleep_only():
 
 
 def test_catchup_survives_zero_typing_tick_setting(monkeypatch):
-    # Ревью 11.11.2026: STREAM_TYPING_TICK_SEC допускает 0, и деление бюджета
-    # на ноль уводило целый ответ в ветку сбоя с пометкой «Соединение
-    # прервалось». Конфиг-опечатка не должна ломать доставку.
+    # Review 11.11.2026: STREAM_TYPING_TICK_SEC allows 0, and dividing the budget
+    # to zero sent the entire answer down the failure branch marked "Connection
+    # interrupted”. A config typo must not break delivery.
     import lumen_typing_pace
     chat_id = 999313
     pace_key = lumen_typing_pace.speed_key("gemini", bot.DEFAULT_GEMINI_MODEL)
@@ -1700,8 +2160,8 @@ def test_catchup_survives_zero_typing_tick_setting(monkeypatch):
 
 
 def test_stop_permissions_and_idempotency():
-    # Аудит 16.11.2026: чужой человек в группе остановить ответ не может, повторный
-    # /stop ничего не делает, область снимается без утечки на следующий ответ.
+    # Audit 16.11.2026: another person in a group cannot stop the response; a repeated
+    # /stop does nothing; remove the area without leaking it into the next answer.
     bot._STREAM_STOPS.clear()
     bot._begin_stream_stop_scope(424242, 100)
     try:
@@ -1710,7 +2170,7 @@ def test_stop_permissions_and_idempotency():
         assert bot._request_stream_stop(424242, 100) is True
         assert bot._stream_stop_requested(424242) is True
         assert bot._request_stream_stop(424242, 100) is False
-        # Вложенная область (стрим) не снимает внешнюю и не теряет флаг.
+        # A nested scope (stream) does not release the outer one or lose the flag.
         bot._begin_stream_stop_scope(424242, 100)
         bot._end_stream_stop_scope(424242)
         assert bot._stream_stop_requested(424242) is True
@@ -1720,8 +2180,8 @@ def test_stop_permissions_and_idempotency():
 
 
 def test_stop_flag_is_consumed_and_does_not_kill_the_next_queued_question():
-    # Второй проход аудита 16.11.2026: флаг на чат переживал апдейт, и второй
-    # вопрос, ждавший лок, гас на первой же проверке стрима.
+    # Second audit pass 16.11.2026: a per-chat flag survived the update, and the second
+    # question waiting for the lock dies at the very first stream check.
     bot._STREAM_STOPS.clear()
     bot._begin_stream_stop_scope(515151, 100)
     bot._begin_stream_stop_scope(515151, 200)
@@ -1737,9 +2197,9 @@ def test_stop_flag_is_consumed_and_does_not_kill_the_next_queued_question():
 
 
 def test_stop_button_is_off_by_default_and_wired_when_on(monkeypatch):
-    # Аудит 16.11.2026: кнопка добавляет две правки на ответ, поэтому по умолчанию
-    # выключена до живого смоука; включённая несёт локализованную подпись и callback
-    # на конкретный чат.
+    # Audit 16.11.2026: the button adds two edits per response, so by default
+    # is disabled until a live smoke test; when enabled, it carries a localized caption and callback
+    # to a specific chat.
     import lumen_streaming
 
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", False)
@@ -1753,8 +2213,8 @@ def test_stop_button_is_off_by_default_and_wired_when_on(monkeypatch):
 
 
 def test_private_stop_keyboard_survives_stream_edits(monkeypatch):
-    # Прод 24.11.2026: inline-кнопка под растущим ответом уезжала за экран.
-    # В личке Stop живёт в reply-клавиатуре над композером.
+    # Production 24.11.2026: an inline button under a growing answer moved off-screen.
+    # In private chats, Stop lives in the reply keyboard above the composer.
     from types import SimpleNamespace
     from aiogram.types import ReplyKeyboardRemove
 
@@ -1794,9 +2254,71 @@ def test_private_stop_keyboard_survives_stream_edits(monkeypatch):
         bot.chat_state.pop(chat_id, None)
 
 
+def test_cancelled_unknown_stop_control_is_not_deleted(monkeypatch):
+    # Review 27.11.2026: cancellation while the control send is in flight can still
+    # return _TG_UNKNOWN; cleanup must not treat that sentinel as a Message.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
+    monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
+    chat_id = 999325
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    delete_accesses = []
+
+    class _Sent:
+        async def delete(self):
+            raise AssertionError("placeholder cleanup is outside this test")
+
+    calls = 0
+
+    async def fake_tg_call(method, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _Sent()
+        entered.set()
+        await release.wait()
+        return bot._TG_UNKNOWN
+
+    def delete_property(obj):
+        delete_accesses.append(obj)
+        raise AttributeError("unknown outcome has no delete")
+
+    monkeypatch.setattr(type(bot._TG_UNKNOWN), "delete", property(delete_property), raising=False)
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    incoming = _FakeIncomingMessage(chat_id)
+    incoming.from_user = SimpleNamespace(id=77)
+
+    async def pieces():
+        await asyncio.Event().wait()
+        yield "unused"
+
+    async def scenario():
+        task = asyncio.create_task(bot._run_streaming_reply(
+            chat_id, "вопрос", incoming, provider="munito", model_id="probe-stop",
+            piece_agen=pieces(),
+        ))
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        release.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("stream cancellation did not propagate")
+
+    try:
+        asyncio.run(scenario())
+        assert delete_accesses == []
+    finally:
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_stop_control_moves_below_each_continuation(monkeypatch):
-    # Длинный ответ создаёт continuation-пузыри. Stop должен оставаться последним
-    # сообщением, иначе новый пузырь снова выталкивает кнопку за экран.
+    # A long answer creates continuation bubbles. Stop must remain the last
+    # message, otherwise the new bubble pushes the button off-screen again.
     from types import SimpleNamespace
 
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
@@ -1839,8 +2361,8 @@ def test_stop_control_moves_below_each_continuation(monkeypatch):
         controls = [msg for kind, msg in events if kind == "control"]
         answers = [msg for kind, msg in events if kind == "answer"]
         assert len(answers) >= 1
-        # В личке reply-клавиатура не пересоздаётся для continuation; второй
-        # control — служебное сообщение с ReplyKeyboardRemove.
+        # In DMs, the reply keyboard is not recreated for continuation; a second
+        # control — a service message with ReplyKeyboardRemove.
         assert len(controls) == 2
         assert all(msg.deleted for msg in controls)
     finally:
@@ -1849,8 +2371,8 @@ def test_stop_control_moves_below_each_continuation(monkeypatch):
 
 
 def test_stop_button_cleanup_waits_for_status_ticker(monkeypatch):
-    # При явном stop тикер останавливается раньше, чем удаляется отдельный
-    # control-пузырь; поздних правок, которые могли бы вернуть кнопку, нет.
+    # On an explicit stop, the ticker stops before the separate
+    # control bubble; there are no later edits that could restore the button.
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
     monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
     chat_id = 999405
@@ -1915,8 +2437,8 @@ def test_stop_button_cleanup_waits_for_status_ticker(monkeypatch):
 
 
 def test_stop_control_is_removed_when_placeholder_is_reused(monkeypatch):
-    # Ранний таймаут отдаёт пузырёк следующей попытке, но отдельный Stop-control
-    # удаляется: следующая попытка создаст свой и не оставит два Control в чате.
+    # An early timeout returns the bubble to the next attempt, but the separate Stop control
+    # is removed: the next attempt will create its own and leave no two Controls in the chat.
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
     monkeypatch.setattr(bot, "RICH_MESSAGES_ENABLED", False)
     monkeypatch.setattr(lumen_streaming, "_model_first_chunk_limit", lambda key, floor: 0.01)
@@ -1962,8 +2484,8 @@ def test_stop_control_is_removed_when_placeholder_is_reused(monkeypatch):
 
 
 def test_private_stop_keyboard_uses_prelock_stop_command(monkeypatch):
-    # /stop обрабатывается командным хендлером до chat-lock, поэтому кнопка
-    # действительно прерывает текущий стрим, а не ждёт его завершения.
+    # /stop is handled by the command handler before the chat lock, so the button
+    # actually interrupts the current stream rather than waiting for it to finish.
     import lumen_streaming
 
     monkeypatch.setattr(bot, "STOP_BUTTON_ENABLED", True)
@@ -1977,7 +2499,7 @@ def test_stop_token_rotates_for_next_queued_stream():
     outer_token = bot._stream_stop_token(77)
     bot._begin_stream_stop_scope(77, 5, stream=True)
     first_token = bot._stream_stop_token(77)
-    bot._begin_stream_stop_scope(77, 5)  # следующий запрос уже ждёт лок
+    bot._begin_stream_stop_scope(77, 5)  # the next request is already waiting for the lock
     assert bot._stream_stop_token(77) == first_token
     bot._end_stream_stop_scope(77)
     bot._end_stream_stop_scope(77)

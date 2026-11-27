@@ -1,35 +1,35 @@
-# Секреты и локальный конфиг — никогда не должны попасть в git
+# Secrets and local configuration must never enter git.
 .env
 .env*
 *.env
 
-# Байткод/кэш Python
+# Python bytecode and caches.
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
 
-# Виртуальные окружения
+# Virtual environments.
 .venv/
 venv/
 
-# Эфемерное состояние бота (генерируется в рантайме, не часть кода)
+# Runtime state is generated locally and is not source code.
 bot.log
 *.log
-chat_state.json
-chat_state.tmp
-global_quota.json
-global_quota.tmp
-# Выгрузка state-backup.yml: полные истории чатов — никогда в коммит (AUD-D-007)
-export_state.json
-# Dev-трейс: тексты чатов и ответы — та же приватность, что у export_state.json
-devtrace.jsonl
-devtrace.jsonl.1
+chat_state.json*
+global_quota.json*
+chats/
+chat_index*
+chat_replacements*
+# State backups contain full conversations; devtrace contains prompts and answers.
+export_state.json*
+devtrace*
+**/devtrace*
 
-# Заметки аудитов — не часть кода
+# Local audit notes.
 audit-*.md
 
-# ОС/редакторы
+# OS and editor files.
 .DS_Store
 .idea/
 .vscode/

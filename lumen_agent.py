@@ -1,4 +1,4 @@
-"""lumen_agent.py — агентный ход: модель сама формулирует поисковые запросы, бот исполняет web_search и собирает источники."""
+"""lumen_agent.py handles an agent turn: the model formulates search queries itself, and the bot executes web_search and gathers sources."""
 from __future__ import annotations
 
 import asyncio
@@ -20,10 +20,10 @@ from lumen_read_page import read_page_tool_result
 
 log = logging.getLogger("bot")
 
-# Схема инструмента в OpenAI-формате. Живой замер 12.11.2026: deepseek-1017,
-# glm-5.3-flash, deepseek-v4-flash и qwen3.8-27b отдают на неё корректные
-# tool_calls и в обычном ответе, и в SSE (finish_reason=tool_calls), а gemma-4-12b
-# и pplx-decider-v1.2 параметры tools не заявлены (карта возможностей в
+# Tool schema in OpenAI format. Live measurement 12.11.2026: deepseek-1017,
+# glm-5.3-flash, deepseek-v4-flash, and qwen3.8-27b return correct
+# tool_calls in both an ordinary response and SSE (finish_reason=tool_calls), while gemma-4-12b
+# and pplx-decider-v1.2 do not declare tools parameters (capability map in
 # lumen_router_config._MUNITO_CAPS).
 WEB_SEARCH_TOOL: dict[str, Any] = {
     "type": "function",
@@ -50,9 +50,9 @@ WEB_SEARCH_TOOL: dict[str, Any] = {
     },
 }
 
-# Схема чтения страницы в OpenAI-формате. Тот же принцип, что у web_search: вызов
-# делает модель, а исполняет бот; URL обязан прийти из сообщения человека или из
-# собранной выдачи — придуманный адрес не читаем (эталон Claude, web-fetch-tool).
+# Page-reading schema in OpenAI format. As with web_search, the model requests the call
+# and the bot executes it. The URL must come from the person's message or collected search
+# results; an invented address is not read (Claude reference, web-fetch-tool).
 READ_PAGE_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -73,63 +73,63 @@ READ_PAGE_TOOL: dict[str, Any] = {
     },
 }
 
-# 8 с — доля планирования в бюджете фазы, а не потолок одного вызова: в прозоне
-# планирование занимало 0.27-0.69 с (замер 12.11.2026), но на боевом промпте у него
-# хвост, и в проде 13.11.2026 два вызова из пяти упёрлись ровно в 8 с (planning_ms
-# 8433 и 8723) — цикл умер, ни разу не поискав.
+# 8 s — the planning share of the phase budget, not the cap for one call: in the worst case
+# Planning took 0.27–0.69 s (12.11.2026 measurement), but on the production prompt it
+# tail, and in production on 13.11.2026 two of five calls hit exactly 8 s (planning_ms
+# 8433 and 8723) — the loop died without ever searching.
 _STEP_CALL_TIMEOUT_SEC = 8.0
-# Потолок одного планирующего вызова: он вправе взять весь остаток фазы за вычетом
-# внешнего поиска, но не больше этой величины (та же, что ROUTE_MODEL_TIMEOUT_SEC
-# для одной попытки ответить).
+# The cap for one planning call: it may consume the entire remainder of the phase except for
+# external search, but no more than this value (the same as ROUTE_MODEL_TIMEOUT_SEC
+# for one attempt to answer).
 _STEP_CALL_MAX_SEC = 16.0
-# Хуже не ответить, чем не поискать: без такого остатка бюджета, СВЕРХ резерва на
-# сеть, цикл не начинается и не продолжается — ответ обязан доехать до человека
-# обычным маршрутом.
+# An answer matters more than an extra search: without this remainder and the network
+# reserve, the loop can neither start nor continue, so the user gets no answer at all.
 _MIN_STEP_BUDGET_SEC = 5.0
-# Преамбула («Ищу актуальные данные.») — строка статуса, а не ответ: один абзац
-# рассуждений занял бы пузырь целиком.
+# The preamble ("Searching for current data.") is a status line, not an answer: one paragraph
+# reasoning would fill the entire bubble.
 _PREAMBLE_MAX_CHARS = 160
-# Потолок шагов: страховка от модели, которая зацикливается на уточнениях. Лимит
-# поиска считается отдельно и в поисках, а не в шагах: один шаг с параллельными
-# tool_calls = 2-3 сети.
+# Step cap: a safeguard against a model looping on clarifications. Search limits are
+# counted separately, not as steps: one step with parallel tool_calls can issue 2–3
+# network requests.
 _MAX_STEPS = 3
 
-# Потолок всей фазы сбора источников: планирующий вызов плюс один внешний поиск.
-# Фаза идёт ДО бюджета маршрута и раньше не была ограничена ничем, кроме собственной
-# пары таймаутов: замер 12.11.2026 — три шага съедали ~42 с до начала ответа.
-_STEP_PHASE_SEC = _STEP_CALL_TIMEOUT_SEC + 6.0  # 6 = дефолт WEB_SEARCH_TIMEOUT_SEC
-# Жёсткий потолок всей фазы: 3 поиска по формуле дали бы 66 с и оставили маршруту
-# меньше 24 с из 90; лучше два полных поиска, чем три, после которых нечем ответить
-# (аудит 16.11.2026, эталон Claude — 1-3 поиска на простой факт).
+# Cap for the entire source-gathering phase: one planning call plus one external search.
+# The phase runs BEFORE the route budget and previously was not limited except by its own
+# pair of timeouts: measurement 12.11.2026 — three steps consumed about 42 seconds before the answer began.
+_STEP_PHASE_SEC = _STEP_CALL_TIMEOUT_SEC + 6.0  #
+# Hard cap for the whole phase: 3 searches by the formula would take 66 s and leave the route
+# less than 24s out of 90; better two complete searches than three, after which there is nothing left to answer with
+# (audit 16.11.2026, Claude reference — 1-3 searches for a simple fact).
 _PHASE_HARD_CAP_SEC = 45.0
 
 _IDENTITY_NAMES: tuple[str, ...] = ()
 
-# Компании и лаборатории. Прежний список снимал только id моделей и короткие
-# алиасы, и в строке этапа оставалось «отзывы про модель Gemini от Google»:
-# имя провайдера видели бы все участники группы (ревью приватности 12.11.2026).
+# Companies and laboratories. The previous list stripped only model IDs and short
+# aliases, and the stage line still showed 'reviews of the Gemini model from Google':
+# provider name would be visible to every group participant (privacy review
+# 12.11.2026).
 _IDENTITY_COMPANIES = (
     "google", "anthropic", "openai", "deepmind", "mistral", "meta ai", "ai meta",
     "xai", "groq", "alibaba", "baidu", "moonshot", "zhipu", "xiaomi", "nvidia",
     "hugging face", "huggingface", "perplexity", "deepseek ai",
 )
-# Алиасы семейств без точного id: «gpt», «llama», «claude». Сняв семейство,
-# версия всё равно не должна остаться одна.
+# Family aliases without an exact ID: "gpt", "llama", "claude". Removing the family,
+# the version must not be left alone anyway.
 _IDENTITY_FAMILIES = (
     "gpt", "llama", "claude", "grok", "nemotron", "hermes", "dolphin", "phi", "gemma",
     "qwen", "doubao", "kimi", "minimax", "hunyuan", "glm",
 )
 
-# Версия, прилипшая к снятому имени: «Gemini 2.5 Pro», «LLaMA 3.1 70B»,
-# «Claude 3.5 Sonnet». Без неё за «Gemini» в пузыре оставалось «2.5 Pro» —
-# обрывок, который человек читает как название модели.
+# A version attached to a captured name: "Gemini 2.5 Pro", "LLaMA 3.1 70B",
+# "Claude 3.5 Sonnet". Without it, "Gemini" left "2.5 Pro" in the bubble,
+# a fragment that a person reads as a model name.
 _NAME_VERSION_TAIL = (
     r"(?:\s+\d+(?:[.,]\d+)*)*"
     r"\s*(?:pro|max|ultra|mini|micro|nano|small|lite|plus|turbo|flash|preview|thinking|"
     r"instruct|sonnet|opus|haiku|chat|code|vision|reasoner|api|oss|serverless|deep\-?r1)[\w.\-]*"
 )
-# Что остаётся после вырезания имени: пустые скобки, притяжательное 's, висячий
-# предлог («новости от», «данные by»).
+# What remains after cutting out the name: empty brackets, a possessive 's, a dangling
+# preposition ("news from", "data by").
 _DANGLING_RE = re.compile(
     r"\b(?:от|для|на|у|про|о|by|of|from|on|via|model|модель)\b\s*(?=[,.;:!?)\]]|$)",
     re.IGNORECASE,
@@ -138,11 +138,11 @@ _DEBRIS_RE = re.compile(r"[\[(]\s*[\])]|[‘'`]\s*s\b")
 
 
 def _identity_names() -> tuple[str, ...]:
-    """Имена моделей и провайдеров, которые не имеют права появиться в строке
-    статуса: общий фильтр lumen_security режет предложение с заявлением личности,
-    а одиночное техимя в короткой преамбуле он не считает заявлением (тест
-    12.11.2026). Список берём из каталогов маршрутизации, чтобы он не разъезжался
-    с ними молча."""
+    """Model and provider names that must not appear in a status line: the common
+    lumen_security filter cuts a sentence asserting identity, but does not treat a single
+    technical name in a short preamble as an identity assertion (test
+    12.11.2026). We take the list from the routing catalogs so it does not silently drift
+    away from them."""
     global _IDENTITY_NAMES
     if not _IDENTITY_NAMES:
         from lumen_router_config import GEMINI_MODELS, _MUNITO_ORDER
@@ -156,20 +156,21 @@ def _identity_names() -> tuple[str, ...]:
 
 def _strip_identity_names(text: str) -> str:
     line = text
-    # «?», относящийся к одному последнему классу, сделал бы хвост обязательным и
-    # тогда бы «Gemini» без версии не снимался вовсе (проверено 12.11.2026):
-    # поэтому весь хвост обёрнут в группу.
+    # A "?" applying only to the last class would make the tail mandatory and
+    # then “Gemini” without a version would not be removed at all (verified 12.11.2026):
+    # therefore the entire tail is wrapped in a group.
     for name in _identity_names():
         line = re.sub(
-            # Хвост версии начинается с разделителя: «grokking» и «graphite» больше
-            # не режутся по подстроке имени (ревью 17.11.2026).
+            # A version suffix starts with a digit or separator; the trailing letter boundary
+            # prevents "grokking" and "graphite" from being cut by a name substring
+            # (review 17.11.2026).
             r"(?<![A-Za-z])(?:[\w.-]+/)*" + re.escape(name)
             + r"(?:\d[\w.:/+-]*|[./:+-][\w.:/+-]*)?"
             + r"(?:" + _NAME_VERSION_TAIL + r")?(?![A-Za-z])",
             "", line, flags=re.IGNORECASE,
         )
-    # Порядок важен: висячий предлог открывает пустые скобки («( модель gpt-4o )»
-    # → «( )»), поэтому обе чистки крутим до устойчивости, а не двумя проходами.
+    # Order matters: a dangling preposition opens empty parentheses ("( model gpt-4o )"
+    # → "( )"), so run both cleanups to a fixed point rather than making just two passes.
     previous = None
     while previous != line:
         previous = line
@@ -177,27 +178,27 @@ def _strip_identity_names(text: str) -> str:
         line = _DANGLING_RE.sub("", line)
     line = " ".join(line.split())
     if line != " ".join((text or "").split()):
-        # Что-то вырезано: после имени остаются хвостовые знаки и провисания,
-        # их снимаем. Не тронутую строку не трогаем вовсе — прежняя точка в конце
-        # преамбулы была частью текста (тест 12.11.2026).
+        # Something was cut: trailing punctuation and whitespace after the name remain.
+        # Remove them only when the line changed; an unchanged line may legitimately end
+        # with a period that belonged to the preamble (12.11.2026 test).
         line = re.sub(r"^[\s,.:;!?)\]]+|[\s,.:;!?]+$", "", line)
     return line.strip()
 
 
 class AgentTurnResult:
-    """Что вынесено из агентного хода: источники, запросы, преамбулы, число поисков."""
+    """What was extracted from the agent turn: sources, queries, preambles, and search count."""
 
     def __init__(self) -> None:
         self.steps = 0
         self.planning_ms = 0
         self.queries: list[str] = []
         self.snippets: list[dict] = []
-        # Один и тот же источник две разные формулировки приносят дважды: считаем
-        # источники по URL, иначе «✓ Искал · нашёл 4» врёт про объём выдачи.
+        # Two different phrasings of the same source bring it twice; count
+        # sources by URL, otherwise “✓ Searched · found 4” misrepresents the output volume.
         self.by_url: dict[str, dict] = {}
         self.preambles: list[str] = []
-        # Прочитанные страницы: отдельный канал доказательств, они едут в промпт
-        # текстом после блока сниппетов.
+        # Read pages: a separate evidence channel; they travel in the prompt
+        # as text after the snippet block.
         self.pages: list[dict] = []
         self.reads = 0
         self.searches = 0
@@ -206,25 +207,25 @@ class AgentTurnResult:
 
     @property
     def has_evidence(self) -> bool:
-        # Прочитанная страница — такое же доказательство, как сниппет: без этого
-        # сценарий «прочитай эту ссылку» выбрасывал её и отвечал по памяти
-        # (аудит 16.11.2026).
+        # A fetched page is evidence just like a snippet: without this
+        # the "read this link" scenario discarded it and answered from memory
+        # (audit 16.11.2026).
         return bool(self.snippets or self.pages)
 
 
 def evidence_phase_budget_sec(max_searches: int) -> float:
-    """Сколько секунд может занять вся фаза: на каждый запланированный поиск пара
-    «планирование + сеть», но не больше потолка шагов и не больше жёсткого потолка
-    фазы. Отдельная граница нужна потому, что планирующие вызовы идут вне бюджета
-    маршрута."""
+    """How many seconds the entire phase may take: for each planned search, a
+    "planning + network" pair, but no more than the step cap or the hard
+    phase cap. A separate boundary is needed because planning calls occur outside the route
+    budget."""
     per_step = _STEP_PHASE_SEC + _STEP_CALL_TIMEOUT_SEC
     return float(min(_PHASE_HARD_CAP_SEC,
                      max(_STEP_PHASE_SEC, min(max_searches, _MAX_STEPS) * per_step)))
 
 
 def agent_turn_enabled() -> bool:
-    """AGENT_TURN_ENABLED=0/false/off возвращает прежний один внешний поиск по словам
-    человека. Выключатель, а не включатель: по умолчанию цикл работает."""
+    """AGENT_TURN_ENABLED=0/false/off restores the previous single external keyword search based on
+    the person's wording. It is an off switch, not an on switch: the loop runs by default."""
     return (os.getenv("AGENT_TURN_ENABLED", "") or "").strip().lower() not in ("0", "false", "off")
 
 
@@ -233,8 +234,8 @@ def _norm_query(query: str) -> str:
 
 
 def _parse_arguments(arguments: Any) -> dict:
-    """arguments у OpenAI-совместимых моделей — JSON-строка (замер 12.11.2026), но
-    отдельные провайдеры присылают dict: разбираем оба."""
+    """For OpenAI-compatible models, arguments is a JSON string (measurement 12.11.2026), but
+    some providers send a dict; parse both."""
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
@@ -244,7 +245,7 @@ def _parse_arguments(arguments: Any) -> dict:
 
 
 def _parse_query(arguments: Any) -> str:
-    """Поисковый запрос из аргументов вызова. Пусто = запрос не годится."""
+    """Search query from call arguments. Empty = the query is unusable."""
     arguments = _parse_arguments(arguments)
     query = arguments.get("query") or arguments.get("q") or arguments.get("search_query") or ""
     if not isinstance(query, str):
@@ -253,38 +254,33 @@ def _parse_query(arguments: Any) -> str:
 
 
 def _clean_preamble(text: str) -> str:
-    """Одна строка статуса: без артефактов провайдера, без имён модели и провайдера,
-    без переносов и в пределах длины. Поле reasoning (сырая цепочка мыслей открытой
-    модели) сюда не попадает намеренно: Claude показывает человеку короткий пересказ
-    хода, а не рассуждение, и сырое рассуждение ломает персону и выдаёт английский
-    в русском чате (замер 12.11.2026: reasoning у головы — 400+ символов на вопрос)."""
+    """One status line: no provider artifacts, model or provider names, line breaks, or excess length. The reasoning field (an open model's raw chain of thought) is deliberately excluded: Claude shows a brief progress summary, not reasoning, and raw reasoning breaks the persona and exposes English in a Russian chat (measured 12.11.2026: the head's reasoning was 400+ characters per question)."""
     import lumen_security
     from lumen_formatting import _strip_provider_artifacts
 
     line = " ".join((text or "").split())
     if not line:
         return ""
-    # Без contextlib.suppress: он прятал AttributeError на неверном имени фильтра, и
-    # преамбула «Я — Gemini 2.5 Pro…» уходила в пузырь как есть (ревью 12.11.2026).
+    # Without contextlib.suppress: it hid an AttributeError caused by a wrong filter name, and
+    # the preamble "I am Gemini 2.5 Pro…" went into the bubble unchanged (review 12.11.2026).
     line = _strip_provider_artifacts(line)
     if lumen_security._detect_identity_leak(line):
-        # Частичная зачистка строку этапа не лечит: от «Я — Gemini 2.5 Pro, ищу
-        # данные» фильтр оставляет «5 Pro, ищу данные», и обрывок имени человек
-        # видит всё равно (проверено 12.11.2026). Преамбула — украшение пузыря,
-        # generic-фраза этапа уже есть, поэтому пустая строка честнее обрывка.
-        # В ответе (не здесь) та же фраза проходит полную зачистку lumen_security.
+        # Partial cleanup does not fix the stage line: starting from "I am Gemini 2.5 Pro, searching
+        # data", the filter leaves "5 Pro, searching for data", and the name fragment
+        # still sees it (verified 12.11.2026). The preamble decorates the bubble,
+        # the generic stage phrase is already present, so an empty string is more honest than a fragment.
+        # In the answer (not here), the same phrase goes through full lumen_security cleanup.
         return ""
     line = _strip_identity_names(line)
     if line != " ".join((text or "").split()):
-        # После вырезанного имени остаётся хвостовая пунктуация («:» следом за
-        # идентификатором) — снимаем её, иначе строка статуса обрывается знаком.
+        # After the removed name, trailing punctuation remains (":" immediately after
+        # identifier), we remove it, or the status line ends abruptly with the character.
         line = re.sub(r"[.,;:!?\s\-–—]+$", "", line)
     return " ".join(line.split())[:_PREAMBLE_MAX_CHARS].strip()
 
 
 def _tool_result_text(snippets: list[dict]) -> str:
-    """Что модель видит как результат инструмента: тот же блок, что едет в промпт,
-    — он уже несёт оговорку про недоверенные данные и обрезан по длине."""
+    """What the model sees as the tool result: the same block sent in the prompt — it already carries the untrusted-data caveat and is length-truncated."""
     block = format_snippets_for_prompt(snippets) if snippets else ""
     return block.strip() or "[web_search returned no results for this query]"
 
@@ -298,13 +294,13 @@ def _read_pages_per_turn() -> int:
 
 
 def _tools_for_turn() -> list[dict]:
-    """Чтение страниц предлагается только когда оно реально работает: включено,
-    прокси и секрет настроены, бюджет не выбран. Иначе модель не должна видеть
-    инструмент, который молча вернёт пустоту."""
+    """Page reading is offered only when it actually works: it is enabled, the proxy and
+    secret are configured, and the budget is not exhausted. Otherwise, the model must not see
+    a tool that silently returns nothing."""
     from lumen_read_page import _read_pages_available
 
     tools = [WEB_SEARCH_TOOL]
-    if _read_pages_available():
+    if _read_pages_available() and _read_pages_per_turn() > 0:
         tools.append(READ_PAGE_TOOL)
     return tools
 
@@ -313,16 +309,16 @@ async def _plan_call(
     messages: list[dict], *, model_id: str, effort: str | None, deadline: float | None,
     chat_id: Any = None,
 ) -> dict | None:
-    """Один планирующий вызов с инструментом. None — на любом сбое: цикл надстройка,
-    его падение не имеет права стоить человеку ответ."""
+    """Sends a new query to the search engine. None is not an empty result: the caller
+    preserves the previous context and can make a different decision based on it."""
     import bot
     from lumen_router_config import _munito_model_supports, _munito_payload_extras
 
     if not _munito_model_supports(model_id, "tools"):
         return None
     remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-    # Планировать бессмысленно, если после вызова не остаётся времени на сеть: резерв
-    # внешнего поиска вычитается из остатка фазы до того, как решаем брать вызов.
+    # Planning is pointless if no time remains for the network after the call: reserve
+    # external search is deducted from the remaining phase time before deciding whether to make the call.
     network_reserve = web_search_timeout_sec()
     if remaining is not None and remaining < _MIN_STEP_BUDGET_SEC + network_reserve:
         return None
@@ -345,9 +341,9 @@ async def _plan_call(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        # Планирование не наказываем карантином (модель ничего не ответила плохого),
-        # но попытка и исход видны в /stats: иначе «Попыток к моделям» меньше, чем
-        # реально ушло запросов (решение владельца 12.11.2026).
+        # Do not punish planning with quarantine (the model did not answer anything bad),
+        # but the attempt and outcome are visible in /stats; otherwise, "Model attempts" would be fewer than
+        # requests were actually spent (the owner's decision on 12.11.2026).
         log.warning("[agent] planning call failed (%s): %s", model_id, exc.__class__.__name__)
         bot._record_stats_event("model_failures")
         return None
@@ -358,8 +354,8 @@ async def _plan_call(
     from lumen_routes import _log_llm_usage, _usage_from_openai_response
 
     _pt, _ct, _tt = _usage_from_openai_response(resp)
-    # В квоту ответа планировщик не пишется (он не ответ), но его токены
-    # логируются: иначе суточный расход провайдера не сходится с [usage].
+    # The planner is not written to the response quota (it is not a response), but its tokens
+    # are logged: otherwise daily provider usage does not reconcile with [usage].
     _log_llm_usage(chat_id=chat_id, provider="munito", model_id=model_id,
                    prompt=_pt, completion=_ct, total=_tt)
     return (choices[0] or {}).get("message") or None
@@ -394,24 +390,24 @@ async def run_search_turn(
     max_searches: int, status: Any = None, deadline: float | None = None,
     history_meta: dict | None = None,
 ) -> AgentTurnResult:
-    """Цикл «модель просит поиск — бот ищет — модель уточняет формулировку».
+    """The model requests a search — the bot searches — the model refines the query.
 
-    Запросы пишет сама модель (так же у Claude: web_search вызывает она, а не
-    классификатор по словам человека), поэтому «а кто сейчас тренер» превращается
-    в два разных запроса вместо одного по сырой фразе. Финальный ответ модель
-    маршрута получает собранные сниппеты в промпте, а не transcript: замер
-    12.11.2026 показал, что transcript без поля tools обе головы игнорируют и
-    отвечают по памяти, поэтому пересылка transcript в ответный вызов запрещена.
-    max_searches ограничивает ЧИСЛО ПОИСКОВ: параллельные tool_calls одного шага
-    считаются каждым запросом, иначе «один шаг» превращался в три сети.
-    """
+    The model writes the queries (as with Claude: it calls web_search rather than
+    relying on a classifier of the user's words), so "who is the coach right now"
+    becomes two different queries instead of one raw phrase. The final answering
+    model receives the collected snippets in the prompt, not a transcript: a
+    12.11.2026 measurement showed that both heads ignore a transcript without the
+    tools field and answer from memory, so forwarding a transcript to the answering
+    call is forbidden. max_searches limits the NUMBER OF SEARCHES: parallel
+    tool_calls in one step each count as a query; otherwise one step became three
+    network calls."""
     import bot
     result = AgentTurnResult()
     if max_searches <= 0:
         return result
     plan_meta = dict(history_meta or {})
-    # Прошлые фото планировщику не нужны: он пишет запросы по тексту, а качаются
-    # они через прокси на каждый свежий вопрос (ревью 12.11.2026).
+    # The planner does not need past photos: it writes queries from text, while they are downloaded
+    # through the proxy for every fresh question (review 12.11.2026).
     plan_meta["attach_past"] = False
     try:
         messages: list[dict] = await bot._build_openai_turn_messages(
@@ -428,30 +424,36 @@ async def run_search_turn(
     pages_left = _read_pages_per_turn() if _read_pages_available() else 0
     while result.steps < _MAX_STEPS and (searches_left > 0 or pages_left > 0):
         if bot._stream_stop_requested(chat_id):
-            # Остановка человеком: дальше искать незачем, ответ ему не нужен.
+            # Stopped by the person: there is no point searching further, they do not need the answer.
             log.info("[agent] stopped by the user during the evidence phase")
             result.failed = True
             break
         _plan_started = time.monotonic()
         message = await _plan_call(messages, model_id=model_id, effort=effort,
                                    deadline=deadline, chat_id=chat_id)
-        # Время планирования меряется отдельно: по нему видно, что фаза дорожает
-        # из-за модели, а не из-за источников (решение владельца 12.11.2026).
+        # Planning time is measured separately: it shows that the phase is becoming more expensive
+        # because of the model, not the sources (owner's decision 12.11.2026).
         result.planning_ms += int((time.monotonic() - _plan_started) * 1000)
         if message is None:
+            result.failed = True
+            break
+        if bot._stream_stop_requested(chat_id):
+            # Stop during planning is already too late for the next iteration, but
+            # the received tool_calls had not been executed yet (RG-01, audit 26.11.2026).
+            log.info("[agent] stopped by the user after planning")
             result.failed = True
             break
         calls = message.get("tool_calls") or []
         preamble = _clean_preamble(message.get("content") or "")
         if preamble and preamble not in result.preambles:
             result.preambles.append(preamble)
-            # Одна правка под преамбулу на весь ход: вторая на том же шаге отнимает
-            # слот, который боевой стрим отдаёт живому набору текста.
+            # One edit below the preamble for the whole turn: a second on the same step takes away
+            # a slot that the production stream gives to the live text set.
             if status is not None and len(result.preambles) == 1:
                 with contextlib.suppress(Exception):
                     await status.set_action(preamble, timed=False)
         if not calls:
-            # Модель решила, что поиск не нужен: этап закончен, дальше обычный маршрут.
+            # The model decided search was unnecessary: the stage is over; continue with the normal route.
             break
         planned_search: list[tuple[dict, str]] = []
         planned_read: list[tuple[dict, str]] = []
@@ -459,12 +461,16 @@ async def run_search_turn(
             if not call.get("id"):
                 continue
             fn = (call.get("function") or {}).get("name") or "web_search"
+            if fn not in {"web_search", "read_page"}:
+                # Do not turn an unknown name into a search: that is a different tool
+                # other side effects (RG-05, audit 26.11.2026).
+                continue
             args = _parse_arguments((call.get("function") or {}).get("arguments"))
             if fn == "read_page":
                 raw_url = args.get("url")
                 url = raw_url.strip() if isinstance(raw_url, str) else ""
-                # Провенанс: только URL из сообщения, выдачи или уже прочитанной
-                # страницы; придуманный адрес не читаем (эталон Claude).
+                # Provenance: only a URL from the message, search results, or an already read
+                # page; do not read an invented address (Claude benchmark).
                 if url and pages_left > 0 and page_url_allowed_for_turn(
                         url, user_text=user_prompt, snippets=list(result.by_url.values()), pages=result.pages):
                     planned_read.append((call, url))
@@ -472,9 +478,28 @@ async def run_search_turn(
                 query = _parse_query(args)
                 if query:
                     planned_search.append((call, query))
-        planned_search = planned_search[:searches_left]
-        # Один URL — одно чтение: модель иногда просит ту же страницу дважды
-        # или уже прочитанную (ревью 17.11.2026).
+        # Repeated and cached searches do not consume the real network-search limit. First
+        # deduplication, then slicing; otherwise two identical calls consumed space
+        # of the next unique query (RG-03, audit 26.11.2026).
+        unique_search: list[tuple[dict, str]] = []
+        seen_search: set[str] = set()
+        for call, query in planned_search:
+            normalized = _norm_query(query)
+            if normalized in seen_search:
+                continue
+            seen_search.add(normalized)
+            unique_search.append((call, query))
+        fresh_candidates = [
+            (call, query) for call, query in unique_search
+            if _norm_query(query) not in by_query
+        ]
+        fresh_keys = {_norm_query(query) for _call, query in fresh_candidates[:searches_left]}
+        planned_search = [
+            (call, query) for call, query in unique_search
+            if _norm_query(query) in by_query or _norm_query(query) in fresh_keys
+        ]
+        # One URL, one read: the model sometimes asks for the same page twice
+        # or already read (review 17.11.2026).
         seen_reads = {p.get("url") for p in result.pages if isinstance(p, dict)}
         deduped_reads: list[tuple[dict, str]] = []
         for call, url in planned_read:
@@ -484,14 +509,14 @@ async def run_search_turn(
             deduped_reads.append((call, url))
         planned_read = deduped_reads[:pages_left]
         if not planned_search and not planned_read:
-            # Ни одного разобранного вызова: повторять бессмысленно, закрываем цикл.
+            # No tool call was parsed: retrying is pointless; close the loop.
             result.failed = True
             break
 
         if planned_search and status is not None:
-            # Показываем запрос только после фильтра имён и невидимок; при
-            # утечке личности — общую фразу этапа вместо запроса (ревью
-            # приватности 12.11.2026).
+            # Show the query only after filtering names and invisible characters; when
+            # an identity leak — use the generic stage phrase instead of the query (review
+            # privacy 12.11.2026).
             shown = _safe_query_text(planned_search[0][1])
             with contextlib.suppress(Exception):
                 if shown:
@@ -502,6 +527,10 @@ async def run_search_turn(
         budget_left = float("inf") if deadline is None else max(0.0, deadline - time.monotonic())
         step_budget = min(web_search_timeout_sec(), budget_left)
         fresh = [(call, query) for call, query in planned_search if _norm_query(query) not in by_query]
+        if bot._stream_stop_requested(chat_id):
+            log.info("[agent] stopped by the user before search execution")
+            result.failed = True
+            break
         per_query = step_budget / max(1, len(fresh)) if len(fresh) > 1 else step_budget
         if fresh:
             got = await asyncio.gather(
@@ -521,18 +550,22 @@ async def run_search_turn(
             if snippets:
                 result.searched = True
 
-        # Чтение страниц: по одной, внутри остатка фазового бюджета. Сбой чтения
-        # не роняет ход — модель получает пометку «текста нет».
+        # Page reading: one at a time, within the remaining phase budget. A read failure
+        # does not crash the turn — the model receives a “no text” mark.
         read_results: dict[str, str | None] = {}
         for call, url in planned_read:
+            if bot._stream_stop_requested(chat_id):
+                log.info("[agent] stopped by the user before page read")
+                result.failed = True
+                break
             if status is not None:
                 with contextlib.suppress(Exception):
                     await status.set_phase("progress_reading_link")
             from lumen_read_page import read_page_timeout_sec
             timeout = read_page_timeout_sec()
             if deadline is not None:
-                # Пол 0.5 с вместо 2: два чтения у самого дедлайна добавляли до
-                # четырёх секунд сверх фазового бюджета (аудит 16.11.2026).
+                # A 0.5 s floor instead of 2: two reads near the deadline added up to
+                # four seconds beyond the phase budget (audit 16.11.2026).
                 timeout = max(0.5, min(timeout, deadline - time.monotonic()))
             text = await _one_read(url, timeout=timeout)
             read_results[str(call.get("id") or "")] = text
@@ -577,16 +610,16 @@ async def run_search_turn(
         } for call, url in planned_read)
 
         result.steps += 1
-        searches_left -= len(planned_search)
+        searches_left -= len(fresh)
         pages_left -= len(planned_read)
-        result.searches += len(planned_search)
+        result.searches += len(fresh)
         result.snippets = list(result.by_url.values())
-        # Закрытый этап печатает один раз вызывающий код: накопительные строки на
-        # каждом шаге давали «нашёл 0» рядом с «нашёл 4» (ревью 12.11.2026).
+        # The caller prints the completed stage once: cumulative lines at
+        # at each step showed both "found 0" and "found 4" (review 12.11.2026).
 
     result.snippets = list(result.by_url.values())
-    # Источники и закрытый этап рисует вызывающий код один раз на ответ: здесь
-    # они удваивались бы с резервной веткой (ревью 12.11.2026).
+    # The caller draws sources and the completed stage once per response: here
+    # they would double with the fallback branch (review 12.11.2026).
 
     log.info(
         "[agent] chat=%s model=%s steps=%d searches=%d reads=%d queries=%d snippets=%d planning_ms=%d failed=%s",
@@ -596,36 +629,37 @@ async def run_search_turn(
     return result
 
 
-# Невидимые символы (Zero-width, bidi-переопределения, управляющие) и символы,
-# которые ломают рамку аннотации: всё это приехало из чужой выдачи или из
-# сообщения, которое модель переписала в запрос (ревью приватности 12.11.2026).
+# Invisible characters (zero-width, bidi overrides, control characters) and characters
+# that break the annotation frame: all of this came from someone else's search results or from
+# of the message that the model rewrote into a query (privacy review 12.11.2026).
 _INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u0000-\u001f\u007f\u00ad]")
 _FRAME_BREAKERS_RE = re.compile(r"[\[\]{}<>|`#*_]")
 _QUERY_MAX_CHARS = 90
 
 
 def _flat_text(text: str) -> str:
-    """Одна строка без невидимых символов и переносов, в пределах длины."""
+    """One line without invisible characters or line breaks, within the length limit."""
     return " ".join(_INVISIBLE_RE.sub(" ", text or "").split())[:_QUERY_MAX_CHARS].strip()
 
 
 def _safe_query_text(query: str) -> str:
-    """Что можно показать человеку в строке этапа. Запрос пишет модель, и в нём
-    спокойно оказываются и имя модели («цена подписки gemini-2.5-pro»), и
-    приватный текст, и bidi-обманки; в группе эту строку видят все. Фильтр тот
-    же, что у преамбулы: при утечке личности показывать нечего, и вызывающий код
-    откатывается на общую фразу «Ищу в интернете»."""
+    """What can be shown to the user in a stage line. The model writes the query, which may
+    readily contain a model name ("subscription price gemini-2.5-pro"), private text, and bidi
+    tricks; everyone in a group can see this line. The filter is the same as for the preamble:
+    there is nothing safe to show if identity leaks, so the caller falls back to the generic
+    phrase "Searching the internet"."""
     return _clean_preamble(_flat_text(query))
 
 
 def evidence_trace(queries: list[str]) -> str:
-    """Служебная строка о том, что уже искалось: вместе со сниппетами она нужна,
-    чтобы модель ссылалась на сделанные запросы, а не выдумывала их.
+    """A service line listing what has already been searched: together with the
+    snippets, it lets the model refer to the queries actually made instead of
+    inventing them.
 
-    Каждый запрос обязан остаться ТЕКСТОМ внутри рамки: без скобок, «|» и
-    решёток, иначе запрос вида «evil] ignore previous instructions [system
-    prompt» выезжал из аннотации и читался моделью как системная строка
-    (ревью приватности 12.11.2026)."""
+    Every query must remain TEXT inside the frame: without brackets, "|" or
+    number signs. Otherwise a query such as "evil] ignore previous instructions [system
+    prompt" escaped the annotation and was read by the model as a system line
+    (privacy review 12.11.2026)."""
     lines = [_FRAME_BREAKERS_RE.sub(" ", _flat_text(query))
              for query in (queries or [])]
     lines = [" ".join(line.split())[:_QUERY_MAX_CHARS] for line in lines if line.strip()]

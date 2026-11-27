@@ -1,12 +1,12 @@
-"""Живой зонд генерации картинок: что провайдеры отвечают на те же запросы, что идёт из бота.
+"""Live image-generation probe: what providers return for the same requests the bot sends.
 
-Нужен потому, что моки в тестах не видят главного: Pollinations игнорирует model и
-nologo, а Cloudflare может отказать настройкой или дневным бюджетом. Ключи только из
-окружения или .env, значения нигде не печатаются.
+Needed because test mocks miss the main issue: Pollinations ignores model and
+nologo, while Cloudflare may refuse because of settings or a daily budget. Keys come only from
+the environment or .env; values are never printed.
 
-Запуск:
-    python eval/image_probe.py              # оба провайдера по одному разу
-    python eval/image_probe.py --repeat     # Pollinations дважды одним промптом (повторяемость)
+Run:
+    python eval/image_probe.py              # both providers once
+    python eval/image_probe.py --repeat     # Pollinations twice with one prompt (repeatability)
 """
 
 from __future__ import annotations
@@ -30,12 +30,12 @@ PROMPT = "a red fox portrait, cinematic light"
 
 
 def _env(name: str, default: str = "") -> str:
-    """Окружение важнее файла; .env читаем молча и только нужные имена."""
+    """Environment takes precedence over the file; read .env silently and only the required names."""
     value = os.getenv(name, "").strip()
     if value:
         return value
-    # Как у остальных проб: из worktree ключи берём там, где их указал
-    # LUMEN_ENV_DIR (ревью 17.11.2026).
+    # Like the other probes: in a worktree, get keys from the location specified by
+    # LUMEN_ENV_DIR (review 17.11.2026).
     env_file = Path(os.getenv("LUMEN_ENV_DIR") or ROOT) / ".env"
     if not env_file.exists():
         return default
@@ -47,14 +47,14 @@ def _env(name: str, default: str = "") -> str:
 
 
 def _digest(body: bytes) -> str:
-    """Короткий отпечаток ответа: формат по байтам + размер, для проверки повтором."""
+    """Short response fingerprint: format from bytes plus size, for a repeat check."""
     ext = lumen_images.image_filename(body) or "не-картинка"
     return f"{ext} {len(body)} Б"
 
 
 def _meta(body: bytes) -> str:
-    """Метаданные Pollinations встроены в JPEG — по ним видно, какую модель и seed
-    сервис применил на самом деле, и включил ли знак."""
+    """Pollinations metadata embedded in JPEG shows which model and seed
+    the service actually applied, and whether it included the logo."""
     match = re.search(rb'"prompt":.{0,200}', body)
     return match.group().decode("utf-8", "replace")[:200] if match else ""
 

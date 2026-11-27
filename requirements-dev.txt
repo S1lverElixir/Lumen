@@ -11,6 +11,8 @@
 -r requirements.txt
 pytest==9.2.0
 pyflakes==4.1.0
+# Executable workflow-contract tests parse the actual YAML.
+PyYAML==6.0.3
 # pip-audit — сканирование requirements.txt на известные CVE (см. CI workflow
 # .github/workflows/ci.yml) — часть аудита техдолга (dependency debt): версии
 # зависимостей зафиксированы через == (см. requirements.txt) и без отдельной

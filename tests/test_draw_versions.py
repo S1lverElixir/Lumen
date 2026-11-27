@@ -1,9 +1,10 @@
-"""Версии картинки: возврат к предыдущей без провайдера и без списания слота.
+"""Image versions: restoring a previous version without a provider call or a
+    slot charge.
 
-Защищает паритет с Undo/Redo в ChatGPT (10.11.2026): «верни предыдущий вариант»
-обязан переслать уже готовое фото, а не рисовать новое; отменённая версия
-возвращается через redo; чужую картинку в группе вернуть нельзя; /reset
-забывает историю версий.
+Protects parity with Undo/Redo in ChatGPT (10.11.2026): \"restore the previous
+version\" must resend the finished photo rather than draw a new one; a canceled
+version is restored through redo; another user group image cannot be
+restored; /reset forgets version history.
 """
 import asyncio
 import time
@@ -77,10 +78,60 @@ def test_revert_resends_previous_photo_without_provider(revert_env, monkeypatch)
     assert state["draw_versions"][-1]["file_id"] == "fid1"
     assert state["draw_redo"][-1]["file_id"] == "fid2"
     assert state["last_draw_prompt"] == "кот 1"
-    # Клавиатура снята с прежнего якоря, а не оставлена на двух фото.
+    # The keyboard was removed from the former anchor instead of being left on two photos.
     stripped = [kw for kw in sent if kw.get("message_id") == 99]
     assert stripped and stripped[0]["reply_markup"].inline_keyboard == []
 
+
+def test_revert_state_survives_cancellation_during_keyboard_strip(revert_env, monkeypatch):
+    # R3-03 (audit 26.11.2026): the photo is already in the chat, and cancellation happened during removal
+    # of the old keyboard; the state must be persisted before this await,
+    # otherwise the visible frame survives with stale versions/anchor.
+    import asyncio as _aio
+    message, sent = revert_env
+    state = _versions_state(3)
+
+    real_tg = bot._tg_call
+
+    async def cancelling_tg_call(method, *args, **kwargs):
+        if "photo" in kwargs:
+            return await real_tg(method, *args, **kwargs)
+        raise _aio.CancelledError
+
+    monkeypatch.setattr(bot, "_tg_call", cancelling_tg_call)
+    try:
+        asyncio.run(bot.revert_draw_version(message, state))
+        raised = False
+    except _aio.CancelledError:
+        raised = True
+    assert raised, "отмена из обработчика не должна глотаться"
+    photos = [kw for kw in sent if "photo" in kw]
+    assert len(photos) == 1
+    assert state["draw_versions"][-1]["file_id"] == "fid1"
+    assert state["draw_redo"][-1]["file_id"] == "fid2"
+    assert state["last_drawn_message_id"] == 501  # the anchor is moved to the returned photo
+
+
+def test_revert_unknown_delivery_does_not_commit_state(revert_env, monkeypatch):
+    # R3-06 (I23 review, 26.11.2026): a false _TG_UNKNOWN on send — delivery
+    # unknown; rollback must not commit versions and the anchor, or
+    # last_drawn_message_id will point to a message that may not exist.
+    message, sent = revert_env
+    state = _versions_state(3)
+    before_v = list(state["draw_versions"])
+    before_r = list(state.get("draw_redo") or [])
+
+    async def unknown_tg_call(method, *args, **kwargs):
+        sent.append(kwargs)
+        if "photo" in kwargs:
+            return bot._TG_UNKNOWN
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_tg_call", unknown_tg_call)
+    assert asyncio.run(bot.revert_draw_version(message, state)) is False
+    assert state["draw_versions"] == before_v
+    assert list(state.get("draw_redo") or []) == before_r
+    assert state.get("last_drawn_message_id") == 99
 
 def test_redo_returns_the_undone_version(revert_env):
     message, sent = revert_env
@@ -124,6 +175,67 @@ def test_failed_resend_keeps_the_version_lists(revert_env, monkeypatch):
     assert state.get("draw_redo") in (None, [])
 
 
+@pytest.mark.parametrize("failure", ["sentinel", "json"])
+def test_draw_unknown_delivery_keeps_slot_and_no_duplicate(monkeypatch, failure):
+    # R4-03 (audit 26.11.2026): unknown delivery is not None. On None, draw returned
+    # the purchased slot and forwarded the same photo as a document; both a timeout
+    # and a post-response decode failure must keep the slot without a duplicate.
+    chat_id = 999504
+    uid = 777504
+
+    async def fake_provider(session, prompt, timeout_sec=None, **_):
+        return b"\x89PNG fake bytes"
+
+    monkeypatch.setattr(bot, "image_provider_names", lambda: ("pollinations",))
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_provider)
+    monkeypatch.setattr(bot, "_is_owner", lambda uid: False)
+    sent = []
+    if failure == "sentinel":
+        monkeypatch.setattr(bot, "bot", SimpleNamespace(send_photo=AsyncMock(), send_document=AsyncMock()))
+
+        async def unknown_tg_call(method, *args, **kwargs):
+            sent.append(kwargs)
+            return bot._TG_UNKNOWN
+
+        monkeypatch.setattr(bot, "_tg_call", unknown_tg_call)
+    else:
+        import json
+
+        class _DecodeFailingBot:
+            async def send_photo(self, **kwargs):
+                sent.append(kwargs)
+                raise json.JSONDecodeError("Expecting value", "<html>", 0)
+
+            async def send_document(self, **kwargs):
+                sent.append(kwargs)
+                return SimpleNamespace(message_id=1)
+
+        monkeypatch.setattr(bot, "bot", _DecodeFailingBot())
+        monkeypatch.setattr(bot, "_tg_proxy_breaker", bot._TelegramProxyCircuitBreaker(
+            cooldown_sec=20.0, trip_threshold=5,
+        ))
+    saved_day = bot.GLOBAL_QUOTA.get("quota_day")
+    bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+    bot.GLOBAL_QUOTA.setdefault("user_daily", {})[str(uid)] = {
+        "total": 0, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0,
+    }
+    incoming = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE),
+        from_user=SimpleNamespace(id=uid), message_id=1, text="кот",
+        reply=AsyncMock(), reply_to_message=None,
+    )
+    try:
+        assert asyncio.run(bot.inline_draw(incoming, "кот в куртке")) is True
+        assert all("document" not in kw for kw in sent), "документ-дубль после unknown-исхода"
+        assert len([kw for kw in sent if "photo" in kw]) == 1
+        entry = bot.GLOBAL_QUOTA["user_daily"][str(uid)]
+        assert entry["draw"] == 1 and entry["total"] == 1, "слот возвращён за возможную доставку"
+    finally:
+        bot.GLOBAL_QUOTA["quota_day"] = saved_day
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+        bot.chat_state.pop(chat_id, None)
+
+
 def test_generation_records_versions_and_caps_at_five(monkeypatch):
     chat_id = 999501
     uid = 777501
@@ -133,8 +245,8 @@ def test_generation_records_versions_and_caps_at_five(monkeypatch):
 
     monkeypatch.setattr(bot, "image_provider_names", lambda: ("pollinations",))
     monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_provider)
-    # Кап версий проверяем, а не квоту: владелец exempt, иначе шестой рисунок
-    # упёрся бы в дневной лимит и тест мерил бы не то.
+    # Check the version cap, not the quota: the owner is exempt, or the sixth drawing
+    # would hit the daily limit, and the test would measure the wrong thing.
     monkeypatch.setattr(bot, "_is_owner", lambda uid: True)
     monkeypatch.setattr(bot, "bot", SimpleNamespace(send_photo=AsyncMock()))
 
@@ -161,9 +273,64 @@ def test_generation_records_versions_and_caps_at_five(monkeypatch):
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
 
 
+def test_draw_cancellation_after_send_keeps_marks_and_slot(monkeypatch):
+    # R3-02 (audit 26.11.2026): cancellation during the network await for removing the old keyboard
+    # must not consume a slot or erase anchors of an already sent photo: markers and
+    # mark_state_dirty are written before this await, while the return sees sent_ok.
+    chat_id = 999503
+    uid = 777503
+    bot.chat_state[chat_id] = {
+        "last_drawn_message_id": 777, "last_drawn_user": uid,
+        "last_draw_prompt": "старый",
+    }
+    refunds = []
+    dirty = []
+
+    async def fake_provider(session, prompt, timeout_sec=None, **_):
+        return b"\x89PNG fake bytes"
+
+    monkeypatch.setattr(bot, "image_provider_names", lambda: ("pollinations",))
+    monkeypatch.setattr(bot, "_pollinations_text_to_image", fake_provider)
+    monkeypatch.setattr(bot, "_is_owner", lambda uid: True)
+    monkeypatch.setattr(bot, "bot", SimpleNamespace(
+        send_photo=AsyncMock(), edit_message_reply_markup=AsyncMock(),
+    ))
+
+    async def fake_tg_call(method, *args, **kwargs):
+        if "photo" in kwargs:
+            return _photo_message(700)
+        if kwargs.get("message_id") == 777:
+            raise asyncio.CancelledError()  # cancellation while removing the old keyboard
+        return SimpleNamespace()
+
+    monkeypatch.setattr(bot, "_tg_call", fake_tg_call)
+    monkeypatch.setattr(bot, "_refund_user_daily", lambda _uid, **kw: refunds.append(kw))
+    monkeypatch.setattr(bot, "_save_media_to_history", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "mark_state_dirty", lambda cid: dirty.append(cid))
+    incoming = SimpleNamespace(
+        chat=SimpleNamespace(id=chat_id, type=bot.ChatType.PRIVATE),
+        from_user=SimpleNamespace(id=uid), message_id=1, text="кот",
+        reply=AsyncMock(), reply_to_message=None,
+    )
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(bot.inline_draw(incoming, "кот"))
+        state = bot.get_state(chat_id)
+        # Anchors and version are written BEFORE cancellation: the next 'another variant' stays live.
+        assert state["last_draw_prompt"] == "кот"
+        assert state["last_drawn_message_id"] == 700
+        assert state["draw_versions"][-1]["prompt"] == "кот"
+        assert dirty == [chat_id]
+        # Do not return the slot: the photo was delivered and generation was paid for (sent_ok).
+        assert refunds and refunds[0]["total"] == 0
+    finally:
+        bot.chat_state.pop(chat_id, None)
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(uid), None)
+
+
 def test_reset_forgets_versions(monkeypatch):
-    # /reset стирает память чата: после него «верни предыдущий вариант» не должен
-    # доставать картинку из забытой истории (паритет 10.11.2026).
+    # /reset clears chat memory: afterward, "restore the previous version" must not
+    # fetch a picture from forgotten history (parity 10.11.2026).
     chat_id = 999502
     state = _versions_state(3)
     state["draw_redo"] = [{"file_id": "x"}]
@@ -218,9 +385,9 @@ def test_core_routes_redo(rate_guard_setup, monkeypatch):
 
 
 def test_versions_survive_serialize_and_restore():
-    # РЕГРЕССИЯ (ревью 10.11.2026): сериализатор писал только last_draw*,
-    # поэтому после первого же деплоя «верни предыдущий вариант» отвечал
-    # «версий нет», хотя картинки в чате остались.
+    # REGRESSION (review 10.11.2026): the serializer wrote only last_draw*,
+    # so after the very first deploy, "restore the previous version" replied
+    # "no versions", although the images remained in the chat.
     import lumen_chat_state
     import lumen_state_storage
     cid = 999560
@@ -237,8 +404,8 @@ def test_versions_survive_serialize_and_restore():
 
 
 def test_restore_drops_broken_version_entries():
-    # Снимок мог прийти из старой версии схемы или битым: в lists() не должно
-    # оказаться не-словарей, иначе revert упадёт на target["file_id"].
+    # A snapshot could come from an old schema version or be corrupt: lists() must not
+    # turn out not to be dictionaries, otherwise revert will fail on target["file_id"].
     import lumen_chat_state
     cid = 999561
     lumen_chat_state.chat_state.pop(cid, None)
@@ -253,8 +420,8 @@ def test_restore_drops_broken_version_entries():
 
 
 def test_revert_keeps_author_of_the_restored_version(revert_env, monkeypatch):
-    # Владелец контекста — автор кадра: иначе возврат чужой версии владельцем
-    # передавал слабые глаголы правки не тому человеку (ревью 10.11.2026).
+    # The frame author owns the context: otherwise the owner returning someone else's version
+    # passed weak edit verbs to the wrong person (review 10.11.2026).
     message, _sent = revert_env
     monkeypatch.setattr(bot, "_is_owner", lambda uid: True)
     state = _versions_state(3, user=456)
@@ -264,18 +431,18 @@ def test_revert_keeps_author_of_the_restored_version(revert_env, monkeypatch):
 
 
 def test_redo_without_undo_stack_answers_no_versions(revert_env):
-    # Redo при пустой отменённой стопке не должен выдавать картинку из
-    # history-корзинки или падать: человек слыжит честный ответ (ревью 10.11.2026).
+    # Redo with an empty canceled stack must not return an image from
+    # history baskets or crash; the person hears an honest answer (review 10.11.2026).
     message, sent = revert_env
     state = _versions_state(2)
     assert asyncio.run(bot.revert_draw_version(message, state, redo=True)) is False
     assert not sent
-    # Именно ключ «версий нет», а не соседний отказ (ревью 17.11.2026).
+    # Specifically the "no versions" key, not an adjacent refusal (review 17.11.2026).
     assert bot._safe_reply.await_args.args[1] == bot._t(999500, "draw_no_versions")
 
 
 def test_failed_redo_send_keeps_the_lists(revert_env, monkeypatch):
-    # Неудачная пересылка redo не должна съедать версию: списки остаются как были.
+    # A failed redo forward must not consume a version: the lists stay as they were.
     message, _sent = revert_env
 
     async def failing_tg_call(method, *args, **kwargs):
@@ -292,8 +459,8 @@ def test_failed_redo_send_keeps_the_lists(revert_env, monkeypatch):
 
 
 def test_revert_consumes_no_daily_slot(revert_env, monkeypatch):
-    # Обещание из docstring: возврат не платит ни слотом человека, ни бюджетом
-    # провайдера. Без проверки его могли бы начать списывать при рефакторе.
+    # Docstring promise: the return costs neither a person slot nor budget
+    # a provider. Without the check, a refactor could start charging it.
     message, _sent = revert_env
     state = _versions_state(3)
     calls = []
@@ -306,9 +473,9 @@ def test_revert_consumes_no_daily_slot(revert_env, monkeypatch):
 
 
 def test_revert_with_trailing_words_goes_to_text(rate_guard_setup, monkeypatch):
-    # «верни предыдущий вариант перевода» — про текст. Резолвер версий обязан
-    # уступить, иначе буква после триггера превращала текстовую просьбу в
-    # пересылку картинки (ревью 10.11.2026).
+    # "restore the previous translation version" — about text. The version resolver must
+    # yield, otherwise a letter after the trigger turned a text request into
+    # forwarding the image (review 10.11.2026).
     message = rate_guard_setup()
     message.text = "верни предыдущий вариант перевода"
     state = _versions_state(3)
@@ -328,8 +495,8 @@ def test_revert_with_trailing_words_goes_to_text(rate_guard_setup, monkeypatch):
 
 
 def test_revert_without_versions_does_not_swallow_the_message(rate_guard_setup, monkeypatch):
-    # В чате, где ничего не рисовали, «верни предыдущий» — обычная просьба
-    # модели: ветка версий не имеет права отвечать «версий нет».
+    # In a chat where nothing has been drawn, "bring back the previous one" is an ordinary request
+    # model: the versions branch is not allowed to answer "no versions".
     message = rate_guard_setup()
     message.text = "верни предыдущий"
     reverted = []
@@ -347,8 +514,8 @@ def test_revert_without_versions_does_not_swallow_the_message(rate_guard_setup, 
 
 
 def test_core_revert_does_not_also_run_the_text_route(rate_guard_setup, monkeypatch):
-    # Ревью покрытия: без return после revert сообщение уезжало ещё и модели,
-    # то есть один «верни» тратил ответ текстового провайдера.
+    # Coverage review: without return after revert, the message also went to the model,
+    # one 'undo' consumed a text-provider answer.
     message = rate_guard_setup()
     message.text = "верни предыдущий вариант"
     state = _versions_state(3)
@@ -365,8 +532,8 @@ def test_core_revert_does_not_also_run_the_text_route(rate_guard_setup, monkeypa
 
 
 def test_revert_after_politeness_still_reverts(rate_guard_setup, monkeypatch):
-    # «верни предыдущий вариант, пожалуйста» — это всё ещё возврат: раньше
-    # вежливое слово превращало просьбу в текстовый ответ (ревью 10.11.2026).
+    # "return the previous version, please" is still a return: previously
+    # a polite word turned the request into a text response (review 10.11.2026).
     for text in ("верни предыдущий вариант, пожалуйста", "верни картинку", "undo please"):
         message = rate_guard_setup()
         message.text = text

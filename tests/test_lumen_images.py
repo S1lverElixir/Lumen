@@ -1,19 +1,19 @@
-"""
-test_lumen_images.py — юнит-тесты на lumen_images.py: контракт запросов к обоим
-провайдерам картинок (Cloudflare основной, Pollinations резерв), разбор их ошибок и
-выбор формата ответа.
+"""test_lumen_images.py — unit tests for lumen_images.py: request contracts for both
+image providers (Cloudflare primary, Pollinations fallback), parsing their errors and
+selecting the response format.
 
-lumen_images.py не зависит от Telegram/рантайм-состояния бота (тот же принцип, что и
-у lumen_formatting.py/lumen_router_config.py — см. их тестовые файлы), поэтому
-тестируется здесь напрямую (import lumen_images), без импорта bot.py.
+lumen_images.py does not depend on Telegram or the bot's runtime state (the same principle as
+lumen_formatting.py/lumen_router_config.py — see their test files), so it is
+tested here directly (import lumen_images), without importing bot.py.
 
-Запуск:
+Run:
     pytest test_lumen_images.py -v
 """
 import asyncio
 import base64
 import json
 import urllib.parse
+from types import SimpleNamespace
 
 from typing import Any
 
@@ -54,9 +54,9 @@ class _FakeResp:
 
 
 class _FakeSession:
-    """Логирует и URL, и тело запроса: половина находок аудита — это параметры,
-    которые молча перестали передаваться (seed, safe, nologo). Список ответов
-    выдаётся по порядку — для ветки «первый запрос отвергли, повтор другой пейлоад»."""
+    """Logs both the URL and the request body: half of the audit findings are parameters
+that silently stopped being passed (seed, safe, nologo). The response list
+is returned in order — for the \"first request rejected, retry with a different payload\" branch."""
 
     def __init__(self, resp, captured=None):
         self.resps = list(resp) if isinstance(resp, (list, tuple)) else [resp]
@@ -81,12 +81,12 @@ def _image_resp():
     return _FakeResp(status=200, headers={"Content-Type": "image/jpeg"}, chunks=(JPEG,))
 
 
-# ─────────────────────────── выбор провайдера ───────────────────────────
+# ─────────────────────────── provider selection ───────────────────────────
 
 
 def test_cloudflare_is_primary_only_when_configured(monkeypatch):
-    # Опечатка/пустой секрет в env обязан уводить цепочку на Pollinations, а не
-    # давать гарантированную ошибку на первом провайдере.
+    # A typo/empty secret in env must switch the chain to Pollinations, not
+    # a guaranteed error on the first provider.
     monkeypatch.setattr(lumen_images, "CLOUDFLARE_ACCOUNT_ID", "")
     monkeypatch.setattr(lumen_images, "CLOUDFLARE_API_TOKEN", "x")
     assert lumen_images.image_provider_names() == ("pollinations",)
@@ -94,7 +94,7 @@ def test_cloudflare_is_primary_only_when_configured(monkeypatch):
     assert lumen_images.image_provider_names() == ("cloudflare", "pollinations")
 
 
-# ─────────────────────────── контракт Pollinations ───────────────────────────
+# ─────────────────────────── Pollinations contract ───────────────────────────
 
 
 @pytest.mark.parametrize("prompt, expected", [
@@ -107,12 +107,12 @@ def test_cloudflare_is_primary_only_when_configured(monkeypatch):
     ("кот", (1024, 1024)),
     ("широкий спектр", (1024, 1024)),
     ("встреча в 13:45", (1024, 1024)),
-    # Латинская "x" вместо кириллической "х": маркер искался только в кириллице,
-    # и "16x9" молча становился квадратом (ревью 10.11.2026).
+    # Latin "x" instead of Cyrillic "kha" (U+0445): the marker was searched for only in Cyrillic,
+    # and "16x9" silently became a square (review 10.11.2026).
     ("город 16x9", (1344, 768)),
-    # Границы цифр обязательны: "13x45" внутри содержит "3x4".
+    # Digit boundaries are mandatory: "13x45" contains "3x4".
     ("встреча в 13x45", (1024, 1024)),
-    # Формат по человеческим словам и по типу артефакта (паритет 10.11.2026).
+    # Format from human wording and from the artifact type (parity 10.11.2026).
     ("котик 21:9", (1344, 576)),
     ("картинка 3:2", (1248, 832)),
     ("постер 3х2", (1248, 832)),
@@ -128,14 +128,14 @@ def test_cloudflare_is_primary_only_when_configured(monkeypatch):
     ("баннер для сайта", (1344, 768)),
     ("превью для youtube", (1344, 768)),
     ("логотип кофейни", (1024, 1024)),
-    # Дефолт артефакта не перекрывает явную пропорцию.
+    # The artifact default does not override an explicit aspect ratio.
     ("постер 16:9", (1344, 768)),
-    # Одиночные прилагательные описывают сюжет, а не кадр.
+    # Single adjectives describe the scene, not the frame.
     ("wide smile", (1024, 1024)),
     ("tall hat on the table", (1024, 1024)),
-    # Формат по артефакту ищем границами слов: «imposter» и «posterior view»
-    # не постеры, «a cat telling stories» и «fisherman with reels» описывают
-    # сюжет, а не кадр (ревью 10.11.2026).
+    # Find the format in the artifact by word boundaries: "imposter" and "posterior view"
+    # not posters; "a cat telling stories" and "fisherman with reels" describe
+    # the plot, not a frame (review 10.11.2026).
     ("imposter among us", (1024, 1024)),
     ("posterior view of a car", (1024, 1024)),
     ("a cat telling stories", (1024, 1024)),
@@ -143,21 +143,21 @@ def test_cloudflare_is_primary_only_when_configured(monkeypatch):
     ("fisherman with reels", (1024, 1024)),
     ("instagram stories with a cat", (768, 1344)),
     ("banner for a shop", (1344, 768)),
-    # Латинические варианты маркеров, которых не было: 4x5 и 5x4 молча
-    # становились квадратом, «wallpaper for desktop» — тоже (ревью 10.11.2026).
+    # Latin variants of markers that were absent: 4x5 and 5x4 silently
+    # became a square, as did "wallpaper for desktop" (review 10.11.2026).
     ("logo 4x5", (896, 1120)),
     ("аватарка 5x4", (1120, 896)),
     ("wallpaper for desktop", (1344, 768)),
     ("portrait format cat", (896, 1120)),
 ])
 def test_detect_image_size(prompt, expected):
-    # Пропорции как в генераторе ChatGPT; "широкий спектр" не должен стать 16:9.
+    # Use the same proportions as the ChatGPT generator; "wide range" must not become 16:9.
     assert lumen_images.detect_image_size(prompt) == expected
 
 
 def _jpeg_header(width, height):
-    """Минимальный JPEG-заголовок: APP0, затем SOF0 с размерами — достаточно
-    для парсера размеров без сторонних библиотек."""
+    """Minimal JPEG header: APP0, then SOF0 with dimensions — enough
+    for the dimension parser without third-party libraries."""
     return (
         bytes([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]) + bytes(14)
         + bytes([0xFF, 0xC0, 0x00, 0x11, 0x08])
@@ -180,7 +180,7 @@ def test_size_for_reference_follows_orientation():
     assert lumen_images.size_for_reference((1280, 720)) == (1344, 768)
     assert lumen_images.size_for_reference((720, 1280)) == (768, 1344)
     assert lumen_images.size_for_reference((800, 800)) == (1024, 1024)
-    # 4:3 и 3:4 — ближайшая пропорция, а не «почти квадрат» (ревью 10.11.2026).
+    # 4:3 and 3:4 — the nearest aspect ratio, not "almost square" (review 10.11.2026).
     assert lumen_images.size_for_reference((1200, 900)) == (1152, 864)
     assert lumen_images.size_for_reference((900, 1200)) == (864, 1152)
     assert lumen_images.size_for_reference(None) == (1024, 1024)
@@ -194,17 +194,27 @@ def test_cloudflare_generation_passes_requested_size(cf_configured):
     assert fields["width"] == "1344" and fields["height"] == "768"
 
 
-def test_pollinations_url_carries_seed_safe_and_nologo():
-    # Замер 09.11.2026: без seed Pollinations отдаёт seed=42 и байт-в-байт тот же
-    # файл на повторе промпта, без safe фильтр NSFW выключен.
+def test_pollinations_url_carries_seed_safe_and_nologo(monkeypatch):
+    # Measured 09.11.2026: without a seed, Pollinations returns seed=42 and the
+    # byte-for-byte same
+    # the file on a prompt retry, with the NSFW safe filter disabled.
     captured = {}
     asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_image_resp(), captured), "cat"))
     url = captured["url"]
     assert "safe=true" in url and "nologo=true" in url and "enhance=false" in url
     query = urllib.parse.parse_qs(url.split("?", 1)[1])
     assert int(query["seed"][0]) > 0
-    asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_image_resp(), captured), "cat"))
-    assert int(urllib.parse.parse_qs(captured["url"].split("?", 1)[1])["seed"][0]) != int(query["seed"][0])
+    # R7-14 (review 17.11.2026): comparing two legitimate draws could normally collide;
+    # patch the secrets seam in lumen_images and verify that every call gets a fresh
+    # randbelow and puts exactly that value +1 in the URL, with no dependence on
+    # luck.
+    draws = iter([11, 22])
+    monkeypatch.setattr(lumen_images, "secrets", SimpleNamespace(randbelow=lambda n: next(draws)))
+    seeds = []
+    for _ in range(2):
+        asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(_image_resp(), captured), "cat"))
+        seeds.append(int(urllib.parse.parse_qs(captured["url"].split("?", 1)[1])["seed"][0]))
+    assert seeds == [12, 23]
 
 
 def test_pollinations_truncates_prompt_to_cap():
@@ -220,8 +230,8 @@ def test_pollinations_truncates_prompt_to_cap():
 
 
 def test_pollinations_refuses_untranslated_cyrillic_prompt():
-    # sana получает кириллицу как '?' на разборе URL и рисует случайное
-    # (пруф 09.11.2026); запрос всё равно списывал дневной бюджет.
+    # sana receives Cyrillic as '?' during URL parsing and draws random
+    # (proof 09.11.2026); the request still consumed the daily budget.
     captured = {}
     with pytest.raises(lumen_images.ImageProviderError):
         asyncio.run(lumen_images._pollinations_text_to_image(
@@ -230,9 +240,9 @@ def test_pollinations_refuses_untranslated_cyrillic_prompt():
 
 
 def test_pollinations_free_limit_402_is_rate_limit_with_retry_after():
-    # Реальный ответ Pollinations 09.11.2026: HTTP 402 FREE_LIMIT, 1 картинка в 45
-    # секунд на IP. Раньше 402 не попадал ни в одну ветку и человек читал
-    # «переформулируй описание» вместо «сервис перегружен».
+    # Actual Pollinations response on 09.11.2026: HTTP 402 FREE_LIMIT, 1 image per 45
+    # seconds per IP. Previously, 402 matched no branch and the user read
+    # "rephrase the description" instead of "the service is overloaded".
     body = json.dumps({"error": {"code": "FREE_LIMIT", "message": "Free limit reached: 1 image every 45 seconds per IP"}})
     resp = _FakeResp(status=402, headers={"Content-Type": "application/json", "Retry-After": "35"},
                     text=body, chunks=(body.encode(),))
@@ -259,19 +269,19 @@ def test_pollinations_429_and_500_are_classified_apart():
     assert not isinstance(exc.value, lumen_images.ImageRateLimitedError)
 
 
-# ─────────────────────────── тело ответа ───────────────────────────
+# ─────────────────────────── response body ───────────────────────────
 
 
 def test_accepts_jpeg_by_magic_bytes_when_content_type_lies():
-    # Регрессия AUD-E-001: JPEG без image/* Content-Type отвергался как не-изображение.
+    # Regression AUD-E-001: JPEG without an image/* Content-Type was rejected as a non-image.
     resp = _FakeResp(status=200, headers={"Content-Type": "application/octet-stream"}, chunks=(JPEG,))
     body = asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "cat"))
     assert body[:3] == b"\xff\xd8\xff"
 
 
 def test_rejects_oversized_body(monkeypatch):
-    # Content-Length врёт, поэтому поток перепроверяем по факту; кап ужимаем,
-    # иначе тест лил бы 30 МБ.
+    # Content-Length lies, so recheck the stream as it arrives; tighten the cap,
+    # otherwise the test would stream 30 MB.
     monkeypatch.setattr(lumen_images, "IMAGE_MAX_BYTES", 100)
     big = b"\x89PNG" + b"\x00" * 200
     with pytest.raises(lumen_images.ImageProviderError):
@@ -284,8 +294,8 @@ def test_rejects_oversized_body(monkeypatch):
 
 
 def test_rejects_format_sendphoto_cannot_take():
-    # GIF-магия проходила как «картинка», а sendPhoto анимированный GIF отклонял:
-    # ошибку человек видел только как «не удалось отправить».
+    # GIF magic passed as an "image", but sendPhoto rejected an animated GIF:
+    # the error was visible to the person only as 'could not send'.
     resp = _FakeResp(status=200, headers={"Content-Type": "image/gif"}, chunks=(GIF,))
     with pytest.raises(lumen_images.ImageProviderError):
         asyncio.run(lumen_images._pollinations_text_to_image(_FakeSession(resp), "cat"))
@@ -303,8 +313,8 @@ def test_image_filename_follows_magic_bytes():
 
 
 class _FakeForm:
-    """Собирает поля multipart-формы: реальный aiohttp.FormData кодирует тело
-    в рантайме, а контракт (имена полей, референс) проверяем здесь."""
+    """Builds multipart form fields: real aiohttp.FormData encodes the body
+    at runtime, while the contract (field names, reference) is checked here."""
 
     def __init__(self):
         self.fields = []
@@ -327,8 +337,8 @@ def _cf_ok_session(captured=None):
 
 
 def test_cloudflare_generation_is_multipart_with_prompt(cf_configured):
-    # Замер 10.11.2026: flux-2-klein принимает только multipart; seed и размер
-    # уходят полями формы, а не JSON.
+    # Measurement 10.11.2026: flux-2-klein accepts multipart only; seed and size
+    # go as form fields, not JSON.
     captured = {}
     session = _cf_ok_session(captured)
     asyncio.run(cf_configured._cloudflare_text_to_image(session, "кот"))
@@ -344,8 +354,8 @@ def test_cloudflare_generation_is_multipart_with_prompt(cf_configured):
 
 
 def test_cloudflare_edit_sends_reference_as_input_image(cf_configured):
-    # Правка одной моделью: референс обязан уехать полем input_image_0 с
-    # сигнатурным content-type, иначе Cloudflare проигнорирует картинку.
+    # Editing with one model: the reference must travel in input_image_0 with
+    # signature content-type, otherwise Cloudflare will ignore the image.
     captured = {}
     jpeg = JPEG
     asyncio.run(cf_configured._cloudflare_edit_to_image(_cf_ok_session(captured), "make it green", jpeg))
@@ -356,7 +366,7 @@ def test_cloudflare_edit_sends_reference_as_input_image(cf_configured):
 
 
 def test_cloudflare_edit_sends_two_references(cf_configured):
-    # Multi-image: второй референс обязан уехать своим полем input_image_1.
+    # Multi-image: the second reference must be sent in its own input_image_1 field.
     captured = {}
     asyncio.run(cf_configured._cloudflare_edit_to_image(
         _cf_ok_session(captured), "combine these two", b"one", second_reference=b"two"))
@@ -366,21 +376,22 @@ def test_cloudflare_edit_sends_two_references(cf_configured):
 
 
 def test_cloudflare_moderation_rejection_is_not_retryable(cf_configured):
-    # Замер 10.11.2026: NSFW-промт получает 400 code 3030 "output has been
-    # flagged". Это не перегрузка: политика не должна включать cooldown.
+    # Measurement 10.11.2026: an NSFW prompt gets 400 code 3030 "output has been
+    # flagged". This is not overload: policy must not enable cooldown.
     body = json.dumps({"success": False, "errors": [
         {"code": 3030, "message": "AiError: Your output has been flagged. Please choose another prompt / input image combination"}]}).encode()
     with pytest.raises(lumen_images.ImageProviderError) as exc:
         asyncio.run(cf_configured._cloudflare_text_to_image(_FakeSession(_FakeResp(
             status=400, chunks=(body,))), "кот"))
-    # Класс ошибки — и есть контракт: на голых подстроках тест проходил бы и с
-    # обычным ImageProviderError (ревью 10.11.2026).
+    # The error class is the contract: with bare substring checks, the test would
+    # also pass with
+    # ordinary ImageProviderError (10.11.2026 review).
     assert isinstance(exc.value, lumen_images.ImageModerationError)
     assert not isinstance(exc.value, (lumen_images.ImageRateLimitedError, lumen_images.ImageBudgetExhaustedError))
 
 
 def test_cloudflare_rejects_unconfigured_without_request(cf_configured, monkeypatch):
-    # Без ключа запрос обязан не уходить в сеть: ловим это по пустому captured.
+    # Without a key, the request must not reach the network: detect this via an empty captured.
     monkeypatch.setattr(cf_configured, "CLOUDFLARE_API_TOKEN", "")
     captured = {}
     with pytest.raises(lumen_images.ImageProviderError):
@@ -389,8 +400,8 @@ def test_cloudflare_rejects_unconfigured_without_request(cf_configured, monkeypa
 
 
 def test_cloudflare_rejects_non_object_json(cf_configured):
-    # Валидный JSON, но не объект: [ и 0 проходили дальше как dict и давали
-    # AttributeError вместо классифицированной ошибки провайдера.
+    # Valid JSON, but not an object: [ and 0 passed through as dict and caused
+    # AttributeError instead of a classified provider error.
     for payload in (b"[]", b"0", b'"image"'):
         with pytest.raises(lumen_images.ImageProviderError):
             asyncio.run(cf_configured._cloudflare_text_to_image(_FakeSession(_FakeResp(
@@ -398,8 +409,8 @@ def test_cloudflare_rejects_non_object_json(cf_configured):
 
 
 def test_retry_after_accepts_http_date():
-    # Retry-After по RFC бывает датой, а не секундами. Голое float() давало None, и
-    # 402 без кода FREE_LIMIT ложно становился «бюджет выбран до завтра».
+    # Retry-After can be a date rather than seconds under RFC. A bare float() returned None,
+    # and a 402 without the FREE_LIMIT code falsely became "budget exhausted until tomorrow".
     from email.utils import format_datetime
     from datetime import datetime, timedelta, timezone
 
@@ -412,8 +423,8 @@ def test_retry_after_accepts_http_date():
 
 
 def test_error_detail_shares_the_body_cap():
-    # Ошибочная ветка читала resp.text() без капа: чужой сервис заливал в память
-    # тело любого размера ровно тем путём, который правка закрывала.
+    # The error branch read resp.text() without a cap: an external service filled memory
+    # a body of any size through exactly the path the fix closed.
     async def detail(chunks):
         resp = _FakeResp(status=402, headers={"Content-Type": "application/json"}, chunks=chunks)
         return await lumen_images._error_detail(resp)
@@ -421,15 +432,15 @@ def test_error_detail_shares_the_body_cap():
     small = b'{"error":{"code":"FREE_LIMIT","message":"1 image every 45 seconds per IP"}}'
     assert "FREE_LIMIT" in asyncio.run(detail((small,)))
     assert asyncio.run(detail((b'{"error":{"code":"FREE_LIMIT","message":"' + b"x" * 5000 + b'"}',))) == ""
-    # Не-ошибочный статус не читается вообще: тело здесь валидный JSON, иначе
-    # проверка проходила бы и на «читаем всегда».
+    # A non-error status is not read at all: the body here is valid JSON, otherwise
+    # the check would also pass on “always read.”
     assert asyncio.run(lumen_images._error_detail(
         _FakeResp(status=500, chunks=(b'{"error":{"code":"BOOM_MESSAGE"}}',)))) == ""
 
 
 def test_cloudflare_error_shapes(cf_configured):
-    # 429 с текстом про дневный бюджет — это «до завтра», а не «подожди минуту»:
-    # путаница стоила бы каждому следующему человеку пустых попыток подряд.
+    # A 429 mentioning the daily budget means "until tomorrow," not "wait a minute":
+    # the confusion would cost every subsequent person a run of empty attempts.
     budget_body = json.dumps({"success": False, "errors": [
         {"code": 10025, "message": "You have used all of your free daily allocation"}]}).encode()
     with pytest.raises(lumen_images.ImageBudgetExhaustedError):
@@ -445,9 +456,9 @@ def test_cloudflare_error_shapes(cf_configured):
 
 
 def test_cloudflare_moderation_flag_at_http_200_is_terminal(cf_configured):
-    # Обёртка Workers AI умеет отдавать отказ телом при HTTP 200: без разбора
-    # success:false такой ответ не терминален, и sana дорисовала бы заблокированное
-    # содержимое (ревью 10.11.2026).
+    # The Workers AI wrapper can return a refusal in the body with HTTP 200: without parsing
+    # success:false does not make such a response terminal, and sana would finish drawing the blocked
+    # content (review 10.11.2026).
     body = json.dumps({"success": False, "errors": [
         {"code": 3030, "message": "Your output has been flagged"}]}).encode()
     with pytest.raises(lumen_images.ImageModerationError):
@@ -455,8 +466,8 @@ def test_cloudflare_moderation_flag_at_http_200_is_terminal(cf_configured):
 
 
 def test_cloudflare_plain_failure_at_http_200_stays_retryable(cf_configured):
-    # Рядом — обычная ошибка обёртки: она НЕ модерация, и цепочку обязана
-    # оставлять живой (ревью 10.11.2026).
+    # Alongside it is an ordinary wrapper error: it is NOT moderation, and the chain must
+    # leave it active (review 10.11.2026).
     with pytest.raises(lumen_images.ImageProviderError) as exc:
         asyncio.run(cf_configured._cloudflare_image_result(200, None, {"success": False, "error": "boom"}))
     assert not isinstance(exc.value, lumen_images.ImageModerationError)
@@ -464,29 +475,78 @@ def test_cloudflare_plain_failure_at_http_200_stays_retryable(cf_configured):
 
 
 def test_cloudflare_moderation_flag_in_messages_array_is_terminal(cf_configured):
-    # Обёртка Workers AI кладёт текст отказа в messages[]/result, а не в errors[]:
-    # без этих полей detail был пустым, отказ считался обычной ошибкой, и резерв
-    # sana дорисовывал заблокированное содержимое (ревью 10.11.2026).
+    # The Workers AI wrapper puts refusal text in messages[]/result, not errors[]:
+    # without these fields, detail was empty, the refusal counted as an ordinary error, and the reserve
+    # sana completed the blocked content (review 10.11.2026).
     payload = {"success": False, "messages": [{"code": 3030, "message": "Your output has been flagged"}]}
     with pytest.raises(lumen_images.ImageModerationError):
         asyncio.run(cf_configured._cloudflare_image_result(200, None, payload))
 
 
 def test_error_strings_never_carries_the_image_blob(cf_configured):
-    # detail уходит в лог и в текст человеку: base64 картинки из result не должен
-    # попадать ни туда, ни в маркеры модерации (ревью 10.11.2026).
+    # detail goes to the log and to user-visible text: the base64 image from result must not
+    # land neither there nor in the moderation markers (review 10.11.2026).
     blob = "A" * 4096
     assert lumen_images._error_strings({"success": True, "result": {"image": blob}}) == ""
     assert lumen_images._error_strings({"success": True, "result": blob}) == ""
     assert lumen_images._error_strings({"result": "Model not available"}) == "Model not available"
-    # Словарь result: короткие подписи берём, картинку и длинные значения — нет.
+    # result dictionary: keep short captions, not the image or long values.
     assert lumen_images._error_strings({"result": {"image": blob, "note": "busy"}}) == "busy"
 
 
+@pytest.mark.parametrize("payload", [
+    {"errors": 7},
+    {"errors": {"code": [], "message": {}}},
+    {"error": {"code": [], "message": {}}},
+    {"message": []},
+    {"messages": 7},
+    {"messages": {"code": {}, "message": []}},
+    {"result": 7},
+    {"result": {"image": "A" * 4096, "note": [], "code": {}, "message": 123}},
+])
+def test_error_strings_ignores_malformed_containers_and_scalars(payload):
+    # R4-09: a provider error must not leak as a TypeError because of a field's type.
+    assert lumen_images._error_strings(payload) == ""
+    assert len(lumen_images._error_strings(payload, cap=10)) <= 10
+
+
+def test_error_strings_accepts_single_error_object_and_keeps_detail_cap():
+    # An erroneous object instead of errors[] still carries a useful message, but
+    # a list in code is not interpolated, and the overall cap stays unchanged.
+    detail = "x" * 1000
+    assert lumen_images._error_strings(
+        {"errors": {"code": [3030], "message": detail}}, cap=17,
+    ) == detail[:17]
+
+
+@pytest.mark.parametrize("payload", [
+    {
+        "success": False,
+        "errors": {"code": [3030], "message": "Your output has been flagged"},
+        "messages": 7,
+        "result": {"image": "A" * 4096, "note": []},
+    },
+    {
+        "success": False,
+        "errors": 7,
+        "messages": {"code": {}, "message": "flagged by moderation"},
+        "result": 123,
+    },
+])
+def test_malformed_moderation_payload_with_marker_is_terminal(cf_configured, payload):
+    # R4-09: a valid marker among corrupted fields must stop the fallback,
+    # and base64 from result must appear neither in detail nor in the exception.
+    blob = payload.get("result", {}).get("image") if isinstance(payload.get("result"), dict) else None
+    with pytest.raises(lumen_images.ImageModerationError) as exc:
+        asyncio.run(cf_configured._cloudflare_image_result(500, None, payload))
+    if blob:
+        assert blob not in str(exc.value)
+
+
 def test_cloudflare_moderation_flag_in_result_dict_at_odd_status_is_terminal(cf_configured):
-    # Обёртка Workers AI несёт текст отказа ещё и в result{}, а relay переписывает
-    # статус: без обоих разбор оставался «обычной ошибкой провайдера», цепочка
-    # доезжала до sana и та дорисовывала отклонённое содержимое (ревью 10.11.2026).
+    # The Workers AI wrapper carries refusal text in result{} as well, while the relay rewrites
+    # status: without both, the failure remained an "ordinary provider error", the chain
+    # reached sana, which drew the rejected content (review 10.11.2026).
     payload = {"success": False, "result": {"error": "flagged by moderation"}}
     with pytest.raises(lumen_images.ImageModerationError):
         asyncio.run(cf_configured._cloudflare_image_result(500, None, payload))

@@ -1,12 +1,12 @@
-"""Живой прогон через тестового бота (TEST_BOT_TARGET): меряем плавность стриминга и поиск.
+"""Live run through the test bot (TEST_BOT_TARGET): measure streaming smoothness and search.
 
-Кадр правки ответа — это edited_message:число правок, паузы между ними и прирост
-символов показывают, идёт ли набор плавно или рывками. Вывод пишется в UTF-8 файл,
-а не в консоль: консоль Windows в cp1251 не выносит ✻ и кириллицу.
+A response edit frame is an edited_message: the number of edits, pauses between them, and character growth
+show whether typing is smooth or jerky. Output goes to a UTF-8 file
+rather than the console: the Windows console in cp1251 cannot handle ✻ and Cyrillic.
 
-Запуск:  python eval/live_smoke_probe.py
-Токен берётся из .env (TEST_BOT_TOKEN) и никогда не печатается. Прод-бот @LumenAI_bot
-адресатом быть не может: проба писала бы живым людям (ревью 17.11.2026).
+Run:  python eval/live_smoke_probe.py
+The token is read from .env (TEST_BOT_TOKEN) and never printed. The production bot @LumenAI_bot
+cannot be a target: the probe would write to real people (review 17.11.2026).
 """
 import json
 import os
@@ -34,7 +34,7 @@ def _token():
 TOKEN = _token()
 API = "https://api.telegram.org/bot{}/{}"
 def _test_target() -> str:
-    """Только тестовый бот: пустой или прод-адрес — остановка до любого запроса."""
+    """Test bot only: an empty or production address stops the run before any request."""
     target = os.environ.get("TEST_BOT_TARGET", "").strip()
     if not target:
         raise SystemExit("TEST_BOT_TARGET не задан: нужен @тестового бота, прод не адресат")
@@ -57,7 +57,7 @@ def call(method, **params):
 
 
 def drain(offset):
-    """Все свежие обновления: отдаём (новый offset, список событий)."""
+    """All fresh updates: return (new offset, event list)."""
     events = []
     while True:
         out = call("getUpdates", offset=offset, limit=100,
@@ -128,8 +128,8 @@ def main():
         "Привет! Подскажи, пожалуйста, кто сейчас возглавляет Центральный банк России и какая ключевая ставка?",
         "А кто был на этой должности до неё?",
     ]
-    # Хвост прошлых обновлений снимаем с его же offset: иначе старый ответ
-    # засчитывается новым вопросом (ловушка 11.11.2026).
+    # Drain the tail of old updates using its own offset: otherwise an old answer
+    # is counted as a new question (pitfall 11.11.2026).
     offset, backlog = drain(0)
     print(f"[probe] backlog drained: {len(backlog)}")
     report = {"backlog": len(backlog)}

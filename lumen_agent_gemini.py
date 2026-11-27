@@ -1,4 +1,4 @@
-"""lumen_agent_gemini.py — агентный поиск на резервном Gemini: модель пишет запросы, бот исполняет web_search."""
+"""lumen_agent_gemini.py — agentic search on the Gemini fallback: the model writes queries, and the bot executes web_search."""
 from __future__ import annotations
 
 import asyncio
@@ -22,22 +22,21 @@ from lumen_search import (fetch_web_snippets, format_snippets_for_prompt,
 
 log = logging.getLogger("bot")
 
-# Те же границы, что у цикла Munito: шаг — это планирующий вызов, поиски
-# считаются отдельно; планирующий вызов не берёт весь остаток фазы.
+# The same boundaries as the Munito loop: a step is a planning call; searches
+# are counted separately; the planning call does not take the entire remainder of the phase.
 _MAX_STEPS = 3
 _STEP_CALL_MAX_SEC = 16.0
 _MIN_STEP_BUDGET_SEC = 5.0
 
 
 def gemini_agent_enabled() -> bool:
-    """По умолчанию выключено: форма function calling подтверждена SDK, но живой
-    прогон на резервной голове ещё не делался. Включается переменной Space."""
+    """Disabled by default: the function-calling shape is confirmed by the SDK, but no live run has been done on the reserve head. Enabled by a Space variable."""
     return (os.getenv("GEMINI_AGENT_TURN_ENABLED", "0") or "").strip().lower() in ("1", "true", "on")
 
 
 def _search_declaration() -> types.FunctionDeclaration:
-    """Та же схема инструмента, что у Munito: имя, описание и поля совпадают,
-    чтобы промпт и поведение модели не зависели от провайдера."""
+    """The same tool schema as Munito: name, description, and fields match,
+so the prompt and model behavior do not depend on the provider."""
     fn = WEB_SEARCH_TOOL["function"]
     return types.FunctionDeclaration(
         name=fn["name"],
@@ -74,12 +73,13 @@ async def run_search_turn(
     max_searches: int, status: Any = None, deadline: float | None = None,
     history_meta: dict | None = None,
 ) -> AgentTurnResult:
-    """Цикл на резервном Gemini: модель просит web_search, бот ищет, модель уточняет.
-    Доказательства уходят в ответный промпт текстом (как у Munito): transcript с
-    function_call без тех же tools головы игнорируют.
+    """Fallback Gemini loop: the model requests web_search, the bot searches, and the
+    model refines. Evidence goes into the answering prompt as text (as with
+    Munito): heads ignore a transcript containing function_call without the same
+    tools.
 
-    Деградация — инвариант: любой сбой возвращает собранное и failed=True, вызов
-    никогда не роняет ответ человеку."""
+    Graceful degradation is an invariant: any failure returns what was gathered
+    with failed=True, and the call never causes the answer to the user to fail."""
     import bot
 
     result = AgentTurnResult()
@@ -102,9 +102,9 @@ async def run_search_turn(
             result.failed = True
             break
         remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-        # Сетевой резерв вычитаем из планирования, как в тракте Munito: иначе
-        # планирующий вызов съедал весь бюджет и поиск стартовал за дедлайном
-        # (ревью 17.11.2026).
+        # Subtract the network fallback from planning, as in the Munito path: otherwise
+        # the planning call consumed the entire budget and search started past the deadline
+        # (review 17.11.2026).
         net_reserve = web_search_timeout_sec()
         if remaining is not None and remaining < _MIN_STEP_BUDGET_SEC + net_reserve:
             result.failed = True
@@ -127,6 +127,11 @@ async def run_search_turn(
             result.failed = True
             break
         result.planning_ms += int((time.monotonic() - started) * 1000)
+        if bot._stream_stop_requested(chat_id):
+            # Stop during planning must not launch an already obtained search.
+            log.info("[agent-gemini] stopped by the user after planning")
+            result.failed = True
+            break
         calls = list(getattr(response, "function_calls", None) or [])
         preamble = _clean_preamble(getattr(response, "text", None) or "")
         if preamble and preamble not in result.preambles:
@@ -136,10 +141,13 @@ async def run_search_turn(
                     await status.set_action(preamble, timed=False)
         if not calls:
             break
-        # Фильтр пустых ДО среза: иначе пустой первый вызов съедал бюджет
-        # и валидный второй не пробовался (ревью 17.11.2026).
-        planned = [(call, _call_query(call)) for call in calls]
-        planned = [(call, query) for call, query in planned if query][:searches_left]
+        # Filter empty entries BEFORE slicing: otherwise the first empty call consumed the budget
+        # and a valid second option was not tried (review 17.11.2026).
+        planned = [
+            (call, _call_query(call)) for call in calls
+            if getattr(call, "name", None) in (None, "web_search")
+        ]
+        planned = [(call, query) for call, query in planned if query]
         seen_queries: set[str] = set()
         deduped: list = []
         for call, query in planned:
@@ -147,7 +155,9 @@ async def run_search_turn(
                 continue
             seen_queries.add(query)
             deduped.append((call, query))
-        planned = deduped
+        # A slice after deduplication: identical calls do not consume the budget
+        # the next unique request (RG-03, audit 26.11.2026).
+        planned = deduped[:searches_left]
         if not planned:
             result.failed = True
             break
@@ -160,6 +170,10 @@ async def run_search_turn(
                     await status.set_phase("progress_searching")
         budget_left = float("inf") if deadline is None else max(0.0, deadline - time.monotonic())
         step_budget = min(web_search_timeout_sec(), budget_left)
+        if bot._stream_stop_requested(chat_id):
+            log.info("[agent-gemini] stopped by the user before search execution")
+            result.failed = True
+            break
         per_query = step_budget / len(planned) if len(planned) > 1 else step_budget
         got = await asyncio.gather(
             *(fetch_web_snippets(query, timeout_sec=max(0.5, per_query),
@@ -173,9 +187,9 @@ async def run_search_turn(
         ]))
         contents.append(types.Content(role="user", parts=[
             types.Part.from_function_response(name="web_search", response={
-                # Та же рамка недоверенных данных и та же чистка, что у Munito:
-                # сырой сниппет мог закрыть фрейм и притащить невидимки
-                # (ревью 17.11.2026).
+                # The same untrusted-data frame and the same cleanup as Munito:
+                # a raw snippet could close the frame and bring in invisible characters
+                # (review 17.11.2026).
                 "results": format_snippets_for_prompt(snippets) or "no results",
             })
             for (_call, query), snippets in zip(planned, [

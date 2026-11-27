@@ -1,6 +1,5 @@
-"""
-lumen_images.py — text-to-image: Cloudflare Workers AI основной провайдер, Pollinations.ai резерв.
-Модуль изолирован: не пишет в chat_state/квоту, не зовёт Telegram, сессию принимает параметром.
+"""lumen_images.py — text-to-image: Cloudflare Workers AI is the primary provider, Pollinations.ai the fallback.
+The module is isolated: it does not write chat_state/quotas or call Telegram, and receives the session as a parameter.
 """
 
 from __future__ import annotations
@@ -22,42 +21,43 @@ import aiohttp
 
 log = logging.getLogger("bot")
 
-# Замер 09.11.2026 живьём: image.pollinations.ai игнорирует model (всегда sana, каталог
-# /models = ["sana"]) и nologo (водяной знак остаётся на ответе), поэтому стилевой
-# каталог из пяти моделей и подбор по промпту убраны — они ничего не выбирали.
+# Live measurement 09.11.2026: image.pollinations.ai ignores model (always sana; the catalog
+# /models = ["sana"]) and nologo (the watermark remains on the response), so the style
+# the five-model catalog and prompt-based selection were removed — they selected nothing.
 POLLINATIONS_IMAGE_URL = "https://image.pollinations.ai/prompt"
 POLLINATIONS_IMAGE_MODEL = (os.getenv("POLLINATIONS_IMAGE_MODEL", "").strip() or "sana")
 CLOUDFLARE_AI_BASE_URL = (os.getenv("CLOUDFLARE_AI_BASE_URL", "").strip() or "https://api.cloudflare.com/client/v4/accounts").rstrip("/")
-# Замер 10.11.2026 живьём: flux-2-klein-4b рисует и правит ОДНОЙ моделью (input_image_0),
-# принимает русский промпт напрямую и вход 1024x1024 без ужатия; ~104 Neuron за
-# картинку 1024x1024 против 1364 у klein-9b. flux-1-schnell остаётся только
-# переменной на случай отката, генерация через него по умолчанию не идёт.
+# Live measurement 10.11.2026: flux-2-klein-4b draws and edits with ONE model (input_image_0),
+# accepts a Russian prompt directly and 1024x1024 input without resizing; ~104 Neuron per
+# a 1024x1024 image versus 1364 at klein-9b. flux-1-schnell remains only
+# the variable in case of rollback; generation does not use it by default.
 CLOUDFLARE_IMAGE_MODEL = (os.getenv("CLOUDFLARE_IMAGE_MODEL", "").strip() or "@cf/black-forest-labs/flux-2-klein-4b")
 CLOUDFLARE_EDIT_MODEL = (os.getenv("CLOUDFLARE_EDIT_MODEL", "").strip() or CLOUDFLARE_IMAGE_MODEL)
 CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
 CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
-# Имя приложения для Pollinations: их privacy-страница пишет, что анонимный трафик
-# логируется вместе с "referring site or app name" — без него запрос неотличим от чужого скрипта.
+# Application name for Pollinations: their privacy page says that anonymous traffic
+# Do not accept "referring site or app name" as a prompt: the model used that
+# technical field as the subject of the picture.
 IMAGE_APP_REFERRER = (os.getenv("IMAGE_APP_REFERRER", "").strip() or "lumen-telegram-bot")
 
-# Один лимит на обоих провайдеров: резерв обязан принять тот же текст, что основной.
-# Cloudflare умеет 2048, капаем ниже — промпт уходит в URL резервного провайдера.
+# One limit for both providers: the fallback must accept the same text as the primary.
+# Cloudflare supports 2048, but we cap below that: the prompt goes into the reserve provider's URL.
 IMAGE_PROMPT_MAX_CHARS = 600
-# Читаем потоково с капом: бесконтрольный resp.read() складывал в память тело
-# любого размера от чужого сервиса.
+# Read the stream with a cap: uncontrolled resp.read() accumulated the body in memory
+# of any size from someone else's service.
 IMAGE_MAX_BYTES = 30 * 1024 * 1024
 IMAGE_URL_ENCODED_MAX_CHARS = 4000
-# Ответы обоих провайдеров — JPEG; PNG/WebP допускаем, GIF нет: sendPhoto анимацию
-# не принимает, а статичный GIF такие API не отдают (аудит 09.11.2026).
+# Responses from both providers are JPEG; PNG/WebP are allowed, GIF is not: sendPhoto, animation
+# does not accept, and these APIs do not return a static GIF (audit 09.11.2026).
 _IMAGE_SIGNATURES = ((b"\xff\xd8\xff", ".jpg"), (b"\x89PNG", ".png"), (b"RIFF", ".webp"))
 
 
 class ImageProviderError(RuntimeError):
-    """Сбой провайдера картинок. Текст — для лога; человеку показывается классифицированный текст."""
+    """Image-provider failure. The text is for the log; the user sees a classified message."""
 
 
 class ImageRateLimitedError(ImageProviderError):
-    """429/402 FREE_LIMIT: провайдер жив, но не тянет темп. retry_after_sec — из заголовка."""
+    """429/402 FREE_LIMIT: the provider is alive but cannot keep up. retry_after_sec comes from the header."""
 
     def __init__(self, message: str, *, retry_after_sec: float | None = None) -> None:
         super().__init__(message)
@@ -65,12 +65,11 @@ class ImageRateLimitedError(ImageProviderError):
 
 
 class ImageModerationError(ImageProviderError):
-    """Фильтр содержания провайдера: не сетевой сбой и не бюджет. Резерв умеет
-    рисовать то же самое без фильтра, поэтому цепочка обязана встать (ревю 10.11.2026)."""
+    """Provider content filter: not a network failure and not a budget issue. The fallback can draw the same content without filtering, so the chain must stop (review 10.11.2026)."""
 
 
 class ImageBudgetExhaustedError(ImageProviderError):
-    """Бесплатный дневной бюджет провайдера выбран — до следующих суток пробовать бессмысленно."""
+    """The provider's free daily budget is used up — retrying before the next day is pointless."""
 
 
 def cloudflare_configured() -> bool:
@@ -78,21 +77,22 @@ def cloudflare_configured() -> bool:
 
 
 def image_provider_names() -> tuple[str, ...]:
-    """Порядок = порядок фолбэка. Cloudflare не настроен — остаётся один Pollinations."""
+    """Order = fallback order. If Cloudflare is not configured, only Pollinations remains."""
     names = ["cloudflare"] if cloudflare_configured() else []
     names.append("pollinations")
     return tuple(names)
 
 
 def _random_seed() -> int:
-    """Pollinations без seed отдаёт seed=42 и байт-в-байт ту же картинку на повторе
-    промпта (замер 09.11.2026) — без случайного seed фича выглядит сломанной."""
+    """Without a seed, Pollinations returns seed=42 and a byte-for-byte identical
+    image when the prompt is repeated (measured 09.11.2026); without a random
+    seed, the feature appears broken."""
     return secrets.randbelow(2_000_000_000) + 1
 
 
 def image_filename(data: bytes) -> str | None:
-    """Имя файла по магическим байтам, а не всегда .jpg: имя уходит в multipart и по
-    нему Telegram определяет формат. None — формат, который sendPhoto не примет."""
+    """File name derived from magic bytes rather than always .jpg: the name goes into multipart and
+Telegram uses it to determine the format. None means a format sendPhoto will not accept."""
     for signature, ext in _IMAGE_SIGNATURES:
         if data.startswith(signature):
             if ext == ".webp" and data[8:12] != b"WEBP":
@@ -102,30 +102,45 @@ def image_filename(data: bytes) -> str | None:
 
 
 def _error_strings(payload: Any, cap: int | None = 400) -> str:
-    """Сообщения об ошибке из JSON-ответа одним текстом: у Cloudflare это
-    errors:[{code,message}], у Pollinations — одиночный error:{code,message}
-    (в нём и живёт код FREE_LIMIT), у обёртки Workers AI текст несёт messages[]
-    и result. Разбор только dict/list, без обхода произвольного чужого JSON."""
+    """Combines error messages from a JSON response into one text: Cloudflare uses
+    errors:[{code,message}], Pollinations uses a single error:{code,message}
+    (which carries the FREE_LIMIT code), and the Workers AI wrapper text carries messages[]
+    and result. Parses only dict/list, without traversing arbitrary foreign JSON."""
     out: list[str] = []
+
+    def _append_item(item: dict[str, Any]) -> None:
+        code = item.get("code")
+        if isinstance(code, (str, int)):
+            out.append(str(code))
+        message = item.get("message")
+        if isinstance(message, str):
+            out.append(message)
+
+    def _error_items(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, (dict, str)):
+            return [value]
+        return []
     if isinstance(payload, dict):
-        for item in payload.get("errors") or []:
+        for item in _error_items(payload.get("errors")):
             if isinstance(item, dict):
-                out.append(f"{item.get('code')} {item.get('message')}")
+                _append_item(item)
             elif isinstance(item, str):
                 out.append(item)
         error = payload.get("error")
         if isinstance(error, dict):
-            out.append(f"{error.get('code')} {error.get('message')}")
+            _append_item(error)
         elif isinstance(error, str):
             out.append(error)
         if isinstance(payload.get("message"), str):
             out.append(payload["message"])
-        # У обёртки Workers AI текст отказа живёт ещё и в messages[], и в result —
-        # строкой или короткими полями словаря. Длинные не берём: detail уходит в
-        # лог, а в result на успехе лежит base64 картинки (ревью 10.11.2026).
-        for item in payload.get("messages") or []:
+        # In the Workers AI wrapper, refusal text also lives in messages[] and in result —
+        # a string or short dictionary fields. Long ones are excluded: detail goes into
+        # the log, while result contains the base64 image on success (review 10.11.2026).
+        for item in _error_items(payload.get("messages")):
             if isinstance(item, dict):
-                out.append(f"{item.get('code')} {item.get('message')}")
+                _append_item(item)
             elif isinstance(item, str):
                 out.append(item)
         result = payload.get("result")
@@ -141,14 +156,15 @@ def _error_strings(payload: Any, cap: int | None = 400) -> str:
 
 
 def _error_strings_full(data: Any) -> str:
-    """Тот же текст без капа 400: маркер модерации мог уехать за обрезку,
-    и 403/500 уходили в резерв (ревью 17.11.2026)."""
+    """One retry on status 400: that status is a transient backend failure rather than
+    a bad request; on 403/500 it is not retried (measurement 17.11.2026)."""
     return _error_strings(data, cap=None)
 
 
 def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
-    """Retry-After бывает и секундами, и HTTP-date (RFC 9110). Голое float() на дате
-    давало None, и 402 без кода FREE_LIMIT ложно становился «бюджет выбран до завтра»."""
+    """Retry-After can be either seconds or an HTTP-date (RFC 9110). A bare float() on a date
+    returned None, and a 402 without the FREE_LIMIT code was falsely reported as
+    “budget selected until tomorrow.”"""
     raw = (resp.headers.get("Retry-After") or "").strip()
     if not raw:
         return None
@@ -157,9 +173,9 @@ def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
     except ValueError:
         seconds = None
     if seconds is not None:
-        # inf/1e309 — мусорный заголовок: кап в сутки вместо вечной остывки.
-        # None здесь значил бы «заголовка нет», и 402 без FREE_LIMIT уходил бы
-        # в «бюджет исчерпан» (ревью 17.11.2026). nan сравнивается сам с собой.
+        # inf/1e309 — garbage header: use a daily cap instead of a permanent cooldown.
+        # None here would mean “no header”, and a 402 without FREE_LIMIT would
+        # into "budget exhausted" (review 17.11.2026). nan does not equal itself.
         if seconds != seconds:
             return 0.0
         return min(max(0.0, seconds), 86400.0)
@@ -175,8 +191,8 @@ def _retry_after_sec(resp: aiohttp.ClientResponse) -> float | None:
 
 
 async def _read_capped_image(resp: aiohttp.ClientResponse) -> bytes | None:
-    """Тело с отказом при превышении капа (None): Content-Length врёт — поток
-    перепроверяем по факту."""
+    """Body with a refusal when the cap is exceeded (None): Content-Length lies,
+    so verify the stream as it arrives."""
     content_length = resp.headers.get("Content-Length")
     if content_length is not None:
         try:
@@ -195,8 +211,8 @@ async def _read_capped_image(resp: aiohttp.ClientResponse) -> bytes | None:
 
 
 async def _error_detail(resp: aiohttp.ClientResponse) -> str:
-    """Текст ошибки провайдера под тем же капом, что и картинка: error-ветка не
-    обязана лить в память чужое тело без предела (аудит 09.11.2026)."""
+    """Apply the same cap to provider error text as to the image: the error branch need
+    not load an unbounded third-party response into memory (audit 09.11.2026)."""
     if int(resp.status) not in (402, 429):
         return ""
     with contextlib.suppress(Exception):
@@ -207,9 +223,7 @@ async def _error_detail(resp: aiohttp.ClientResponse) -> str:
 
 
 def _encoded_prompt(prompt: str) -> str:
-    """Промпт уходит в путь URL, поэтому каппировать надо по длине ПОСЛЕ
-    percent-encoding: 600 эмодзи это ~7200 символов, и CDN отвечает 414. Отсечка
-    посимвольная, чтобы не разорвать %-последовательность."""
+    """The prompt goes into the URL path, so it must be capped by length AFTER percent-encoding: 600 emoji is about 7200 characters, and the CDN returns 414. Truncate character by character so a %-sequence is not split."""
     pieces: list[str] = []
     used = 0
     for ch in prompt[:IMAGE_PROMPT_MAX_CHARS]:
@@ -226,8 +240,8 @@ def _timeout(total_sec: float | None) -> aiohttp.ClientTimeout:
 
 
 def _take_image_bytes(body: bytes, ctype: str, provider: str) -> bytes:
-    """Что в ответе действительно картинка: Content-Type чужого сервиса не надёжнее
-    магических байтов, верим любому из двух (регрессия AUD-E-001)."""
+    """Whether the response is really an image: a third-party Content-Type is no more
+    reliable than magic bytes, so trust either one (regression AUD-E-001)."""
     if not body:
         raise ImageProviderError(f"{provider} вернул пустое тело")
     if image_filename(body) is not None:
@@ -237,17 +251,19 @@ def _take_image_bytes(body: bytes, ctype: str, provider: str) -> bytes:
     raise ImageProviderError(f"{provider} вернул не-изображение: {ctype}")
 
 
-# Пропорции как в генераторе ChatGPT: размер задаётся маркером в промпте.
-# Все варианты ≈1 мегапиксель (21:9 — 0.77 Мп), чтобы цена в Neuron не росла
-# (замер 10.11.2026).
+# Aspect ratios as in the ChatGPT generator: size is set by a marker in the prompt.
+# All variants are about 1 megapixel (21:9 is 0.77 MP), so the price in Neuron does not grow
+# (measurement 10.11.2026).
 _SIZES: dict[str, tuple[int, int]] = {
     "16:9": (1344, 768),
     "9:16": (768, 1344),
     "4:3": (1152, 864),
     "3:4": (864, 1152),
     "1:1": (1024, 1024),
-    # 3:2 и 4:5 — форматы ChatGPT для постера и сторис-портрета; стороны кратно
-    # 32 и площадь снова ≈1 Мп, чтобы цена в Neuron не прыгала (10.11.2026).
+    # 3:2 and 4:5 are ChatGPT formats for a poster and a story portrait; sides are
+    # multiples
+    # 32 and the area is back to ~1 MP, so the price in Neuron does not jump
+    # (10.11.2026).
     "3:2": (1248, 832),
     "2:3": (832, 1248),
     "4:5": (896, 1120),
@@ -266,8 +282,8 @@ _SIZE_WORDS: tuple[tuple[str, str], ...] = (
     ("горизонтальн", "16:9"),
     ("вертикальн", "9:16"),
     ("широкоформатн", "16:9"),
-    # Только целыми фразами: одиночные «wide»/«tall»/«portrait» описывают сюжет
-    # («wide smile», «tall hat», «portrait of a woman») и кадр менять не должны.
+    # Only whole phrases: individual "wide"/"tall"/"portrait" words describe the scene
+    # (“wide smile”, “tall hat”, “portrait of a woman”) and must not change the frame.
     ("панорамн", "16:9"), ("во всю ширину", "16:9"), ("widescreen", "16:9"),
     ("wide format", "16:9"), ("landscape format", "16:9"),
     ("landscape orientation", "16:9"),
@@ -275,27 +291,27 @@ _SIZE_WORDS: tuple[tuple[str, str], ...] = (
     ("vertical format", "9:16"), ("vertical video", "9:16"), ("tall format", "9:16"),
     ("portrait format", "4:5"), ("square format", "1:1"),
     ("квадрат", "1:1"),
-    # Английские "portrait"/"landscape" — жанр, а не ориентация ("portrait of a woman"):
-    # размер не навязываем, иначе каждый портрет выходил вертикальным (ревью 10.11.2026).
+    # English "portrait"/"landscape" — genre, not orientation ("portrait of a woman"):
+    # do not force a size, or every portrait would come out vertical (review 10.11.2026).
     ("square", "1:1"),
 )
 
 
-# «Сделай постер», «обои на телефон», «баннер для сайта» — человек ждёт
-# привычный этому артефакту кадр, как в ChatGPT, а не квадрат. Ищем после
-# явных пропорций, поэтому «постер 16:9» остаётся 16:9.
-# Паттерны — с границами слов и обязательной связкой для неоднозначных
-# английских существительных: «imposter» и «posterior view» не постеры, а «a cat
-# telling stories» и «fisherman with reels» описывают сюжет, а не формат
-# (ревью 10.11.2026).
+# "Make a poster", "phone wallpaper", "website banner" — the person expects
+# the frame customary for this artifact, as in ChatGPT, rather than a square. Look after
+# explicit aspect ratios, so "16:9 poster" remains 16:9.
+# Patterns — with word boundaries and a required link word for ambiguous
+# English nouns: "imposter" and "posterior view" are not posters, while "a cat
+# telling stories" and "fisherman with reels" describe a subject, not a format
+# (review 10.11.2026).
 _SIZE_DEFAULTS: tuple[tuple[str, str], ...] = (
     (r"обои на (?:телефон|смартфон)|phone wallpaper", "9:16"),
     (r"\bсторис\b|(?:для|for)\s+(?:моей\s+|my\s+)?(?:сторис|story|stories|reels?)\b", "9:16"),
     (r"\b(?:instagram|insta)\s+(?:story|stories|reels?)\b|\breels?\b[\s-]*(?:формат|format)", "9:16"),
     (r"\btiktok\b", "9:16"),
     (r"в полный рост", "9:16"),
-    # Stems с \w*: «кот на постере», «колонка в баннере» — те же форматы, что
-    # и в именительном падеже (ревью 10.11.2026).
+    # Stems with \w*: "cat on a poster", "column in a banner" are the same formats as
+    # and in the nominative case (review 10.11.2026).
     (r"\b(?:постер\w*|плакат\w*|обложк\w*|posters?|book cover)\b", "2:3"),
     (r"\b(?:баннер\w*|превью|banners?|thumbnails?)\b", "16:9"),
     (r"(?:desktop|рабочего стол\w*) wallpaper|wallpaper for desktop"
@@ -305,9 +321,10 @@ _SIZE_DEFAULTS: tuple[tuple[str, str], ...] = (
 
 
 def detect_image_size(prompt: str) -> tuple[int, int]:
-    """Размер из маркера в промпте; по умолчанию 1024x1024. Ищем только явные
-    форматы/слова пропорций, чтобы "широкий спектр" не стал 16:9. Форматы ищем
-    с границами цифр: иначе "13:45" содержит "3:4" (найдено ревью 10.11.2026)."""
+    """Size from the prompt marker; defaults to 1024x1024. Only explicit aspect
+    formats/words are matched so "wide range" does not become 16:9. Formats are
+    matched with digit boundaries; otherwise "13:45" contains "3:4" (found in
+    review 10.11.2026)."""
     low = (prompt or "").lower()
     for token, key in _SIZE_WORDS:
         if any(c.isdigit() for c in token) and any(c in token for c in (":", "х", "x")):
@@ -322,8 +339,8 @@ def detect_image_size(prompt: str) -> tuple[int, int]:
 
 
 def image_dimensions(data: bytes) -> tuple[int, int] | None:
-    """Ширина/высота по заголовку файла, без Pillow: правка должна сохранять
-    пропорции референса (замер 10.11.2026: 16:9 фото выходило квадратом)."""
+    """Read width/height from the file header without Pillow: edits must preserve the
+    reference's proportions (measurement 10.11.2026: a 16:9 photo came out square)."""
     try:
         if data.startswith(b"\xff\xd8"):
             i = 2
@@ -333,8 +350,8 @@ def image_dimensions(data: bytes) -> tuple[int, int] | None:
                     continue
                 marker = data[i + 1]
                 if marker == 0xDA:
-                    # SOF всегда до SOS; после него — энтропия, и побайтовый скан
-                    # 8-10 МБ держал GIL 0.4-0.5 с (ревью 17.11.2026).
+                    # SOF always precedes SOS; after it comes entropy, and a byte-by-byte scan
+                    # 8-10 MB held the GIL for 0.4-0.5 s (review 17.11.2026).
                     return None
                 if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
                     i += 2
@@ -370,23 +387,23 @@ def image_dimensions(data: bytes) -> tuple[int, int] | None:
 
 
 def size_for_reference(dimensions: tuple[int, int] | None) -> tuple[int, int]:
-    """Выходной размер правки: ближайшая из поддерживаемых пропорций к кадру
-    референса (4:3 и 3:4 тоже), неизвестные размеры дают квадрат."""
+    """Edit output size: the supported aspect ratio closest to the reference frame
+    (including 4:3 and 3:4); unknown dimensions produce a square."""
     if not dimensions:
         return (1024, 1024)
     w, h = dimensions
     if not w or not h:
         return (1024, 1024)
     ratio = w / h
-    # Все поддерживаемые пропорции, а не пять: 3:2/21:9 раньше съезжали в 4:3/16:9
-    # и кадр дрейфовал при правке (ревью 17.11.2026).
+    # All supported aspect ratios, not just five: 3:2/21:9 previously shifted to 4:3/16:9
+    # and the frame drifted during editing (review 17.11.2026).
     target = {name: int(name.split(":")[0]) / int(name.split(":")[1]) for name in _SIZES}
     best = min(_SIZES, key=lambda name: abs(math.log(ratio / target[name])))
     return _SIZES[best]
 
 
 def _image_content_type(data: bytes) -> str:
-    """Тип референса по магическим байтам: имя файла у FormData условное."""
+    """Reference type by magic bytes: the filename in FormData is arbitrary."""
     if data.startswith(b"\x89PNG"):
         return "image/png"
     if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
@@ -395,8 +412,8 @@ def _image_content_type(data: bytes) -> str:
 
 
 def _cloudflare_model_url(model: str) -> str:
-    # safe="/@": Cloudflare ждёт модель в пути как `@cf/имя/модель`, голый quote()
-    # превратил бы слэш в %2F и получил бы 404 на заведомо существующую модель.
+    # safe="/@": Cloudflare expects the model in the path as `@cf/name/model`; bare quote()
+    # would turn the slash into %2F and get a 404 for a model known to exist.
     return (
         f"{CLOUDFLARE_AI_BASE_URL}/{urllib.parse.quote(CLOUDFLARE_ACCOUNT_ID, safe='')}"
         f"/ai/run/{urllib.parse.quote(model, safe='/@')}"
@@ -407,11 +424,11 @@ async def _cloudflare_request(
     session: aiohttp.ClientSession, url: str, *, form: aiohttp.FormData,
     timeout_sec: float | None,
 ) -> tuple[int, float | None, Any]:
-    """Один multipart-POST, дочитанный и закрытый: (статус, retry_after, JSON).
-    Тело ошибки читается тем же капом, что и картинка; разбираем и на ошибках —
-    дневный бюджет Cloudflare сообщает текстом в errors при HTTP 429.
-    Замер 10.11.2026: flux-2-klein принимает ТОЛЬКО multipart, JSON-тело
-    отвергает 5006 "required properties at '/' are 'multipart'"."""
+    """One fully read and closed multipart POST: (status, retry_after, JSON).
+    The error body is read with the same cap as the image and is parsed even on errors —
+    Cloudflare reports its daily budget in the errors text on HTTP 429.
+    Measured 10.11.2026: flux-2-klein accepts ONLY multipart; it rejects a JSON body with
+    5006 "required properties at '/' are 'multipart'"."""
     async with session.post(
         url, data=form, timeout=_timeout(timeout_sec),
         headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
@@ -431,13 +448,13 @@ _MODERATION_MARKERS = ("flagged", "moderation")
 
 
 def _is_moderation_detail(detail: str) -> bool:
-    """Признак фильтра содержания в ответе Cloudflare (замер 10.11.2026: код 3030
+    """Classify an image-provider refusal (measured 10.11.2026: one case used code 3030
     "Your output has been flagged")."""
     return any(word in (detail or "").lower() for word in _MODERATION_MARKERS)
 
 
 def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) -> bytes:
-    """Общая расшифровка ответа flux-2-klein: успех, бюджет, темп, модерация."""
+    """Common decoding of a flux-2-klein response: success, budget, pacing, moderation."""
     full_detail = _error_strings_full(data)
     detail = full_detail[:400]
     if status == 200 and not isinstance(data, dict):
@@ -445,18 +462,19 @@ def _cloudflare_image_result(status: int, retry_after: float | None, data: Any) 
     if status == 402:
         raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 402 {detail})")
     if status == 429:
-        # Теми же 429 Cloudflare отвечает и на выбитый дневной бюджет Neuron.
+        # Cloudflare also returns the same 429s when the daily Neuron budget is exhausted.
         if any(word in detail.lower() for word in ("allocation", "free tier", "daily")):
             raise ImageBudgetExhaustedError(f"Cloudflare: бесплатный бюджет выбран (HTTP 429 {detail})")
         raise ImageRateLimitedError(f"Cloudflare HTTP 429 {detail}".strip(), retry_after_sec=retry_after)
-    # Фильтр содержания (замер 10.11.2026: код 3030 "Your output has been
-    # flagged"): это не сетевой сбой, повтор и резерв не помогут — человеку
-    # честнее «ошибка генерации, переформулируй». Тот же флаг приходит и телом
-    # (обёртка Workers AI) при любом статусе, поэтому проверка до ветки статусов:
-    # иначе sana дорисовывала отклонённое содержимое (ревью 10.11.2026).
+    # Content filter (measurement 10.11.2026: code 3030 "Your output has been
+    # flagged"): this is not a network failure; retries and fallback will not help,
+    # so the user
+    # is more honest than "generation error, rephrase it." The same flag also arrives in the body
+    # (Workers AI wrapper) on any status, so check before the status branches:
+    # otherwise sana would draw in the rejected content (review 10.11.2026).
     if (status != 200 or (isinstance(data, dict) and not data.get("success", True)))             and _is_moderation_detail(full_detail):
-        # Полный текст, не обрезанный: «flagged» за капом 400 иначе не виден,
-        # и 403/500 уходили в резерв (ревью 17.11.2026).
+        # Full, untruncated text: otherwise "flagged" beyond the 400 cap is invisible,
+        # and 403/500 fell back to the reserve (review 17.11.2026).
         raise ImageModerationError(f"Cloudflare отклонил содержимое по модерации: {full_detail[:200]}")
     if status != 200:
         raise ImageProviderError(f"Cloudflare HTTP {status} {detail}".strip())
@@ -478,9 +496,9 @@ def _cloudflare_form(
     second_reference: bytes | None = None,
     width: int = 1024, height: int = 1024,
 ) -> aiohttp.FormData:
-    """Тело запроса klein: prompt/width/height/seed и референс для правки.
-    Размеры 256..1920, около мегапикселя — дешёвая единица бюджета
-    (4*26.05 = 104 Neuron за картинку 1024x1024)."""
+    """klein request body: prompt/width/height/seed plus a reference image for edits.
+    Dimensions 256..1920; about one megapixel is the cheap budget unit
+    (4*26.05 = 104 Neurons for a 1024x1024 image)."""
     form = aiohttp.FormData()
     form.add_field("prompt", prompt[:IMAGE_PROMPT_MAX_CHARS])
     form.add_field("width", str(width))
@@ -501,7 +519,7 @@ async def _cloudflare_text_to_image(
     session: aiohttp.ClientSession, prompt: str, *,
     timeout_sec: float | None = None, width: int = 1024, height: int = 1024,
 ) -> bytes:
-    """Генерация с нуля через Workers AI (multipart)."""
+    """Generation from scratch via Workers AI (multipart)."""
     if not cloudflare_configured():
         raise ImageProviderError("Cloudflare не настроен: нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN")
     status, retry_after, data = await _cloudflare_request(
@@ -516,8 +534,7 @@ async def _cloudflare_edit_to_image(
     second_reference: bytes | None = None,
     timeout_sec: float | None = None, width: int = 1024, height: int = 1024,
 ) -> bytes:
-    """Правка готовой картинки: референс уходит полем input_image_0 (замер
-    10.11.2026: красное яблоко -> зелёное, вход 1024x1024 принимается как есть)."""
+    """Editing an existing image: the reference is sent in input_image_0 (measured 10.11.2026: red apple -> green; 1024x1024 input is accepted as-is)."""
     if not cloudflare_configured():
         raise ImageProviderError("Cloudflare не настроен: нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_API_TOKEN")
     if not reference:
@@ -534,16 +551,17 @@ async def _cloudflare_edit_to_image(
 
 
 async def _pollinations_text_to_image(session: aiohttp.ClientSession, prompt: str, *, timeout_sec: float | None = None) -> bytes:
-    """Классический эндпоинт без ключа — только резерв. Замер 09.11.2026: 1 картинка в
-    45 секунд на IP (HTTP 402 FREE_LIMIT с Retry-After), модель всегда sana, nologo
-    игнорируется, поэтому водяной знак остаётся."""
+    """The classic keyless endpoint is reserve only. Measured 09.11.2026: 1 image per
+    45 seconds per IP (HTTP 402 FREE_LIMIT with Retry-After), model always sana, nologo
+    ignored, so the watermark remains."""
     if not (prompt or "").isascii():
-        # sana превращает кириллицу в '?' на разборе URL и рисует случайное
-        # (пруф 09.11.2026): без перевода честнее отказа, чем картинка-мусор за
-        # счёт дневного бюджета (ревю 10.11.2026).
+        # sana turns Cyrillic into '?' during URL parsing and draws random
+        # (proof 09.11.2026): refusing without translation is more honest than a garbage image for
+        # daily budget count (review 10.11.2026).
         raise ImageProviderError("Pollinations: описание не переведено на английский")
     encoded = _encoded_prompt(prompt)
-    # safe=true: без него фильтр NSFW выключен (так в их доках), а бот публичный.
+    # safe=true: without it, the NSFW filter is disabled (according to their docs),
+    # and the bot is public.
     url = (
         f"{POLLINATIONS_IMAGE_URL}/{encoded}"
         f"?width=1024&height=1024&model={urllib.parse.quote(POLLINATIONS_IMAGE_MODEL, safe='')}"
@@ -563,7 +581,7 @@ async def _pollinations_text_to_image(session: aiohttp.ClientSession, prompt: st
         if status == 429:
             raise ImageRateLimitedError(f"Pollinations HTTP 429 {detail}".strip(), retry_after_sec=retry_after)
         if status == 402:
-            # FREE_LIMIT — темп на IP, то есть перегрузка; без него — конченный бюджет.
+            # FREE_LIMIT — the per-IP rate, i.e., overload protection; without it — an exhausted budget.
             if "FREE_LIMIT" in detail or retry_after is not None:
                 raise ImageRateLimitedError(f"Pollinations HTTP 402 {detail}".strip(), retry_after_sec=retry_after)
             raise ImageBudgetExhaustedError(f"Pollinations HTTP 402 {detail}".strip())

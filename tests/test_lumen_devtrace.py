@@ -1,4 +1,4 @@
-"""test_lumen_devtrace.py — JSONL-след запросов и ответов для разбора багов."""
+"""test_lumen_devtrace.py contains a JSONL trace of requests and responses for debugging."""
 import asyncio
 from types import SimpleNamespace
 
@@ -13,7 +13,7 @@ def _enable_trace(monkeypatch, tmp_path):
 
 
 def test_devtrace_disabled_by_default_writes_nothing(monkeypatch, tmp_path):
-    # Сторож: без DEV_TRACE=1 файл не создаётся даже при прямом вызове.
+    # Guard: without DEV_TRACE=1, the file is not created even on a direct call.
     monkeypatch.delenv("DEV_TRACE", raising=False)
     monkeypatch.setenv("DEV_TRACE_PATH", str(tmp_path / "trace.jsonl"))
     assert lumen_devtrace.record_answer(1, user_text="hi", reply="hello") is False
@@ -21,8 +21,8 @@ def test_devtrace_disabled_by_default_writes_nothing(monkeypatch, tmp_path):
 
 
 def test_devtrace_answer_clips_and_redacts_secret(monkeypatch, tmp_path):
-    # Защищает разбор глупостей модели (полный маршрут и ответ в файле) и
-    # отсутствие секретов в нём: регрессия — сырой токен в trace-файле.
+    # Protects parsing of model nonsense (the full route and answer in the file) and
+    # the absence of secrets in it: the regression is a raw token in the trace file.
     _enable_trace(monkeypatch, tmp_path)
     monkeypatch.setattr(bot, "BOT_TOKEN", "devtrace-secret-abc")
     ok = lumen_devtrace.record_answer(
@@ -41,7 +41,7 @@ def test_devtrace_answer_clips_and_redacts_secret(monkeypatch, tmp_path):
 
 
 def test_devtrace_read_tail_returns_last_n_and_skips_broken(monkeypatch, tmp_path):
-    # Хвост для /devtrace: последние N и пропуск битых строк вместо 500.
+    # Tail for /devtrace: the last N, skipping malformed lines instead of 500.
     _enable_trace(monkeypatch, tmp_path)
     for i in range(5):
         assert lumen_devtrace.record_passive(7, f"msg {i}") is True
@@ -57,7 +57,7 @@ def test_devtrace_endpoint_rejects_missing_or_wrong_key(monkeypatch):
     try:
         result = asyncio.run(bot.devtrace(_FakeAdminRequest(headers={"Authorization": "Bearer wrong"})))
         assert result.status_code == 401
-        # Отсутствующий заголовок — тоже 401, не только неверный (ревью 17.11.2026).
+        # A missing header is also a 401, not just an incorrect one (review 17.11.2026).
         missing = asyncio.run(bot.devtrace(_FakeAdminRequest(headers={})))
         assert missing.status_code == 401
     finally:
@@ -65,7 +65,7 @@ def test_devtrace_endpoint_rejects_missing_or_wrong_key(monkeypatch):
 
 
 def test_devtrace_endpoint_returns_entries(monkeypatch, tmp_path):
-    # Сторож: валидный ключ отдаёт записанный след, а не пустой список.
+    # Guard: a valid key returns the recorded trace, not an empty list.
     _enable_trace(monkeypatch, tmp_path)
     original = bot.ADMIN_PANEL_KEY
     bot.ADMIN_PANEL_KEY = "real-admin-key"
@@ -80,7 +80,7 @@ def test_devtrace_endpoint_returns_entries(monkeypatch, tmp_path):
 
 
 def test_devtrace_passive_hook_writes_background(monkeypatch, tmp_path):
-    # Фон группы попадает в след: иначе разбирать влияние контекста не по чему.
+    # Group background appears in the trace; otherwise there is nothing to analyze context effects against.
     from aiogram.enums import ChatType
     _enable_trace(monkeypatch, tmp_path)
     monkeypatch.setattr(bot, "_should_only_record_passively", lambda *a, **k: True)
