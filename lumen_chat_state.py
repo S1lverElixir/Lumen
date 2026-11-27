@@ -1,7 +1,6 @@
-"""
-lumen_chat_state.py — состояние чатов, квоты и локи: ChatState/chat_state,
-персистентность (файл/Upstash), флашинг грязного состояния, get_state/_t,
-локи чатов, owner-утилиты. Связь с bot.py — только отложенным импортом.
+"""lumen_chat_state.py — chat state, quotas, and locks: ChatState/chat_state,
+persistence (file/Upstash), flushing dirty state, get_state/_t,
+chat locks, and owner utilities. The link to bot.py is through deferred imports only.
 """
 from __future__ import annotations
 
@@ -11,6 +10,9 @@ import json
 import logging
 import os
 import tempfile
+import threading
+import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 import time
 from collections import deque
@@ -26,9 +28,15 @@ from lumen_memory import (
     summary_batch,
 )
 from lumen_state_storage import (
+    CHAT_REPLACEMENT_SCHEMA_VERSION,
+    CHAT_STATE_SCHEMA_VERSION,
+    ChatJournalEntry,
     StorageConfig,
     _chat_storage_key,
+    _is_json_integer,
     _serialize_chat_state,
+    _validate_chat_snapshot,
+    _validate_replacement_journal,
     _upstash_set as _lumen_upstash_set,
     _upstash_get as _lumen_upstash_get,
     _upstash_delete as _lumen_upstash_delete,
@@ -38,9 +46,10 @@ from lumen_state_storage import (
     _chat_storage_path as _lumen_chat_storage_path,
 )
 
-# Реэкспорт для шва bot.py/тестов: bot.X и lcs.X видят те же объекты квот.
-# GLOBAL_QUOTA только мутируется, не перебиндивается — реэкспорт делит объект (аудит F-02, 09.11.2026).
-# __all__ обязателен: без него pyflakes помечает имена, не используемые в самом модуле, лишним импортом.
+# Re-export for the bot.py/tests seam: bot.X and lcs.X see the same quota objects.
+# GLOBAL_QUOTA is only mutated, never rebound — re-export shares the object (audit F-02, 09.11.2026).
+# __all__ is explicit so pyflakes sees imports used for the public API rather
+# than reporting them as unused.
 from lumen_quotas import (
     GLOBAL_QUOTA,
     USER_DAILY_KEY,
@@ -49,6 +58,8 @@ from lumen_quotas import (
     _mark_rate_limited,
     _maybe_alert_gemini_exhausted,
     _image_budget_exhausted,
+    _reserve_image_neurons,
+    _release_image_neurons,
     _image_neurons_total,
     recover_global_quota,
     _image_provider_block_reason,
@@ -65,6 +76,7 @@ from lumen_quotas import (
     _reset_quota_if_new_day,
     _stats_entry,
     _user_daily_entry,
+    _user_daily_admission_blocked,
     _user_daily_gemini_exhausted,
     _user_daily_limit,
     _user_daily_peek,
@@ -85,6 +97,8 @@ __all__ = [
     "_mark_rate_limited",
     "_maybe_alert_gemini_exhausted",
     "_image_budget_exhausted",
+    "_reserve_image_neurons",
+    "_release_image_neurons",
     "_image_neurons_total",
     "recover_global_quota",
     "_image_provider_block_reason",
@@ -101,6 +115,7 @@ __all__ = [
     "_reset_quota_if_new_day",
     "_stats_entry",
     "_user_daily_entry",
+    "_user_daily_admission_blocked",
     "_user_daily_gemini_exhausted",
     "_user_daily_limit",
     "_user_daily_peek",
@@ -116,24 +131,27 @@ __all__ = [
 log = logging.getLogger("bot")
 
 MAX_CHAT_LIMIT = 5000
+_MAX_UNRESOLVED_CHAT_IDS = MAX_CHAT_LIMIT
 PRUNED_CHAT_TARGET = 4500
-MAX_MEDIA_RECENT_IDS = 8  # хранится ОТДЕЛЬНО на каждого пользователя чата (см. recent_media_ids: dict[user_id, deque])
-# Живых отправителей медиа в чате десятки, 500 покрывает большие группы с запасом.
-# Потолок только против подделки user_id и раздувания снапшота, легитимные чаты не задевает.
+MAX_MEDIA_RECENT_IDS = 8  # stored SEPARATELY for each chat user (see recent_media_ids: dict[user_id, deque])
+# A chat has dozens of active media senders; 500 covers large groups with room
+# to spare.
+# Check recipient membership first, before loading or creating a chat.
 MAX_MEDIA_BUCKETS_PER_CHAT = 500
-# Единый лимит памяти на чат, включая фон группы (решение владельца 06.11.2026:
-# 100 было мало, фон вытеснялся до нуля; 200 — примерно день живого группового чата).
+# A single memory limit per chat, including group background (owner's decision 06.11.2026:
+# 100 was too few; background content was flushed to zero. 200 is roughly one
+# day of an active group chat.
 MAX_TOTAL_MEMORY_MESSAGES = MAX_MEMORY_MESSAGES
-# Сколько отправителей помним на чат: ники для подписей и резолва прозвищ.
+# How many senders to remember per chat: nicknames for signatures and nickname resolution.
 MAX_KNOWN_SENDERS_PER_CHAT = 500
 
 
 class ChatState(TypedDict, total=False):
-    # history — единый хронологический лог: фон группы, обращения и ответы бота.
+    # history is a single chronological log: group background, messages and bot replies.
     history: list[dict[str, Any]]
     memory_summary: str
     memory_pending: list[dict[str, Any]]
-    # Поколение памяти: /reset во время сводки не должен вернуть старые факты.
+    # Memory generation: /reset during summarization must not bring old facts back.
     memory_epoch: int
     recent_media_ids: dict[str, "deque[tuple[str, str]]"]
     user_names: dict[str, dict[str, str]]
@@ -148,18 +166,20 @@ try:
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
 except Exception as _state_dir_exc:
     log.warning('[setup] STATE_DIR %s is not writable (%s), using a private temp directory instead.', _STATE_DIR, _state_dir_exc)
-    # Приватный подкаталог с 0o700: сырой gettempdir() читаем соседям по машине,
-    # а там истории чатов (аудит M4, 10.2026).
+    # Private subdirectory with mode 0o700: a bare gettempdir() is readable by others on the machine,
+    # where the chat histories are (audit M4, 10.2026).
     _STATE_DIR = Path(tempfile.mkdtemp(prefix="lumen-state-"))
     os.chmod(_STATE_DIR, 0o700)
 STATE_FILE_PATH = _STATE_DIR / "chat_state.json"
 GLOBAL_QUOTA_FILE = _STATE_DIR / "global_quota.json"
-# Per-chat ключи вместо одного блоба: меньше payload и blast radius при сбое.
+# Per-chat keys instead of one blob: smaller payload and failure blast radius.
 _CHATS_DIR = _STATE_DIR / "chats"
 with contextlib.suppress(Exception):
     _CHATS_DIR.mkdir(parents=True, exist_ok=True)
 CHAT_INDEX_KEY = "lumen:chat_index"
 CHAT_INDEX_FILE = _STATE_DIR / "chat_index.json"
+CHAT_REPLACEMENTS_KEY = "lumen:chat_replacements"
+CHAT_REPLACEMENTS_FILE = _STATE_DIR / "chat_replacements.json"
 
 
 def _storage_config() -> StorageConfig:
@@ -198,13 +218,362 @@ def _chat_storage_path(chat_id: int) -> Path:
     import bot
     return _lumen_chat_storage_path(bot._storage_config(), chat_id)
 
-# Момент последней успешной записи для /stats: дубль в GLOBAL_QUOTA переживает
-# рестарт, иначе после рестарта показывало "записей не было" при живых данных.
+
+_replacement_journal_lock = threading.Lock()
+_replacement_state_lock = threading.Lock()
+_replacement_generations: dict[int, str] = {}
+_journal_deletion_ids: set[int] = set()
+_replacement_ambiguous_clears: dict[int, str] = {}
+_replacement_publication_dirty: set[int] = set()
+
+
+def _replacement_journal_document(pending: dict[int, ChatJournalEntry]) -> dict[str, object]:
+    serialized = {
+        str(chat_id): generation if kind == "replacement" else {"kind": "delete"}
+        for chat_id, (kind, generation) in pending.items()
+    }
+    return {"schema_version": CHAT_REPLACEMENT_SCHEMA_VERSION, "pending": serialized}
+
+
+def _read_replacement_journal_unlocked() -> dict[int, ChatJournalEntry]:
+    import bot
+    raw = bot._storage_read_text(CHAT_REPLACEMENTS_KEY, CHAT_REPLACEMENTS_FILE)
+    if raw is None:
+        return {}
+    parsed = _validate_replacement_journal(json.loads(raw))
+    if parsed is None:
+        raise ValueError("invalid chat replacement journal")
+    return parsed
+
+
+def _unresolved_chat_ids_locked() -> set[int]:
+    return (
+        _recreated_chat_ids
+        | _pending_chat_deletions
+        | _deleting_chat_ids
+        | _deletion_index_pending_ids
+        | _journal_deletion_ids
+        | set(_replacement_generations)
+    )
+
+
+def _reconcile_replacement_state_locked(chat_id: int) -> None:
+    _replacement_generations.pop(chat_id, None)
+    _journal_deletion_ids.discard(chat_id)
+    _replacement_ambiguous_clears.pop(chat_id, None)
+    _recreated_chat_ids.discard(chat_id)
+    _deleting_chat_ids.discard(chat_id)
+    if chat_id in _replacement_publication_dirty:
+        _dirty_chat_ids.discard(chat_id)
+    _replacement_publication_dirty.discard(chat_id)
+
+
+def _load_replacement_journal() -> bool:
+    """Load the journal fail-closed before any indexed snapshot can be trusted."""
+    global _replacement_generations, _journal_deletion_ids, _replacement_ambiguous_clears
+    with _replacement_journal_lock:
+        try:
+            pending = _read_replacement_journal_unlocked()
+        except Exception as exc:
+            with _replacement_state_lock:
+                _replacement_generations = {}
+                _journal_deletion_ids = set()
+                _replacement_ambiguous_clears = {}
+            log.warning("[state] Reading chat replacement journal failed: %s", exc)
+            return False
+        if len(pending) > _MAX_UNRESOLVED_CHAT_IDS:
+            with _replacement_state_lock:
+                _replacement_generations = {}
+                _journal_deletion_ids = set()
+                _replacement_ambiguous_clears = {}
+            log.warning("[state] Chat replacement journal exceeds the unresolved-state cap.")
+            return False
+        with _replacement_state_lock:
+            _replacement_generations = {
+                chat_id: generation
+                for chat_id, (kind, generation) in pending.items()
+                if kind == "replacement" and generation is not None
+            }
+            _journal_deletion_ids = {
+                chat_id for chat_id, (kind, _generation) in pending.items()
+                if kind == "delete"
+            }
+            _replacement_ambiguous_clears = {}
+        return True
+
+
+def _ensure_replacement_generation(chat_id: int) -> str:
+    """Persist the replacement intent before its snapshot and retain it across retries."""
+    import bot
+    while True:
+        with _replacement_journal_lock:
+            pending = _read_replacement_journal_unlocked()
+            with _replacement_state_lock:
+                unresolved = _unresolved_chat_ids_locked() | set(pending)
+                if len(pending) > _MAX_UNRESOLVED_CHAT_IDS or (
+                    chat_id not in unresolved and len(unresolved) >= _MAX_UNRESOLVED_CHAT_IDS
+                ):
+                    raise RuntimeError("chat replacement journal capacity reached")
+                current = _replacement_generations.get(chat_id)
+                current_entry = pending.get(chat_id)
+                generation = (
+                    current_entry[1]
+                    if current_entry is not None and current_entry[0] == "replacement"
+                    else current or uuid.uuid4().hex
+                )
+            if current_entry != ("replacement", generation):
+                pending[chat_id] = ("replacement", generation)
+                bot._storage_write_text(
+                    CHAT_REPLACEMENTS_KEY, CHAT_REPLACEMENTS_FILE,
+                    json.dumps(_replacement_journal_document(pending), ensure_ascii=False),
+                )
+                _note_storage_write()
+            with _replacement_state_lock:
+                if _replacement_generations.get(chat_id) != current:
+                    continue
+                _replacement_generations[chat_id] = generation
+                _journal_deletion_ids.discard(chat_id)
+                _replacement_ambiguous_clears.pop(chat_id, None)
+                return generation
+
+
+def _confirm_ambiguous_replacement_clear_locked(chat_id: int, generation: str) -> bool:
+    import bot
+    try:
+        raw_index = bot._storage_read_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE)
+        parsed_index = _parse_index_document(raw_index) if raw_index is not None else None
+        if parsed_index is None or chat_id not in parsed_index[0]:
+            return False
+        raw_snapshot = bot._storage_read_text(
+            _chat_storage_key(chat_id), bot._chat_storage_path(chat_id),
+        )
+        if raw_snapshot is None:
+            return False
+        snapshot = json.loads(raw_snapshot)
+        return bool(
+            _validate_chat_snapshot(snapshot)
+            and snapshot.get("replacement_generation") == generation
+        )
+    except Exception as exc:
+        log.warning("[state] Confirming chat %s replacement clear failed: %s", chat_id, exc)
+        return False
+
+
+def _clear_replacement_journal_locked(chat_id: int, generation: str) -> bool:
+    import bot
+    with _replacement_state_lock:
+        if _replacement_generations.get(chat_id) != generation:
+            return False
+    pending = _read_replacement_journal_unlocked()
+    if pending.get(chat_id) == ("replacement", generation):
+        pending.pop(chat_id, None)
+        try:
+            bot._storage_write_text(
+                CHAT_REPLACEMENTS_KEY, CHAT_REPLACEMENTS_FILE,
+                json.dumps(_replacement_journal_document(pending), ensure_ascii=False),
+            )
+            _note_storage_write()
+        except Exception:
+            with _replacement_state_lock:
+                if _replacement_generations.get(chat_id) == generation:
+                    _replacement_ambiguous_clears[chat_id] = generation
+            raise
+        with _replacement_state_lock:
+            if _replacement_generations.get(chat_id) != generation:
+                return False
+            _reconcile_replacement_state_locked(chat_id)
+        return True
+    if pending.get(chat_id) is not None:
+        return False
+    with _replacement_state_lock:
+        if (
+            _replacement_ambiguous_clears.get(chat_id) != generation
+            or _replacement_generations.get(chat_id) != generation
+        ):
+            return False
+    if not _confirm_ambiguous_replacement_clear_locked(chat_id, generation):
+        return False
+    with _replacement_state_lock:
+        if (
+            _replacement_ambiguous_clears.get(chat_id) != generation
+            or _replacement_generations.get(chat_id) != generation
+        ):
+            return False
+        _reconcile_replacement_state_locked(chat_id)
+    return True
+
+
+def _clear_replacement_journal(chat_id: int, generation: str) -> bool:
+    """Clear only the generation that was actually published or deleted."""
+    with _replacement_journal_lock:
+        return _clear_replacement_journal_locked(chat_id, generation)
+
+
+def _ensure_chat_deletion_intent(
+    chat_id: int, *, generation: int, order: _StateWriteOrder,
+) -> bool:
+    """Persist deletion authority before removing any snapshot."""
+    import bot
+    if _state_load_failed:
+        return False
+    with _replacement_journal_lock:
+        pending = _read_replacement_journal_unlocked()
+        with _replacement_state_lock:
+            unresolved = _unresolved_chat_ids_locked() | set(pending)
+            if len(pending) > _MAX_UNRESOLVED_CHAT_IDS or (
+                chat_id not in unresolved and len(unresolved) >= _MAX_UNRESOLVED_CHAT_IDS
+            ):
+                raise RuntimeError("chat deletion journal capacity reached")
+        if pending.get(chat_id) != ("delete", None):
+            pending[chat_id] = ("delete", None)
+            bot._storage_write_text(
+                CHAT_REPLACEMENTS_KEY, CHAT_REPLACEMENTS_FILE,
+                json.dumps(_replacement_journal_document(pending), ensure_ascii=False),
+            )
+            _note_storage_write()
+        with _replacement_state_lock:
+            if generation != order.generation or chat_id in chat_state:
+                return False
+            _journal_deletion_ids.add(chat_id)
+            _deleting_chat_ids.add(chat_id)
+            # A durable deletion intent supersedes an older replacement barrier.
+            _recreated_chat_ids.discard(chat_id)
+    return True
+
+
+def _clear_deletion_journal_locked(chat_id: int) -> bool:
+    import bot
+    pending = _read_replacement_journal_unlocked()
+    if pending.get(chat_id) != ("delete", None):
+        return False
+    pending.pop(chat_id, None)
+    bot._storage_write_text(
+        CHAT_REPLACEMENTS_KEY, CHAT_REPLACEMENTS_FILE,
+        json.dumps(_replacement_journal_document(pending), ensure_ascii=False),
+    )
+    _note_storage_write()
+    with _replacement_state_lock:
+        _reconcile_replacement_state_locked(chat_id)
+    return True
+
+
+def _finish_chat_deletions(
+    chat_ids: set[int], *, generation: int | None = None,
+    order: _StateWriteOrder | None = None, delete_snapshots: bool = False,
+) -> set[int]:
+    """Publish durable index exclusions before releasing replacement journals."""
+    import bot
+    global _index_dirty, _index_generation
+    if not chat_ids:
+        return set()
+    if _state_load_failed:
+        log.warning("[state] Chat deletion index publication blocked: startup state is unreadable.")
+        return set()
+    with _replacement_journal_lock:
+        try:
+            pending = _read_replacement_journal_unlocked()
+        except Exception as exc:
+            log.warning("[state] Reading chat deletion journal failed: %s", exc)
+            return set()
+        entries = {cid: pending.get(cid) for cid in chat_ids}
+        if delete_snapshots:
+            try:
+                for cid in sorted(chat_ids):
+                    bot._storage_delete_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
+            except Exception as exc:
+                log.warning("[state] Removing interrupted chat snapshot(s) failed: %s", exc)
+                return set()
+        _index_dirty = True
+        _index_generation += 1
+        started_generation = _index_generation
+        try:
+            payload = json.dumps(_index_document(exclude=chat_ids))
+            saved = bot._save_chat_index_payload(payload, generation=started_generation)
+        except Exception as exc:
+            log.warning("[state] Publishing chat deletion index failed: %s", exc)
+            return set()
+        if not saved or _index_generation != started_generation:
+            log.warning("[state] Chat deletion index publication failed or was superseded; keeping retry state.")
+            return set()
+        if order is not None and generation != order.generation:
+            return set()
+        completed: set[int] = set()
+        for cid in sorted(chat_ids):
+            entry = entries[cid]
+            if entry is not None and entry[0] == "delete":
+                try:
+                    cleared = _clear_deletion_journal_locked(cid)
+                except Exception as exc:
+                    log.warning("[state] Chat %s was deleted but its deletion journal could not be cleared: %s", cid, exc)
+                    continue
+                if not cleared:
+                    log.warning("[state] Chat %s was deleted but its deletion journal could not be cleared.", cid)
+                    continue
+            elif entry is not None:
+                try:
+                    cleared = _clear_replacement_journal_locked(cid, entry[1] or "")
+                except Exception as exc:
+                    log.warning("[state] Chat %s was deleted but its replacement journal could not be cleared: %s", cid, exc)
+                    continue
+                if not cleared:
+                    log.warning("[state] Chat %s was deleted but its replacement journal could not be cleared.", cid)
+                    continue
+            else:
+                with _replacement_state_lock:
+                    current = _replacement_generations.get(cid)
+                    if cid in chat_state or (
+                        current is not None
+                        and current != _replacement_ambiguous_clears.get(cid)
+                    ):
+                        continue
+                    _reconcile_replacement_state_locked(cid)
+            with _replacement_state_lock:
+                if order is not None and (
+                    generation != order.generation or cid in _recreated_chat_ids
+                ):
+                    continue
+                _pending_chat_deletions.discard(cid)
+                _index_extra_ids.discard(cid)
+                _legacy_migration_pending_ids.discard(cid)
+                _deletion_index_pending_ids.discard(cid)
+            completed.add(cid)
+        return completed
+
+
+def _finish_chat_deletion(
+    chat_id: int, *, generation: int | None = None,
+    order: _StateWriteOrder | None = None,
+) -> bool:
+    """Keep the recreation barrier if durable deletion cannot clear its journal."""
+    return _finish_chat_deletions(
+        {chat_id}, generation=generation, order=order,
+    ) == {chat_id}
+
+
+def _finish_interrupted_chat_deletions(chat_ids: set[int]) -> None:
+    """Finalize journaled missing snapshots, or retain them for a storage retry."""
+    if not chat_ids:
+        return
+    with _replacement_state_lock:
+        _deletion_index_pending_ids.update(chat_ids)
+    completed = _finish_chat_deletions(chat_ids, delete_snapshots=True)
+    with _replacement_state_lock:
+        _legacy_migration_pending_ids.difference_update(chat_ids)
+        _pending_chat_deletions.difference_update(completed)
+        _pending_chat_deletions.update(chat_ids - completed)
+    if completed:
+        log.info("[state] Finalized %d interrupted chat deletion(s).", len(completed))
+    if completed != chat_ids:
+        log.warning("[state] Keeping %d interrupted chat deletion(s) queued for retry.", len(chat_ids - completed))
+
+
+# Time of the last successful write for /stats: the duplicate in GLOBAL_QUOTA survives
+# restart; otherwise, after a restart it showed "there were no records" despite live data.
 _LAST_STORAGE_WRITE_TS: float | None = None
 
 
 def _note_storage_write() -> None:
-    """Фиксирует успешную запись (см. выше). Вызывать только при успехе."""
+    """Records a successful write (see above). Call only on success."""
     global _LAST_STORAGE_WRITE_TS
     _LAST_STORAGE_WRITE_TS = time.time()
     try:
@@ -214,7 +583,7 @@ def _note_storage_write() -> None:
 
 
 def _last_storage_write_ts() -> float | None:
-    """Когда хранилище последний раз приняло запись, None — ещё ни разу."""
+    """When storage last accepted a write; None means it never has."""
     if _LAST_STORAGE_WRITE_TS is not None:
         return _LAST_STORAGE_WRITE_TS
     try:
@@ -226,45 +595,69 @@ def _last_storage_write_ts() -> float | None:
     return None
 
 
-# Реальный код здесь, а не обёртки над storage: иначе тесты не перехватили бы вызовы через bot._storage_*.
+# Put the real code here, not wrappers over storage; otherwise tests could not intercept calls through bot._storage_*.
 def _save_chat_to_storage(chat_id: int, state: dict[str, Any]) -> bool:
-    """True/False для повтора во флаше: раньше сбой молча терял историю до рестарта."""
-    import bot
+    """True/False for retrying the flash: previously, a failure silently lost history until restart."""
     if _state_load_failed:
-        # Индекс не прочитан: неизвестно, какие чаты уже есть удалённо. Пока флаг
-        # стоит, ни один чат не пишем — иначе первое сообщение в старый чат затирает
-        # историю раньше, чем ретрай перечислит id (третий проход 16.11.2026).
+        # Index not read: we do not know which chats already exist remotely. While the flag
+        # is set, do not write to any chat — otherwise the first message to an old chat overwrites
+        # history earlier than a retry lists ids (the third pass on 16.11.2026).
         log.debug("[state] Skip chat %s shutdown save: chat index unreadable.", chat_id)
         return False
     if chat_id in _chat_snapshot_unloaded:
-        # Тот же защитный пропуск, что и в async-флаше: shutdown-путь на HF Space
-        # отрабатывает почти при каждой перезапуске (аудит run-2, ревью 08.11.2026).
+        # The same protective skip as in the async flush: the shutdown path on HF Space
+        # runs on almost every restart (run-2 audit, review 08.11.2026).
         log.debug("[state] Skip chat %s shutdown save: remote snapshot was never restored.", chat_id)
         return False
     try:
         payload = json.dumps(_serialize_chat_state(state), ensure_ascii=False)
-        bot._storage_write_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id), payload)
-        _note_storage_write()
-        return True
+        _order, generation = _reserve_state_write(chat_id)
+        return _save_chat_payload(chat_id, payload, generation=generation, order=_order)
     except Exception as exc:
         log.warning("[state] Saving chat %s failed: %s", chat_id, exc)
         return False
 
-def _delete_chat_storage(chat_id: int) -> bool:
-    """Как выше: неудалённое возвращается в очередь, иначе бесхозные ключи навсегда."""
+def _delete_chat_storage(
+    chat_id: int, *, generation: int | None = None,
+    order: _StateWriteOrder | None = None,
+) -> bool:
+    """As above: undeleted items return to the queue, otherwise orphaned keys remain forever."""
     import bot
-    try:
-        bot._storage_delete_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id))
-        _note_storage_write()
-        return True
-    except Exception as exc:
-        log.warning("[state] Deleting chat %s failed: %s", chat_id, exc)
+    if chat_id in _legacy_migration_pending_ids:
+        log.warning('[state] Skip deleting chat %s: legacy migration is not complete.', chat_id)
         return False
+    if generation is None:
+        order, generation = _reserve_state_write(chat_id)
+    elif order is None:
+        order = _state_write_order(chat_id)
+    with order.lock:
+        if generation != order.generation:
+            # No deletion happened. Retry so a later prune cannot orphan the newer key.
+            return False
+        try:
+            if not _ensure_chat_deletion_intent(chat_id, generation=generation, order=order):
+                return False
+            bot._storage_delete_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id))
+            _note_storage_write()
+            with _replacement_state_lock:
+                if (
+                    generation != order.generation
+                    or chat_id in _recreated_chat_ids
+                    or chat_id in chat_state
+                ):
+                    return False
+                _deletion_index_pending_ids.add(chat_id)
+            if generation != order.generation:
+                return False
+            return _finish_chat_deletion(chat_id, generation=generation, order=order)
+        except Exception as exc:
+            log.warning("[state] Deleting chat %s failed: %s", chat_id, exc)
+            return False
 
-# schema_version — задел под следующую миграцию (if version < N); старые записи = v0 без смены поведения.
+# schema_version is groundwork for the next migration (if version < N); old records = v0 with no behavior change.
 
 def _split_legacy_ctx_line(line: str) -> tuple[str | None, str]:
-    """Старая строка фона "Display: text" → (display, text); без метки — весь текст."""
+    """Old background line "Display: text" → (display, text); without the marker — the entire text."""
     head, sep, tail = line.partition(": ")
     if sep and head and len(head) <= 80 and "\n" not in head:
         return head.strip(), tail.strip()
@@ -272,22 +665,28 @@ def _split_legacy_ctx_line(line: str) -> tuple[str | None, str]:
 
 
 def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
-    """Разворачивает сериализованный снимок одного чата (см. _serialize_chat_state)
-    обратно в chat_state[cid] — общая логика между новым per-chat форматом чтения
-    и одноразовой миграцией из старого общего блоба (см. load_state_from_disk).
+    """Expands a serialized snapshot of one chat (see _serialize_chat_state) back into chat_state[cid]: shared logic between the new per-chat read format and the one-time migration from the old shared blob (see load_state_from_disk).
 
-    Старые поля моделей игнорируются: роутер автоматический; schema пока только задел."""
-    # Битая запись не должна ронять восстановление остальных чатов: пропускаем с warning.
+Legacy model fields are ignored: routing is automatic; schema is only a placeholder for now."""
+    # Freeze a chat only for deletion: a load failure must not cause partial
+    #     history to be overwritten; preserve the warning.
     if not isinstance(s, dict):
         log.warning('[state] Skip chat %s: snapshot is not a dict', cid)
         return
     schema_version = s.get("schema_version", 0)
     log.debug('[state] Restoring chat %s (schema_version=%s)', cid, schema_version)
+    if not (type(schema_version) is int and schema_version in (0, 1)):
+        # Versions 0 and 1 used the legacy field set. Current snapshots are a
+        # strict contract; silent normalization could publish a partial backup.
+        if (not _is_json_integer(schema_version)
+                or schema_version != CHAT_STATE_SCHEMA_VERSION
+                or not _validate_chat_snapshot(s, expected_version=CHAT_STATE_SCHEMA_VERSION)):
+            raise ValueError("invalid current chat snapshot")
     raw_media = s.get("recent_media_ids", {})
     if isinstance(raw_media, dict):
         media_buckets: dict[str, Any] = {}
         for uid, items in raw_media.items():
-            # Строка вместо списка давала deque из символов — такой бакет отбрасываем.
+            # A string instead of a list produced a deque of characters — discard such a bucket.
             if not isinstance(items, list):
                 continue
             clean = [
@@ -298,25 +697,25 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
             ]
             media_buckets[str(uid)] = deque(clean, maxlen=MAX_MEDIA_RECENT_IDS)
         if len(media_buckets) > MAX_MEDIA_BUCKETS_PER_CHAT:
-            # Снимок старше фикса мог накопить лишнее — оставляем хвост, новые вытесняются в _save_media_to_history.
+            # A snapshot older than the fix may have accumulated extras — retain the tail; new entries are evicted in _save_media_to_history.
             media_buckets = dict(list(media_buckets.items())[-MAX_MEDIA_BUCKETS_PER_CHAT:])
     else:
-        # Старый формат (плоский список на весь чат) — не мигрируем содержимое,
-        # просто стартуем с чистого состояния, новые записи наполнят сами по себе.
+        # Old format (a flat list for the entire chat) — do not migrate its contents,
+        # just start from clean state; new records will populate it on their own.
         media_buckets = {}
     if "history" in s:
         raw_history = s.get("history")
         if raw_history is None:
             history = []
         elif not isinstance(raw_history, list):
-            # list("строка") давал список символов и пересохранял мусор — пропускаем запись.
+            # list("string") produced a list of characters and re-saved garbage; skip the write.
             log.warning('[state] Skip chat %s: history is not a list', cid)
             return
         else:
             history = list(raw_history)
     else:
-        # Миграция со старого раздельного формата памяти: конкатенируем обе истории.
-        # Точный порядок уже не восстановить, сам факт истории важнее.
+        # Migration from the old split memory format: concatenate both histories.
+        # The exact order can no longer be restored; the fact of the history matters more.
         raw_gem = s.get("gemini_history")
         raw_or = s.get("or_history")
         if raw_gem is not None and not isinstance(raw_gem, list):
@@ -325,10 +724,11 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         if raw_or is not None and not isinstance(raw_or, list):
             log.warning('[state] Skip chat %s: or_history is not a list', cid)
             return
-        # Старые письма не режем здесь: общий лимит и очередь сводки ниже.
+        # Do not trim old messages here: the overall limit and summary queue handle that below.
         history = list(raw_gem or []) + list(raw_or or [])
-    # Старый фон (ctx) больше не отдельное хранилище: вливаем его в общий лог
-    # хвостом. Точный порядок между старыми форматами не восстановить, но факты целы.
+    # Old background (ctx) is no longer separate storage: merge it into the common log
+    # at the end. The exact order between old formats cannot be reconstructed, but the
+    #     facts are intact.
     raw_ctx = s.get("ctx")
     if isinstance(raw_ctx, list):
         for line in raw_ctx[:MAX_TOTAL_MEMORY_MESSAGES]:
@@ -346,7 +746,8 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         [item for item in raw_pending if isinstance(item, dict)][-MAX_MEMORY_PENDING:]
         if isinstance(raw_pending, list) else []
     )
-    # Снимок мог превысить новый лимит: старые уходят в очередь сводки, а не теряются.
+    # Reading/updating counters is also a write: merging must include those chats,
+    #     not just add ours.
     if len(history) > MAX_TOTAL_MEMORY_MESSAGES:
         pending = (pending + history[:-MEMORY_KEEP_MESSAGES])[-MAX_MEMORY_PENDING:]
         del history[:-MEMORY_KEEP_MESSAGES]
@@ -356,13 +757,13 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
         "memory_pending": pending,
         "recent_media_ids": media_buckets,
         "user_names": _restore_user_names(s.get("user_names")),
-        # Настенные часы, а не monotonic: тот сбрасывается рестартом и делал все
-        # чаты "активными" в /stats. Снимкам без метки — 0: такой чат неактивен.
+        # Wall clock, not monotonic: the latter resets on restart and made all
+        # chats as “active” in /stats. Snapshots without a marker get 0: such a chat is inactive.
         "last_activity": _restore_last_activity(s),
-        # Язык переживает рестарт: сериализатор его пишет, а восстановление
-        # раньше теряло (прод-баг: /lang слетал при каждом деплое).
+        # The language survives a restart: the serializer writes it, and restoration
+        # previously lost (production bug: /lang reset on every deploy).
         "lang": normalize_lang(s.get("lang")),
-        # Контекст правки/повтора картинки (сериализатор пишет, старым снимкам — пусто).
+        # Context for image editing/regeneration (the serializer writes it; old snapshots get nothing).
         "last_drawn_message_id": _restore_int_field(s, "last_drawn_message_id"),
         "last_drawn_at": _restore_last_drawn_at(s),
         "last_drawn_user": _restore_int_field(s, "last_drawn_user"),
@@ -373,8 +774,7 @@ def _restore_single_chat(cid: int, s: dict[str, Any]) -> None:
 
 
 def _restore_draw_versions(raw: Any) -> list[dict[str, Any]]:
-    """Версии картинки после рестарта: словари с file_id, не больше пяти,
-    описание урезано как у last_draw_prompt (ревью 10.11.2026)."""
+    """Image versions after a restart: dictionaries with file_id, at most five, with the description truncated like last_draw_prompt (review 10.11.2026)."""
     if not isinstance(raw, list):
         return []
     out = []
@@ -389,7 +789,7 @@ def _restore_draw_versions(raw: Any) -> list[dict[str, Any]]:
 
 
 def _restore_last_drawn_at(s: dict[str, Any]) -> float:
-    """Время последней генерации из снимка; старым снимкам — 0 (контекста нет)."""
+    """Time of the last generation from the snapshot; 0 for old snapshots (no context)."""
     raw = s.get("last_drawn_at")
     if isinstance(raw, bool):
         return 0.0
@@ -399,8 +799,8 @@ def _restore_last_drawn_at(s: dict[str, Any]) -> float:
 
 
 def _restore_int_field(s: dict[str, Any], key: str) -> int | None:
-    """Целое из снимка: bool — тоже int в Python, а мусор в поле id превращал
-    каждый тап «Ещё вариант» в вечный отказ (ревью 10.11.2026)."""
+    """An integer from the snapshot: bool is also an int in Python, and garbage in the id field
+    turned every "Show another option" tap into a permanent refusal (review 10.11.2026)."""
     raw = s.get(key)
     if isinstance(raw, int) and not isinstance(raw, bool):
         return raw
@@ -408,7 +808,7 @@ def _restore_int_field(s: dict[str, Any], key: str) -> int | None:
 
 
 def _restore_last_activity(s: dict[str, Any]) -> float:
-    """Метка из снимка или 0 для старых записей без неё (см. выше)."""
+    """A mark from the snapshot, or 0 for old records without one (see above)."""
     raw = s.get("last_activity")
     if isinstance(raw, bool):
         return 0.0
@@ -418,7 +818,7 @@ def _restore_last_activity(s: dict[str, Any]) -> float:
 
 
 def _sender_display(username: str | None, first_name: str | None) -> str:
-    """Показываемое имя: @username, с first_name в скобках, если различаются."""
+    """Display name: @username, with first_name in parentheses if they differ."""
     clean_username = username.strip().lstrip("@") if isinstance(username, str) else ""
     clean_first = first_name.strip()[:64] if isinstance(first_name, str) and first_name.strip() else ""
     if clean_username:
@@ -431,7 +831,7 @@ def _sender_display(username: str | None, first_name: str | None) -> str:
 
 
 def _note_sender(state: dict[str, Any], user_id: int | None, username: str | None, first_name: str | None) -> str:
-    """Запоминает отправителя в state[user_names], возвращает показное имя."""
+    """Remembers the sender in state[user_names] and returns the display name."""
     display = _sender_display(username, first_name)
     try:
         if user_id is None:
@@ -450,7 +850,7 @@ def _note_sender(state: dict[str, Any], user_id: int | None, username: str | Non
         if isinstance(first_name, str) and first_name.strip():
             entry["first_name"] = first_name.strip()[:64]
         if len(bucket) > MAX_KNOWN_SENDERS_PER_CHAT:
-            # Старейшие вытесняем: словарь упорядочен вставкой.
+            # Evict the oldest: the dictionary is insertion-ordered.
             for old_key in list(bucket.keys())[:len(bucket) - MAX_KNOWN_SENDERS_PER_CHAT]:
                 bucket.pop(old_key, None)
     except Exception:
@@ -459,7 +859,7 @@ def _note_sender(state: dict[str, Any], user_id: int | None, username: str | Non
 
 
 def _restore_user_names(raw: Any) -> dict[str, dict[str, str]]:
-    """Словарь отправителей из снимка, мусор отбрасываем."""
+    """Sender dictionary from a snapshot; discard garbage."""
     clean: dict[str, dict[str, str]] = {}
     if not isinstance(raw, dict):
         return clean
@@ -481,11 +881,9 @@ def _restore_user_names(raw: Any) -> dict[str, dict[str, str]]:
 
 
 def _resolve_nick(state: dict[str, Any], nick: str) -> str | None:
-    """Прозвище в показное имя: ищет по username и first_name без регистра.
+    """Nickname to display name: searches username and first_name case-insensitively.
 
-    Смотрит в обе стороны: «блин» находит «Блинчик», а «блинчика» тоже
-    находит «Блинчик» (склонения в живой речи). Короткие совпадения
-    отбрасываем, иначе двухбуквенные огрызки шумят на каждом сообщении."""
+Checks both directions: "blin" matches "Blinchik", and "blinchika" also matches "Blinchik" (inflections in natural speech). Short matches are discarded; otherwise two-letter fragments would create noise on every message."""
     try:
         needle = (nick or "").strip().lstrip("@").lower()
         if len(needle) < 3:
@@ -508,21 +906,95 @@ def _resolve_nick(state: dict[str, Any], nick: str) -> str | None:
     return None
 
 
-def _index_ids() -> list[int]:
-    return sorted(set(chat_state.keys()) | _index_extra_ids)
+def _parse_index_document(raw: str) -> tuple[list[int], set[int]] | None:
+    """Read both the completed index format and the migration-pending extension."""
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    if isinstance(parsed, list):
+        raw_ids = parsed
+        raw_pending: list[object] = []
+    elif isinstance(parsed, dict):
+        raw_ids = parsed.get("ids")
+        raw_pending = parsed.get("legacy_pending", [])
+        if not isinstance(raw_ids, list) or not isinstance(raw_pending, list):
+            return None
+    else:
+        return None
+    ids: list[int] = []
+    for value in raw_ids:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        ids.append(value)
+    pending: set[int] = set()
+    for value in raw_pending:
+        # This extension is an authority boundary: coercing 991001.9 or "991001"
+        # could make stale legacy data authoritative for a different, deleted chat.
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        pending.add(value)
+    if not pending.issubset(ids):
+        return None
+    return ids, pending
 
 
-def _fetch_index_ids() -> set[int] | None:
-    """Троттлинг и чтение удалённого индекса БЕЗ мутаций общих множеств.
+def _index_ids_unlocked(
+    *, include_recreated: set[int] | None = None,
+    exclude: set[int] | None = None,
+) -> list[int]:
+    # A pruned chat leaves memory before its remote key is deleted. Keep it discoverable
+    # until deletion succeeds so a transient failure cannot orphan the stored snapshot.
+    # A recreated chat is different: its old remote snapshot must stay undiscoverable
+    # until the replacement snapshot is durable, or a failed first save resurrects it.
+    return sorted(
+        (
+            (set(chat_state.keys())
+             | _index_extra_ids
+             | _pending_chat_deletions
+             | _deleting_chat_ids
+             | _legacy_migration_pending_ids)
+            - _recreated_chat_ids
+            | (include_recreated or set())
+        )
+        - (exclude or set())
+        - _deletion_index_pending_ids
+    )
 
-    Вызывается из to_thread: прежняя версия меняла _index_extra_ids и
-    _chat_snapshot_unloaded прямо в рабочем потоке, а окно между update и clear
-    теряло защиту у чата, созданного в этот миг (ревью 17.11.2026)."""
+
+def _index_ids(
+    *, include_recreated: set[int] | None = None,
+    exclude: set[int] | None = None,
+) -> list[int]:
+    with _replacement_state_lock:
+        return _index_ids_unlocked(include_recreated=include_recreated, exclude=exclude)
+
+
+def _index_document(
+    pending: set[int] | None = None, *, include_recreated: set[int] | None = None,
+    exclude: set[int] | None = None,
+) -> list[int] | dict[str, object]:
+    """Pending migration IDs share the index's atomic write and generation fence."""
+    with _replacement_state_lock:
+        migration_pending = set(_legacy_migration_pending_ids if pending is None else pending)
+        migration_pending -= _deletion_index_pending_ids
+        if exclude:
+            migration_pending -= exclude
+        ids = _index_ids_unlocked(include_recreated=include_recreated, exclude=exclude)
+    if migration_pending:
+        return {"ids": ids, "legacy_pending": sorted(migration_pending)}
+    return ids
+
+
+def _fetch_index_ids(*, migration_pending: set[int] | None = None) -> set[int] | None:
+    """Throttles and reads the remote index WITHOUT mutating shared sets.
+
+Called from to_thread: the previous version changed _index_extra_ids and _chat_snapshot_unloaded directly in a worker thread, and the window between update and clear removed protection from a chat created in the meantime (review 17.11.2026)."""
     global _state_load_failed, _index_retry_last_ts
     if not _state_load_failed:
         return set()
     now = time.monotonic()
-    # Ноль — «ещё не пробовали»: на свежем раннере monotonic() меньше минуты.
+    # Zero means "not tried yet": on a fresh runner, monotonic() is under a minute.
     if _index_retry_last_ts and now - _index_retry_last_ts < _INDEX_RETRY_SEC:
         return None
     _index_retry_last_ts = now
@@ -533,43 +1005,51 @@ def _fetch_index_ids() -> set[int] | None:
         log.warning('[state] Chat index retry failed: %s', exc)
         return None
     if raw is None:
-        # None — это и «ключа нет», и «шлюз ответил без result». Пустым индексом
-        # такое считать нельзя (аудит 16.11.2026).
+        # None means both "there is no key" and "the gateway returned no result". An empty index
+        # must not be counted this way (audit 16.11.2026).
         log.warning('[state] Chat index retry returned no body — keeping the write guard.')
         return None
-    ids: set[int] = set()
-    if raw:
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            return None
-        if not isinstance(parsed, list):
-            return None
-        valid = 0
-        for cid in parsed:
-            try:
-                ids.add(int(cid))
-                valid += 1
-            except Exception:
-                continue
-        if parsed and valid == 0:
-            # Список без единого числа — битый индекс, а не пустой.
-            _state_load_failed = True
-            log.warning('[state] Chat index holds no numeric ids — keeping the write guard.')
-            return None
-    return ids
+    parsed = _parse_index_document(raw)
+    if parsed is None:
+        _state_load_failed = True
+        log.warning('[state] Chat index is invalid — keeping the write guard.')
+        return None
+    ids, pending = parsed
+    if migration_pending is not None:
+        migration_pending.update(pending)
+    return set(ids)
 
 
-def _apply_recovered_ids(ids: set[int]) -> bool:
-    """Слияние прочитанного индекса с памятью — только из loop-потока."""
+def _apply_recovered_ids(ids: set[int], migration_pending: set[int] | None = None) -> bool:
+    """Merge the read index with memory — from the loop thread only."""
     global _state_load_failed
-    # Вытесненные и удалённые id не воскрешаем (второй проход аудита 16.11.2026).
+    if _replacement_journal_load_failed:
+        log.warning('[state] Chat index recovery blocked: replacement journal is unreadable.')
+        return False
+    # Do not resurrect evicted or deleted ids (second audit pass 16.11.2026).
     ids = {cid for cid in ids if cid not in _pending_chat_deletions and cid not in _deleted_chat_ids}
+    recovered_pending = (
+        (set(migration_pending or ()) | _legacy_migration_pending_ids)
+        - _pending_chat_deletions - _deleted_chat_ids
+    )
+    _legacy_migration_pending_ids.clear()
+    _legacy_migration_pending_ids.update(recovered_pending)
     _index_extra_ids.update(ids)
-    # Замораживаем только те, чей снимок не прочитан (нет в памяти).
+    # Freeze only those whose snapshot was not read (not in memory).
     _chat_snapshot_unloaded.update(cid for cid in ids if cid not in chat_state)
-    # Созданные во время сбоя чаты тоже не имеют права затирать удалённую копию.
-    _chat_snapshot_unloaded.update(_created_during_outage)
+    # Pending migration snapshots were not read on this path; legacy is not
+    # authoritative enough to overwrite whatever per-chat copy may already exist.
+    _chat_snapshot_unloaded.update(recovered_pending)
+    # Freeze only outage-created chats that actually exist remotely. An ID proven
+    # absent is new and must remain writable after its index entry is published.
+    existing_outage_chats = _created_during_outage & ids
+    _chat_snapshot_unloaded.update(existing_outage_chats)
+    # A recovered remote snapshot proves this is an existing chat: remove only the
+    # replacement barrier while preserving the freeze and dirty queue.
+    with _replacement_state_lock:
+        _recreated_chat_ids.difference_update(existing_outage_chats)
+        for cid in existing_outage_chats:
+            _replacement_generations.pop(cid, None)
     _created_during_outage.clear()
     _state_load_failed = False
     log.info('[state] Chat index recovered after the startup failure: %d remote id(s) merged.', len(ids))
@@ -577,100 +1057,262 @@ def _apply_recovered_ids(ids: set[int]) -> bool:
 
 
 def _recover_index_ids() -> bool:
-    """Синхронный путь (shutdown): чтение + слияние в одном потоке."""
+    """Synchronous path (shutdown): reading + merging in one thread."""
     if not _state_load_failed:
         return True
-    ids = _fetch_index_ids()
+    migration_pending: set[int] = set()
+    ids = _fetch_index_ids(migration_pending=migration_pending)
     if ids is None:
         return False
-    return _apply_recovered_ids(ids)
+    return _apply_recovered_ids(ids, migration_pending)
 
 
 def _save_chat_index() -> bool:
-    """True/False для повтора в _flush_state_now: раньше неуспех молча терялся (аудит A5-1)."""
+    """True/False for retry in _flush_state_now: failure was previously lost silently (audit A5-1)."""
     import bot
     try:
-        ids = _index_ids()
-        bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, json.dumps(ids))
-        _note_storage_write()
-        return True
+        return bot._save_chat_index_payload(json.dumps(_index_document()), generation=_index_generation)
     except Exception as exc:
         log.warning("[state] Saving chat index failed: %s", exc)
         return False
 
-def _save_chat_index_payload(payload: str) -> bool:
-    """Только блокирующая запись готового снапшота индекса — для to_thread. True/False для повтора."""
+def _save_chat_index_payload(payload: str, *, generation: int | None = None) -> bool:
+    """Write one index snapshot; a cancelled flush's late worker cannot replace a newer index."""
     import bot
-    try:
-        bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, payload)
-        _note_storage_write()
+    with _index_write_lock:
+        if generation is not None and generation != _index_generation:
+            return False
+        try:
+            bot._storage_write_text(CHAT_INDEX_KEY, CHAT_INDEX_FILE, payload)
+            _note_storage_write()
+            return True
+        except Exception as exc:
+            log.warning("[state] Saving chat index failed: %s", exc)
+            return False
+
+
+def _publish_recreated_chats(saved_ids: set[int]) -> bool:
+    """Publish durable replacements, then clear their journals and barriers."""
+    import bot
+    global _index_dirty, _index_generation
+    with _replacement_state_lock:
+        candidates = saved_ids & _recreated_chat_ids & set(chat_state)
+        candidates -= _pending_chat_deletions | _deleted_chat_ids
+    if not candidates:
         return True
+    try:
+        with _replacement_journal_lock:
+            pending = _read_replacement_journal_unlocked()
+        with _replacement_state_lock:
+            generations: dict[int, str] = {}
+            for cid in candidates:
+                entry = pending.get(cid)
+                generation = (
+                    entry[1]
+                    if entry is not None and entry[0] == "replacement"
+                    else None
+                )
+                current = _replacement_generations.get(cid)
+                if generation is None and current == _replacement_ambiguous_clears.get(cid):
+                    generation = current
+                generations[cid] = generation
+        if any(not generation for generation in generations.values()):
+            log.warning("[state] Replacement journal is missing a saved chat; keeping barriers.")
+            return False
+        _index_dirty = True
+        _index_generation += 1
+        started_generation = _index_generation
+        payload = json.dumps(_index_document(include_recreated=candidates))
+        if not bot._save_chat_index_payload(payload, generation=started_generation):
+            log.warning("[state] Republishing recreated chat(s) failed, keeping index dirty.")
+            return False
+        if _index_generation != started_generation:
+            return False
+        for cid, generation in generations.items():
+            if not _clear_replacement_journal(cid, generation):
+                log.warning("[state] Clearing replacement journal for chat %s failed.", cid)
+        if _index_generation != started_generation:
+            return False
+        with _replacement_state_lock:
+            _index_dirty = bool(candidates & _recreated_chat_ids)
+        return not _index_dirty
     except Exception as exc:
-        log.warning("[state] Saving chat index failed: %s", exc)
+        log.warning("[state] Publishing recreated chat(s) failed: %s", exc)
         return False
 
-def _save_quota_payload(payload: str) -> bool:
-    """Только блокирующая запись готового снапшота квоты — для to_thread. True/False для повтора."""
+async def _persist_migration_progress(saved_ids: set[int]) -> None:
+    """Publish snapshot completion before allowing legacy-backed chats to be deleted."""
     import bot
+    global _index_dirty, _index_generation
+    completed = _legacy_migration_pending_ids & saved_ids
+    if not completed:
+        return
+    remaining = _legacy_migration_pending_ids - completed
+    # Clear only IDs that have not been mutated again since their snapshot write.
+    # A newer dirty mark must survive both the await and successful completion.
+    newer_dirty = completed & _dirty_chat_ids
+    _dirty_chat_ids.difference_update(completed - newer_dirty)
+    _index_dirty = True
+    _index_generation += 1
+    started_generation = _index_generation
+    payload = json.dumps(_index_document(remaining))
     try:
-        bot._storage_write_text("lumen:global_quota", GLOBAL_QUOTA_FILE, payload)
-        _note_storage_write()
-        return True
-    except Exception as exc:
-        log.warning("[quota] Failed to save global quota: %s", exc)
-        return False
+        saved = await asyncio.to_thread(
+            bot._save_chat_index_payload, payload, generation=started_generation
+        )
+    except asyncio.CancelledError:
+        _dirty_chat_ids.update(completed)
+        raise
+    if saved and _index_generation == started_generation:
+        _legacy_migration_pending_ids.clear()
+        _legacy_migration_pending_ids.update(remaining)
+        _index_dirty = False
+    else:
+        _dirty_chat_ids.update(completed)
+        log.warning('[state] Legacy migration completion write failed; keeping deletion blocked.')
 
-# Раньше save_state_to_disk()/save_global_quota() вызывались синхронно почти на
-# Горячий путь только помечает конкретный чат грязным, запись — из фоновой
-# корутины раз в FLUSH_INTERVAL_SEC и только по изменившимся чатам: блокирующий
-# dump всего состояния на каждое сообщение вешал loop для всех чатов сразу.
+
+def _persist_migration_progress_sync(saved_ids: set[int]) -> None:
+    """Synchronous shutdown counterpart of _persist_migration_progress."""
+    import bot
+    global _index_dirty, _index_generation
+    completed = _legacy_migration_pending_ids & saved_ids
+    if not completed:
+        return
+    remaining = _legacy_migration_pending_ids - completed
+    _dirty_chat_ids.difference_update(completed)
+    _index_dirty = True
+    _index_generation += 1
+    started_generation = _index_generation
+    saved = bot._save_chat_index_payload(
+        json.dumps(_index_document(remaining)), generation=started_generation
+    )
+    if saved and _index_generation == started_generation:
+        _legacy_migration_pending_ids.clear()
+        _legacy_migration_pending_ids.update(remaining)
+        _index_dirty = False
+    else:
+        _dirty_chat_ids.update(completed)
+        log.warning('[state] Legacy migration completion write failed; keeping deletion blocked.')
+
+
+def _save_quota_payload(payload: str, *, generation: int | None = None) -> bool:
+    """Write one quota snapshot unless a newer mutation already invalidated it."""
+    import bot
+    with _quota_write_lock:
+        if generation is not None and generation != _quota_generation:
+            return False
+        try:
+            bot._storage_write_text("lumen:global_quota", GLOBAL_QUOTA_FILE, payload)
+            _note_storage_write()
+            return True
+        except Exception as exc:
+            log.warning("[quota] Failed to save global quota: %s", exc)
+            return False
+
+# Previously, save_state_to_disk()/save_global_quota() ran synchronously on almost every
+# message. The hot path now only marks the specific chat dirty; background coroutines
+# write changed chats once per FLUSH_INTERVAL_SEC. Dumping the entire state on every
+# message stalled the loop for all chats at once.
 _dirty_chat_ids: set[int] = set()
+# Legacy chat keys stay unwritten until their discovery index entry is durable.
+_unindexed_chat_ids: set[int] = set()
+# IDs whose per-chat snapshots still depend on the retained legacy blob.
+_legacy_migration_pending_ids: set[int] = set()
 _pending_chat_deletions: set[int] = set()
+# New and recreated chats stay undiscoverable until their replacement snapshot,
+# index and journal commit; otherwise a failed first save leaves an orphaned ID.
+_recreated_chat_ids: set[int] = set()
+# This completeness marker covers in-flight deletions and replacement recovery.
+# Backups must refuse windows with partial memory; unsaved new chats are already complete.
+_deleting_chat_ids: set[int] = set()
+# A missing snapshot must not be rediscovered by another index writer before its
+# durable exclusion and journal clearance finish.
+_deletion_index_pending_ids: set[int] = set()
 _index_dirty = False
 _quota_dirty = False
-# Поколения мутаций под гонку "payload построен — запись висит — состояние
-# изменилось": флаш сбрасывает флаг, только если поколение не выросло за время
-# записи, иначе изменение терялось бы до следующей мутации.
+# Mutation generations guard the race "payload built — write pending — state
+# changed”: the flush resets the flag only if the generation has not increased during
+# record, otherwise the change would be lost before the next mutation.
 _index_generation = 0
+# periodic and shutdown index writes share one lock; a cancelled to_thread worker
+# otherwise can commit its older payload after the final flush.
+_index_write_lock = threading.Lock()
+_quota_write_lock = threading.Lock()
 _quota_generation = 0
-# Отказ стартовой загрузки: пока стоит, индекс и квоту не перезаписываем,
-# иначе первый флаш затрёт хорошие удалённые данные пустым снимком (аудит A5-2).
+# Startup load failure: while this is set, do not overwrite the index or quota,
+# otherwise the first flush would overwrite good remote data with an empty
+# snapshot (audit A5-2).
 _state_load_failed = False
-# Отказ ЧТЕНИЯ КВОТЫ — отдельный флаг: снятие защиты индекса после удачного
-# ретрая не имеет права разблокировать запись пустой квоты поверх банов и
-# дневных счётчиков (аудит 16.11.2026).
+_replacement_journal_load_failed = False
+# A QUOTA READ failure has its own flag: lifting index protection after a successful
+# a retry must not unblock a write of an empty quota over bans and
+# daily counters (audit 16.11.2026).
 _quota_load_failed = False
-# id из удалённого индекса, прочитанного ПОВТОРНО после стартового сбоя: индекс
-# собирается слиянием, а не заменой нашими чатами (аудит 16.11.2026 — новые чаты
-# получали ключ, но выпадали из индекса и после рестарта оставались сиротами).
+# IDs read from a deleted index must not return after a startup failure: recovery
+# rebuilds the index by merging instead of replacing it with only our chats
+# (audit 16.11.2026: new chats received a key, dropped out of the index, and remained
+# orphans after a restart).
 _index_extra_ids: set[int] = set()
-# Чаты, созданные в памяти, пока индекс был нечитаем: их удалённой копии мы не
-# видели, поэтому после восстановления они замораживаются, а не перезаписываются.
+# Chats created in memory while the index was unreadable: we do not have their remote copy
+# were seen, so after recovery they are frozen rather than overwritten.
 _created_during_outage: set[int] = set()
-# id, реально удалённые этим процессом: ретрай индекса не имеет права их вернуть.
+# ids actually deleted by this process: an index retry must not bring them back.
 _deleted_chat_ids: set[int] = set()
 _index_retry_last_ts = 0.0
 _INDEX_RETRY_SEC = 60.0
-# Параллельные чтения чатов на старте: Upstash/диск отвечает десятки миллисекунд,
-# и восемь потоков сжимают холодный старт в разы без давления на квоту.
+# Parallel chat reads at startup: Upstash/disk responds in tens of milliseconds,
+# and eight threads reduce cold-start time severalfold without pressure on the quota.
 _PARALLEL_CHAT_READS = 8
-# Чаты, чей удалённый снимок НЕ восстановился: их ключи нельзя перезаписывать
-# однострочным снимком из памяти — удалённая копия полнее (аудит run-2, 08.11.2026).
+# Chats whose remote snapshot was NOT restored: their keys must not be overwritten
+# a one-line in-memory snapshot; the remote copy is fuller (run-2 audit,
+# 08.11.2026).
 _chat_snapshot_unloaded: set[int] = set()
 FLUSH_INTERVAL_SEC = 10.0
-# Конкурентность флаша — семафором: всплеск "грязных" чатов иначе породил бы сотни параллельных HTTP к Upstash.
+# Serialize flushes with a semaphore: a burst of "dirty" chats would otherwise create hundreds of parallel HTTP requests to Upstash.
 def _flush_concurrency() -> int:
-    """Лениво через bot._env_number: голый int() ронял импорт на мусоре,
-    а 0 давал висящий семафор."""
+    """Lazily via bot._env_number: bare int() crashed the import on garbage input,
+    while 0 created a hanging semaphore."""
     import bot
     return bot._env_number("STATE_FLUSH_CONCURRENCY", 10, cast=int, min_value=1)
 
 
 _state_flush_semaphore: asyncio.Semaphore | None = None
 
+# to_thread survives cancellation of the awaiting flush. Serialize each chat's writes and
+# invalidate older snapshots so a late worker cannot overwrite the final shutdown state.
+class _StateWriteOrder:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.generation = 0
+
+
+_state_write_registry_lock = threading.Lock()
+# Active callers keep their order alive; idle chats must not leave permanent registry entries.
+_state_write_orders: weakref.WeakValueDictionary[int, _StateWriteOrder] = weakref.WeakValueDictionary()
+
+
+def _state_write_order(chat_id: int) -> _StateWriteOrder:
+    with _state_write_registry_lock:
+        order = _state_write_orders.get(chat_id)
+        if order is None:
+            order = _StateWriteOrder()
+            _state_write_orders[chat_id] = order
+        return order
+
+
+def _reserve_state_write(chat_id: int) -> tuple[_StateWriteOrder, int]:
+    with _state_write_registry_lock:
+        order = _state_write_orders.get(chat_id)
+        if order is None:
+            order = _StateWriteOrder()
+            _state_write_orders[chat_id] = order
+        order.generation += 1
+        return order, order.generation
+
 
 def _flush_semaphore() -> asyncio.Semaphore:
-    """Один семафор на процесс, создаётся при первом флаше."""
+    """One semaphore per process, created on the first flush."""
     global _state_flush_semaphore
     if _state_flush_semaphore is None:
         _state_flush_semaphore = asyncio.Semaphore(_flush_concurrency())
@@ -679,28 +1321,53 @@ def _flush_semaphore() -> asyncio.Semaphore:
 async def _save_chat_to_storage_limited(chat_id: int, state: dict[str, Any]) -> bool:
     import bot
     async with _flush_semaphore():
-        # Снапшот JSON — ЗДЕСЬ, а не в потоке: dumps без await атомарен для loop'а,
-        # а живой state в to_thread могли мутировать между итерациями (битый снапшот).
+        # The JSON snapshot is taken HERE, not in the stream: dumps without await is atomic for the loop,
+        # and live state in to_thread could mutate between iterations (broken snapshot).
         try:
             payload = json.dumps(bot._serialize_chat_state(state), ensure_ascii=False)
         except Exception as exc:
             log.warning("[state] Saving chat %s failed: %s", chat_id, exc)
             return False
-        return await asyncio.to_thread(bot._save_chat_payload, chat_id, payload)
+        _order, generation = _reserve_state_write(chat_id)
+        return await asyncio.to_thread(bot._save_chat_payload, chat_id, payload, generation=generation, order=_order)
 
-def _save_chat_payload(chat_id: int, payload: str) -> bool:
-    """Только блокирующая запись готового снапшота (см. выше) — для to_thread."""
+def _save_chat_payload(
+    chat_id: int, payload: str, *, generation: int | None = None,
+    order: _StateWriteOrder | None = None,
+) -> bool:
+    """Write one ready snapshot unless a newer write or deletion has superseded it."""
+    if order is None:
+        order = _state_write_order(chat_id)
+    with order.lock:
+        if generation is not None and generation != order.generation:
+            # A newer save may have failed; this worker wrote nothing and must not
+            # let migration completion treat the snapshot as durable.
+            return False
+        return _save_chat_payload_locked(chat_id, payload)
+
+
+def _save_chat_payload_locked(chat_id: int, payload: str) -> bool:
+    """Only blocking I/O that writes a ready snapshot (see above), for to_thread."""
     import bot
     if _state_load_failed:
-        # См. shutdown-путь: неизвестный набор удалённых чатов запрещает запись.
+        # See the shutdown path: an unknown set of remote chats prohibits writes.
         log.debug("[state] Skip chat %s save: chat index unreadable, keeping remote data intact.", chat_id)
         return False
     if chat_id in _chat_snapshot_unloaded:
-        # Снятие защиты — только полная перезагрузка состояния (старт процесса);
-        # в пределах жизни процесса ключ бережём, очередь остаётся грязной.
+        # Removing the protection requires a full state reload (process startup);
+        # for the lifetime of the process, keep the key; the queue remains dirty.
         log.debug("[state] Skip chat %s save: its remote snapshot was never restored, keeping the remote copy.", chat_id)
         return False
     try:
+        with _replacement_state_lock:
+            recreated = chat_id in _recreated_chat_ids
+        if recreated:
+            replacement_generation = _ensure_replacement_generation(chat_id)
+            snapshot = json.loads(payload)
+            if not isinstance(snapshot, dict):
+                raise ValueError("replacement snapshot is not an object")
+            snapshot["replacement_generation"] = replacement_generation
+            payload = json.dumps(snapshot, ensure_ascii=False)
         bot._storage_write_text(_chat_storage_key(chat_id), bot._chat_storage_path(chat_id), payload)
         _note_storage_write()
         return True
@@ -711,31 +1378,73 @@ def _save_chat_payload(chat_id: int, payload: str) -> bool:
 async def _delete_chat_storage_limited(chat_id: int) -> bool:
     import bot
     async with _flush_semaphore():
-        return await asyncio.to_thread(bot._delete_chat_storage, chat_id)
+        # The chat may have been recreated while this deletion waited for a
+        # semaphore slot. Never let the stale task supersede that newer state.
+        if chat_id in chat_state:
+            _cancel_chat_deletion(chat_id)
+            return True
+        _order, generation = _reserve_state_write(chat_id)
+        return await asyncio.to_thread(bot._delete_chat_storage, chat_id, generation=generation, order=_order)
 
 def mark_state_dirty(chat_id: int | None = None) -> None:
-    """Помечает состояние чата как требующее сохранения.
-    Явный chat_id (предпочтительный путь для нового кода) — помечает "грязным"
-    ТОЛЬКО этот чат, ничего больше. Вызов БЕЗ chat_id (миграция из старого
-    общего блоба) помечает "грязными" вообще все текущие чаты и индекс целиком."""
+    """Marks a chat state as requiring persistence.
+An explicit chat_id (the preferred path for new code) marks ONLY
+that chat 'dirty', nothing else. A call WITHOUT chat_id (migration from the old
+shared blob) marks ALL current chats and the entire index 'dirty'."""
     global _index_dirty, _index_generation
     if chat_id is not None:
-        _dirty_chat_ids.add(chat_id)
+        with _replacement_state_lock:
+            _replacement_publication_dirty.discard(chat_id)
+            _dirty_chat_ids.add(chat_id)
     else:
-        _dirty_chat_ids.update(chat_state.keys())
+        with _replacement_state_lock:
+            _replacement_publication_dirty.clear()
+            _dirty_chat_ids.update(chat_state.keys())
         _index_dirty = True
         _index_generation += 1
 
+def _begin_chat_replacement_locked(chat_id: int) -> None:
+    """Hide the ID from the index until the snapshot is durable; journal before writing."""
+    unresolved = _unresolved_chat_ids_locked()
+    if chat_id not in unresolved and len(unresolved) >= _MAX_UNRESOLVED_CHAT_IDS:
+        raise RuntimeError("unresolved chat state capacity reached")
+    _recreated_chat_ids.add(chat_id)
+    _replacement_generations[chat_id] = uuid.uuid4().hex
+    _replacement_ambiguous_clears.pop(chat_id, None)
+
+
 def _mark_new_chat_id(chat_id: int) -> None:
-    """Регистрирует НОВЫЙ chat_id, только что появившийся в chat_state (см.
-    get_state). Помечает и сам чат, и индекс "грязными" — если пометить только
-    чат без индекса, после рестарта его данные будут недостижимы: per-chat ключ
-    существует, но индекс (единственный способ узнать список ID при чтении) о
-    нём не знает."""
+    """Route a new chat through the replacement barrier before its first snapshot.
+
+    Index-first publication made a crash durable as an ID without a snapshot.
+    The journal now precedes the snapshot, and the index is published only after it.
+    """
     global _index_dirty, _index_generation
-    _dirty_chat_ids.add(chat_id)
+    with _replacement_state_lock:
+        _begin_chat_replacement_locked(chat_id)
+        _replacement_publication_dirty.discard(chat_id)
+        _dirty_chat_ids.add(chat_id)
+        _unindexed_chat_ids.discard(chat_id)
+    _reserve_state_write(chat_id)
     _index_dirty = True
     _index_generation += 1
+
+
+def _cancel_chat_deletion(chat_id: int) -> None:
+    """A returning chat invalidates queued and in-flight pruning deletes."""
+    global _index_dirty, _index_generation
+    with _replacement_state_lock:
+        _begin_chat_replacement_locked(chat_id)
+        _pending_chat_deletions.discard(chat_id)
+        _deleting_chat_ids.discard(chat_id)
+        _deletion_index_pending_ids.discard(chat_id)
+        _deleted_chat_ids.discard(chat_id)
+        # Backup completeness already treats this set as unresolved storage work.
+        _deleting_chat_ids.add(chat_id)
+    _reserve_state_write(chat_id)
+    _index_dirty = True
+    _index_generation += 1
+
 
 def mark_quota_dirty() -> None:
     global _quota_dirty, _quota_generation
@@ -743,109 +1452,171 @@ def mark_quota_dirty() -> None:
     _quota_generation += 1
 
 async def _flush_dirty_state_once() -> None:
-    """Тело ОДНОЙ итерации периодического сброса состояния — вынесено из
-    _flush_dirty_state (которая теперь только спит и вызывает эту функцию в цикле)
-    отдельной функцией, чтобы её можно было протестировать напрямую, не дожидаясь
-    реального FLUSH_INTERVAL_SEC в тестах."""
+    """The body of ONE iteration of periodic state flushing — extracted from
+    _flush_dirty_state (which now only sleeps and calls this function in a loop)
+    into a separate function so it can be tested directly without waiting for
+    the real FLUSH_INTERVAL_SEC in tests."""
     import bot
-    global _index_dirty, _quota_dirty
+    global _index_dirty, _index_generation, _quota_dirty
+    attempted_ids: list[int] = []
+    failed_ids: set[int] = set()
     try:
         if _pending_chat_deletions:
-            to_delete = list(_pending_chat_deletions)
-            _pending_chat_deletions.clear()
-            # Удаление — тоже запись в хранилище: замороженный чат и чат при сбое
-            # загрузки сохраняют удалённую копию до успешного чтения. Раньше защита
-            # стояла только на записи (ревью 17.11.2026).
+            to_delete = list(_pending_chat_deletions - (_deleting_chat_ids - _recreated_chat_ids))
+            _pending_chat_deletions.difference_update(to_delete)
+            revived = {cid for cid in to_delete if cid in chat_state}
+            for cid in revived:
+                _cancel_chat_deletion(cid)
+            to_delete = [cid for cid in to_delete if cid not in revived]
+            # Deletion is also a storage write: a frozen chat and a chat during a failure
+            # on load retain the deleted copy until a successful read. Previously, protection
+            # was only on the write (review 17.11.2026).
             guarded = {cid for cid in to_delete
-                       if _state_load_failed or cid in _chat_snapshot_unloaded}
+                       if _state_load_failed or cid in _chat_snapshot_unloaded
+                       or cid in _legacy_migration_pending_ids}
             if guarded:
                 _pending_chat_deletions.update(guarded)
                 to_delete = [cid for cid in to_delete if cid not in guarded]
                 log.warning('[state] Skip %d chat deletion(s): remote snapshot not restored yet.',
                             len(guarded))
+            _deleting_chat_ids.update(to_delete)
+            delete_gather = asyncio.gather(
+                *(bot._delete_chat_storage_limited(cid) for cid in to_delete),
+                return_exceptions=True,
+            )
+            cancelled = False
+            while True:
+                try:
+                    # Cancellation must not abandon a running storage thread or
+                    # clear the incomplete-state marker before its result is known.
+                    del_results = await asyncio.shield(delete_gather)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
             try:
-                del_results = await asyncio.gather(
-                    *(bot._delete_chat_storage_limited(cid) for cid in to_delete),
-                    return_exceptions=True,
-                )
-            except asyncio.CancelledError:
-                # Отмена флаша не должна терять очередь удалений: id уже сняты
-                # с набора, вернуть их до выхода (аудит 29.10.2026).
-                _pending_chat_deletions.update(to_delete)
-                raise
-            # Неудавшиеся id возвращаются в очередь для повтора, а не теряются при 5xx/429 Upstash.
-            failed_deletes = {cid for cid, res in zip(to_delete, del_results) if res is not True}
-            if failed_deletes:
-                _pending_chat_deletions.update(failed_deletes)
-                log.warning(
-                    '[state] %d chat deletion(s) failed, will retry next cycle: %s',
-                    len(failed_deletes), ", ".join(str(c) for c in sorted(failed_deletes)),
-                )
+                # Failed IDs are returned to the queue for retry instead of being lost on Upstash 5xx/429.
+                failed_deletes = {
+                    cid for cid, res in zip(to_delete, del_results)
+                    if res is not True and cid not in chat_state
+                }
+                completed_deletes = {
+                    cid for cid, res in zip(to_delete, del_results)
+                    if res is True and cid not in chat_state
+                }
+                if completed_deletes:
+                    # Only a real delete proves that the old recreated key is gone.
+                    _recreated_chat_ids.difference_update(completed_deletes)
+                    # The previous index may have retained these IDs while deletion failed.
+                    # A successful retry must schedule their removal even if _index_dirty was cleared.
+                    _index_dirty = True
+                    _index_generation += 1
+                if failed_deletes:
+                    _pending_chat_deletions.update(failed_deletes)
+                    log.warning(
+                        '[state] %d chat deletion(s) failed, will retry next cycle: %s',
+                        len(failed_deletes), ", ".join(str(c) for c in sorted(failed_deletes)),
+                    )
+            finally:
+                # Keep the marker until failed IDs are queued again; otherwise an
+                # export can observe neither pending nor in-flight deletion.
+                _deleting_chat_ids.difference_update(set(to_delete) - _recreated_chat_ids)
+            if cancelled:
+                raise asyncio.CancelledError
         if _state_load_failed and _dirty_chat_ids:
-            # Удалённые истории не затёрты: файл в памяти — это либо новый чат,
-            # либо всё, что осталось после сбоя загрузки; индекс и квота при
-            # этом не пишутся (аудит A5-2, 28.10.2026).
+            # Deleted histories are not overwritten: the in-memory file is either a new chat,
+            # either everything left after a failed load; the index and quota must
+            # are not written there (audit A5-2, 28.10.2026).
             log.warning('[state] Startup load failed; saving chats from memory, index stays untouched.')
+        if _state_load_failed or (_index_dirty and not (_recreated_chat_ids & _dirty_chat_ids)):
+            # Persist discovery metadata before new per-chat keys. If this write fails,
+            # an otherwise successful snapshot would be orphaned after a restart.
+            if _state_load_failed:
+                # The remote index is newer than empty memory: merge it, never replace it.
+                recovered_pending: set[int] = set()
+                fetched_ids = await asyncio.to_thread(
+                    _fetch_index_ids, migration_pending=recovered_pending
+                )
+                if fetched_ids is None:
+                    log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+                else:
+                    _apply_recovered_ids(fetched_ids, recovered_pending)
+                    indexed_new_ids = set(_unindexed_chat_ids)
+                    index_payload = json.dumps(_index_document())
+                    started_index_generation = _index_generation
+                    if await asyncio.to_thread(
+                        bot._save_chat_index_payload, index_payload, generation=started_index_generation
+                    ):
+                        if _index_generation == started_index_generation:
+                            _unindexed_chat_ids.difference_update(indexed_new_ids)
+                            _index_dirty = False
+            else:
+                indexed_new_ids = set(_unindexed_chat_ids)
+                index_payload = json.dumps(_index_document())
+                started_index_generation = _index_generation
+                if await asyncio.to_thread(
+                    bot._save_chat_index_payload, index_payload, generation=started_index_generation
+                ):
+                    if _index_generation == started_index_generation:
+                        _unindexed_chat_ids.difference_update(indexed_new_ids)
+                        _index_dirty = False
         if _dirty_chat_ids:
             to_save = list(_dirty_chat_ids)
+            _replacement_publication_dirty.update(set(to_save) & _recreated_chat_ids)
             _dirty_chat_ids.clear()
-            # Каждый чат — свой независимый write; если один упадёт, это не
-            # заденет сохранение остальных чатов из этой же пачки.
-            attempted_ids = [cid for cid in to_save if cid in chat_state]
+            # Each chat has its own independent write; if one fails, it does not
+            # affect saving the other chats from the same batch.
+            attempted_ids = [
+                cid for cid in to_save
+                if cid in chat_state and (cid not in _unindexed_chat_ids or _state_load_failed)
+            ]
+            # A failed index write leaves new chats queued, not silently clean.
+            _dirty_chat_ids.update(
+                cid for cid in set(to_save) - set(attempted_ids)
+                if cid in chat_state and cid not in _deleted_chat_ids
+            )
             try:
                 save_results = await asyncio.gather(
                     *(bot._save_chat_to_storage_limited(cid, chat_state[cid]) for cid in attempted_ids),
                     return_exceptions=True,
                 )
             except asyncio.CancelledError:
-                # Отмена (shutdown/рестарт) не должна терять грязные чаты:
-                # id уже сняты с набора — возвращаем до выхода (аудит 29.10.2026).
+                # Cancellation (shutdown/restart) must not lose dirty chats:
+                # ids are already removed from the set; return them before exiting (audit 29.10.2026).
                 _dirty_chat_ids.update(attempted_ids)
                 raise
-            # Неудавшиеся id возвращаются в грязные для повтора, а не теряются при 5xx/429 Upstash.
+            # Failed IDs return to the dirty set for retry instead of being lost on Upstash 5xx/429 errors.
             failed_ids = {cid for cid, res in zip(attempted_ids, save_results) if res is not True}
-            if failed_ids:
-                _dirty_chat_ids.update(failed_ids)
+            retry_ids = {
+                cid for cid in failed_ids
+                if cid in chat_state and cid not in _deleted_chat_ids
+            }
+            if retry_ids:
+                _dirty_chat_ids.update(retry_ids)
                 log.warning(
                     '[state] %d chat(s) failed to save this cycle, will retry next: %s',
-                    len(failed_ids), ", ".join(str(c) for c in sorted(failed_ids)),
+                    len(retry_ids), ", ".join(str(c) for c in sorted(retry_ids)),
                 )
-        if _index_dirty or _state_load_failed:
-            # Флаг сбрасываем только после подтверждённой записи — иначе упавший индекс
-            # молча терялся бы до следующей мутации (найдено внешним аудитом).
-            # Сбой загрузки сам по себе повод на ретрай: иначе после битого ответа
-            # шлюза индекс не читался бы заново и запись стояла до рестарта
-            # (адверсариальный проход 17.11.2026).
-            # Снапшот ключей — здесь (см. комментарий у _save_chat_to_storage_limited).
-            if _state_load_failed:
-                # Удалённый индекс новее пустой памяти — не затираем, очередь живёт дальше.
-                # Один повтор чтения в минуту: удалённые id сливаем, а не заменяем.
-                fetched_ids = await asyncio.to_thread(_fetch_index_ids)
-                if fetched_ids is None:
-                    log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
-                else:
-                    _apply_recovered_ids(fetched_ids)
-                    index_payload = json.dumps(_index_ids())
-                    started_index_generation = _index_generation
-                    if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
-                        if _index_generation == started_index_generation:
-                            _index_dirty = False
-            else:
-                index_payload = json.dumps(_index_ids())
-                started_index_generation = _index_generation
-                if await asyncio.to_thread(bot._save_chat_index_payload, index_payload):
-                    # Сбрасываем, только если за время записи никто не мутировал:
-                    # иначе свежий снимок уже устарел и флаг обязан жить дальше.
-                    if _index_generation == started_index_generation:
-                        _index_dirty = False
+        saved_ids = set(attempted_ids) - failed_ids
+        # A saved replacement stays dirty until its index and journal both commit.
+        _dirty_chat_ids.update(saved_ids & _recreated_chat_ids)
+        if not _state_load_failed:
+            published = await asyncio.to_thread(_publish_recreated_chats, saved_ids)
+            if not published and (saved_ids & _recreated_chat_ids):
+                _index_dirty = True
+        await _persist_migration_progress(saved_ids)
         if _quota_dirty:
-            if _quota_load_failed and not await asyncio.to_thread(bot.recover_global_quota):
-                # Удалённая квота новее пустой памяти — не затираем, очередь живёт дальше.
+            import lumen_quotas as lq
+            if _quota_load_failed and not await lq.recover_global_quota_async():
+                # The remote quota is newer than empty memory: do not overwrite it; the queue stays alive.
                 log.warning('[quota] Skip quota save: startup load failed, keeping remote data intact.')
             else:
-                quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False)
+                quota_payload = json.dumps(GLOBAL_QUOTA, ensure_ascii=False, allow_nan=False)
                 started_quota_generation = _quota_generation
-                if await asyncio.to_thread(bot._save_quota_payload, quota_payload):
+                if await asyncio.to_thread(
+                    bot._save_quota_payload,
+                    quota_payload,
+                    generation=started_quota_generation,
+                ):
                     if _quota_generation == started_quota_generation:
                         _quota_dirty = False
     except Exception as exc:
@@ -858,19 +1629,19 @@ async def _flush_dirty_state() -> None:
         await asyncio.sleep(FLUSH_INTERVAL_SEC)
         await bot._flush_dirty_state_once()
 def _flush_state_now() -> None:
-    """Синхронный финальный сброс всего "грязного" состояния — используется только
-    при остановке процесса (main(), finally): event loop всё равно останавливается,
-    поэтому блокирующие вызовы здесь не проблема, а вот пропустить несохранённые
-    изменения между последним тиком периодического флаша и остановкой контейнера —
-    проблема."""
+    """Synchronously flushes all "dirty" state at shutdown; used only when stopping the process (main(), finally): the event loop is stopping anyway, so blocking calls are not a problem, but losing unsaved changes between the last periodic flush tick and container shutdown is."""
     import bot
-    global _index_dirty
-    # Неуспех — обратно в очередь с громким логом, как в async-флаше: молча
-    # чистить очереди на shutdown значило бы тихо терять записи (аудит A5-1).
+    global _index_dirty, _index_generation
+    # Failure goes back into the queue with a loud log, as in the async flush: silently
+    # clearing queues on shutdown would silently lose records (audit A5-1).
     for cid in list(_pending_chat_deletions):
-        if _state_load_failed or cid in _chat_snapshot_unloaded:
-            # Shutdown не обходит защиту удаления: замороженный чат сохраняет
-            # удалённую копию до успешного чтения (адверсариальный проход 17.11.2026).
+        if cid in chat_state:
+            _cancel_chat_deletion(cid)
+            continue
+        if (_state_load_failed or cid in _chat_snapshot_unloaded
+                or cid in _legacy_migration_pending_ids):
+            # Shutdown does not bypass deletion protection: a frozen chat retains
+            # the deleted copy until a successful read (adversarial pass 17.11.2026).
             log.warning('[state] Shutdown: skip deleting chat %s, snapshot not restored.', cid)
             continue
         try:
@@ -878,11 +1649,42 @@ def _flush_state_now() -> None:
         except Exception as exc:
             deleted = False
             log.warning('[state] Deleting chat %s failed: %s', cid, exc)
+        if cid in chat_state:
+            _cancel_chat_deletion(cid)
+            continue
         if deleted is True:
             _pending_chat_deletions.discard(cid)
+            _recreated_chat_ids.discard(cid)
+            _index_dirty = True
+            _index_generation += 1
         else:
             log.warning('[state] Chat %s deletion failed, keeping it queued.', cid)
+    if _state_load_failed or (_index_dirty and not (_recreated_chat_ids & _dirty_chat_ids)):
+        # Mirror the periodic flush: a new key must be discoverable before it exists.
+        indexed_new_ids = set(_unindexed_chat_ids)
+        started_index_generation = _index_generation
+        index_saved = False
+        if _state_load_failed:
+            if _recover_index_ids():
+                index_saved = bot._save_chat_index() is True
+            else:
+                log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
+        else:
+            try:
+                index_saved = bot._save_chat_index() is True
+            except Exception as exc:
+                index_saved = False
+                log.warning('[state] Saving chat index failed: %s', exc)
+        if index_saved and _index_generation == started_index_generation:
+            _unindexed_chat_ids.difference_update(indexed_new_ids)
+            _index_dirty = False
+        elif not index_saved:
+            log.warning('[state] Chat index save failed, keeping it dirty.')
+    saved_ids: set[int] = set()
+    _replacement_publication_dirty.update(set(_dirty_chat_ids) & _recreated_chat_ids)
     for cid in list(_dirty_chat_ids):
+        if cid in _unindexed_chat_ids:
+            continue
         st = chat_state.get(cid)
         if st is None:
             _dirty_chat_ids.discard(cid)
@@ -893,43 +1695,87 @@ def _flush_state_now() -> None:
             saved = False
             log.warning('[state] Saving chat %s failed: %s', cid, exc)
         if saved is True:
-            _dirty_chat_ids.discard(cid)
+            saved_ids.add(cid)
+            if cid not in _legacy_migration_pending_ids and cid not in _recreated_chat_ids:
+                _dirty_chat_ids.discard(cid)
         else:
             log.warning('[state] Chat %s save failed, keeping it dirty.', cid)
-    if _index_dirty:
-        if _state_load_failed:
-            # Удалённый индекс новее пустой памяти — не затираем (аудит A5-2).
-            if _recover_index_ids():
-                try:
-                    if bot._save_chat_index() is True:
-                        _index_dirty = False
-                except Exception as exc:
-                    log.warning("[state] Saving chat index failed: %s", exc)
-            else:
-                log.warning('[state] Skip index save: startup load failed, keeping remote data intact.')
-        else:
-            try:
-                index_saved = bot._save_chat_index()
-            except Exception as exc:
-                index_saved = False
-                log.warning('[state] Saving chat index failed: %s', exc)
-            if index_saved is True:
-                _index_dirty = False
-            else:
-                log.warning('[state] Chat index save failed, keeping it dirty.')
+    _persist_migration_progress_sync(saved_ids)
+    if not _state_load_failed:
+        published = _publish_recreated_chats(saved_ids)
+        if not published and (saved_ids & _recreated_chat_ids):
+            _index_dirty = True
+
+def _restore_pending_replacement_chats() -> set[int]:
+    """Recover matching snapshots and identify journaled interrupted deletions."""
+    import bot
+    global _index_dirty, _index_generation
+    interrupted_deletions: set[int] = set()
+    for cid in list(_journal_deletion_ids):
+        chat_state.pop(cid, None)
+        _recreated_chat_ids.add(cid)
+        _deleting_chat_ids.add(cid)
+        interrupted_deletions.add(cid)
+        log.info("[state] Journaled chat %s has a deletion intent; finalizing interrupted deletion.", cid)
+    for cid, generation in list(_replacement_generations.items()):
+        chat_state.pop(cid, None)
+        _recreated_chat_ids.add(cid)
+        _deleting_chat_ids.add(cid)
+        try:
+            raw = bot._storage_read_text(_chat_storage_key(cid), bot._chat_storage_path(cid))
+            if raw is None:
+                interrupted_deletions.add(cid)
+                log.info("[state] Journaled chat %s has no snapshot; finalizing interrupted deletion.", cid)
+                continue
+            snapshot = json.loads(raw)
+            if not _validate_chat_snapshot(snapshot):
+                raise ValueError("replacement snapshot is malformed")
+            if snapshot.get("replacement_generation") != generation:
+                interrupted_deletions.add(cid)
+                log.info("[state] Journaled chat %s has a stale snapshot; finalizing interrupted deletion.", cid)
+                continue
+            bot._restore_single_chat(cid, snapshot)
+            if cid not in chat_state:
+                raise ValueError("replacement snapshot did not restore")
+        except Exception as exc:
+            _chat_snapshot_unloaded.add(cid)
+            log.warning("[state] Quarantining replacement chat %s: %s", cid, exc)
+            continue
+        _replacement_publication_dirty.add(cid)
+        _dirty_chat_ids.add(cid)
+        _index_dirty = True
+        _index_generation += 1
+        log.info("[state] Recovered replacement chat %s from its journal.", cid)
+    return interrupted_deletions
+
 
 def load_state_from_disk() -> None:
     import bot
     global _state_load_failed, _quota_load_failed, _index_retry_last_ts
-    # Новая попытка снимает старый отказ; неуспех ниже выставит его заново.
+    global _replacement_journal_load_failed
+    # A new attempt clears the old refusal; a failure below will set it again.
     _state_load_failed = False
     _quota_load_failed = False
+    replacement_journal_failed = not _load_replacement_journal()
+    _replacement_journal_load_failed = replacement_journal_failed
+    if replacement_journal_failed:
+        _state_load_failed = True
     _index_extra_ids.clear()
+    _unindexed_chat_ids.clear()
+    _legacy_migration_pending_ids.clear()
     _created_during_outage.clear()
     _deleted_chat_ids.clear()
+    _deletion_index_pending_ids.clear()
+    _recreated_chat_ids.clear()
+    _replacement_publication_dirty.clear()
     _index_retry_last_ts = 0.0
     _chat_snapshot_unloaded.clear()
+    interrupted_deletions = _restore_pending_replacement_chats()
     bot.load_global_quota()
+    if replacement_journal_failed:
+        # Without the pending set, an old snapshot cannot be distinguished from a
+        # replacement. Load nothing and keep every persistence write blocked.
+        return
 
     index_raw = None
     index_read_failed = False
@@ -941,20 +1787,26 @@ def load_state_from_disk() -> None:
         log.warning("[state] Reading chat index failed, falling back to legacy combined blob: %s", exc)
 
     if index_raw is not None:
-        # Новый формат (per-chat ключи) — индекс уже существует, читаем каждый
-        # чат отдельно по своему ключу.
-        try:
-            chat_ids = json.loads(index_raw)
-        except Exception as exc:
-            # Состав удалённых чатов неизвестен: перезапись индекса потеряла бы
-            # пер-чат записи, которых нет в legacy-блобе (аудит 16.11.2026).
+        # New format (per-chat keys) — the index already exists; read each
+        # the chat separately under its own key.
+        parsed_index = _parse_index_document(index_raw)
+        if parsed_index is None:
+            # The set of deleted chats is unknown: overwriting the index would lose
+            # per-chat records absent from the legacy blob (audit 16.11.2026).
             _state_load_failed = True
-            log.warning('[state] Failed to parse chat index: %s', exc)
+            log.warning('[state] Failed to parse chat index.')
             chat_ids = None
+            legacy_pending: set[int] = set()
+        else:
+            chat_ids, legacy_pending = parsed_index
+            _legacy_migration_pending_ids.update(legacy_pending)
         if isinstance(chat_ids, list):
             loaded_count = 0
+            missing_ids: list[int] = []
             ids: list[int] = []
             for chat_id_raw in chat_ids:
+                if chat_id_raw in _recreated_chat_ids:
+                    continue
                 try:
                     ids.append(int(chat_id_raw))
                 except Exception:
@@ -966,10 +1818,10 @@ def load_state_from_disk() -> None:
                 except Exception as exc:
                     return cid, exc
 
-            # Чтения идут параллельно: последовательный обход 4500 чатов по одному
-            # HTTPS-запросу давал минуты холодного старта, и всё это время вебхук
-            # отвечал 503 (аудит 16.11.2026). Восстановление в память остаётся в
-            # этом потоке: общие словари не трогаем из пула.
+            # Reads run in parallel: sequentially walking 4500 chats one
+            # An HTTPS request took minutes of cold start, and throughout that time the webhook
+            # returned 503 (audit 16.11.2026). Restoration into memory remains in
+            # in this thread: do not touch shared dictionaries from the pool.
             workers = max(1, min(_PARALLEL_CHAT_READS, len(ids)))
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 for cid, raw in pool.map(_read_one, ids):
@@ -980,6 +1832,8 @@ def load_state_from_disk() -> None:
                         continue
                     if not raw:
                         _index_extra_ids.add(cid)
+                        _chat_snapshot_unloaded.add(cid)
+                        missing_ids.append(cid)
                         continue
                     try:
                         parsed_chat = json.loads(raw)
@@ -991,53 +1845,112 @@ def load_state_from_disk() -> None:
                     try:
                         bot._restore_single_chat(cid, parsed_chat)
                     except Exception as exc:
-                        # Одна битая запись не обрывает восстановление остальных чатов.
+                        # One corrupt record does not interrupt recovery of the other chats.
                         _chat_snapshot_unloaded.add(cid)
                         _index_extra_ids.add(cid)
                         log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
                         continue
                     if cid in chat_state:
                         loaded_count += 1
+                        if cid in _legacy_migration_pending_ids:
+                            # Re-save once so the completion marker can advance safely.
+                            _dirty_chat_ids.add(cid)
+                    else:
+                        # Structurally invalid JSON can be skipped without raising.
+                        # Keep its remote key quarantined instead of creating and saving empty state.
+                        _chat_snapshot_unloaded.add(cid)
+                        _index_extra_ids.add(cid)
+                        log.warning('[state] Skip chat %s: snapshot did not restore', cid)
+            recoverable_ids = [cid for cid in missing_ids if cid in legacy_pending]
+            if recoverable_ids:
+                # Only the durable pending set proves that legacy is authoritative.
+                # Other missing keys may be deletions and must stay quarantined.
+                try:
+                    legacy_raw = bot._storage_read_text("lumen:chat_state", STATE_FILE_PATH)
+                except Exception as exc:
+                    legacy_raw = None
+                    log.warning('[state] Failed to read legacy fallback for missing snapshots: %s', exc)
+                legacy_chats: object = None
+                if legacy_raw:
+                    try:
+                        legacy_chats = json.loads(legacy_raw)
+                    except Exception as exc:
+                        log.warning('[state] Failed to parse legacy fallback for missing snapshots: %s', exc)
+                if isinstance(legacy_chats, dict):
+                    for cid in recoverable_ids:
+                        snapshot = legacy_chats.get(str(cid))
+                        if snapshot is None:
+                            log.warning('[state] Legacy fallback has no snapshot for pending chat %s', cid)
+                            continue
+                        try:
+                            bot._restore_single_chat(cid, snapshot)
+                        except Exception as exc:
+                            log.warning('[state] Failed to restore legacy fallback for chat %s: %s', cid, exc)
+                            continue
+                        if cid in chat_state:
+                            _chat_snapshot_unloaded.discard(cid)
+                            _dirty_chat_ids.add(cid)
+                            loaded_count += 1
+                        else:
+                            log.warning('[state] Legacy fallback did not restore chat %s', cid)
+                else:
+                    log.warning('[state] Legacy fallback unavailable; keeping pending chats quarantined.')
             log.info("[state] Restored states for %d chats (per-chat storage, %d parallel reads).",
                      loaded_count, workers)
+            _finish_interrupted_chat_deletions(interrupted_deletions)
             return
-        # Индекс битый, но per-chat файлы могут быть целы — пробуем legacy-блоб:
-        # лучше старые данные, чем пустые чаты (найдено внешним аудитом).
+        # The index is corrupt, but per-chat files may be intact; try the legacy blob:
+        # better to keep old data than empty chats (found by an external audit).
 
-    # ── Legacy-формат (единый блоб на все чаты, старый ключ "lumen:chat_state") ──
-    # Старого индекса нет — первый запуск на новом формате. Восстановленные чаты
-    # помечаем грязными: первый же флаш перепишет их по-новому. Старый ключ
-    # не удаляем — чужие данные при миграции не трогаем.
+    # ── Legacy format (one blob for all chats, old key "lumen:chat_state") ──
+    # There is no old index — first run on the new format. Restored chats
+    # mark them dirty: the very first flush will rewrite them. The old key
+    # do not delete — do not touch other people's data during migration.
     try:
         raw = bot._storage_read_text("lumen:chat_state", STATE_FILE_PATH)
         if not raw:
             if index_raw is not None:
-                # Индекс был, но не разобрался, а legacy нет: удалённые per-chat
-                # данные новее пустой памяти — следующий флаш их бы затирал.
+                # The index existed but could not be parsed, and there is no legacy: deleted per-chat
+                # data is newer than empty memory; the next flush would overwrite it.
                 _state_load_failed = True
                 log.warning("[state] Chat index unreadable and no legacy blob, keeping remote data intact.")
+            _finish_interrupted_chat_deletions(interrupted_deletions)
             return
         loaded = json.loads(raw)
         for chat_id_str, s in loaded.items():
             try:
                 cid = int(chat_id_str)
             except Exception:
+                # An unidentifiable record cannot be quarantined in the integer index.
+                _state_load_failed = True
+                log.warning('[state] Legacy chat ID is not an integer; preserving the legacy blob.')
+                break
+            if cid in _recreated_chat_ids:
                 continue
             try:
                 bot._restore_single_chat(cid, s)
             except Exception as exc:
-                # Одна битая запись не обрывает восстановление остальных чатов.
-                _state_load_failed = True
+                # Keep the legacy-backed ID discoverable without freezing valid siblings.
+                chat_state.pop(cid, None)
+                _chat_snapshot_unloaded.add(cid)
+                _index_extra_ids.add(cid)
+                _legacy_migration_pending_ids.add(cid)
                 log.warning('[state] Skip chat %s: restore failed: %s', cid, exc)
                 continue
+            if cid not in chat_state:
+                # Structural validation can reject a record without raising.
+                _chat_snapshot_unloaded.add(cid)
+                _index_extra_ids.add(cid)
+                _legacy_migration_pending_ids.add(cid)
+                log.warning('[state] Skip chat %s: snapshot did not restore', cid)
         log.info(
             '[state] Restored states for %d chats (migrated from the old shared storage format — will be rewritten in the new per-chat format on next flush).',
             len(chat_state),
         )
-        if index_read_failed or index_raw is not None:
-            # Индекс не прочитан (или битый), а per-chat ключи могут быть НОВЕЕ блоба:
-            # восстановленное из блоба годится только для ответов, писать его обратно
-            # нельзя, иначе старый снимок затрёт более свежую историю (аудит 16.11.2026).
+        if _state_load_failed or index_read_failed or index_raw is not None:
+            # The index was not read (or is corrupt), while per-chat keys may be NEWER than the blob:
+            # restored from the blob is suitable only for replies; writing it back
+            # is impossible, otherwise an old snapshot would overwrite newer history (audit 16.11.2026).
             for _cid in list(chat_state):
                 try:
                     _chat_snapshot_unloaded.add(int(_cid))
@@ -1048,14 +1961,23 @@ def load_state_from_disk() -> None:
                 len(chat_state),
             )
         else:
+            # Legacy migration creates discoverable IDs only when the new index lands.
+            _legacy_migration_pending_ids.update(chat_state.keys())
+            _unindexed_chat_ids.update(chat_state.keys())
             bot.mark_state_dirty()
     except Exception as exc:
         _state_load_failed = True
         log.warning("[state] Restoring states failed: %s", exc)
+    _finish_interrupted_chat_deletions(interrupted_deletions)
 
 def get_state(chat_id: int) -> dict[str, Any]:
     import bot
     if chat_id not in chat_state:
+        if chat_id in _pending_chat_deletions or chat_id in _deleted_chat_ids:
+            _cancel_chat_deletion(chat_id)
+        # Barrier before insertion: when the journal cap is full, a new ID must not
+        # remain in memory without protection against orphan-index publication.
+        bot._mark_new_chat_id(chat_id)
         if _state_load_failed:
             _created_during_outage.add(chat_id)
         chat_state[chat_id] = {
@@ -1065,23 +1987,21 @@ def get_state(chat_id: int) -> dict[str, Any]:
             "memory_epoch": 0,
             "recent_media_ids": {},
             "user_names": {},
-            # Настенные часы: monotonic обнуляется рестартом и ломал /stats.
+            # Wall-clock time: monotonic resets on restart and broke /stats.
             "last_activity": time.time(),
         }
-        # Новый chat_id должен попасть в индекс (см. per-chat хранилище выше) —
-        # иначе после рестарта его данные будут недостижимы: собственный ключ
-        # существует, но индекс о нём не знает.
-        bot._mark_new_chat_id(chat_id)
     else:
-        # Настенные часы: monotonic обнуляется рестартом и ломал /stats.
+        # Wall clock: monotonic resets on restart and broke /stats.
         chat_state[chat_id]["last_activity"] = time.time()
     if len(chat_state) > MAX_CHAT_LIMIT:
-         bot._prune_old_chats()
+        # The requested chat may be the only removable entry when memory is full.
+        # Never evict it before returning state to its active caller.
+        bot._prune_old_chats(keep_chat_id=chat_id)
     return chat_state[chat_id]
 
 def _chat_lang(chat_id: int | None) -> str:
-    """Язык системных сообщений для чата: поле "lang" состояния, иначе "en".
-    Никогда не падает — при любом мусоре в поле отдаёт дефолт."""
+    """Language of system messages for the chat: the state "lang" field, otherwise "en".
+    Never fails; any garbage in the field falls back to the default."""
     import bot
     try:
         if chat_id is None:
@@ -1091,15 +2011,15 @@ def _chat_lang(chat_id: int | None) -> str:
         return DEFAULT_LANG
 
 def _t(chat_id: int | None, key: str, **kwargs: Any) -> str:
-    """Локализованная реплика key на языке чата (см. lumen_lang.py)."""
+    """A localized key utterance in the chat language (see lumen_lang.py)."""
     import bot
     return _lang_t(bot._chat_lang(chat_id), key, **kwargs)
 
 
 def _peek_chat_lang(chat_id: int | None) -> str:
-    """Язык чата без создания записи состояния. Нужен отказам до get_state:
-    обычный _chat_lang через get_state заводил бы чат даже отклонённому по лимиту
-    сообщению — и перенос проверки лимита выше get_state не давал эффекта."""
+    """The chat language without creating a state entry. Needed for rejections before get_state:
+    the normal _chat_lang via get_state would create a chat even for a message
+    rejected by the limit — moving the limit check above get_state had no effect."""
     try:
         if chat_id is None:
             return DEFAULT_LANG
@@ -1110,52 +2030,71 @@ def _peek_chat_lang(chat_id: int | None) -> str:
 
 
 def _t_no_create(chat_id: int | None, key: str, **kwargs: Any) -> str:
-    """Та же локализация, что _t, но без побочных эффектов для хранилища."""
+    """The same localization as _t, but without side effects for storage."""
     return _lang_t(_peek_chat_lang(chat_id), key, **kwargs)
 
 _DELETED_CHAT_IDS_CAP = 5000
 
 
-def _prune_old_chats() -> None:
+def _prune_old_chats(*, keep_chat_id: int | None = None) -> None:
     import bot
     global _index_dirty, _index_generation
     sorted_ids = sorted(chat_state.keys(), key=lambda cid: chat_state[cid].get("last_activity", 0))
-    # Лок ЗАНЯТ = в чате идёт ответ. Такой чат вытеснять нельзя: идущий маршрут
-    # продолжал бы писать в отвязанный state, а следующее сообщение создало бы
-    # новый лок — два параллельных ответа в одном чате и порча истории
-    # (аудит 26.09.2026). Такой чат просто не попадает в выборку.
+    # Lock BUSY = a reply is in progress in the chat. Such a chat cannot be evicted: the active route
+    # would keep writing to the detached state, while the next message would create
+    # a new lock — two parallel answers in one chat and history corruption
+    # (audit 26.09.2026). Such a chat is simply excluded from the sample.
     def _is_busy(cid: int) -> bool:
         lock = bot._chat_locks.get(cid)
-        return lock is not None and lock.locked()
+        # A queued waiter is accepted work even during the handoff window where
+        # the holder released the lock but the waiter has not resumed yet.
+        return ((lock is not None and lock.locked())
+                or bot._chat_lock_waiters.get(cid, 0) > 0
+                or bot._chat_lock_background_waiters.get(cid, 0) > 0)
 
-    # Замороженный чат не вытесняем: его id выпал бы из индекса, а ключ
-    # остался бы сиротой навсегда (адверсариальный проход №2).
+    # Do not evict a frozen chat: its ID would fall out of the index, and the key
+    # would remain orphaned forever (adversarial pass no. 2).
+    # A replacement barrier stays in place through journal clearance; pruning
+    # that chat concurrently could republish it after a crash.
+    with _replacement_state_lock:
+        recreated = set(_recreated_chat_ids)
+        unresolved = _unresolved_chat_ids_locked()
+        capacity = max(0, _MAX_UNRESOLVED_CHAT_IDS - len(unresolved))
     removable = [cid for cid in sorted_ids
-                 if not _is_busy(cid)
+                 if cid != keep_chat_id
+                 and not _is_busy(cid)
                  and cid not in _chat_snapshot_unloaded
+                 and cid not in _legacy_migration_pending_ids
+                 and cid not in recreated
                  and not _state_load_failed]
-    # Потолок считаем от всего состояния, а не от выборки removable: иначе при
-    # плотной загрузке вытеснять было нечего и чаты копились без ограничения
-    # (враждебное ревью 27.09.2026). Занятые пропускаем до следующих прогонов.
+    # Compute the cap from all state, not just the removable selection; otherwise, with
+    # under heavy load there was nothing to evict, so chats accumulated without limit
+    # (hostile review 27.09.2026). Busy ones are skipped until the next runs.
     to_remove = max(0, len(chat_state) - PRUNED_CHAT_TARGET)
-    removed_ids = removable[:to_remove]
+    # At capacity, keep both live chats and existing barriers; unresolved work
+    # remains retryable without allowing another prune deletion to grow it.
+    removed_ids = removable[:min(to_remove, capacity)]
     for cid in removed_ids:
         chat_state.pop(cid, None)
         _index_extra_ids.discard(cid)
         bot._chat_locks.pop(cid, None)
-    # Вытесненные чаты должны реально исчезнуть из хранилища (иначе их собственные
-    # ключи/файлы бесхозно копятся вечно) — ставим в очередь на удаление,
-    # обрабатывается в _flush_dirty_state вместе с обычным сбросом.
+    # Evicted chats must actually disappear from storage (otherwise their own
+    # orphaned keys/files accumulate forever) — queue them for deletion,
+    # handled in _flush_dirty_state along with the regular flush.
     _deleted_chat_ids.update(removed_ids)
-    # Кап: без него множество растёт до конца жизни процесса. Старые id уже
-    # удалены из хранилища, свежие важнее (ревью 17.11.2026).
+    # Cap: without it, the set grows for the rest of the process lifetime. Old ids are already
+    # removed from storage; fresh ones matter more (review 17.11.2026).
     if len(_deleted_chat_ids) > _DELETED_CHAT_IDS_CAP:
         for extra_id in list(_deleted_chat_ids)[:len(_deleted_chat_ids) - _DELETED_CHAT_IDS_CAP]:
             _deleted_chat_ids.discard(extra_id)
-    _pending_chat_deletions.update(removed_ids)
-    _dirty_chat_ids.difference_update(removed_ids)
+    with _replacement_state_lock:
+        _pending_chat_deletions.update(removed_ids)
+        _dirty_chat_ids.difference_update(removed_ids)
+        _replacement_publication_dirty.difference_update(removed_ids)
+        _unindexed_chat_ids.difference_update(removed_ids)
+    # Keep the recreation barrier until a real delete or replacement publication succeeds.
     if removed_ids:
-        # Неизменённые чаты не пачкаем: иначе следующий флаш перезаписывал тысячи лишних ключей.
+        # Do not dirty unchanged chats; otherwise the next flush would rewrite thousands of extra keys.
         _index_dirty = True
         _index_generation += 1
 
@@ -1170,10 +2109,11 @@ def get_chat_lock(chat_id: int) -> asyncio.Lock:
 _CHAT_LOCK_MAX_RETRIES = 3
 
 async def acquire_chat_lock(chat_id: int, timeout: float) -> asyncio.Lock:
-    """Захват per-chat лока с проверкой поколения: между get и acquire прунинг
-    или эвикт могли снести чат и лок — захваченный лок тогда чужой, отпускаем
-    и берём заново. Без проверки два сообщения отвечали бы параллельно, портя
-    историю (аудит A5-10). Таймаут — на каждую попытку, кругов не больше трёх."""
+    """Acquire the per-chat lock with a generation check: between get and acquire,
+    pruning or eviction may have removed the chat and its lock — the acquired lock
+    then belongs to someone else, so release it and retry. Without the check, two
+    messages could be answered concurrently, corrupting history (audit A5-10).
+    The timeout applies to each attempt, with at most three rounds."""
     import bot
     for _ in range(_CHAT_LOCK_MAX_RETRIES):
         lock = get_chat_lock(chat_id)
@@ -1181,13 +2121,12 @@ async def acquire_chat_lock(chat_id: int, timeout: float) -> asyncio.Lock:
         if bot._chat_locks.get(chat_id) is lock:
             return lock
         lock.release()
-    # Четвёртая попытка без сверки поколения отдавала чужой лок: два сообщения
-    # одного чата отвечали параллельно (ревью 17.11.2026, дыра в фиксе A5-10).
+    # Without the generation check, a fourth attempt could acquire another caller's lock:
+    # two messages from one chat were then answered in parallel (review 17.11.2026, a hole in fix A5-10).
     raise TimeoutError("chat lock kept changing during acquisition")
 
 def _evict_orphan_chat_locks() -> int:
-    """Сносит локи чатов, которых уже нет в chat_state и которые никто не
-    держит, — иначе _chat_locks растёт навсегда (AUD-G-001). Занятые не трогаем."""
+    """Removes locks for chats that no longer exist in chat_state and are not held by anyone — otherwise _chat_locks grows forever (AUD-G-001). Busy locks are left alone."""
     import bot
     orphan = [cid for cid, lock in bot._chat_locks.items() if cid not in chat_state and not lock.locked()]
     for cid in orphan:
@@ -1195,11 +2134,11 @@ def _evict_orphan_chat_locks() -> int:
     return len(orphan)
 
 def _is_owner(user_id: int | None) -> bool:
-    """Владелец по OWNER_ID; названий моделей никому не показываем (см. автороутер)."""
+    """Owner via OWNER_ID; never show model names to anyone (see the author router)."""
     import bot
     return bot.OWNER_ID is not None and user_id is not None and user_id == bot.OWNER_ID
 
-# ── Владельческая блокировка (/ban): тот же персистентный файл/ключ, что квота.
+# ── Owner moderation lock (/ban): the same persistent file/key as quota. ──
 BANNED_KEY = "banned_users"
 
 def _banned_map() -> dict[str, Any]:
@@ -1211,14 +2150,14 @@ def _banned_map() -> dict[str, Any]:
     return raw
 
 def _is_banned(user_id: int | None) -> bool:
-    """Заблокирован ли пользователь. Владельца забанить нельзя — всегда False."""
+    """Whether the user is blocked. The owner cannot be banned; always False."""
     import bot
     if user_id is None or bot._is_owner(user_id):
         return False
     return str(user_id) in _banned_map()
 
 def _ban_user(user_id: int) -> bool:
-    """True если добавился сейчас, False если уже был (или это владелец)."""
+    """True if added just now, False if already present (or this is the owner)."""
     import bot
     if bot._is_owner(user_id):
         return False
@@ -1230,7 +2169,7 @@ def _ban_user(user_id: int) -> bool:
     return True
 
 def _unban_user(user_id: int) -> bool:
-    """True если был в списке и убран."""
+    """True if it was in the list and removed."""
     import bot
     if str(user_id) not in _banned_map():
         return False
@@ -1239,7 +2178,7 @@ def _unban_user(user_id: int) -> bool:
     return True
 
 def _banned_list() -> list[int]:
-    """ID по возрастанию — для /banlist."""
+    """IDs in ascending order—for /banlist."""
     ids = []
     for key in _banned_map():
         try:
@@ -1249,7 +2188,7 @@ def _banned_list() -> list[int]:
     return sorted(ids)
 
 async def _notify_owner(text: str) -> None:
-    """ЛС владельцу о редких важных событиях; с троттлингом у вызывателя, никогда не кидает."""
+    """Direct message to the owner about rare important events; throttled by the caller and never raises."""
     import bot
     if bot.OWNER_ID is None or bot.bot is None:
         return
@@ -1257,7 +2196,7 @@ async def _notify_owner(text: str) -> None:
         await bot._tg_call(bot.bot.send_message, chat_id=bot.OWNER_ID, text=text, call_timeout=10.0)
 
 async def _is_privileged_in_chat(chat_type: str, chat_id: int, user_id: int | None) -> bool:
-    """Общие настройки чата: личка — всегда, владелец — везде, группы — только creator/admin."""
+    """Shared chat settings: DMs always, owner everywhere, groups only creator/admin."""
     import bot
     if chat_type == ChatType.PRIVATE:
         return True
@@ -1273,9 +2212,9 @@ async def _is_privileged_in_chat(chat_type: str, chat_id: int, user_id: int | No
         return False
 
 
-# После сводки в памяти остаются последние 150 сообщений дословно (см. lumen_memory).
+# After summarization, the last 150 messages remain verbatim in memory (see lumen_memory).
 HISTORY_SUMMARIZE_KEEP = MEMORY_KEEP_MESSAGES
-# Пауза между повторами упавшей сводки: иначе каждый ответ ждал бы сеть заново.
+# Pause between retries of a failed digest: otherwise every answer would wait for the network again.
 MEMORY_SUMMARY_RETRY_SEC = 60.0
 
 _SUMMARY_SYSTEM = (
@@ -1290,11 +2229,11 @@ _SUMMARY_SYSTEM = (
 
 
 async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | None = None) -> None:
-    """Держит память в 200 сообщений: старше уходят в сводку, последние 150 остаются.
+    """Keeps 200 messages in memory: older ones move into a summary, the latest 150 remain.
 
-    Сводка живёт в state["memory_summary"] и попадает в системный промпт. Если она
-    не удалась, старые сообщения ждут в state["memory_pending"] и повторяются позже —
-    молчаливое выбрасывание фактов запрещено (решение владельца 06.11.2026)."""
+The summary lives in state['memory_summary'] and goes into the system prompt. If it
+fails, old messages wait in state['memory_pending'] and are retried later; silently
+discarding facts is forbidden (owner's decision 06.11.2026)."""
     import bot
     state = state if isinstance(state, dict) else {}
     pending = state.get("memory_pending")
@@ -1302,17 +2241,17 @@ async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | N
     over = len(history) > MAX_TOTAL_MEMORY_MESSAGES
     if not over and not pending:
         return
-    # Фон пишется без лока чата: вторая сводка по тому же state только дублировала бы вызов.
+    # The background writes without the chat lock: a second summary for the same state would only duplicate the call.
     if state.get("memory_trimming"):
         return
-    # Упавшая сводка не должна тормозить каждый следующий ответ: повтор по таймеру.
+    # A failed summary must not slow every subsequent response: retry on a timer.
     retry_at = state.get("memory_retry_at")
     if pending and not over and isinstance(retry_at, (int, float)) and time.time() < retry_at:
         return
     old: list[dict[str, Any]] = []
     if over:
         old = list(history[:-HISTORY_SUMMARIZE_KEEP])
-        # del, а не history[:] = ...: конкурентный append фона в хвост не теряется.
+        # del, not history[:] = ...: a concurrent background append to the tail is not lost.
         del history[:-HISTORY_SUMMARIZE_KEEP]
     old = pending + old
     if not old:
@@ -1322,11 +2261,12 @@ async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | N
             "[history] Pending memory exceeds %d messages; the oldest %d facts are dropped.",
             MAX_MEMORY_PENDING, len(old) - MAX_MEMORY_PENDING,
         )
-    # В очередь ДО сетевого вызова: рестарт посреди сводки не должен терять факты.
+    # Enqueue BEFORE the network call: a restart during summarization must not
+    # lose facts.
     state["memory_pending"] = old[-MAX_MEMORY_PENDING:]
     epoch = state.get("memory_epoch")
     digest, consumed = summary_batch(state.get("memory_summary") or "", old)
-    # Сводка идёт под локом чата: она не должна выходить за потолок сообщения.
+    # Summarization runs under the chat lock: it must not exceed the message budget.
     budget = bot.HISTORY_SUMMARY_BUDGET_SEC
     remaining = bot._msg_remaining_sec()
     if remaining is not None:
@@ -1339,13 +2279,13 @@ async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | N
         log.warning("[history] Summarization over budget/failed, keeping %d message(s) pending: %s", len(old), exc)
     finally:
         state.pop("memory_trimming", None)
-    # /reset во время сводки поднял поколение: старые факты возвращать нельзя.
+    # /reset during a summary advanced the generation: old facts must not be returned.
     if state.get("memory_epoch") != epoch:
         return
     if summary:
         state["memory_summary"] = summary
-        # Съедено только начало: остаток остаётся в pending и уходит в следующую
-        # сводку, а не пропадает вместе с очисткой (ревью 17.11.2026).
+        # Only the beginning was consumed: the remainder stays in pending and goes into the next
+        # the summary instead of disappearing with the clearing (review 17.11.2026).
         leftover = old[consumed:]
         state["memory_pending"] = leftover[-MAX_MEMORY_PENDING:] if leftover else []
         state.pop("memory_retry_at", None)
@@ -1358,7 +2298,7 @@ async def _trim_history(history: list[dict[str, Any]], state: dict[str, Any] | N
 
 
 async def _summarize_text(text: str) -> str:
-    """Обновлённая память чата: Gemini flash-lite, затем голова Munito; пусто — сбой."""
+    """Updated chat memory: Gemini flash-lite, then the Munito head; empty means failure."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
     budget = bot.HISTORY_SUMMARY_BUDGET_SEC
@@ -1367,7 +2307,8 @@ async def _summarize_text(text: str) -> str:
         budget = max(0.1, min(budget, remaining))
     deadline = time.monotonic() + budget
     gemini_model = "gemini-2.5-flash-lite"
-    # Сильная модель на сводке: слабая голова теряла факты, ради которых память и нужна.
+    # Freeze all three state aspects together: a snapshot while one of them is
+    #     being replaced loses the old history.
     if bot.client is not None:
         try:
             from google.genai import types
@@ -1380,7 +2321,7 @@ async def _summarize_text(text: str) -> str:
                         system_instruction=_SUMMARY_SYSTEM,
                         temperature=0.2,
                         max_output_tokens=800,
-                        # Без thinking: сводка — пересказ фактов, а не задача на рассуждение.
+                        # Without thinking: a summary retells facts rather than solving a reasoning task.
                         thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
                 ),
@@ -1403,7 +2344,7 @@ async def _summarize_text(text: str) -> str:
         "temperature": 0.2, "max_tokens": 800, "stream": False,
     }
     try:
-        # Имя запроса читаем через bot.: подмена тестами продолжает работать.
+        # Read the request name through bot.: test patching continues to work.
         resp = await bot._munito_request(
             "chat/completions", "POST",
             json_body={**payload, "model": model, **_munito_payload_extras()},

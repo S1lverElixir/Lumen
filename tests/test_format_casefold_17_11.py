@@ -1,9 +1,9 @@
-"""Регрессии линейных заменителей форматирования (ревью 17.11.2026)."""
+"""Regressions in linear formatting replacers (review 17.11.2026)."""
 import lumen_formatting as lf
 
 
 def test_tag_replacement_survives_case_folding_length_change():
-    # lower() меняет длину на İ/ß: индексы из копии сдвигали теги.
+    # lower() changes length for İ/ß: indices from the copy shifted tags.
     assert "İstanbul <b>bold</b> ok" in lf._md_to_html("İstanbul <b>bold</b> ok")
     assert "<code>rm -rf</code>" in lf._md_to_html("DİKKAT: <code>rm -rf</code>")
 

@@ -1,50 +1,50 @@
-"""
-lumen_model_speed.py — самокалибрующаяся оценка задержек моделей.
+"""lumen_model_speed.py — self-calibrating model latency estimation.
 
-Прод 17.09.2026: голова цепочки тормозила 96с, а роутер ставил её первой. Поэтому замер по факту + EMA, новичок с нейтрального приора. EMA только в памяти.
+Production 17.09.2026: the chain head stalled for 96s, while the router put it first. Therefore: actual measurement + EMA, with a neutral prior for newcomers. EMA is kept only in memory.
 """
 
 from __future__ import annotations
 
-# Ключ provider:model_id — из lumen_typing_pace, чтобы не плодить два форматтера.
+# Key provider:model_id, from lumen_typing_pace, to avoid creating a second
+# formatter.
 from lumen_typing_pace import speed_key
 
-# Тот же компромисс стабильности/подстройки, что в typing_pace.
+# The same stability/adaptation tradeoff as in typing_pace.
 _EMA_ALPHA = 0.3
 
-# Приор нейтрален: новичок без замеров не взлетает в голову и не падает в хвост.
+# Priority is neutral: a newcomer without measurements neither jumps to the head nor
+#     falls to the tail.
 _DEFAULT_TTF_SEC = 10.0
 _DEFAULT_TOTAL_SEC = 25.0
 
-# Границы-зажимы ДО усреднения (тот же приём, что clamp в record_observed_speed):
-# один выброс не должен утащить EMA в небеса или в пол.
+# Clamp bounds BEFORE averaging (the same technique as clamp in
+# record_observed_speed):
+# a single outlier must not drag the EMA skyward or to the floor.
 _MIN_TTF_SEC = 1.0
 _MAX_TTF_SEC = 90.0
 _MIN_TOTAL_SEC = 3.0
 _MAX_TOTAL_SEC = 120.0
 
-# Запас на разовое зависание первого куска, а не вечное ожидание.
+# Headroom for a one-time first-chunk hang, not an infinite wait.
 _TTF_ABANDON_MULT = 2.5
 
 _latency_ema: dict[str, tuple[float, float]] = {}
 
 
 def expected_ttf_sec(key: str) -> float:
-    """Ожидаемое время до первого куска — EMA или приор для новой модели."""
+    """Expected time to the first chunk — EMA or a prior for a new model."""
     ttf = _latency_ema.get(key, (_DEFAULT_TTF_SEC, _DEFAULT_TOTAL_SEC))[0]
     return max(_MIN_TTF_SEC, min(_MAX_TTF_SEC, ttf))
 
 
 def expected_total_sec(key: str) -> float:
-    """Ожидаемое полное время ответа — EMA или приор для новой модели."""
+    """Expected total response time: an EMA or a prior for a new model."""
     total = _latency_ema.get(key, (_DEFAULT_TTF_SEC, _DEFAULT_TOTAL_SEC))[1]
     return max(_MIN_TOTAL_SEC, min(_MAX_TOTAL_SEC, total))
 
 
 def record_response(key: str, *, total_sec: float, ttf_sec: float | None = None) -> None:
-    """Учесть один УСПЕШНЫЙ ответ. Без ttf_sec (нестриминговый ответ первого куска
-    не видел) ttf-EMA не трогаем: подстановка total завышала first_chunk_limit,
-    и зависшая голова держалась дольше. Неположительные замеры игнорируются."""
+    """Account for one SUCCESSFUL response. Without ttf_sec (a non-streaming response never saw a first chunk), leave ttf-EMA unchanged: substituting total inflated first_chunk_limit and kept a stuck head alive longer. Non-positive measurements are ignored."""
     if total_sec <= 0:
         return
     prev = _latency_ema.get(key)
@@ -63,20 +63,20 @@ def record_response(key: str, *, total_sec: float, ttf_sec: float | None = None)
 
 
 def first_chunk_limit_sec(key: str, floor_sec: float) -> float:
-    """min — floor от холодного старта, max — EMA_ttf × множитель от разового зависания."""
+    """min — a floor for cold start, max — EMA_ttf × a multiplier for a one-off hang."""
     return max(floor_sec, expected_ttf_sec(key) * _TTF_ABANDON_MULT)
 
 
 def reorder_route(
     route: list[tuple[str, str]], group_key=None,
 ) -> list[tuple[str, str]]:
-    """Переставить модели по задержкам внутри подряд идущего блока одного провайдера.
+    """Reorders models by latency within a contiguous block of one provider.
 
-    Склейка блоков по провайдеру уводила резервную Gemini-цепочку вперёд Groq
-    (аудит 27.10.2026); порядок блоков — часть защиты квот, поэтому не трогаем его.
-    group_key задаёт границу возможностей: сортировка не переставляет модель
-    через неё (без search grounding голова свежего маршрута не отвечает поиском,
-    ревью 17.11.2026)."""
+    Merging blocks by provider had moved the Gemini fallback chain ahead of Groq
+    (audit 27.10.2026); block order is part of quota protection, so leave it
+    unchanged. group_key defines the capability boundary: sorting must not move
+    a model across it (without search grounding, the head of the freshness route
+    cannot answer with search; review 17.11.2026)."""
     def _sort_key(item: tuple[str, str]) -> float:
         return expected_total_sec(speed_key(item[0], item[1]))
 

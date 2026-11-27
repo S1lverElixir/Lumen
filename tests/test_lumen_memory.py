@@ -1,4 +1,4 @@
-"""test_lumen_memory.py — единый лог памяти: авторы, время, медиа-ссылки, прошлые фото и ждущая просьба."""
+"""test_lumen_memory.py — memory limits: TTL, trimming, updates on every turn, and protection against loading old state."""
 from __future__ import annotations
 
 import time
@@ -14,7 +14,7 @@ def _state(**extra):
 
 
 def test_format_entry_has_author_time_and_photo_marker():
-    # Автор и время в каждой реплике: в группе иначе «кто что сказал» додумывается.
+    # Author and time on every turn: otherwise, in a group, "who said what" has to be guessed.
     entry = {
         "role": "user", "content": "кот на подоконнике", "sender": "@m1st",
         "ts": time.time(), "media": [{"file_id": "f1", "mime": "image/jpeg"}],
@@ -25,7 +25,7 @@ def test_format_entry_has_author_time_and_photo_marker():
 
 
 def test_append_user_keeps_photo_without_caption():
-    # Фото без подписи — законная реплика: раньше пустой content выбрасывался.
+    # A photo without a caption is a valid reply: empty content used to be discarded.
     state = _state()
     lumen_memory.append_user(
         state, "", sender="@m1st", sender_id=1, ts=time.time(),
@@ -43,7 +43,7 @@ def test_media_ref_stores_file_id_not_bytes():
 
 
 def test_recent_media_window_30_and_max_two_photos():
-    # Окно 30 сообщений и максимум 2 фото: иначе в каждый запрос уезжала галерея.
+    # A 30-message window and at most 2 photos: otherwise a gallery went into every request.
     now = time.time()
     history = []
     for i in range(40):
@@ -77,8 +77,8 @@ def test_last_media_for_user_prefers_own_in_group_and_any_in_private():
 
 
 def test_pending_instruction_finds_question_before_photo():
-    # «Сейчас кину фотку, что мне идёт?» → фото без подписи отвечает на просьбу,
-    # а не получает служебное «опиши подробно».
+    # "I'll send a photo now, what suits me?" → a photo without a caption answers the request,
+    # instead of receiving the service message “describe in detail”.
     now = time.time()
     state = _state(history=[
         {"role": "user", "content": "сейчас кину фотку, что мне больше идёт?",
@@ -86,7 +86,7 @@ def test_pending_instruction_finds_question_before_photo():
         {"role": "assistant", "content": "Давай."},
     ])
     assert lumen_memory.pending_instruction(state, 1, now=now) == "сейчас кину фотку, что мне больше идёт?"
-    # Старая просьба и обычная болтовня не тянутся.
+    # An old request and ordinary small talk are not pulled in.
     stale = _state(history=[{
         "role": "user", "content": "кину фотку, что мне идёт?", "sender": "@m1st",
         "sender_id": 1, "ts": now - 3600,
@@ -101,7 +101,7 @@ def test_pending_instruction_finds_question_before_photo():
 
 
 def test_system_prompt_with_memory_labels_summary_as_data():
-    # Сводка в системном промпте должна называться данными, а не новой просьбой.
+    # A summary in the system prompt must be labeled as data, not a new request.
     prompt = lumen_memory.system_prompt_with_memory(
         "BASE", {"memory_summary": "Пользователь любит котов."},
     )
@@ -112,15 +112,15 @@ def test_system_prompt_with_memory_labels_summary_as_data():
 
 
 def test_summary_input_keeps_previous_memory_when_body_is_long():
-    # Прошлая сводка не должна выпадать при обрезке километрового хвоста.
+    # The previous summary must not fall out when a miles-long tail is trimmed.
     entries = [{"role": "user", "content": "x" * 100} for _ in range(200)]
     digest = lumen_memory.summary_input("PREVIOUS FACT", entries, max_chars=500)
     assert digest.startswith("Previous memory:\nPREVIOUS FACT")
     assert "Messages leaving the short-term window:" in digest
 
 def test_photo_context_limit_rises_on_an_explicit_media_reference():
-    # Аудит 16.11.2026: эталон Claude видит все изображения переписки; у нас цена —
-    # токены и скачивание, поэтому база 2, а явная ссылка на фото разрешает больше.
+    # 16.11.2026 audit: the Claude reference sees all images in the conversation; our cost is
+    # tokens and downloads, so the base is 2, while an explicit photo link allows more.
     assert lumen_memory.photo_context_limit("привет, как дела") == lumen_memory.PHOTO_CONTEXT_MAX
     assert lumen_memory.photo_context_limit("посмотри на те фото") == max(
         lumen_memory.PHOTO_CONTEXT_MAX, lumen_memory.PHOTO_CONTEXT_MAX_REFERENCED)
@@ -137,8 +137,8 @@ def test_env_positive_parses_and_falls_back(monkeypatch):
 
 
 def test_past_photos_reach_gemini_contents_up_to_the_limit(monkeypatch):
-    # Критика полноты 16.11.2026: число фото проверялось только по константам.
-    # Здесь считаем реальные inline-части в собранном ходе.
+    # Completeness critique 16.11.2026: the photo count was checked only against constants.
+    # Here we count the actual inline parts in the assembled turn.
     import asyncio
     import bot
     import lumen_routes

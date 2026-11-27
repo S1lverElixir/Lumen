@@ -1,9 +1,9 @@
-"""Сетка усилия: совпадает ли автовыбор с тем, что выбрал бы человек.
+"""Effort grid: does automatic selection match what a human would choose.
 
-Метки ручные (детерминированная линейка, как search_trigger_corpus), судья не нужен:
-здесь проверяется правило, а не вкус модели. Порог успеха — 80 % совпадений и ноль
-промахов «надо думать дольше, а выбрали low».
-Запуск:  python eval/effort_grid.py
+Labels are manual (a deterministic ruler, like search_trigger_corpus); no judge is needed:
+this checks the rule, not the model's taste. The success threshold is 80% agreement and zero
+misses of “needs more thinking, but low was selected.”
+Run:  python eval/effort_grid.py
 """
 from __future__ import annotations
 
@@ -16,32 +16,32 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 
 from lumen_router_config import pick_reasoning_effort  # noqa: E402
 
-# (формулировка, ожидаемый уровень,=is_heavy,=needs_freshness)
+# (wording, expected level,=is_heavy,=needs_freshness)
 CASES: list[tuple[str, str, bool, bool]] = [
-    # Болтовня и короткие реплики: скорость важнее глубины.
+    # Small talk and short replies: speed matters more than depth.
     ("привет", "low", False, False),
     ("спасибо большое!", "low", False, False),
     ("ну как тебя вообще", "low", False, False),
     ("ок", "low", False, False),
     ("ага", "low", False, False),
-    # Вопросы с вопросом или числом: средняя граница.
+    # Questions containing a question or number: the middle boundary.
     ("кто такие викинги", "medium", False, False),
     ("сколько будет 27*43", "medium", False, False),
     ("что такое контекстное окно", "medium", False, False),
     ("почему небо голубое", "medium", False, False),
     ("переведи на английский «добрый вечер»", "medium", False, False),
-    # Свежесть: средний уровень, глубокого reasoning не требуется.
+    # Freshness: medium level; deep reasoning is not required.
     ("кто сейчас главный тренер сборной", "medium", False, True),
     ("какая ключевая ставка ЦБ России", "medium", False, True),
     ("погода в Минске на завтра", "medium", False, True),
     ("сколько стоит билет Минск Москва", "medium", False, True),
-    # Тяжёлый запрос: код, статья, разбор.
+    # Heavy request: code, an article, or analysis.
     ("напиши функцию парсера на python", "high", True, False),
     ("исправь баг в этом коде", "high", True, False),
     ("напиши эссе про индустриализацию", "high", True, False),
     ("сравни два города по четырём параметрам", "high", True, False),
     ("разбери подробно этот договор", "high", True, False),
-    # Дальний горизонт: архитектура, доказательство, план на шаги.
+    # Long horizon: architecture, proof, or a step-by-step plan.
     ("спроектируй архитектуру бота и докажи выбор", "xhigh", False, False),
     ("составь план тренировок на четыре недели по шагам", "xhigh", False, False),
     ("докажи, что корень из двух иррационален", "xhigh", False, False),
@@ -49,17 +49,17 @@ CASES: list[tuple[str, str, bool, bool]] = [
     ("расскажи подробно про каждый этап и почему именно так, "
      "затем сравни все варианты и дай итог, а потом ещё раз проверь расчёт?"
      "? и не забудь про края?" + "и ещё много текста " * 60, "xhigh", False, False),
-    # Явные просьбы про длину и глубину.
+    # Explicit requests about length and depth.
     ("коротко: сколько будет 27*43", "low", False, False),
     ("ответь одним словом: столица Австралии — Канберра?", "low", False, False),
     ("кратко, без пояснений: что такое JWT", "low", False, False),
     ("подумай как следует и перепроверь: улитка в колодце 30 метров", "high", False, False),
-    # Человек ловит модель на ошибке и просит перепроверить: ступень вверх
-    # (замер сетки 12.11.2026 давал medium, пока метка не была снята с
-    # прежнего плоского правила «короче 40 знаков»).
+    # The person catches the model making a mistake and asks for a recheck: one level up
+    # (the 12.11.2026 grid measurement gave medium until the label was removed from
+    # the old flat rule “fewer than 40 characters”).
     ("реши ещё раз, ты не прав, перепроверь расчёт", "high", False, False),
     ("внимательно посчитай, сколько стоит 3 билета по 1290 со скидкой 15%", "high", False, False),
-    # Многоязычные: тот же смысл по-другому.
+    # Multilingual: the same meaning phrased differently.
     ("hi there", "low", False, False),
     ("why is the sky blue", "medium", False, False),
     ("write a python function that parses csv", "high", True, False),
@@ -76,8 +76,8 @@ CASES: list[tuple[str, str, bool, bool]] = [
     ("объясни как ребёнку, что такое рефакторинг кода", "high", True, False),
     ("план на неделю по шагам для запуска сайта", "xhigh", False, False),
     ("оптимизируй этот алгоритм и доказательство приведи", "xhigh", False, False),
-    # Блоклеры адверсариального ревью 12.11.2026: обычный текст не имеет права
-    # уезжать на самый дорогой уровень, а короткий вопрос — на самый дешёвый.
+    # Adversarial review blockers 12.11.2026: ordinary text must not go to the most
+    # expensive level, and a short question must not go to the cheapest.
     ("Планирую отпуск на месяц", "low", False, False),
     ("Планета Венера, месяц за месяцем", "medium", False, False),
     ("how does a rapid transit system work", "medium", False, False),
@@ -113,7 +113,7 @@ def main() -> int:
         print(f"  недо-усилие: {text!r}")
     ok = (total - len(bad)) / total >= 0.8 and not under
     print("порог: >=80 % и ноль недо-усилия ->", "ХОРОШО" if ok else "ПЛОХО")
-    # Ненулевой код: иначе CI/обёртка не видят «ПЛОХО» (ревью 17.11.2026).
+    # Nonzero exit code: otherwise CI/the wrapper cannot see “BAD” (review 17.11.2026).
     return 0 if ok else 1
 
 

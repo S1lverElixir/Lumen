@@ -1,37 +1,37 @@
-# Матрица паритета с Claude (состояние 16.11.2026)
+# Claude parity matrix (state as of 16.11.2026)
 
-Каждая строка: поверхность, что делает Claude (по `docs/CLAUDE_REFERENCE.md`, где каждое
-утверждение помечено источником), что делает Lumen, статус. Статусы: `паритет`,
-`принятое отличие` (осознанно, с причиной), `разрыв` (не сделано), `решение владельца`.
+Each row covers a surface, what Claude does (according to `docs/CLAUDE_REFERENCE.md`,
+where every claim is marked with its source), what Lumen does, and the status. Statuses:
+`parity`, `accepted difference` (intentional, with a reason), `gap` (not implemented),
+and `owner decision`.
 
-| Поверхность | Claude | Lumen | Статус |
+| Surface | Claude | Lumen | Status |
 |---|---|---|---|
-| Решение «искать» | По классу вопроса (свежие события, цены, изменившиеся факты, просьба), порог управляется промптом | Регекс + зона 2 «решает модель» + маркер `[[SEARCH]]`; корпус 35/35 искать, 0/20 ложных, зона 2 — 0 лишних поисков на 20 (`eval/RESULTS.md`, 16.11) | паритет по факту, архитектура отличается |
-| Число поисков | Простой факт 1-3, сравнение 10+ | medium 2, high 2, xhigh 3, фаза 45 с | принятое отличие: 10+ не влезает в бюджет 90 с и бесплатные лимиты |
-| Запросы | Пишет модель, уточняет после выдачи | То же (`lumen_agent`), уточнение 11/12 (замер 12.11) | паритет |
-| Чтение страниц | Полный текст страницы и PDF, обрезка по токенам, провенанс URL | `read_page` через защищённый `/read` (публичный https, SSRF-проверки, без редиректов, текст, 2 МБ), провенанс как у Claude | паритет в коде, живой прогон — после деплоя прокси |
-| Цитаты | Внутри текста, привязаны к утверждению, `cited_text` ≤150 символов | Блок «Источники» в конце, 1-3 ссылки; только реально виденные URL. Инлайн-цитаты пробовались 16.11: 48/50 и 46/50 против 50/50 — откачены | разрыв по форме; замер записан в `eval/RESULTS.md` |
-| Честность без поиска | Не утверждает, что искал, без поиска | То же; зонд «врёт ли про источники» — 0/10 (13.11) | паритет |
-| Усилие (effort) | пять уровней, дефолт high (кроме Opus 5.5/Haiku 5.5), влияет на вызовы инструментов, не на длину ответа | four уровня (low..xhigh), дефолт medium для содержательного, поиски привязаны к уровню; длина — промптом | принятое отличие: `max` не заводим, xhigh уже опустошал вывод |
-| Размышление на экране | Индикатор с таймером и свёрнутый блок | «✻ Думал N с», свёрнутый блок активности | паритет; точная строка Claude документами не подтверждена |
-| Остановка ответа | Stop: частичный текст остаётся, чат рабочий | `/stop` и кнопка (off by default): останавливает с первой секунды, частичный текст в истории, «продолжи» работает | паритет по смыслу; по умолчанию кнопка выключена, владелец включил её на Space 16.11.2026; живого смоука нет |
-| Плавность стрима | Клиентский рендер | Правки Telegram: тик 0,55 с, слот 0,3 с (личка), 1,8 с (группа); короткий ответ 1-2 кадра — предел транспорта | принятое отличие: физика Telegram |
-| Картинки на входе | Видит все изображения переписки | 2 последних фото, 4 при явной ссылке; каждый лишний — токены и скачивание | принятое отличие по цене |
-| Генерация картинок | Нет нативной генерации | `/draw`: Cloudflare klein (генерация и правки) → Pollinations; бюджет в Neuron, документ при >10 МБ | эталон ChatGPT, не Claude |
-| Системный промпт | XML-теги, без разделов поиска/языка/эмодзи | Плоский английский блок с явными разделами поиска, языка и запрета эмодзи; 50/50 на рабочем корпусе (16.11, первый токен 4.4 с) | принятое отличие; переписывание только с замером |
-| Тон и формат | Проза по умолчанию, минимум форматирования, списки 1-2 предложения, без филлеров | То же + строже эмодзи (как у 4.5-4.8), «ты» по решению 25.09 | паритет по духу |
-| Языки | Правило языка в промпте 2026 нет | 25 паков, ответ на языке вопроса (25/25 в замере 12.11) | паритет по факту |
-| Инструменты | web_search, web_fetch, code execution, memory, artifacts | web_search + read_page; кода и артефактов нет | принятое отличие: Telegram и бесплатный тариф |
-| Лимиты и отказы | Квоты провайдера, честные ошибки | Производные лимиты, честные отказы, суточные потолки в `/stats` | паритет по принципу |
-| История и память | Сжатие контекста на сервере | Лог 200 сообщений, сводка, память чата; запись защищена от потери при сбоях | принятое отличие: хранение своё |
+| Search decision | By question class (current events, prices, changed facts, requests); threshold controlled by the prompt | Regex + zone 2, where the model decides + `[[SEARCH]]` marker; corpus: 35/35 search, 0/20 false positives, zone 2: 0 unnecessary searches out of 20 (`eval/RESULTS.md`, 16.11) | parity in results; architecture differs |
+| Number of searches | Simple fact: 1-3; comparison: 10+ | medium 2, high 2, xhigh 3, phase 45 s | accepted difference: 10+ does not fit the 90 s budget and free-tier limits |
+| Queries | Written by the model; refined after results | Same (`lumen_agent`); refinement 11/12 (measurement, 12.11) | parity |
+| Page reading | Full page text and PDF, truncated by tokens, URL provenance | `read_page` through the protected `/read` route (public https, SSRF checks, no redirects, text, 2 MB), same provenance as Claude | parity in code; live run after proxy deployment |
+| Citations | Inline, tied to claims, `cited_text` ≤150 characters | “Sources” block at the end, 1-3 links; only URLs actually seen. Inline citations were tried on 16.11: 48/50 and 46/50 versus 50/50 — reverted | gap in form; measurement recorded in `eval/RESULTS.md` |
+| Honesty without search | Does not claim it searched when it did not | Same; “does it lie about sources?” probe: 0/10 (13.11) | parity |
+| Effort | Five levels, default high (except Opus 5.5/Haiku 5.5); affects tool calls, not response length | Four levels (low..xhigh), default medium for substantive requests; searches tied to the level; length controlled by the prompt | accepted difference: `max` is not introduced; xhigh already depleted output |
+| Visible thinking | Indicator with a timer and an expandable block | “✻ Thought for N s,” expandable activity block | parity; the exact Claude wording is not documented |
+| Response interruption | Stop: partial text remains and the chat stays usable | `/stop` and the Stop control, always enabled in production: stops from the first second, partial text is stored in history, “continue” works | parity in meaning; live failover still needs the owner's smoke test |
+| Stream smoothness | Client-side rendering | Telegram edits: tick 0.55 s, slot 0.3 s (private chat), 1.8 s (group); a short response takes 1-2 frames — a transport limit | accepted difference: Telegram constraints |
+| Input images | Sees all images in the conversation | 2 latest photos, 4 when explicitly referenced; every extra image costs tokens and bandwidth | accepted difference based on cost |
+| Image generation | No native generation | `/draw`: Cloudflare klein (generation and edits) → Pollinations; budget in Neuron, document above 10 MB | ChatGPT is the reference, not Claude |
+| System prompt | XML tags, with no sections on search, language, or emojis | Flat English block with explicit sections on search, language, and the emoji ban; 50/50 on the working corpus (16.11, first token 4.4 s) | accepted difference; rewrite only with measurements |
+| Tone and format | Prose by default, minimal formatting, lists of 1-2 sentences, no filler | Same + stricter emoji policy (like 4.5-4.8), “you” by decision on 25.09 | parity in spirit |
+| Languages | No language rule in the 2026 prompt | 25 packs; responds in the question's language (25/25 in the 12.11 measurement) | parity in results |
+| Tools | web_search, web_fetch, code execution, memory, artifacts | web_search + read_page; no code execution or artifacts | accepted difference: Telegram and the free tier |
+| Limits and refusals | Provider quotas, honest errors | Derived limits, honest refusals, daily caps in `/stats` | parity in principle |
+| History and memory | Server-side context compression | 200-message log, summary, chat memory; writes protected against loss during failures | accepted difference: custom storage |
 
-## Разрывы, которые остаются открытыми
+## Gaps that remain open
 
-1. Цитаты внутри текста: решение о форме и замер персоны.
-2. Цикл поиска на Gemini-резерве: код готов (`lumen_agent_gemini.py`, выключен по умолчанию) на 16.11.2026; нужен живой прогон на резервной голове.
-3. Переписывание структуры промпта: не начато, только с живыми замерами до/после.
-4. Глубокое сравнение (10+ поисков) не влезает в бюджет сообщения: нужно пересчитать
-   бюджеты фаз и, возможно, поднять `MESSAGE_TOTAL_BUDGET_SEC` вместе с релеем.
-5. Кнопка остановки: готова, выключена по умолчанию до живого смоука.
-6. Живые проверки после деплоя: `/read`, `/stop`, два поиска в логах, ручной чек-лист
-   стрима.
+1. Inline citations: decision on the form and persona measurement.
+2. Search loop on the Gemini reserve: code is ready (`lumen_agent_gemini.py`, off by default) as of 16.11.2026; a live run on the reserve head is needed.
+3. Prompt structure rewrite: not started; only with live before/after measurements.
+4. Deep research (10+ searches) does not fit the message budget: phase budgets need recalculation,
+   and `MESSAGE_TOTAL_BUDGET_SEC` may need to be raised together with the relay.
+5. Live Stop-control smoke test: the control is enabled in production; verify `/stop`, partial-text retention and continuation after deployment.
+6. Live post-deployment checks: `/read`, `/stop`, two searches in the logs, and the manual streaming checklist.

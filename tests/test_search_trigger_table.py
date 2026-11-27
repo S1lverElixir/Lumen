@@ -1,27 +1,27 @@
-"""
-test_search_trigger_table.py — таблица «искал бы Claude»: когда бот обязан пойти в веб.
+"""test_search_trigger_table.py — the “would Claude search?” table: when the bot must use the web.
 
-Что защищают: два класса регрессий, замеренных 11.11.2026. (1) Пропуск: «вышёл ли
-финал», «какая ключевая ставка», «when does the season finale come out» не запускали
-поиск вовсе — модель отвечала по памяти и угадывала. (2) Ложное срабатывание:
-«помнишь, мы вчера обсуждали ремонт?» считалось свежим вопросом из-за слова
-«вчера», поиск гас зря, а ответ получал пометку «без интернета». (3) Пропуск форм
-языка: скриншоты группы 11.11.2026 — «когда вышла Fable 5.2» и «когда вышла модель
-claude Fable 5.2» без поиска, потому что перечень форм держался на словах-триггерах.
-Правила теперь структурные (корень глагола, имя+версия, класс события), таблица
-проверяет и обратную сторону: математика, рецепты и вопросы про самого себя
-не должны гнать в веб.
+It protects against three regressions measured on 11.11.2026. (1) Missed searches:
+“has the finale come out,” “what is the key rate,” and “when does the season finale
+come out” did not trigger a search at all — the model answered from memory and
+guessed. (2) False positives: “remember, we discussed repairs yesterday?” was treated
+as a fresh question because of “yesterday,” so an unnecessary search ran and the
+answer was marked “without internet.” (3) Missed language forms: group screenshots
+from 11.11.2026 showed “when did Fable 5.2 come out” and “when did the claude Fable 5.2
+model come out” without a search because the form list relied on trigger words.
+The rules are now structural (verb root, name+version, event class), and the table
+also checks the reverse: math, recipes, and questions about the assistant itself must
+not trigger a web search.
 
-Тест детерминированный: только классификатор, без сети.
-Запуск:
+The test is deterministic: classifier only, no network.
+Run:
     pytest tests/test_search_trigger_table.py -v
 """
 import pytest
 
 from lumen_message_core import _wants_web_search
 
-# Формулировки на языках, которые реально видит пользователь: таблица обязана
-# работать не только для ru/en (внешний аудит 28.10.2026 ловил именно это).
+# Wording in languages users actually see: the table must
+# work not only for ru/en (an external audit on 28.10.2026 caught exactly this).
 SEARCHES = [
     "кто сейчас возглавляет Центральный банк России",
     "какая ключевая ставка в россии",
@@ -46,8 +46,8 @@ SEARCHES = [
     "prix de l'or aujourd'hui",
     "noticias de hoy en España",
     "какі навіны ў Беларусі сёння",
-    # Скриншоты группы 11.11.2026: «когда вышла» не было в перечне форм, бот
-    # ответил без поиска. Теперь детект структурный (корень, версия, класс вопроса).
+    # Group screenshots 11.11.2026: "when was it released" was not in the list of forms, so the bot
+    # answered without searching. Detection is now structural (root, version, question class).
     "когда вышла Fable 5.2",
     "когда вышла модель claude Fable 5.2",
     "когда вышел iPhone 17",
@@ -65,8 +65,8 @@ SEARCHES = [
     "что нового в обновлении 3.2",
     "правда ли, что вышел S26",
     "существует ли модель Fable 6",
-    # Корпус eval/search_trigger_corpus.py 11.11.2026: эти семь формулировок
-    # структурные правила агента всё ещё пропускали (промах 7 из 35).
+    # eval/search_trigger_corpus.py corpus 11.11.2026: these seven phrasings
+    # exposed cases the agent's structural rules still missed (7 misses out of 35).
     "кто выиграл Лигу наций",
     "кто главный в NVIDIA",
     "кто канцлер Германии",
@@ -91,11 +91,11 @@ NO_SEARCH = [
     "сколько будет 245 на 13",
     "составь план тренировки на неделю",
     "сравни python и java по синтаксису",
-    # Ссылка на прошлый разговор — вопрос к памяти чата, а не к вебу (11.11.2026).
+    # A link to a previous conversation is a question for chat memory, not the web (11.11.2026).
     "помнишь, мы вчера обсуждали ремонт?",
     "как мы раньше решили, какой город выбираем?",
     "do you remember what we talked about yesterday",
-    # Обязательные ложные срабатывания структурных правил (требование владельца 11.11.2026).
+    # Mandatory false positives from structural rules (owner requirement 11.11.2026).
     "объясни, что такое митохондрия",
     "сколько будет 45*17",
     "напиши стих про осень",
@@ -123,12 +123,12 @@ def test_knowledge_and_memory_questions_do_not_want_web_search(text):
 
 
 def test_empty_text_never_searches():
-    # Пустой текст не должен гнать в поиск и тратить бюджет сообщения.
+    # Empty text must not trigger search and consume the message budget.
     assert _wants_web_search("") is False
 
 def test_followup_question_searches_only_when_there_is_a_topic():
-    # «а кто был до неё» само по себе искать нечего: без прошлого вопроса бот
-    # не гоняет поиск в пустоту, с прошлым — ищет по теме (замер 11.11.2026).
+    # "and who came before her" has nothing to search for on its own: without a previous question, the bot
+    # does not run a pointless search; with history, it searches by topic (measurement 11.11.2026).
     follow_up = "а кто был до неё"
     assert _wants_web_search(follow_up) is False
     assert _wants_web_search(follow_up, previous="кто сейчас возглавляет Центральный банк России") is True

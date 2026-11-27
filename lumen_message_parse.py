@@ -1,7 +1,7 @@
-"""
-lumen_message_parse.py — разбор входящих сообщений: ссылки, триггерные фразы
-/draw и /tts без слэша, маркеры реплая, отсылки к медиа, пометка "файла нет".
-Чистые функции и конфиги, без зависимости от рантайма бота.
+"""lumen_message_parse.py parses incoming messages: links, trigger phrases
+/draw and /tts without a slash, reply markers, media references, and the
+\"no file\" marker. Pure functions and configuration, with no dependency on the
+bot runtime.
 """
 
 from __future__ import annotations
@@ -16,14 +16,13 @@ _TIKTOK_RE = re.compile(r"(?:^|\.)tiktok\.com$")
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
 
 def extract_url(text: str) -> str | None:
-    """Первая ссылка в тексте. Вторая и далее игнорируются: TikTok/YouTube-пути
-    берут одну ссылку (см. match-обработку в message_core)."""
+    """The first link in the text. The second and later links are ignored: TikTok/YouTube paths take one link (see match handling in message_core)."""
     m = re.search(r"https?://[^\s]+", text)
     if not m:
          return None
     url = m.group(0)
-    # Закрывающую скобку срезаем только при дисбалансе: иначе адрес
-    # "…/Doom_(1993_video_game)" терял скобку и не читался (внешний аудит 16.11.2026).
+    # Trim the closing bracket only when unbalanced; otherwise the address
+    # "…/Doom_(1993_video_game)" lost the parenthesis and could not be read (external audit 16.11.2026).
     while url and url[-1] in ".,!?;:>'\"])":
         if url[-1] == ")" and url.count("(") >= url.count(")"):
             break
@@ -44,7 +43,7 @@ def is_youtube(url: str) -> bool:
     except Exception:
          return False
 
-# Триггеры только startswith: иначе "как нарисовать..." ложно запустит генерацию.
+# Triggers use startswith only: otherwise "how to draw..." would falsely start generation.
 DRAW_TRIGGER_PREFIXES = [
     "сгенерируй картинку", "сгенерируй мне картинку", "сгенерируй изображение",
     "сгенерируй мне изображение", "создай картинку", "создай мне картинку",
@@ -54,29 +53,29 @@ DRAW_TRIGGER_PREFIXES = [
     "ты можешь нарисовать", "можешь нарисовать мне", "сможешь нарисовать", "можете нарисовать",
     "не мог бы ты нарисовать", "мог бы ты нарисовать", "can you draw",
     "could you draw", "please draw", "i want you to draw",
-    # EN: /start обещает "draw a cat" — чиним (найдено внешним аудитом: был только русский).
+    # EN: /start promises 'draw a cat'; fix it (found by an external audit: only Russian had it).
     "generate an image", "generate me an image", "create an image", "draw a picture",
     "draw me", "draw an", "draw a", "paint me", "paint", "sketch",
 ]
-# Глаголы правки картинки: срабатывают только когда есть референс — вложение,
-# реплай на фото или (для сильных глаголов) свежее фото автора. Без картинки
-# текст уходит обычной модели, поэтому "измени мир" не рисует ничего.
+# Image-edit verbs: trigger only when a reference exists — an attachment,
+# a reply to a photo or (for strong verbs) a recent photo by the author. Without an image
+# the text goes to an ordinary model, so 'change the world' draws nothing.
 EDIT_TRIGGER_PREFIXES = [
     "отредактируй", "переделай", "перерисуй", "измени", "поменяй", "замени",
     "дорисуй", "подправь", "подкорректируй", "убери", "добавь", "сделай",
     "edit", "modify", "change", "replace", "redraw", "retouch",
     "remove", "add", "make the", "make it", "make them", "turn the", "swap the",
 ]
-# Слабые глаголы ("сделай/убери/добавь") осмысленны только при явной отсылке
-# к картинке (реплай/вложение): иначе "сделай мне кофе" стало бы правкой.
+# Weak verbs ("make/remove/add") are meaningful only with an explicit reference
+# to a picture (reply/attachment): otherwise "make me coffee" would become an edit.
 EDIT_TRIGGER_IMPLICIT = [
     "отредактируй", "переделай", "перерисуй", "измени", "поменяй", "замени",
     "дорисуй", "подправь", "подкорректируй",
     "edit", "modify", "change", "replace", "redraw", "retouch",
 ]
-# Повтор генерации: «ещё вариант» после картинки повторяет последнее описание
-# (свежесть проверяет _fresh_generation_ref). Без свежей генерации — обычный текст,
-# поэтому «повтори» здесь нет: оно слишком часто значит «повтори ответ».
+# Regeneration: "another version" after an image repeats the most recent description
+# (freshness is checked by _fresh_generation_ref). Without a fresh generation, this is ordinary text,
+# so “repeat” is not included here: it too often means “repeat the answer.”
 REPEAT_TRIGGER_PREFIXES = [
     "ещё вариант", "еще вариант", "ещё варианты", "еще варианты", "другой вариант",
     "другие варианты", "новый вариант", "ещё картинку", "еще картинку",
@@ -84,13 +83,13 @@ REPEAT_TRIGGER_PREFIXES = [
     "другую картинку",
     "another version", "another variant", "regenerate",
 ]
-# Возврат к предыдущей версии: фото уже лежит у Telegram, провайдер не нужен
-# и дневной слот не тратится (паритет с Undo/Redo в ChatGPT, 10.11.2026).
+# Reverting to the previous version: the photo is already at Telegram; no provider is needed
+# and the daily slot is not consumed (parity with Undo/Redo in ChatGPT, 10.11.2026).
 REVERT_TRIGGER_PREFIXES = [
     "верни предыдущий вариант", "верни прошлый вариант", "верни предыдущую картинку",
     "верни прошлую картинку", "верни предыдущее изображение", "предыдущий вариант",
-    # Разрешение по пустому хвосту («14.2») позволяет вернуть и короткими формами:
-    # раньше «верни предыдущий» и «верни картинку» молча уходили текстовой модели.
+    # A resolution on an empty tail ("14.2") also allows short forms:
+    # previously "return the previous one" and "return the picture" silently went to the text model.
     "верни предыдущий", "верни прошлый", "верни картинку", "верни фото",
     "верни изображение", "верни как было", "верни то", "previous version",
     "прошлый вариант", "отмени правку", "отмени последнее изменение",
@@ -100,8 +99,8 @@ REDO_TRIGGER_PREFIXES = [
     "верни обратно", "верни последнюю версию", "верни как стало", "повтори правку",
     "redo",
 ]
-# «Нарисуй 2 варианта» как в ChatGPT: число вариантов из промпта, 2-4.
-# Ищем только рядом со словом варианта/картинки/изображения, а не любое число.
+# "Draw 2 options" as in ChatGPT: the option count comes from the prompt, 2-4.
+# Search only near the word option/picture/image, not for any number.
 _VARIANTS_RE = re.compile(
     r"(?<!\d)([2-4])\s*(?:вариант\w*|картинк\w*|изображени\w*|верси\w*|versions?|variants?)(?!\w)",
     re.IGNORECASE,
@@ -110,8 +109,8 @@ _VARIANTS_WORDS: dict[str, int] = {"два": 2, "две": 2, "три": 3, "че�
 
 
 def _split_image_variants(text: str) -> tuple[int, str]:
-    """(сколько вариантов, текст без фразы количества): «2 варианта кота» ->
-    (2, «кота»), чтобы число не уезжало модели и в повтор («ещё вариант»)."""
+    """(number of options, text without the quantity phrase): “2 cat options” ->
+    (2, “cat”), so the number does not reach the model and the repeat (“another option”)."""
     low = (text or "").lower()
     m = _VARIANTS_RE.search(low)
     if m:
@@ -135,26 +134,26 @@ _VARIANTS_WORD_RE = re.compile(
 
 
 def _strip_variants_phrase(text: str) -> str:
-    """Убирает только фразу про варианты: «3 versions» и «3 изображения» в
-    описании резолвера — часть сюжета, их не трогаем (проход №5, 17.11.2026)."""
+    """Removes only the phrase about options: \"3 versions\" and \"3 images\" in the resolver description are part of the story, so they are left alone (pass 5, 17.11.2026)."""
     src = text or ""
     cleaned = _VARIANTS_STRIP_RE.sub(" ", src)
     cleaned = _VARIANTS_WORD_RE.sub(" ", cleaned)
     if cleaned == src:
-        # Ничего не вырезали — возвращаем текст байт-в-байт, точка на конце цела.
+        # Nothing was removed — return the text byte for byte, including the final period.
         return src
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return re.sub(r"(?:,\s*)+", ", ", cleaned).strip(" ,")
     return re.sub(r"\s{2,}", " ", cleaned).strip(" ,.-")
 
 
-# ── Wake-word в группах: «Люмен, ...» вместо @упоминания ──
-# Правила против ложных срабатываний (ревью 18.11.2026):
-#  - только начало сообщения (после коротких обращений «эй/слушай/окей»);
-#  - обычная форма — имя + пунктуация («,» «:» «—» «!» «?» «.» + пробел);
-#  - форма через пробел — эвристика: блокируем третье лицо («умеет», «хороший»);
-#  - точка — делимитер только перед пробелом/концом: «lumen.example.com» не имя;
-#  - имя внутри слова, в середине фразы, @упоминание и URL не трогаем.
+# Wake word in groups: "Lumen, ..." instead of an @mention
+# Rules against false positives (review 18.11.2026):
+# - only at the start of a message (after short address words like
+# "hey"/"listen"/"okay");
+#   - regular form: name + punctuation ("," ":" "—" "!" "?" "." + a space);
+#  - the spaced form is a heuristic: block third-person forms ("can," "good");
+# - a dot is a delimiter only before a space or the end: 'lumen.example.com' is not a name;
+#   - do not touch a name inside a word, mid-phrase, an @mention, or a URL.
 _WAKE_PARTICLE_RE = re.compile(
     r"^(?:эй|слушай|окей|okay|hey)\s*[,.!—–-]?\s+", re.IGNORECASE,
 )
@@ -164,7 +163,7 @@ _WAKE_WEAK_PARTICLE_RE = re.compile(
 _WAKE_COPULA_RE = re.compile(
     r"^(?:это|is|является|был|была|было|были)(?![А-Яа-яA-Za-z])", re.IGNORECASE,
 )
-# Третье лицо в форме через пробел: «люмен умеет…», «люмен хороший…».
+# Third person in spaced form: "Lumen can...", "Lumen is good...".
 _WAKE_THIRD_PERSON_RE = re.compile(
     r"^(?:умеет|может|хорош\w*|лучш\w*|работает|отвечает|жив[её]т|приш[её]л|"
     r"упал\w*|стоит|любит|знает|понимает|принадлежит|не\s+бот|бот\b|"
@@ -174,7 +173,7 @@ _WAKE_THIRD_PERSON_RE = re.compile(
 
 
 def strip_group_wake_word(text: str, words: tuple[str, ...] = ("люмен", "lumen")) -> tuple[bool, str]:
-    """(сработал ли wake-word, текст без него)."""
+    """(whether the wake word matched, text without it)."""
     src = (text or "").strip()
     if not src or src.startswith("/"):
         return False, text
@@ -196,13 +195,13 @@ def strip_group_wake_word(text: str, words: tuple[str, ...] = ("люмен", "lu
         after = after.lstrip().lstrip("\"'»”)")
         punct_delim = False
         if after[:1] in ("—", "–", "-"):
-            # Тире — обращение, но «Люмен — это бот» остаётся болтовнёй: копулу проверяем.
+            # An em dash indicates address, but “Lumen is a bot” remains small talk: check the copula.
             after = after[1:].lstrip()
         elif after[:1] in (",", ":", ";", "!", "?"):
             after = after[1:].lstrip()
             punct_delim = True
         elif after[:1] == ".":
-            # «lumen.example.com» — не обращение; «Люмен. Привет» — обращение.
+            # "lumen.example.com" is not an address; "Lumen. Hello" is an address.
             nxt = after[1:2]
             if nxt and not nxt.isspace():
                 continue
@@ -213,7 +212,7 @@ def strip_group_wake_word(text: str, words: tuple[str, ...] = ("люмен", "lu
         if not after:
             continue
         if not punct_delim:
-            # Форма через пробел: снимаем очевидное третье лицо и связку.
+            # Space-separated form: remove the obvious third person and the copula.
             if _WAKE_COPULA_RE.match(after) or _WAKE_THIRD_PERSON_RE.match(after):
                 return False, text
         after = re.sub(r"^[^\w/]+", "", after, flags=re.UNICODE)
@@ -226,28 +225,28 @@ def strip_group_wake_word(text: str, words: tuple[str, ...] = ("люмен", "lu
 
 
 def _detect_image_variants(text: str) -> int:
-    """Сколько вариантов просили: 1 — обычная генерация, 2-4 — несколько."""
+    """How many variants were requested: 1 — regular generation, 2-4 — multiple."""
     return _split_image_variants(text)[0]
 
 
 
-# ── Паритет с ChatGPT (10.11.2026): он рисует по любому запросу, где виден
-# смысл «сделай картинку», а не по первому слову. Человек пишет «ну нарисуй
-# кота», «кот в шляпе, нарисуй», «хочу картинку с котом», «нужен логотип
-# кофейни», «make me an image of a cat». При этом вопрос «как нарисовать кота»
-# и служебные глаголы («покажи картинку», «сохрани», «переведи») картинкой
-# становиться не должны.
-# Начало-вопрос или служебный глагол: до них просьбой рисовать не считаем.
+# ChatGPT parity (10.11.2026): it draws on any request where
+# the meaning of "make a picture," not the first word. A person writes "come on, draw
+# a cat", "a cat in a hat, draw it", "I want a picture with a cat", "I need a logo
+# cafes", "make me an image of a cat". Meanwhile, "how to draw a cat"
+# and auxiliary verbs ("show the picture", "save", "translate") with an image
+# should not become
+# An opening question or service verb: before those, do not treat it as a request to draw.
 _DRAW_BLOCK_LEAD_RE = re.compile(
     r"^(?:как|почему|зачем|что|кто|где|когда|сколько|можно|нужно\s+ли|объясни|расскажи|"
     r"покажи|сохрани|переведи|удали|найди|открой|закрой|отправь|пришли|погоди|сравни|"
     r"how|why|what|who|where|when|explain|show|save|translate|delete|find|open|send)\b",
     re.IGNORECASE,
 )
-# Обвязка перед глаголом: «ну нарисуй», «мне, пожалуйста, нарисуй», «ты можешь...».
-# Одно снятое слово-связки: цепочку «ну ещё вариант» режем по границам,
-    # потому что «ещё» — одновременно связка и первое слово триггера повтора
-    # (ревью 10.11.2026).
+    # Wrapper before the verb: "come on, draw", "please draw for me", "can you..."
+    # One filler word removed: cut the chain “well, another option” at word boundaries,
+    # because "another" is both a connector and the first word of the repeat trigger
+    # (review 10.11.2026).
 _DRAW_FILLER_ONE_RE = re.compile(
     r"^(?:(?:ну|давай|а|и|вот|мне|пожалуйста|ещё|еще|тоже|также|сначала|для\s+начала|"
     r"please|pls|also|just)\b[,\s]*)",
@@ -256,7 +255,7 @@ _DRAW_FILLER_ONE_RE = re.compile(
 
 
 def _filler_offsets(text_lower: str) -> list[int]:
-    """Возможные начала просьбы: 0 и позиция после каждого снятого слова."""
+    """Possible starts of a request: 0 and the position after each removed word."""
     offsets = [0]
     pos = 0
     for _ in range(4):
@@ -273,7 +272,7 @@ _DRAW_FILLER_RE = re.compile(
     r"please|pls|also|just)\b[,\s]*){0,4}",
     re.IGNORECASE,
 )
-# Артефакт, который просят создать (в ChatGPT это и шаблоны: постер, логотип, обложка).
+# The artifact the person asks to create (in ChatGPT this also includes templates: a poster, logo, or cover).
 _IMAGE_ARTIFACT_RE = re.compile(
     r"(?:картинк|изображени|иллюстрац|постер|плакат|баннер|логотип|эмблем|маскот|талисман|"
     r"макет|мем\b|мемы|мемов|мема|визитк|стикерпак|"
@@ -282,7 +281,7 @@ _IMAGE_ARTIFACT_RE = re.compile(
     r"sticker|mockup|sketch|drawing|cartoon|mascot|flyer|emblem|emblems|thumbnail|thumbnails)",
     re.IGNORECASE,
 )
-# Глагол просьбы: он превращает название артефакта в заказ.
+# Request verb: it turns an artifact name into an order.
 _IMAGE_REQUEST_VERB_RE = re.compile(
     r"(?:^|[\s,.!?])(?:хочу|хочешь|хотелось|хотел\s+бы|нужен|нужна|нужно|надо|можно|"
     r"дай|давай|сдела\w*|созда\w*|придума\w*|накида\w*|сгенери\w*|нарис\w*|увид\w*|получи\w*|"
@@ -290,18 +289,18 @@ _IMAGE_REQUEST_VERB_RE = re.compile(
     r"|(?:can|could|will)\s+you\b",
     re.IGNORECASE,
 )
-# Артефакт в роли детали: «книга с красивой обложкой», «дом с большим
-# макетом». Заказать рисование так не просят (ревью 10.11.2026). Группу артефакта
-# помечаем: «сделай картинку с логотипом» — это заказ картинки, а не детали.
+# Artifact as a detail: "a book with a beautiful cover", "a house with a large
+# layout". Asking for drawing that way is not how people request it (review 10.11.2026). The artifact group
+# we flag it: "make an image with a logo" is an image order, not a detail.
 _IMAGE_PART_RE = re.compile(
     r"\w+\s+(?:с|со|with)\s+(?:\w+\s+){0,2}"
     r"(?P<part>обложк|превью|логотип|иконк|стикер|макет|постер|плакат|баннер|эмблем|"
     r"иллюстрац|картинк|изображени|аватар|stickers?|logos?|banner|poster|cover)\w*",
     re.IGNORECASE,
 )
-# Артефакт первым словом — implicit заказ, как в ChatGPT («poster for a gig»,
-# «логотип кофейни»). До этого такие фразы терялись: глагол просьбы в них есть
-# только по смыслу (ревью 10.11.2026).
+# An artifact as the first word is an implicit order, as in ChatGPT ('poster for a gig',
+# "coffee shop logo"). Before this, such phrases were lost: they contain a request verb
+# only by meaning (review 10.11.2026).
 _IMAGE_HEAD_ARTIFACT_RE = re.compile(
     r"^(?:картинк|изображени|иллюстрац|постер|плакат|баннер|логотип|эмблем|маскот|"
     r"талисман|аватар|обложк|обои|заставк|стикер|стикерпак|наклейк|открытк|комикс|"
@@ -310,8 +309,8 @@ _IMAGE_HEAD_ARTIFACT_RE = re.compile(
     r"drawing|cartoon|mascot|flyer|thumbnail|emblem|icon)\w*\b",
     re.IGNORECASE,
 )
-# Жалоба на картинку или утверждение о ней — не просьба нарисовать: сюда же
-# «обложка альбома была лучшей» и «image not loading» (ревью 10.11.2026).
+# A complaint about an image or a statement about it is not a drawing request; this also covers
+# "the album cover was better" and "image not loading" (review 10.11.2026).
 _IMAGE_COMPLAINT_RE = re.compile(
     r"\b(?:не|ні|немає|ошибк\w*|error|бит\w*|сломан\w*|broken|failed)\b"
     r"|\bне\s+(?:работает|грузится|открыв\w*|видн\w*|загруз\w*)\b"
@@ -319,24 +318,24 @@ _IMAGE_COMPLAINT_RE = re.compile(
     r"|\b(?:был[аио]?|были|стал[аи]?|выглядит|нравится|понравил[аи]сь|was|were|is|are)\b",
     re.IGNORECASE,
 )
-# Указание на уже существующий кадр: тогда это правка, а не новая генерация.
+# A reference to an existing frame: this is an edit, not a new generation.
 _IMAGE_EXISTING_RE = re.compile(
     r"\b(?:этот|этого|этому|этим|эта|этой|эту|эти|этих|тот|того|та|ту|те|такую|такой|"
     r"её|ее|неё|ней|this|that|previous|earlier|same)\b|\b(?:прежн|прошл)",
     re.IGNORECASE,
 )
-# Императив рисования в любом месте фразы: «кот в шляпе, нарисуй».
-# generate/render/сгенерируй здесь не нужны: «сгенерируй отчёт» и «generate a
-    # summary» — текстовые задачи (ревью 10.11.2026). Они остаются только в
-    # префиксах с артефактным словом («generate an image», «сгенери картинку»).
+    # A drawing imperative anywhere in the phrase: “cat in a hat, draw”.
+    # generate/render vocabulary (including inflected forms) is not needed here: "generate a report" and "generate a
+    # summary" — text tasks (review 10.11.2026). They remain only in
+    # prefixes containing an artifact word ('generate an image', 'generate a picture').
 _DRAW_IMPERATIVE_ANYWHERE_RE = re.compile(
     r"(?<![A-Za-zА-Яа-яЁё])(нарисуй-ка|нарисуй|нарисуйте|изобрази|"
     r"draw|sketch|illustrate|render|paint)\b",
     re.IGNORECASE,
 )
-# Фраза, начинающаяся с артефакта: «picture of a cat», «логотип для кофейни».
-# Только «артефакт + предлог сюжета»: «picture of a cat», «логотип для
-    # кофейни». Голое слово («картинка не загружается») — не заказ (ревью 10.11.2026).
+    # A phrase beginning with an artifact: "picture of a cat", "a logo for a coffee shop."
+    # Only "artifact + subject preposition": "picture of a cat", "a logo for
+    # coffee shops". A bare word ("the image will not load") is not an order (review 10.11.2026).
 _IMAGE_LED_RE = re.compile(
     r"^(?:картинка|картинку|картину|изображение|иллюстрация|иллюстрацию|постер|плакат|"
     r"баннер|логотип|эмблема|маскот|аватар|аватарка|обложка|обои|стикер|"
@@ -346,8 +345,8 @@ _IMAGE_LED_RE = re.compile(
 )
 
 
-# Местоименная просьба: «нарисуй это», «изобрази то, что я описал». Без
-# разрешения по истории в модель уходило слово «это» — и рисовался мусор.
+# Pronominal request: "draw this," "depict what I described." Without
+# in the model context was the word "this", and it drew garbage.
 _DRAW_ANAPHORA_RE = re.compile(
     r"^(?:это|то|это\s+красиво|то\s+же\s+самое|такую\s+же|такой\s+же|такое\s+же|такое|"
     r"the\s+same|this|that|it)\b"
@@ -355,14 +354,14 @@ _DRAW_ANAPHORA_RE = re.compile(
     r"|\b(?:this|that)\s+(?:you\s+)?described\b",
     re.IGNORECASE,
 )
-# Слова, которые ничего не добавляют к просьбе: «верни предыдущий вариант ок».
+# Words that add nothing to the request: "bring back the previous version, okay".
 _POLITE_TAIL_RE = re.compile(
     r"\b(?:пожалуйста|please|ок|окей|хорошо|it|this|то|это)\b",
     re.IGNORECASE,
 )
-# Просьба нарисовать без названия артефакта: «хочу увидеть кота на луне»,
-# «imagine a city on the moon». Одна эта фраза картинку не заказывает — она
-# только оправдывает один короткий вопрос модели.
+# A request to draw without an artifact name: “I want to see a cat on the moon,”
+# "imagine a city on the moon". That phrase alone does not order a picture — it
+# only justifies one short question to the model.
 _DRAW_VISUAL_SIGNAL_RE = re.compile(
     r"\b(?:увидеть|увидим|представь|представь\s+себе|визуализируй|нарисуй\s+нам)\b"
     r"|\b(?:imagine|visualise|visualize|picture\s+this)\b",
@@ -371,15 +370,17 @@ _DRAW_VISUAL_SIGNAL_RE = re.compile(
 
 
 def _is_anaphoric_draw_request(content: str) -> bool:
-    """Тело просьбы — указание на то, что уже обсуждалось. Ищем от начала:
-    «кота, это что я люблю» — конкретный сюжет, а не местоимение (ревью 10.11.2026)."""
+    """The body of the request refers to something already discussed. Search from the
+    beginning: \"the cat, that is what I love\" is a specific subject, not a pronoun
+    (review 10.11.2026)."""
     text = (content or "").strip()
     return bool(_DRAW_ANAPHORA_RE.match(text))
 
 
 def _is_bare_trigger_request(rest: str) -> bool:
-    """Пусто или только вежливые слова: «верни предыдущий вариант, пожалуйста» —
-    это всё ещё возврат, а не просьба о тексте (ревью 10.11.2026)."""
+    """Empty or polite words only: "return the previous version, please" is still a return,
+    not a request for text (review 10.11.2026).
+    """
     text = (rest or "").strip()
     for _ in range(3):
         stripped = _DRAW_FILLER_RE.match(text.lower())
@@ -391,12 +392,11 @@ def _is_bare_trigger_request(rest: str) -> bool:
 
 
 def _has_visual_signal(text_lower: str) -> bool:
-    """Вопрос («как представить себе...»), команда и ссылка на сайт — не просьба
-    рисовать: сигнал считаем только у чистого утвердительного текста."""
+    """A question (\"how to picture...\"), command, and website link are not requests to draw: count the signal only for purely affirmative text."""
     if _DRAW_BLOCK_LEAD_RE.search(text_lower) or text_lower.startswith("/"):
         return False
-    # «представь краткое содержание https://…» — чтение сайта, а не кадр;
-    # вопрос про картинку — тоже не заказ (ревью 10.11.2026).
+    # "give a brief summary of https://…" — reading a site, not generating a frame;
+    # a question about an image is also not an order (review 10.11.2026).
     if ("?" in text_lower or "？" in text_lower
             or "http://" in text_lower or "https://" in text_lower):
         return False
@@ -404,33 +404,31 @@ def _has_visual_signal(text_lower: str) -> bool:
 
 
 def _strip_trigger_fillers(text_lower: str) -> tuple[str, int]:
-    """(текст без обвязки, длина снятого префикса): «ну нарисуй кота» и
-    «мне, пожалуйста, нарисуй кота» — та же просьба, что «нарисуй кота».
-    Снимаем только известные слова-связки и только в начале, максимум четыре."""
+    """(text without filler, length of the removed prefix): “come on, draw a cat” and “please draw me a cat” are the same request as “draw a cat.” Only known filler words are removed, only at the start, at most four."""
     m = _DRAW_FILLER_RE.match(text_lower)
     cut = len(m.group(0)) if m else 0
     return text_lower[cut:], cut
 
 
-# «draw a table of the results» — просьба собрать таблицу словами, а не картинку
-# (внешний аудит 16.11.2026). Слабый английский глагол без визуального объекта
-# в начале остатка уходит обычной модели; русские триггеры не ограничены.
+# "draw a table of the results" — a request to write a table, not make a picture
+# (external audit 16.11.2026). A weak English verb without a visual object
+# at the start of the remainder goes to the regular model; Russian triggers are not restricted.
 _WEAK_DRAW_PREFIXES = frozenset(("draw a", "draw an", "draw me", "paint", "paint me", "sketch"))
-# Любой триггер, кончающийся глаголом рисования, тоже слабый: "can you draw" и
-# "please draw" иначе проходили мимо проверки (проверка правок 16.11.2026).
+# Any trigger ending in a drawing verb is also weak: "can you draw" and
+# "please draw" otherwise bypassed the check (fix verification 16.11.2026).
 _WEAK_DRAW_LAST_WORDS = frozenset(("draw", "paint", "sketch"))
-# Текстовые артефакты — ответ модели словами. "summary card/poster/…" остаются
-# картинками: это визуальный объект, а не пересказ (проверка правок 16.11.2026).
+# Textual artifacts are the model's answer in words. "summary card/poster/..." remain
+# images: this is a visual object, not a description (fix verification 16.11.2026).
 _DRAW_TEXTUAL_TAIL_RE = re.compile(
     r"^(?:a |an |the )?(?:table|list|comparison|conclusion|summary)\b"
     r"(?!\s+(?:card|poster|infographic|chart|diagram|image|picture))", re.IGNORECASE)
 
 
 def _draw_trigger_is_visual(trigger: str, rest: str) -> bool:
-    """Слабый английский триггер рисует, только если дальше объект картинки.
-    Модификатор ("table with a vase") не спасает: «table of the results» и
-    «table with the results» — одно и то же, а лишний рисованный ответ жжёт
-    личный слот; редкий стол-мебель человек спросит как «photo of a table»."""
+    """A weak English trigger draws only if an image object follows.
+    A modifier (\"table with a vase\") does not help: \"table of the results\" and
+    \"table with the results\" mean the same thing, while an extra drawn answer burns
+    a personal slot; someone asking about a rare piece of furniture will say \"photo of a table\"."""
     words = trigger.split()
     if trigger not in _WEAK_DRAW_PREFIXES and not (words and words[-1] in _WEAK_DRAW_LAST_WORDS):
         return True
@@ -438,9 +436,9 @@ def _draw_trigger_is_visual(trigger: str, rest: str) -> bool:
     return not _DRAW_TEXTUAL_TAIL_RE.match(tail)
 
 
-# «прочти инструкцию и объясни, что делать» — просьба разобраться, а не озвучить
-# (внешний аудит 16.11.2026). Голые «прочти/зачитай» без глагола пересказа
-# остаются озвучкой: «зачитай этот абзац» — именно TTS.
+# "read the instructions and explain what to do" — a request to analyze, not to read aloud
+# (external audit 16.11.2026). Bare “read/read aloud” without a retelling verb
+# remain speech: "read this paragraph aloud" means TTS.
 _TTS_BARE_READ = frozenset(("прочти", "прочтите", "зачитай", "зачитайте"))
 _TTS_EXPLAIN_RE = re.compile(r"\b(?:объясни|объясните|расскажи|расскажите|перескажи|перескажите)\b")
 
@@ -452,11 +450,11 @@ def _tts_trigger_is_speech(trigger: str, rest: str) -> bool:
 
 
 def _match_trigger_with_fillers(text_lower: str, prefixes) -> tuple[str | None, int]:
-    """(триггер, сколько символов снято). Триггер в чистом начале приоритетнее:
-    прежние маршруты не двигаются. Дальше перебираем границы обвязки — «ну ещё
-    вариант» начинается со второго слова, и срез обязан быть точно по нему.
-    Без найденного триггера срез не отдаём: иначе «please draw a cat» теряло
-    «please draw» дважды и в модель уходило «in a hat» (ревью 10.11.2026)."""
+    """(trigger, number of characters removed). A trigger at the exact beginning takes
+    priority so existing routes do not change. We then try wrapper boundaries —
+    \"well, another version\" starts at the second word, and the slice must match it exactly.
+    If no trigger is found, we do not return the slice: otherwise \"please draw a cat\"
+    lost \"please draw\" twice and \"in a hat\" reached the model (10.11.2026 review)."""
     for cut in _filler_offsets(text_lower):
         hit = _match_trigger_prefix(text_lower[cut:], prefixes)
         if hit:
@@ -465,21 +463,20 @@ def _match_trigger_with_fillers(text_lower: str, prefixes) -> tuple[str | None, 
 
 
 def _is_new_artifact_request(text: str) -> bool:
-    """«сделай картинку кота» — новая генерация, «сделай эту картинку ярче» —
-    правка: указание на существующий кадр перевешивает слабый глагол."""
+    """“make a picture of a cat” — new generation; “make this picture brighter” — edit: a reference to an existing image outweighs the weak verb."""
     if _DRAW_BLOCK_LEAD_RE.search(text) or not _IMAGE_ARTIFACT_RE.search(text):
         return False
     if _IMAGE_EXISTING_RE.search(text):
         return False
     head = bool(_IMAGE_HEAD_ARTIFACT_RE.match(_strip_trigger_fillers(text)[0]))
     verb = bool(_IMAGE_REQUEST_VERB_RE.search(text))
-    # Без глагола просьбы артефакт заказывает кадр только стоя в начале фразы,
-    # и то не в жалобе («картинка не загружается»).
+    # Without a verb, an artifact request orders a frame only at the start of the phrase,
+    # and even then not in a complaint ("the image will not load").
     if not verb:
         return head and not _IMAGE_COMPLAINT_RE.search(text)
-    # С глаголом — ловим только «артефакт как деталь чужого предмета»: если хоть
-    # одно артефактное слово стоит вне связки «книга с обложкой», это заказ
-    # (ревью 10.11.2026: «сделай картинку с логотипом кота»).
+    # With a verb, catch only "artifact as a detail of another object": if at least
+    # a lone artifact word outside the phrase 'a book with a cover' is an order
+    # (review 10.11.2026: “make a picture with a cat logo”).
     parts = [m.span("part") for m in _IMAGE_PART_RE.finditer(text)]
     for m in _IMAGE_ARTIFACT_RE.finditer(text):
         if not any(a <= m.start() < b for a, b in parts):
@@ -488,20 +485,20 @@ def _is_new_artifact_request(text: str) -> bool:
 
 
 def _match_draw_intent(text_lower: str, text_original: str) -> tuple[str, str]:
-    """(вид, описание): "draw" — просьба нарисовать без триггера в начале фразы.
-    Пустой вид — обычные маршруты (текст, правка, повтор) не трогаем."""
+    """(kind, description): \"draw\" — a request to draw without a trigger at the start of the phrase.
+    Empty kind — leave the regular routes (text, edit, repeat) alone."""
     core_start = len(_DRAW_FILLER_RE.match(text_lower).group(0))
     core = text_lower[core_start:]
-    # «ну покажи картинку» — показ, а не генерация: лид проверяем после обвязки.
-    # Вопрос («какой логотип лучше выбрать?») и жалоба («image not loading»)
-    # заказом не считаются (ревью 10.11.2026).
+    # "well, show the picture" means display, not generation: check the lead after the framing.
+    # A question ('which logo is better?') and a complaint ('image not loading')
+    # are not considered an order (review 10.11.2026).
     if _DRAW_BLOCK_LEAD_RE.search(core) or "?" in core or "？" in core:
         return "", ""
     if _IMAGE_COMPLAINT_RE.search(core):
         return "", ""
 
     if _match_trigger_prefix(core, DRAW_TRIGGER_PREFIXES):
-        # Обычный префиксный путь: он уже обработан выше по коду, здесь не дублируем.
+        # The regular prefix path: it was already handled above in the code; do not duplicate it here.
         return "", ""
     if _is_new_artifact_request(text_lower):
         return "draw", text_original.strip()
@@ -518,8 +515,8 @@ def _match_draw_intent(text_lower: str, text_original: str) -> tuple[str, str]:
         return "draw", text_original.strip()
     return "", ""
 
-# «Нарисуй X в стиле этого фото»: генерация с референсом стиля (как в ChatGPT).
-# Срабатывает только когда рядом есть фото — иначе это обычная генерация.
+# 'Draw X in the style of this photo': generation with a style reference (as in ChatGPT).
+# Triggers only when a photo is attached; otherwise this is ordinary generation.
 _STYLE_PHRASES = (
     "в стиле", "по образцу",
     "как на этом фото", "как на этой картинке", "как на этом изображении",
@@ -528,12 +525,12 @@ _STYLE_RE = re.compile(r"in the style of|like this (?:photo|image)", re.IGNORECA
 
 
 def _wants_style_reference(text: str) -> bool:
-    """Просили перенести стиль с приложенного фото, а не просто нарисовать."""
+    """The user asked to transfer the style from an attached photo, not simply draw something."""
     low = (text or "").lower()
     return any(phrase in low for phrase in _STYLE_PHRASES) or bool(_STYLE_RE.search(low))
 
 
-# "хочу картинку" не триггер: путается с показом/редактурой. Длинные фразы выше коротких, иначе вернётся первое совпадение.
+# "I want a picture" is not a trigger: it is confused with display/editing. Longer phrases precede shorter ones; otherwise the first match is returned.
 TTS_TRIGGER_PREFIXES = [
     "озвучьте", "озвучь текст", "озвучь мне", "озвуч текст", "озвучь", "озвуч",
     "переведи текст в голос", "переведи слова в голос", "переведи в голос",
@@ -544,15 +541,13 @@ TTS_TRIGGER_PREFIXES = [
     "зачитай текст", "зачитай", "зачитайте текст", "зачитайте",
     "прочитай вслух", "прочти вслух", "прочтите вслух", "прочтите", "прочти",
     "сделай аудио", "сделай голосовое", "запиши голосовое",
-    # EN: /start обещает "read this out loud" (найдено внешним аудитом).
+    # EN: /start promises "read this out loud" (found by an external audit).
     "read this out loud", "read it out loud", "read out loud", "read aloud",
     "voice this", "voice it", "speak this", "say this aloud", "narrate this",
 ]
 
 def _match_trigger_prefix(text_lower: str, prefixes: list[str]) -> str | None:
-    """Самый длинный триггер в начале строки: «нарисуй» стоит раньше «нарисуй-ка» и
-    обрезал «нарисуй-ка кота» до «ка кота» (ревью 10.11.2026). Нужна граница слова,
-    иначе "прочтите"/"нарисуйка" дадут битую генерацию."""
+    """The longest trigger at the start of a line: \"draw\" came before \"draw, please\" and truncated \"draw, please a cat\" to \"please a cat\" (review 10.11.2026). A word boundary is needed; otherwise \"read\"/\"drawcat\" would produce broken generation."""
     best: str | None = None
     for prefix in prefixes:
         if not text_lower.startswith(prefix):
@@ -564,7 +559,7 @@ def _match_trigger_prefix(text_lower: str, prefixes: list[str]) -> str | None:
             best = prefix
     return best
 
-# Пустышки "это/этот текст" значат реплай. Найдено 09.2026: "нарисуй это" рисовало слово "это".
+# Placeholders "this/this text" mean a reply. Found 09.2026: "draw this" drew the word "this".
 _REPLY_MARKER_RE = re.compile(
     r"^(это|этот|эта|эту|эти|этого|этому|этим|этих)"
     r"(\s+(текст|сообщение|пост|файл|картинк\w*|изображени\w*|видео|фото))?$",
@@ -572,16 +567,12 @@ _REPLY_MARKER_RE = re.compile(
 )
 
 def _strip_reply_marker(content: str) -> str:
-    """Убирает указательную пустышку из остатка после триггера: если кроме неё
-    ничего нет — имелся в виду реплай (возвращает ""). Иначе возвращает остаток
-    как есть для буквального использования. Хвостовая пунктуация ("это.",
-    "это!") перед проверкой срезается — иначе "озвучь это." чинился бы только
-    без точки (найдено код-ревью)."""
+    """Removes the demonstrative placeholder from the remainder after the trigger: if nothing else remains, a reply was intended (returns \"\"). Otherwise, the remainder is returned unchanged for literal use. Trailing punctuation (\"this.\", \"this!\") is stripped before the check; otherwise \"read this aloud.\" would only be fixed without the period (found in code review)."""
     if _REPLY_MARKER_RE.match(content.strip().rstrip(".,!?:;—-").strip()):
         return ""
     return content
 
-# Пометка "файла нет" на один ход модели, в историю не пишем: иначе старые пометки всплывут в следующих ходах.
+# A “no file” marker for one model turn, not written to history: otherwise old markers reappear in later turns.
 _NO_MEDIA_NOTE = (
     "\n\n[Служебная пометка — это не слова пользователя: к сообщению не "
     "прикреплён файл, и среди недавних файлов чата подходящего нет. Если "
@@ -591,29 +582,29 @@ _NO_MEDIA_NOTE = (
 )
 
 def _history_user_text(user_text: str) -> str:
-    """Текст user-реплики для записи в историю: срезает одноразовую служебную
-    пометку (см. _NO_MEDIA_NOTE), если она есть в хвосте. Самому текущему
-    запросу к модели пометка уже ушла — здесь остаётся чистый текст."""
+    """User reply text for history: removes the one-time internal note
+    (see _NO_MEDIA_NOTE) if it is at the end. The note has already been sent to
+    the current model request; only clean text remains here."""
     if user_text.endswith(_NO_MEDIA_NOTE):
         return user_text[:-len(_NO_MEDIA_NOTE)]
     return user_text
 
 
-# Чаты, записанные до 30.10.2026, хранят внутри реплик одноразовую службу: блок
-# текущей даты и выдачу поиска (выборка бэкапа: 19 реплик из 210, до 68% объёма
-# user-контекста). Плейсхолдер вместо ответа тоже осел в истории.
+# Chats saved before 30.10.2026 store a one-time service item inside replies: a block
+# current date and search results (backup sample: 19 replies out of 210, up to 68% of volume
+# user context). A placeholder instead of an answer also remained in the history.
 _HISTORY_SERVICE_RE = re.compile(
     r"\s*\[Context: today[^\]]*\]|\s*\[Web search (?:snippets|results)[^\]]{0,200}\][\s\S]*$", re.IGNORECASE)
 
 
 def _clean_history_entry(item: dict) -> dict | None:
-    """Реплика истории без служебных блоков; None — выбросить целиком."""
+    """History reply without internal blocks; None means discard it entirely."""
     text = item.get("content")
     if not isinstance(text, str):
         return item
     cleaned = _HISTORY_SERVICE_RE.sub("", text).strip()
     if not cleaned or _is_empty_like(cleaned):
-        # Медиа без подписи — законная реплика: её метку [фото] строит lumen_memory.
+        # Media without a caption is a valid message: its [photo] label is built by lumen_memory.
         if item.get("media"):
             return {**item, "content": ""}
         return None
@@ -621,13 +612,13 @@ def _clean_history_entry(item: dict) -> dict | None:
         return item
     return {**item, "content": cleaned}
 
-# Только явные существительные медиа: общие "это/покажи" тянули чужое фото и давали галлюцинации.
-# Именованные группы — чтобы понять КАКОЙ тип спросили (регрессия 18.08.2026: "покажи стикер" описывал чужое фото).
+# Only explicit media nouns: generic "this/show me" phrases pulled in someone else's photo and caused hallucinations.
+# Named groups show WHICH type was asked for (regression 18.08.2026: "show a sticker" described someone else's photo).
 _MEDIA_REFERENCE_RE = re.compile(
     r"\b(?:"
     r"(?P<sticker>стикер\w*)|"
-    # Отрицательные хвосты: «видеокарта», «аудиокнига», «фотосинтез»,
-    # «документация», «файловая система» — это не вложения (аудит 29.10.2026).
+    # Negative tails: “graphics card,” “audiobook,” “photosynthesis,”
+    # "documentation", "file system" — these are not attachments (audit 29.10.2026).
     r"(?P<video>видео(?!карт|звон|игр|плеер|редактор|наблюден|курс|связ)\w*|видос\w*|ролик\w*|клип\w*|кружок\w*|gif\w*|гиф\w*)|"
     r"(?P<audio>аудио(?!книг|плеер)\w*|голосов\w*|войс\w*)|"
     r"(?P<photo>фото(?!синтез|н\b|ны\b|аппарат|элемент|эффект)\w*|снимок\w*|изображени\w*|скрин\w*|скриншот\w*|картинк\w*)|"
@@ -637,12 +628,12 @@ _MEDIA_REFERENCE_RE = re.compile(
 )
 
 def _media_reference_category(text: str) -> str | None:
-    """Какой ТИП медиа упомянут в тексте ("фото"/"видео"/"аудио"/"стикер"/
-    "документ"), если вообще упомянут — None, если явного упоминания нет
-    (см. _MEDIA_REFERENCE_RE).
-    Используется в _resolve_incoming_media (приоритет №3), чтобы искать в
-    recent_media_ids медиа ИМЕННО запрошенного типа, а не слепо последний файл
-    независимо от того, что реально спросили."""
+    """Which TYPE of media is mentioned in the text (\"photo\"/\"video\"/\"audio\"/
+    \"sticker\"/\"document\"), if any; returns None when there is no explicit
+    mention (see _MEDIA_REFERENCE_RE).
+    Used by _resolve_incoming_media (priority #3) to search recent_media_ids for
+    media of EXACTLY the requested type rather than blindly taking the latest
+    file regardless of what was actually asked."""
     if not text:
         return None
     m = _MEDIA_REFERENCE_RE.search(text)
@@ -651,12 +642,13 @@ def _media_reference_category(text: str) -> str | None:
     return next(name for name, val in m.groupdict().items() if val is not None)
 
 def _looks_like_media_reference(text: str) -> bool:
-    """Требует явного упоминания конкретного типа медиа (фото/видео/аудио/стикер и
-    т.п.) — иначе см. регрессию выше. Тестируется отдельно от _handle_message_core."""
+    """Requires an explicit mention of a specific media type (photo/video/audio/
+    sticker, etc.); otherwise see the regression above. Tested separately from
+    _handle_message_core."""
     return _media_reference_category(text) is not None
 
 def _mime_matches_media_category(mime: str, category: str) -> bool:
-    """Mime подходит категории: стикер только image/webp, фото пережимается в JPEG, этого хватает без объекта Sticker."""
+    """The MIME type fits the category: stickers are image/webp only, photos are converted to JPEG, which is enough without a Sticker object."""
     low = (mime or "").lower()
     if category == "sticker":
         return low == "image/webp"
@@ -665,14 +657,14 @@ def _mime_matches_media_category(mime: str, category: str) -> bool:
     if category in ("video", "audio"):
         return low.startswith(f"{category}/")
     if category == "document":
-        # PDF/текстовые/офисные файлы + octet-stream (неопознанный бинарник —
-        # честная ошибка пользователю всё равно придёт позже из ask_gemini через
-        # _is_gemini_supported_mime, а не молчаливое "не нашёл файл").
+        # PDF/text/office files + octet-stream (an unrecognized binary —
+        # an honest error will still reach the user later from ask_gemini via
+        # _is_gemini_supported_mime, rather than a silent "file not found").
         return low.startswith(("application/", "text/"))
     return False
 
-# ── Кнопки-уточнения (pick-сценарии) ──
-# Pick вместо гадания модели: глагол вкуса + тема + коротко, длинные с деталями идут в модель.
+# Clarification buttons (pick scenarios)
+# Pick rather than letting the model guess: taste verb + subject + short; long requests with details go to the model.
 _PICK_VERBS = (
     "посоветуй", "порекомендуй", "подскажи", "накидай", "придумай",
     "recommend", "suggest", "advise",
@@ -690,8 +682,8 @@ _PICK_TOPICS: dict[str, str] = {
     "book": "books", "books": "books",
     "game": "games", "games": "games",
 }
-# Игровые формы — только целиком с двух сторон: префикс "игр" ловил глаголы
-# ("кто играет сегодня" — не запрос игры). Инфинитивы оставляем: "во что поиграть" — игры.
+# Game forms — only with boundaries on both sides: the "igr" prefix (transliterated) caught verbs
+# ("who is playing today" is not a game request). Keep infinitives: "what to play" is about games.
 _PICK_EXACT_TOPICS: dict[str, str] = {
     "игра": "games", "игры": "games", "игру": "games", "игрой": "games",
     "игре": "games", "игр": "games", "играть": "games", "поиграть": "games",
@@ -699,14 +691,15 @@ _PICK_EXACT_TOPICS: dict[str, str] = {
 _PICK_MAX_LEN = 60
 
 def match_pick_request(text_lower: str) -> str | None:
-    """Возвращает id pick-сценария (film/music/...), если текст — вкусовой
-    запрос без деталей, иначе None. Проверяется в _handle_message_core до
-    маршрута к ИИ: совпавшим запросам показываются кнопки вместо гадания."""
+    """Returns the pick-scenario id (film/music/...) if the text is a preference
+    request without details, otherwise None. Checked in _handle_message_core before
+    routing to AI: matching requests show buttons instead of making the model guess."""
     text = text_lower.strip()
     if not text or len(text) > _PICK_MAX_LEN:
         return None
-    # Детали (год, перечисления через запятую) — обычным путём в модель:
-    # у такого запроса уже есть вкус, кнопки не нужны.
+    # Details (year, comma-separated lists) go through the normal path to the
+    # model:
+    # such a request already has a specific style; no buttons are needed.
     if re.search(r"\b(19|20)\d{2}\b", text) or text.count(",") >= 2:
         return None
     if not any(v in text for v in _PICK_VERBS):
@@ -715,7 +708,7 @@ def match_pick_request(text_lower: str) -> str | None:
         if re.search(r"(?<!\w)" + re.escape(topic) + r"(?!\w)", text):
             return scenario
     for topic, scenario in _PICK_TOPICS.items():
-        # Латиница строго \b, кириллица префиксом (AUD-E-006): "тигр" не игры.
+        # Latin strictly uses ; Cyrillic uses a prefix (AUD-E-006): "tiger" must not match "games".
         if topic.isascii():
             if re.search(r"\b" + re.escape(topic) + r"\b", text):
                 return scenario
@@ -725,7 +718,7 @@ def match_pick_request(text_lower: str) -> str | None:
 
 
 def _find_recent_media_by_category(bucket: Any, category: str) -> tuple[str, str] | None:
-    """Последний элемент бакета ПОДХОДЯЩЕГО типа (не просто последний): "покажи стикер" при [фото] даёт None."""
+    """The last element of the bucket of the MATCHING type (not merely the last one): \"show a sticker\" with [photo] returns None."""
     if not bucket:
         return None
     for fid, mime in reversed(bucket):

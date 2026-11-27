@@ -99,8 +99,9 @@ production on 12.11.2026, so change a fact and update this file in the same comm
 - A green CI run on main is a deploy: `.github/workflows/sync-to-hf.yml` waits for CI, then pushes
   exactly the tested commit to the Space with a lease. A hotfix made directly on the Space makes the
   sync fail loudly instead of being overwritten. Batch work into one merge: every merged commit re-queues a Docker build, and while the build is queued the Space answers 503 and nobody gets an answer (measured 11.11.2026: three merges inside 12 minutes left the build queued for 15+ minutes).
-- The proxy ships separately through `deploy-proxy.yml`. Since the 16.11.2026 audit it deploys on
-  every green CI run on `main`, not only when the tip's diff touches `proxy/`: the old conditional
+- The proxy ships separately through `deploy-proxy.yml`. Since the 16.11.2026 audit the workflow runs on
+  every green CI run on `main`, not only when the tip's diff touches `proxy/`; actual deployment still requires
+  `DENO_PROXY_DEPLOY=1`. The old conditional
   base was `HEAD~1` for a linear push, so a proxy change riding in a multi-commit push was invisible
   and both Deno apps kept the previous revision (09.11.2026). The diff is still printed as a warning
   for the log. Deploying the same code again is idempotent and costs half a minute. The relay still runs on the classic
@@ -242,8 +243,8 @@ Gemini is the unconditional reserve on every route where Munito answers.
 
 ## Code style
 - Targeted edits on existing files. Never rewrite a file from scratch unless a split was approved.
-- Comments in Russian, except structural headers carrying identifiers or commands. Say why (reason,
-  incident date, tradeoff), 2-3 lines max, never restate the code. Comment only where something is
+- Identifiers, comments and docstrings use US English, except structural headers carrying identifiers
+  or commands. Say why (reason, incident date, tradeoff), 2-3 lines max, never restate the code. Comment only where something is
   non-obvious: magic numbers, regexes, workarounds, ordering constraints, surprising behavior.
 - Keep dated regression markers short: `(prod ДД.ММ.ГГГГ: what happened)`, or just the date when
   the sentence already says what happened; `(audit ...)`, `(review ...)` the same way. Long
@@ -286,9 +287,9 @@ Gemini is the unconditional reserve on every route where Munito answers.
 ## Docs, mirrors and tools
 The same facts live in several places and they drift. A change to behavior updates them in the same
 commit: `docs/ARCHITECTURE.md` (pipelines, routing, the streaming checklist, deploy paths),
-`docs/ENVIRONMENT.md` (variables and hardcoded limits), `README.md` and `README.ru.md` (two
-languages of one document, so a user-facing change edits both), this file, and `opencode.json` when
-a permission changed. A generated RepoWiki may sit in the gitignored `.qoder/` directory: it is
+`docs/ENVIRONMENT.md` (variables and hardcoded limits), `README.md`, this file, and `opencode.json`
+when a permission changed. Canonical technical documentation uses US English; do not add translated
+technical-document mirrors without a real requirement. User-facing bot strings keep their audience language. A generated RepoWiki may sit in the gitignored `.qoder/` directory: it is
 not committed, it drifts, and `docs/` stays the truth.
 - `eval/` holds the offline probes and the persona harness, run by hand from main through
   `persona-eval.yml`; method and results are in `docs/PROMPT_EVAL.md`, and its dated measurements

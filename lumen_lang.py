@@ -1,17 +1,16 @@
-"""
-lumen_lang.py — фиксированные строки бота (не ответы ИИ) на 25 языках топ-стран
-Telegram (09.2026). Выбор per-chat (поле "lang"), переживает рестарты.
-Первые 6 языков в STRINGS, новые — ПАКАМИ PACK_XX (дифф аддитивный).
-Новый язык: код в SUPPORTED_LANGS + LANG_NAMES, перевод КАЖДОГО ключа
-в STRINGS и PICK_TABLE (тест полноты не пустит пропуск). Обращение на "ты".
+"""lumen_lang.py contains the bot's fixed strings (not AI answers) in 25 languages of top
+Telegram countries (09.2026). Selection is per chat (the 'lang' field) and survives restarts.
+The first 6 languages are in STRINGS, newer ones in PACK_XX PACKS (an additive diff).
+New language: add the code to SUPPORTED_LANGS + LANG_NAMES and translate EVERY key
+in STRINGS and PICK_TABLE (the completeness test will not let an omission through). Use the informal 'you'.
 """
 
 from __future__ import annotations
 
-# Порядок — по алфавиту кода языка: в меню кнопки идут в этом порядке.
+# Order by alphabetical language code: menu buttons follow this order.
 SUPPORTED_LANGS: tuple[str, ...] = ("ar", "be", "bn", "de", "en", "es", "fa", "fil", "fr", "hi", "id", "it", "kk", "ms", "nl", "pl", "pt", "ru", "th", "tr", "uk", "ur", "uz", "vi", "zu")
 
-# Нативные названия для кнопок меню (без флагов: флаг ≠ язык, см. план i18n).
+# Native names for menu buttons (no flags: a flag is not a language; see the i18n plan).
 LANG_NAMES: dict[str, str] = {
     "ar": "العربية",
     "be": "Беларуская",
@@ -44,21 +43,21 @@ DEFAULT_LANG = "en"
 
 
 def normalize_lang(code: str | None) -> str:
-    """Приводит любой код к поддерживаемому; неизвестное/пустое → "en"."""
+    """Normalize any code to a supported one; unknown/empty → "en"."""
     c = (code or "").strip().lower()
     if c in LANG_NAMES:
         return c
-    # "en-US"/"ru_RU" и подобное — берём базу до разделителя.
+    # "en-US"/"ru_RU" and the like — take the base before the separator.
     base = c.replace("_", "-").split("-")[0]
     if base in LANG_NAMES:
         return base
     return DEFAULT_LANG
 
 
-# key -> lang -> текст. Плейсхолдеры {error}/{choice}/{name} подставляются
-# через t(..., **kwargs).
+# key -> lang -> text. Placeholders {error}/{choice}/{name} are substituted
+# via t(..., **kwargs).
 STRINGS: dict[str, dict[str, str]] = {
-    # ── Меню /lang ──
+    # ── /lang menu ──
     "lang_title": {
         "be": "Цяпер: {current}. Выберы мову адказаў:",
         "en": "Right now: {current}. Choose the reply language:",
@@ -83,7 +82,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "В группе язык меняет только администратор, создатель группы или владелец бота. В личных сообщениях — доступно всем.",
         "uk": "У групі мову змінює лише адміністратор, творець групи або власник бота. В особистих повідомленнях — доступно всім.",
     },
-    # ── Описания команд (setMyCommands) ──
+    # ── Command descriptions (setMyCommands) ──
     "cmd_desc_start": {
         "be": "Пра сябе і каманды",
         "en": "About me and commands",
@@ -141,7 +140,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "В группах я держу в памяти недавние сообщения — они уходят вместе с твоим вопросом.",
         "uk": "У групах тримаю в пам'яті недавні повідомлення — вони йдуть разом із твоїм запитанням.",
     },
-    # ── Подсказки пустых команд ──
+    # Empty-command hints
     "draw_empty": {
         "be": "Напішы, што намаляваць: /draw касмічная станцыя",
         "en": "Tell me what to draw: /draw space station",
@@ -166,7 +165,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Текст слишком длинный для озвучки (лимит {limit} символов, сейчас {length}). Сократи текст и попробуй снова.",
         "uk": "Текст задовгий для озвучення (ліміт {limit} символів, зараз {length}). Скороти текст і спробуй знову.",
     },
-    # ── Ошибки генерации изображений ──
+    # ── Image-generation errors ──
     "draw_err_unavailable": {
         "be": "Сэрвіс генерацыі малюнкаў часова недаступны. Паспрабуй пазней.",
         "en": "The image generation service is temporarily unavailable. Try again later.",
@@ -207,7 +206,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Ошибка генерации изображения. Попробуй ещё раз или переформулируй описание.",
         "uk": "Помилка генерації зображення. Спробуй ще раз або переформулюй опис.",
     },
-    # ── Ошибки озвучки ──
+    # ── Speech errors ──
     "tts_err_exhausted": {
         "be": "Ліміт запытаў на агучку часова вычарпаны. Паспрабуй крыху пазней.",
         "en": "The text-to-speech request limit is temporarily exhausted. Try again a bit later.",
@@ -224,7 +223,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Не получилось озвучить текст. Попробуй ещё раз или сократи текст.",
         "uk": "Не вдалося озвучити текст. Спробуй ще раз або скороти текст.",
     },
-    # ── Лимиты и ошибки маршрута ──
+    # Route limits and errors
     "rate_limited": {
         "be": "Занадта шмат паведамленняў запару — пачакай крыху.",
         "en": "Too many messages in a row — wait a moment.",
@@ -367,7 +366,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Сервис сейчас перегружен. Попробуй, пожалуйста, ещё раз через минуту.",
         "uk": "Сервіс зараз перевантажений. Спробуй, будь ласка, ще раз за хвилину.",
     },
-    # ── Дневные лимиты на пользователя ──
+    # Daily per-user limits
     "user_daily_total": {
         "be": "Дзённы ліміт паведамленняў вычарпаны. Новыя будуць даступныя праз {hours} г {mins} хв.",
         "en": "Daily message limit reached. New ones will be available in {hours}h {mins}m.",
@@ -440,7 +439,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Отвечаю без интернета — данные могут быть устаревшими.",
         "uk": "Відповідаю без інтернету — дані можуть бути застарілими.",
     },
-    # ── Ответ на провокации ──
+    # Response to provocation
     "injection_probe_reply": {
         "be": "Сваю наладу і інструкцыі я не выкрываю і не абмяркоўваю ў такім фармаце. Калі пытанне звычайнае — задавай.",
         "en": "I don't reveal or discuss my configuration and instructions in that format. If it's an ordinary question — ask away.",
@@ -449,7 +448,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Свою настройку и инструкции я не раскрываю и не обсуждаю в таком формате. Если вопрос обычный — спрашивай.",
         "uk": "Своє налаштування та інструкції я не розкриваю й не обговорюю в такому форматі. Якщо питання звичайне — питай.",
     },
-    # ── Занятость ──
+    # ── Busy status ──
     "lock_busy": {
         "be": "Я яшчэ адказваю на папярэдняе паведамленне — пачакай.",
         "en": "I'm still answering the previous message — hold on a moment.",
@@ -466,7 +465,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Подожди, предыдущий запрос ещё обрабатывается.",
         "uk": "Зачекай, попередній запит ще обробляється.",
     },
-    # ── Пометки стриминга ──
+    # ── Streaming markers ──
     "stream_note_send_fail": {
         "be": "\n\n[не атрымалася адправіць працяг паведамлення]",
         "en": "\n\n[couldn't send the rest of the message]",
@@ -508,7 +507,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Историю стёр.",
         "uk": "Історію стерто.",
     },
-    # ── /logs и /stats (только владелец) ──
+    # ── /logs and /stats (owner only) ──
     "logs_deny": {
         "be": "Гэта недаступна.",
         "en": "This isn't available.",
@@ -782,7 +781,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Видео и слайдшоу качаю только в личных сообщениях — перешли туда ссылку, и я всё скачаю.",
         "uk": "Відео та слайдшоу завантажую лише в особистих — перешли туди посилання, і я все зроблю.",
     },
-    # ── Статусы ──
+    # ── Statuses ──
     "status_generating_image": {
         "be": "Генерую малюнак…",
         "en": "Generating image…",
@@ -815,7 +814,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Слушаю…",
         "uk": "Слухаю…",
     },
-    # ── Живой статус обработки (плейсхолдер) ──
+    # Live processing status (placeholder)
     "progress_searching": {
         "be": "Шукаю ў інтэрнэце",
         "en": "Searching the web",
@@ -907,7 +906,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "{sec} с",
         "uk": "{sec} с",
     },
-    # ── Кнопки-уточнения: служебные реплики ──
+    # ── Clarification buttons: service replies ──
     "pick_suffix": {
         "be": "\n\n(або проста напішы тэкстам)",
         "en": "\n\n(or just write it in text)",
@@ -940,7 +939,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Выбор: {choice}",
         "uk": "Вибір: {choice}",
     },
-    # ── Владелец ──
+    # ── Owner ──
     "owner_quota_notice": {
         "be": "Квота Gemini вычарпана цалкам па ўсіх мадэлях у маршруце (гл. /stats для дэталяў).",
         "en": "Gemini quota fully exhausted across all route models (see /stats for details).",
@@ -951,8 +950,8 @@ STRINGS: dict[str, dict[str, str]] = {
     },
 }
 
-# ── Языковые паки волны 1 (pt/ar/tr/de/fr/it) ──
-# Формат: PACK_XX[key] = текст. Реестр — в LANG_PACKS ниже.
+# ── Language packs for wave 1 (pt/ar/tr/de/fr/it) ──
+# Format: PACK_XX[key] = text. Registry is in LANG_PACKS below.
 PACK_PT: dict[str, str] = {
     "lang_title": "Agora: {current}. Escolha o idioma das respostas:",
     "lang_done": "Idioma: Português.",
@@ -2573,8 +2572,8 @@ PACK_BN: dict[str, str] = {
     "fallback_no_search": "অনুসন্ধান ছাড়াই উত্তর দিচ্ছি — তথ্য পুরোনো হতে পারে।",
 }
 
-# Осознанное исключение: в fil по умолчанию Taglish (link, file, command) —
-# так пишет сам паки; чистый fil читается как машинный перевод (аудит 11.11.2026).
+# A deliberate exception: fil defaults to Taglish (link, file, command) —
+# as Pakistani writes it; pure fil reads like machine translation (audit 11.11.2026).
 PACK_FIL: dict[str, str] = {
     "lang_title": "Ngayon: {current}. Piliin ang wika ng mga sagot:",
     "lang_done": "Wika: Filipino.",
@@ -3007,7 +3006,7 @@ PACK_ZU: dict[str, str] = {
     "fallback_no_search": "Ngiphendula ngaphandle kokusesha — imininingwane kungenzeka igugile.",
 }
 
-# Реестр языковых паков волны 1+ (см. комментарий в шапке про STRINGS vs PACK).
+# Registry of wave 1+ language packs (see the header comment about STRINGS vs PACK).
 LANG_PACKS: dict[str, dict[str, str]] = {
     "pt": PACK_PT,
     "ar": PACK_AR,
@@ -3030,9 +3029,9 @@ LANG_PACKS: dict[str, dict[str, str]] = {
     "zu": PACK_ZU,
 }
 
-# ── Кнопки-уточнения: вопросы/варианты/шаблоны по языкам ──
-# Структура сценария та же, что была в PICK_* (см. историю git): вопрос,
-# 4 опции, шаблон дописки выбора к исходному запросу.
+# ── Clarification buttons: questions/options/templates by language ──
+# The scenario structure is the same as in PICK_* (see git history): question,
+# 4 options, a template for appending the choice to the original request.
 PICK_TABLE: dict[str, dict[str, dict[str, object]]] = {
     "be": {
         "film": {"q": "Чаго сёння хочацца?", "opts": ["Лёгкае і вясёлае", "Драма", "Трылер", "Фантастыка"], "tpl": "{original} (жанр: {choice})"},
@@ -3212,9 +3211,9 @@ PICK_TABLE: dict[str, dict[str, dict[str, object]]] = {
 }
 
 
-# Один и тот же блок живых примеров во всех языках: состав приветствия не
-# должен различаться между переводами (аудит 28.10.2026). Хранится отдельно,
-# чтобы не дублировать одну и ту же строку в 25 значениях start_text.
+# The same live-example block in every language: the greeting composition does not
+# must differ between translations (audit 28.10.2026). Stored separately,
+# to avoid duplicating the same line in 25 start_text values.
 _START_EXAMPLES: dict[str, str] = {
     "ar": "جرّب الآن: «من أنت؟»، أرسل صورة مع «ماذا فيها؟» أو «اقترح فيلمًا».",
     "be": "Паспрабуй прама зараз: «хто ты?», дашлі фота з пытаннем «што на ім?» ці «парай фільм».",
@@ -3244,14 +3243,14 @@ _START_EXAMPLES: dict[str, str] = {
 }
 
 
-# Единственное число в живых строках-таймерах: en и zu меняют форму слова
-# «секунда» при sec == 1 (smoke 11.11.2026: «Thought for 1 seconds»).
-# Остальные паки либо не склоняют единицу (hi, fa, th, ur, bn, vi, ...),
-# либо дают сокращение («s», «с», «sn», «soniya») — форма им не нужна.
-# Единственное число счётчика: в es, fr и it найденные «результаты» стоят
-# существительным после цифры, и «1 resultados» звучит ошибкой (ревью
-# 11.11.2026). Остальные 22 пака либо ставят число в конец («found 1»), либо
-# не склоняют (th, vi, id, bn «{count}টি», zu «okungu-{count}»).
+# The only plural in live timer strings: en and zu change the word form
+# "second" when sec == 1 (11.11.2026 smoke test: "Thought for 1 seconds").
+# Other language packs either do not decline the unit (hi, fa, th, ur, bn, vi, ...),
+# or give an abbreviation ("s", "s", "sn", "soniya") — this form is unnecessary.
+# Singular counter form: in es, fr, and it, the found "results" stand
+# the noun after a number, and "1 resultados" sounds like an error (review
+# 11.11.2026). The other 22 packs either put the number at the end ("found 1"), or
+# do not decline them (th, vi, id, bn "{count}টি", zu "okungu-{count}").
 _COUNT_ONE_FORMS: dict[str, dict[str, str]] = {
     "progress_search_done": {
         "es": "Búsqueda en internet · 1 resultado",
@@ -3278,9 +3277,9 @@ _TIMED_ONE_FORMS: dict[str, dict[str, str]] = {
 
 
 def t(lang: str | None, key: str, **kwargs: object) -> str:
-    """Строка key на языке lang (фолбэк — английский). Плейсхолдеры вида
-    {error}/{choice}/{name} подставляются из kwargs. Новые языки лежат в
-    LANG_PACKS (см. низ файла), старые шесть — в STRINGS выше."""
+    """The key string in language lang (English fallback). Placeholders like
+    {error}/{choice}/{name} are substituted from kwargs. New languages live in
+    LANG_PACKS (see the bottom of the file); the older six are in STRINGS above."""
     lang = normalize_lang(lang)
     table = STRINGS.get(key, {})
     text = LANG_PACKS.get(lang, {}).get(key) or table.get(lang) or table.get(DEFAULT_LANG) or key
@@ -3289,9 +3288,9 @@ def t(lang: str | None, key: str, **kwargs: object) -> str:
     if kwargs.get("sec") == 1:
         text = _TIMED_ONE_FORMS.get(key, {}).get(lang, text)
     elif key == "progress_thinking" and kwargs.get("sec") == 0:
-        # Claude при нуле печатает только фразу (smoke 11.11.2026: «Thinking…
-        # 0 seconds»). Отсечка по «…»: оно есть во всех 25 паках ключа —
-        # test_status_and_progress_punctuation_is_consistent его бережёт.
+        # Claude at zero prints only the phrase (smoke 11.11.2026: “Thinking…
+        # 0 seconds”). The cutoff by “…”: it is present in all 25 packs for the key —
+        # test_status_and_progress_punctuation_is_consistent protects it.
         cut = text.find("…")
         if cut != -1:
             return text[:cut + 1]
@@ -3308,7 +3307,7 @@ def t(lang: str | None, key: str, **kwargs: object) -> str:
 
 
 def pick_texts(lang: str | None, scenario: str) -> tuple[str, list[str], str]:
-    """(вопрос, опции, шаблон) pick-сценария на языке lang."""
+    """(question, options, template) pick scenario in language lang."""
     lang = normalize_lang(lang)
     table = PICK_TABLE.get(lang) or PICK_TABLE[DEFAULT_LANG]
     rec = table.get(scenario) or PICK_TABLE[DEFAULT_LANG].get(scenario, {})
@@ -3319,8 +3318,8 @@ def pick_texts(lang: str | None, scenario: str) -> tuple[str, list[str], str]:
     )
 
 
-# Возврат к предыдущей версии картинки (паритет 10.11.2026): один ключ, явный
-# перевод во всех 25 языках — тест полноты таблицы пропуск не пустит.
+# Revert to the previous image version (10.11.2026 parity): one key, an explicit
+# translation in all 25 languages — the table-completeness test will not allow a gap.
 _DRAW_NO_VERSIONS: dict[str, str] = {
     "en": "There is no earlier picture in this chat yet — draw something first.",
     "ru": "В этом чате пока нет предыдущей картинки — сначала нарисуй что-нибудь.",
@@ -3355,10 +3354,10 @@ for _lang, _text in _DRAW_NO_VERSIONS.items():
     if _lang not in STRINGS["draw_no_versions"]:
         LANG_PACKS.setdefault(_lang, {})["draw_no_versions"] = _text
 
-# ── Профиль бота в Telegram: setMyName / setMyShortDescription / setMyDescription ──
-# «О себе» жил только в BotFather — вне репозитория, тестов и зеркал (10.11.2026).
-# Имя — бренд, оно латиницей во всех паках; лимиты Bot API (64/120/500) сторожит
-# тест: при превышении Telegram отвечает 400, и профиль молча остаётся старым.
+# ── Bot profile in Telegram: setMyName / setMyShortDescription / setMyDescription ──
+# "About" lived only in BotFather — outside the repository, tests, and mirrors (10.11.2026).
+# The name is a brand, in Latin script in every pack; Bot API limits (64/120/500) are guarded by
+# test: when the limit is exceeded, Telegram returns 400, and the profile silently stays unchanged.
 _PROFILE_NAME: dict[str, str] = {
     "ar": "Lumen",
     "be": "Lumen",
@@ -3468,8 +3467,8 @@ _PROFILE_DESCRIPTION: dict[str, str] = {
            "ngidweba futhi ngikhulume. I-TikTok link ibuyela ingenawo umaka wamanzi. Imiyalo ayiphoqelele — bhala ngamagama. Yakhelwe ngu-@SilverElixir",
 }
 
-# Тот же порядок, что у _DRAW_NO_VERSIONS выше: 6 старых языков в STRINGS,
-# остальные 19 — паками в LANG_PACKS.
+# Same order as _DRAW_NO_VERSIONS above: 6 old languages in STRINGS,
+# the other 19 — in packs in LANG_PACKS.
 _PROFILE_CORE = tuple(c for c in SUPPORTED_LANGS if c not in LANG_PACKS)
 for _profile_key, _profile_table in (
     ("profile_name", _PROFILE_NAME),
@@ -3483,8 +3482,8 @@ for _profile_key, _profile_table in (
         if _lang not in STRINGS[_profile_key]:
             LANG_PACKS.setdefault(_lang, {})[_profile_key] = _text
 
-# Остановка ответа (аудит 16.11.2026): ключ живёт отдельной картой, чтобы не резать
-# 25 блоков ради одной короткой строки; t() читает LANG_PACKS, тест сверяет обе таблицы.
+# Stopping an answer (audit 16.11.2026): the key lives in a separate map so it does not cut
+# 25 blocks for one short string; t() reads LANG_PACKS, and the test checks both tables.
 _STREAM_NOTE_STOPPED: dict[str, str] = {
     'ar': '\n\nتم الإيقاف.',
     'be': '\n\nСпынена.',
@@ -3516,7 +3515,7 @@ STRINGS["stream_note_stopped"] = _STREAM_NOTE_STOPPED
 for _lang_code, _note_text in _STREAM_NOTE_STOPPED.items():
     LANG_PACKS.setdefault(_lang_code, {})["stream_note_stopped"] = _note_text
 
-# Кнопка «Остановить» под ответом (аудит 16.11.2026): ключ отдельной картой.
+# The "Stop" button below the answer (audit 16.11.2026): the key is a separate map.
 _STOP_BUTTON_LABELS: dict[str, str] = {
     'ar': 'إيقاف',
     'be': 'Спыніць',

@@ -1,7 +1,6 @@
-"""
-test_bot_tts.py — TTS: Gemini TTS и inline_tts (квоты, бюджеты, лимиты пользователя).
+"""test_bot_tts.py — TTS: Gemini TTS and inline_tts (quotas, budgets, user limits).
 
-Выделено из test_bot.py (P2 аудита); общие фейки — в bot_test_helpers.py.
+Split out from test_bot.py (P2 audit); shared fakes are in bot_test_helpers.py.
 """
 from unittest.mock import MagicMock, AsyncMock
 import asyncio
@@ -18,24 +17,24 @@ from tests.bot_test_helpers import (
 
 
 def test_inline_tts_records_quota_usage_on_success():
-    # У TTS всего 10 запросов/сутки на модель (дашборд) — расход учитываем в GLOBAL_QUOTA["gemini"] как у текстовых.
+    # TTS allows only 10 requests/day per model (dashboard) — charge usage to GLOBAL_QUOTA["gemini"] as for text.
 
-    # Минимальный RIFF/WAV-заголовок — достаточно, чтобы код распознал формат как
-    # WAV и не пытался обернуть его заново через pcm_to_wav; реальная конвертация
-    # через ffmpeg в этом окружении не установлена и ожидаемо упадёт — это штатно
-    # ловится внутри inline_tts (тест проверяет учёт квоты, а не качество звука).
+    # A minimal RIFF/WAV header is enough for the code to recognize the format as
+    # WAV and did not try to wrap it again through pcm_to_wav; the actual conversion
+    # ffmpeg is not installed in this environment and is expected to fail — this is normal
+    # is caught inside inline_tts (the test checks quota accounting, not audio quality).
     fake_wav_bytes = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 64
 
     def fake_generate_content(*, model, contents, config=None):
         return _fake_tts_response(fake_wav_bytes)
 
     fake_client = MagicMock()
-    # Асинхронный путь (lumen_tts): синхронный вызов в потоке убран — зависший
-    # Google держал лок чата бесконечно (аудит 26.09.2026).
+    # Async path (lumen_tts): the synchronous call in a thread was removed — a hung
+    # Google held the chat lock indefinitely (audit 26.09.2026).
     fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
 
     incoming = _FakeIncomingMessage(999801)
-    incoming.message_id = 12345  # inline_tts использует его для reply_to_message_id
+    incoming.message_id = 12345  # inline_tts uses it for reply_to_message_id
 
     original_client = bot.client
     original_bot = bot.bot
@@ -54,8 +53,8 @@ def test_inline_tts_records_quota_usage_on_success():
 
 
 def test_inline_tts_marks_quota_exhausted_on_daily_quota():
-    # Суточная квота первой TTS-модели — метка до утра через _mark_quota_exhausted,
-    # а синтез продолжается со второй моделью цепочки.
+    # The first TTS model's daily quota is marked until morning via _mark_quota_exhausted,
+    # while synthesis continues with the second model in the chain.
     class _RateLimitExc(Exception):
         status_code = 429
 
@@ -95,9 +94,9 @@ def test_inline_tts_marks_quota_exhausted_on_daily_quota():
 
 
 def test_inline_tts_burst_rate_limit_only_cools_down():
-    # Минутный всплеск у первой TTS-модели не должен ставить суточную метку:
-    # раньше любой 429 убирал её до полуночи, хотя текстовый маршрут уже получил
-    # короткую остывку. Синтез всё равно продолжается со второй моделью.
+    # A one-minute spike from the first TTS model must not set the daily marker:
+    # previously, any 429 removed it until midnight, although the text route had already received
+    # a short cooldown. Synthesis still continues with the second model.
     import time as _time
 
     class _RateLimitExc(Exception):
@@ -138,8 +137,8 @@ def test_inline_tts_burst_rate_limit_only_cools_down():
 
 
 def test_gemini_tts_synthesis_has_timeout_and_does_not_use_threads():
-    # Регрессия (аудит 26.09.2026): синхронный вызов в asyncio.to_thread без
-    # таймаута — зависший Google держал лок чата бесконечно и терял поток.
+    # Regression (audit 26.09.2026): a synchronous call inside asyncio.to_thread without
+    # the timeout — a hung Google call held the chat lock indefinitely and lost the stream.
     import asyncio as _asyncio
     from lumen_tts import _gemini_tts_bytes as synth
 
@@ -159,8 +158,8 @@ def test_gemini_tts_synthesis_has_timeout_and_does_not_use_threads():
 
     client.models = SimpleNamespace(generate_content=never)
 
-    # Именно таймаут, не любое исключение: RuntimeError от зависшего мока
-    # проходил прежний pytest.raises(Exception) (ревью 17.11.2026).
+    # Specifically a timeout, not just any exception: RuntimeError from a hung mock
+    # passed the old pytest.raises(Exception) check (review 17.11.2026).
     with pytest.raises(_asyncio.TimeoutError):
         _asyncio.run(synth(
             client, "текст", tts_models=["m1"],
@@ -173,7 +172,7 @@ def test_gemini_tts_synthesis_has_timeout_and_does_not_use_threads():
 
 
 def test_gemini_tts_passes_http_timeout_to_sdk():
-    # Второй рубеж: таймаут задан и в http_options, даже если внешний wait_for не сработал.
+    # Second line of defense: the timeout is set in http_options even if the outer wait_for does not fire.
     import asyncio as _asyncio
     from lumen_tts import _gemini_tts_bytes as synth
 
@@ -217,8 +216,8 @@ def _wav_client():
         return _fake_tts_response(fake_wav_bytes)
 
     fake_client = MagicMock()
-    # Асинхронный путь (lumen_tts): синхронный вызов в потоке убран — зависший
-    # Google держал лок чата бесконечно (аудит 26.09.2026).
+    # Asynchronous path (lumen_tts): the synchronous call in a thread was removed; a hung
+    # A hung Google call held the chat lock indefinitely (audit 26.09.2026).
     fake_client.aio.models.generate_content = AsyncMock(side_effect=fake_generate_content)
     return fake_client
 
@@ -250,7 +249,7 @@ def test_split_tts_chunks_hard_cuts_single_long_sentence():
 
 
 def test_inline_tts_sends_long_text_in_parts():
-    # Длинный текст бьём на части вместо отказа: два голосовых, первый в ответ.
+    # Split long text into parts instead of failing: two voice messages, the first in response.
     from lumen_commands import TTS_MAX_PARTS
     assert TTS_MAX_PARTS >= 2
     limit = bot.TTS_MAX_CHARS
@@ -292,14 +291,14 @@ def test_inline_tts_refuses_beyond_parts_cap_without_sending():
     try:
         asyncio.run(bot.inline_tts(incoming, text))
         assert counting.voices == []
-        assert len(incoming.sent) >= 1  # текст tts_too_long ушёл
+        assert len(incoming.sent) >= 1  # the tts_too_long text was sent
     finally:
         bot.client = original_client
         bot.bot = original_bot
 
 
 def test_pcm_to_wav_rejects_non_wav_riff():
-    # Аудит A6-11: префиксу RIFF верили вслепую — у WEBP/AVI он тоже есть.
+    # Audit A6-11: the RIFF prefix was trusted blindly; WEBP/AVI also have it.
     import lumen_tts
     out = lumen_tts.pcm_to_wav(b"RIFF....WEBP....")
     assert out.startswith(b"RIFF") and out[8:12] == b"WAVE"
@@ -307,7 +306,7 @@ def test_pcm_to_wav_rejects_non_wav_riff():
 
 
 def test_inline_tts_zero_budget_never_synthesizes(monkeypatch):
-    # Аудит D2: нулевой общий бюджет — синтез не стартует вообще, сразу честная ошибка.
+    # Audit D2: with zero total budget, synthesis does not start at all; an honest error is returned immediately.
     import lumen_commands
 
     async def must_not_synthesize(text):
@@ -329,7 +328,7 @@ def test_inline_tts_zero_budget_never_synthesizes(monkeypatch):
 
 
 def test_inline_tts_sends_partial_with_shortened_note(monkeypatch):
-    # Аудит D2: второй кусок завис — первый уходит, пользователь узнаёт об обрезке.
+    # Audit D2: the second chunk hung; the first is sent, and the user is told about the truncation.
     import lumen_commands
 
     class _CountingVoiceBot(_FakeVoiceBot):
@@ -371,9 +370,9 @@ def test_inline_tts_sends_partial_with_shortened_note(monkeypatch):
 
 
 def test_inline_tts_replies_when_voice_send_fails(monkeypatch):
-    # Аудит 28.10.2026: статус «Озвучиваю» уже удалён, а send_voice вернул None —
-    # раньше пользователь оставался в полной тишине. Теперь честная ошибка,
-    # а неотправленный чанк возвращается в дневной лимит.
+    # Audit 28.10.2026: the “Voice synthesis” status was already removed, and send_voice returned None —
+    # previously left the user in complete silence. Now there is an honest error,
+    # while an unsent chunk is returned to the daily limit.
     import lumen_commands
 
     class _SilentVoiceBot(_FakeVoiceBot):
@@ -402,12 +401,63 @@ def test_inline_tts_replies_when_voice_send_fails(monkeypatch):
         bot.chat_state.pop(999989, None)
 
 
+def test_inline_tts_decode_failure_unknown_keeps_slot_without_retry(monkeypatch):
+    # JSON failed after sending: the voice may have been accepted. None would refund the
+    # slot and show an error over audio that may already have been delivered.
+    import json
+    import lumen_commands
+
+    class _DecodeFailingVoiceBot(_FakeVoiceBot):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def send_voice(self, **kwargs):
+            self.calls += 1
+            raise json.JSONDecodeError("Expecting value", "<html>", 0)
+
+    async def fake_synth(text):
+        return (b"audio1", "speech.ogg", 5)
+
+    refunds = []
+    notices = []
+
+    async def fake_reply(message, text, **kwargs):
+        notices.append(text)
+
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fake_synth)
+    monkeypatch.setattr(bot, "_refund_user_daily", lambda *a, **kw: refunds.append((a, kw)))
+    monkeypatch.setattr(bot, "_safe_reply", fake_reply)
+    monkeypatch.setattr(bot, "_tg_proxy_breaker", bot._TelegramProxyCircuitBreaker(
+        cooldown_sec=20.0, trip_threshold=5,
+    ))
+    voice_bot = _DecodeFailingVoiceBot()
+    monkeypatch.setattr(bot, "bot", voice_bot)
+    incoming = _FakeIncomingMessage(999990)
+    incoming.message_id = 12354
+    incoming.from_user = SimpleNamespace(id=777099)
+    saved_day = bot.GLOBAL_QUOTA.get("quota_day")
+    bot.GLOBAL_QUOTA["quota_day"] = bot._current_quota_day()
+    try:
+        asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+        assert voice_bot.calls == 1
+        assert refunds == []
+        assert notices == []
+        entry = bot.GLOBAL_QUOTA["user_daily"][str(777099)]
+        assert entry["total"] == 1 and entry["tts"] == 1
+    finally:
+        bot.GLOBAL_QUOTA["quota_day"] = saved_day
+        bot.GLOBAL_QUOTA.get("user_daily", {}).pop(str(777099), None)
+        bot.chat_state.pop(999990, None)
+
+
 def test_inline_tts_refuses_when_user_tts_limit_exhausted(monkeypatch):
-    # Новое: исчерпанный TTS-лимит — отказ до синтеза, модель не вызывается.
+    # New: an exhausted TTS limit causes a refusal before synthesis; the model is not called.
     incoming = _FakeIncomingMessage(999988)
     incoming.message_id = 12352
     incoming.from_user = SimpleNamespace(id=777013)
     monkeypatch.setattr(bot, "DAILY_USER_TTS_LIMIT", 1)
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, "quota_day", bot._current_quota_day())
     bot._record_user_daily(777013, tts=True)
 
     async def fail_generate(*args, **kwargs):
@@ -426,15 +476,66 @@ def test_inline_tts_refuses_when_user_tts_limit_exhausted(monkeypatch):
     try:
         asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
         assert len(replies) == 1 and "Daily voicing limit" in replies[0]
-        # Отказ не считается: счётчик не вырос.
+        # A refusal is not counted: the counter does not increase.
         assert bot._user_daily_entry(777013)["tts"] == 1
     finally:
         bot.GLOBAL_QUOTA.get("user_daily", {}).pop("777013", None)
         bot.chat_state.pop(999988, None)
 
 
+def test_inline_tts_replies_when_daily_bucket_is_full(monkeypatch):
+    # R2-14 review: a capacity refusal is not a personal-limit refusal.
+    import lumen_commands
+    import lumen_quotas as lq
+
+    incoming = _FakeIncomingMessage(999987)
+    incoming.message_id = 12351
+    incoming.from_user = SimpleNamespace(id=777012)
+    monkeypatch.setattr(lq, "MAX_USER_DAILY_KEYS", 2)
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, "quota_day", bot._current_quota_day())
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, lq.USER_DAILY_KEY, {
+        str(uid): {"total": 1, "gemini": 0, "tts": 0, "draw": 0, "bonus": 0}
+        for uid in (777010, 777011)
+    })
+    replies = []
+
+    async def fake_safe_reply(msg, text, **kwargs):
+        replies.append(text)
+
+    async def fail_synth(_text):
+        raise AssertionError("synthesis must not run when the daily bucket is full")
+
+    monkeypatch.setattr(bot, "_safe_reply", fake_safe_reply)
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", fail_synth)
+    asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+    assert replies == [bot._model_error_text("fallback", bot._chat_lang(incoming.chat.id))]
+    assert bot._user_daily_peek(777012) is None
+
+
+def test_inline_tts_ignores_unrelated_exhausted_draw_counter(monkeypatch):
+    # R2-14 review: a stale over-limit draw counter must not block or silence TTS.
+    import lumen_commands
+
+    incoming = _FakeIncomingMessage(999986)
+    incoming.message_id = 12350
+    incoming.from_user = SimpleNamespace(id=777011)
+    monkeypatch.setattr(bot, "DAILY_USER_DRAW_LIMIT", 5)
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, "quota_day", bot._current_quota_day())
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, "user_daily", {
+        "777011": {"total": 0, "gemini": 0, "tts": 0, "draw": 6, "bonus": 0},
+    })
+    synth = AsyncMock(return_value=(b"audio", "speech.ogg", 1))
+    monkeypatch.setattr(lumen_commands, "_synthesize_tts_voice", synth)
+    monkeypatch.setattr(bot, "bot", _FakeVoiceBot())
+    asyncio.run(bot.inline_tts(incoming, "Привет, мир"))
+    assert synth.await_count == 1
+    entry = bot._user_daily_peek(777011)
+    assert entry is not None
+    assert (entry["total"], entry["tts"], entry["draw"]) == (1, 1, 6)
+
+
 def test_inline_tts_records_user_daily_on_success(monkeypatch):
-    # Новое: успешная озвучка растит total+tts (пара к test_inline_tts_records_quota_usage_on_success).
+    # New: successful TTS increases total+tts (paired with test_inline_tts_records_quota_usage_on_success).
     fake_wav_bytes = b"RIFF" + b"\x00" * 4 + b"WAVEfmt " + b"\x00" * 64
 
     def fake_generate_content(*, model, contents, config=None):
@@ -459,7 +560,8 @@ def test_inline_tts_records_user_daily_on_success(monkeypatch):
 
 
 def test_inline_tts_charges_each_synthesized_chunk():
-    # Каждый чанк — отдельный синтез за квоту: списываем поштучно, а не раз за сообщение.
+    # Each chunk is a separate synthesis charged to the quota: charge per chunk,
+    # not once per message.
     limit = bot.TTS_MAX_CHARS
     part = "Предложение номер раз про интересные вещи. "
     text = part * ((limit // len(part)) + 2)
@@ -488,7 +590,7 @@ def test_inline_tts_charges_each_synthesized_chunk():
 
 
 def test_inline_tts_refuses_when_chunks_would_exceed_limit(monkeypatch):
-    # Проверка считает все чанки сразу: 4/5 + текст на 3 чанка — отказ до синтеза.
+    # The check counts all chunks up front: 4/5 plus text spanning 3 chunks — reject before synthesis.
     import lumen_commands
     from types import SimpleNamespace
     limit = bot.TTS_MAX_CHARS
@@ -499,6 +601,7 @@ def test_inline_tts_refuses_when_chunks_would_exceed_limit(monkeypatch):
     incoming.message_id = 12361
     incoming.from_user = SimpleNamespace(id=777016)
     monkeypatch.setattr(bot, "DAILY_USER_TTS_LIMIT", 5)
+    monkeypatch.setitem(bot.GLOBAL_QUOTA, "quota_day", bot._current_quota_day())
     for _ in range(4):
         bot._record_user_daily(777016, tts=True)
 

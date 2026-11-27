@@ -1,5 +1,4 @@
-"""
-lumen_commands.py — команды бота, TTS/Draw-пайплайны и кнопки-уточнения. Связи с bot.py — только через отложенный `import bot`; bot.py реэкспортирует имена и регистрирует хендлеры.
+"""lumen_commands.py — bot commands, TTS/Draw pipelines, and clarification buttons. Links with bot.py are only through a deferred `import bot`; bot.py re-exports names and registers handlers.
 """
 from __future__ import annotations
 
@@ -58,14 +57,14 @@ async def cmd_start(message: Message) -> None:
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
         return
-    # Лимит и здесь: хендлер зарегистрирован раньше общего catch-all, поэтому
-    # сообщение до _reject_rate_limited_message не доходило — спамер получал
-    # бесконечные ответы в группе, расходуя прокси-трафик (аудит 26.09.2026).
+    # The limit applies here too: the handler is registered before the general catch-all, so
+    # the message never reached _reject_rate_limited_message — the spammer received
+    # endless responses in a group while consuming proxy traffic (audit 26.09.2026).
     if await bot._reject_rate_limited_message(message):
         return
     text = bot._t(message.chat.id, "start_text")
     if message.chat.type != ChatType.PRIVATE:
-        # В группах контекст честно виден: фон чата (до 100 сообщений) уходит провайдерам вместе с вопросом.
+        # In groups the context is transparently visible: the chat background (up to 100 messages) goes to providers along with the question.
         text += "\n\n" + bot._t(message.chat.id, "group_history_notice")
     await bot._tg_call(
         message.reply,
@@ -73,29 +72,29 @@ async def cmd_start(message: Message) -> None:
         parse_mode=ParseMode.HTML,
     )
 
-# Справочник провайдерских функций собирается на каждый вызов: тесты подменяют
-# bot._<провайдер>_text_to_image, а копия, снятая один раз при импорте, показала бы
-# подмену мимо (тот же класс ошибок, что с bot.X в аудите A5-8).
+# The provider-function registry is rebuilt on every call: tests replace
+# bot._<provider>_text_to_image, while a copy taken once at import would show
+# replacement bypass (the same error class as bot.X in the A5-8 audit).
 def _image_provider_calls() -> dict[str, Any]:
     import bot
     return {name: getattr(bot, f"_{name}_text_to_image") for name in bot.image_provider_names()}
 
 
-# Семафор на каждый event loop — приём тот же, что у bot._media_semaphore: тесты
-# гоняют много коротких asyncio.run, один общий объект привязался бы к первому циклу.
+# One semaphore per event loop, as with bot._media_semaphore. Tests run many short
+# asyncio.run calls; one shared object would become bound to the first loop.
 _image_semaphores: dict[Any, asyncio.Semaphore] = {}
 _draw_inflight: set[Any] = set()
 
-# Промпт переводит голова Munito: перевод — служебный вызов, как саммари истории.
+# The Munito head translates the prompt: translation is a service call, like history summarization.
 _DRAW_TRANSLATE_SYSTEM = (
     "Translate the user's image description into English for a text-to-image model. "
     "Keep every visual detail, count and style; translate literally, do not add anything. "
     "Reply with only the English description, no quotes, no explanations."
 )
 
-# Паритет с ChatGPT (10.11.2026): он никогда не отдаёт модели дословную просьбу,
-# а пишет из неё законченный кадр. Кап промпта 600 символов, поэтому просим
-# 30-60 слов: длиннее — отбрасывали бы лучший вариант ради исходной фразы.
+# Parity with ChatGPT (10.11.2026): it never gives the model the verbatim request,
+# and writes a finished frame from it. The prompt cap is 600 characters, so we ask
+# 30-60 words: anything longer would discard the best option in favor of the original phrase.
 _DRAW_PROMPT_SYSTEM = (
     "You write the final prompt for a text-to-image model. Turn the user's request "
     "into one English paragraph of 30-60 words describing only what is visible in "
@@ -109,8 +108,8 @@ _DRAW_PROMPT_SYSTEM = (
     "(16:9, 9:16, 4:3, 3:4, 2:3, 3:2, 1:1, 21:9) exactly as the user wrote it. "
     "Never refuse, never comment on the request - always output the prompt only."
 )
-# Правка — инструкция, а не описание сцены: «убери фон» не должно превращаться
-# в пересказ всей картинки, иначе klein теряет смысл изменения.
+# An edit is an instruction, not a scene description: "remove the background" must not
+# become a description of the whole image, or klein loses the meaning of the edit.
 _DRAW_EDIT_SYSTEM = (
     "Translate the user's instruction for editing an existing picture into English "
     "for an image-editing model. Keep it as an instruction saying what to change, "
@@ -120,9 +119,9 @@ _DRAW_EDIT_SYSTEM = (
 )
 
 
-# Просьба без названия артефакта («хочу увидеть кота на луне») и местоименная
-# («нарисуй это») разрешаются одним коротким вопросом по истории этого чата;
-# NONE означает «обычный текст», картинка не рисуется (паритет 10.11.2026).
+# A request without an artifact name (“I want to see a cat on the moon”) and a pronominal
+# ("draw this") are allowed with one short question about this chat's history;
+# NONE means "ordinary text"; no image is drawn (parity 10.11.2026).
 _DRAW_CONTEXT_SYSTEM = (
     "Decide what the user wants drawn. You receive the recent conversation and the "
     "current request. If they clearly ask for a picture — on their own or together "
@@ -138,8 +137,8 @@ _DRAW_CONTEXT_SYSTEM = (
 
 
 def _draw_context_snippet(state: dict, limit: int = 1400) -> str:
-    """Последние реплики этого чата одним текстом — только для разрешения
-    картинки, наружу из модуля рисования они не идут."""
+    """The latest messages in this chat as one text, only for image approval; they do not
+leave the drawing module."""
     import lumen_memory
     from lumen_message_core import _flatten_untrusted
     history = (state or {}).get("history") or []
@@ -156,12 +155,12 @@ def _draw_context_snippet(state: dict, limit: int = 1400) -> str:
 
 
 async def resolve_draw_request(message, request: str, state: dict, deadline: float) -> str:
-    """Описание кадра по просьбе без артефактного слова или по местоимению."""
+    """Describes the frame on request without an artifact word or via a pronoun."""
     import bot
     request = (request or "")[:IMAGE_PROMPT_MAX_CHARS]
     context = _draw_context_snippet(state)
-    # Текст отреплайченного сообщения ещё не в истории: добавляем его сами,
-    # иначе «нарисуй это» реплаем на описание разрешалось по старым репликам.
+    # The replied-to message text is not in history yet: add it ourselves,
+    # otherwise "draw this" as a reply to a description was allowed by old replies.
     reply_msg = getattr(message, "reply_to_message", None)
     if reply_msg is not None:
         _reply_text = ((reply_msg.text or reply_msg.caption or "").strip())[:400]
@@ -187,8 +186,8 @@ async def resolve_draw_request(message, request: str, state: dict, deadline: flo
     return prepared if hit else ""
 
 
-# Лапки и тире из перевода ломали резерв: sana принимает только ASCII, а guard
-# в провайдере не различает кириллицу и типографику (ревью 10.11.2026).
+# Paws and dashes from the translation broke the fallback: sana accepts only ASCII,
+# while the provider guard does not distinguish Cyrillic from typography (review 10.11.2026).
 _DRAW_TRANSLATE_ASCII = str.maketrans({
     "\u201c": '"', "\u201d": '"', "\u00ab": '"', "\u00bb": '"',
     "\u2018": "'", "\u2019": "'", "\u2013": "-", "\u2014": "-", "\u2026": "...",
@@ -196,25 +195,22 @@ _DRAW_TRANSLATE_ASCII = str.maketrans({
 
 
 def _draw_prompt_ascii(text: str) -> str:
-    """Типографику, акценты и эмодзи сводим к ASCII: guard sana режет ЛЮБОЙ
-    не-ASCII, и «café» или морда котика в переводе выключали резерв (ревью
-    10.11.2026). Латиницы не осталось — возвращаем как есть: пусть провайдер
-    честно откажет, а не рисует по пустому описанию."""
+    """Reduce typography, accents, and emoji to ASCII: sana's guard rejects ANY non-ASCII, and “café” or a cat face in a translation disabled the fallback (review 10.11.2026). If no Latin letters remain, return the text unchanged: let the provider refuse honestly rather than draw from an empty description."""
     folded = unicodedata.normalize("NFKD", text.translate(_DRAW_TRANSLATE_ASCII))
     folded = re.sub(r"\s+", " ", folded.encode("ascii", "ignore").decode()).strip()
     if not re.search(r"[A-Za-z]", folded):
         return text
-    # Потеряна хоть одна буква — потерян и смысл: «убери фон, keep the cat
-    # unchanged» сжималось в «keep the cat unchanged», то есть «ничего не меняй»
-    # (ревью 10.11.2026). Типографика и эмодзи при этом режутся как раньше.
+    # Lose even one letter and the meaning is lost: "remove the background, keep the cat
+    # unchanged” was compressed to “keep the cat unchanged,” meaning “change nothing”
+    # (review 10.11.2026). Typography and emoji are still stripped as before.
     if sum(ch.isalpha() for ch in text) != sum(ch.isalpha() for ch in folded):
         return text
     return folded
 
 
 def _clip_prompt_text(text: str) -> str:
-    """Кап по границе слова: обрезанное описание честнее, чем выброшенное, а
-    кап нужен — провайдер режет длинный prompt без предупреждения."""
+    """Cap at a word boundary: a truncated description is more honest than a discarded one, and
+    the cap is needed because the provider truncates long prompts without warning."""
     if len(text) <= IMAGE_PROMPT_MAX_CHARS:
         return text
     cut = text[:IMAGE_PROMPT_MAX_CHARS]
@@ -222,8 +218,8 @@ def _clip_prompt_text(text: str) -> str:
     return (cut[:sp] if sp > 40 else cut).strip()
 
 
-# Потолок служебных описаний в день: MUNITO_DAILY_LIMIT (250) минус ответы
-# людям. Счётчик in-memory: после рестарта обнуляется, как и карантин моделей.
+# Daily cap for service descriptions: MUNITO_DAILY_LIMIT (250) minus answers
+# people. The counter is in memory: it resets on restart, just like model quarantine.
 IMAGE_DESC_DAILY_LIMIT = 120
 _desc_day = ""
 _desc_calls = 0
@@ -243,9 +239,9 @@ def _note_description_call() -> None:
     _desc_calls += 1
 
 
-# Модель может ответить мета-фразой вместо описания: провайдеру такое нельзя.
-# Форм отказа шире, чем «I can't»: сокращения, ведущая разметка, другие языки
-# (ревью 10.11.2026).
+# The model may reply with a meta-phrase instead of a description; the provider cannot accept that.
+# Refusal forms are broader than "I can't": contractions, leading markup, other languages
+# (review 10.11.2026).
 _DRAW_REFUSAL_RE = re.compile(
     r"^(?:"
     r"i(?:'?m|\s+am)?\s+(?:ca(?:n'?t|nnot)|unable|not\s+(?:able|allowed)|won'?t"
@@ -266,7 +262,7 @@ _DRAW_PREAMBLE_RE = re.compile(
 
 
 def _meta_refusal(text: str) -> bool:
-    """Ищем отказ после ведущих markup-символов; curly-апостроф сводим к '.__"""
+    """Look for a refusal after leading markup characters; normalize a curly apostrophe to '."""
     clean = re.sub(r"^[\s*\"'`#—–-]+", "", (text or "").replace("\u2019", "'"))
     return bool(_DRAW_REFUSAL_RE.match(clean))
 
@@ -275,20 +271,21 @@ async def _draw_llm_description(
     system: str, user_text: str, deadline: float, *, timeout_sec: float,
     temperature: float, max_tokens: int,
 ) -> str:
-    """Один короткий запрос к Munito за описанием картинки: "" — модель
-    недоступна, ответ не годится или бюджета не осталось."""
+    """One short Munito request for an image description: '' means the model
+is unavailable, the answer is unusable, or no budget remains."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
     if not _munito_active() or not user_text.strip():
         return ""
     if not _description_budget_left():
-        # Служебные вызовы не пишутся в квоту моделей: без своего капа 80
-        # картинок с резолвером и переводом выжигали MUNITO_DAILY_LIMIT целиком
-        # (ревью 10.11.2026).
+        # Service calls are not charged to the model quota: without their own cap, 80
+        # images with a resolver and translation burned the entire MUNITO_DAILY_LIMIT
+        # (10.11.2026 review).
         log.info("[draw] Description budget for today exhausted — using the user's words.")
         return ""
-    # Считаем попытку до запроса: сбой, отказ и ливк тоже бьют по общему лимиту
-    # Munito, а после await их уже не учесть (ревью 10.11.2026).
+    # Count the attempt before the request: failures, refusals, and departures also count
+    # against the overall Munito limit and cannot be accounted for after the await
+    # (review 10.11.2026).
     _note_description_call()
     remaining = deadline - time.monotonic()
     if remaining < 1.5:
@@ -324,7 +321,7 @@ async def _draw_llm_description(
     answer = _DRAW_PREAMBLE_RE.sub("", answer, count=1)
     from lumen_security import _detect_identity_leak
     if _detect_identity_leak(answer):
-        # Описание с названием модели: наружу его не пускаем, генерацию не отменяем.
+        # A description containing a model name: do not let it out, and do not cancel generation.
         log.warning("[draw] Description leaked identity (len=%d) — ignored.", len(answer))
         return ""
     bot._record_quota_usage("munito", model, service=True)
@@ -332,9 +329,9 @@ async def _draw_llm_description(
 
 
 async def _prepare_draw_prompt(prompt: str, deadline: float, *, edit: bool = False) -> str:
-    """Описание для провайдера: генерацию переписываем в законченный кадр по-
-    английски, правку только переводим, оставляя инструкцию. Пустой ответ, сбой
-    или нехватка бюджета — исходная формулировка, генерация не отменяется."""
+    """Description for the provider: rewrite generation requests as a completed shot in
+    English; only translate edit requests, preserving the instruction. An empty response, failure,
+    or insufficient budget falls back to the original wording; generation is not canceled."""
     import bot
     answer = await _draw_llm_description(
         _DRAW_EDIT_SYSTEM if edit else _DRAW_PROMPT_SYSTEM, prompt, deadline,
@@ -350,8 +347,8 @@ async def _prepare_draw_prompt(prompt: str, deadline: float, *, edit: bool = Fal
     return prompt
 
 
-# Перевод одного описания для ASCII-резерва на одно обращение: серия из N
-# вариантов иначе звала переводчика N раз по 12 секунд (ревью 10.11.2026).
+# Translate one description for the ASCII fallback per call: a series of N
+# of options otherwise called the translator N times at 12 seconds each (review 10.11.2026).
 _RESERVE_TRANSLATE_TTL_SEC = 60.0
 _reserve_translate_memo: dict[str, tuple[float, str]] = {}
 
@@ -363,8 +360,8 @@ async def _translate_for_reserve(text: str, deadline: float) -> str:
     if hit is not None and now - hit[0] < _RESERVE_TRANSLATE_TTL_SEC:
         return hit[1]
     translated = await bot._translate_draw_prompt(text, deadline)
-    # В кэш только удачный перевод: сбой или нехватка бюджета возвращают ту же
-    # кириллицу, и её резерв рисовал бы знаками «?» ещё 60 секунд (ревью 10.11.2026).
+    # Only successful translations enter the cache: a failure or lack of budget returns the same
+    # Cyrillic, and its fallback would render characters as "?" for another 60 seconds (review 10.11.2026).
     if translated and translated != text and translated.isascii():
         if len(_reserve_translate_memo) > 32:
             _reserve_translate_memo.clear()
@@ -373,9 +370,10 @@ async def _translate_for_reserve(text: str, deadline: float) -> str:
 
 
 async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
-    """Промт с не-латиницей переводим на английский: Pollinations/sana превращает
-    кириллицу в '?' ещё при разборе URL (пруф 09.11.2026: метаданные готового JPEG),
-    модель рисует случайное. Сбой/таймаут перевода — оригинал, как раньше."""
+    """Translate non-Latin prompts into English: Pollinations/sana turns Cyrillic into '?'
+    during URL parsing (proof 09.11.2026: metadata from the finished JPEG), and the model
+    draws something random. If translation fails or times out, use the original, as before.
+    """
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_active, _munito_payload_extras
     if prompt.isascii() or not _munito_active():
@@ -404,7 +402,7 @@ async def _translate_draw_prompt(prompt: str, deadline: float) -> str:
         )
         choices = resp.get("choices") or []
         answer = bot._or_extract_text(choices[0].get("message") or "").strip() if choices else ""
-        # Перевод длиннее капа — модель ушла в рассуждения вместо описания.
+        # Translation longer than the cap — the model went into reasoning instead of a description.
         if answer and len(answer) <= IMAGE_PROMPT_MAX_CHARS:
             bot._record_quota_usage("munito", model, service=True)
             return _draw_prompt_ascii(answer)
@@ -428,23 +426,30 @@ async def inline_draw(
     message: Message, prompt: str, *, reference: tuple[bytes, str] | None = None,
     prepared_prompt: str | None = None,
 ) -> bool:
-    """Одна картинка (или правка). Возвращает True, если фото реально ушло в чат.
-    prepared_prompt — описание, уже готовое для провайдера (серия вариантов
-    готовит его один раз), иначе готовим внутри."""
+    """One image (or edit). Returns True if the photo was actually sent to the chat. prepared_prompt is a description already prepared for the provider (a series prepares it once); otherwise it is prepared here."""
     import bot
     cid = message.chat.id
     uid = bot._user_key_for_message(message)
-    # Общий дневной бюджет картинок — до резерва и до сети: отказ не должен ни
-    # списывать слот пользователя, ни биться в провайдера, у которого день кончился.
+    # Overall daily image budget — before the reserve and before network access: a refusal must neither
+    # charge the user's slot, or call a provider whose day is over.
     if not bot._is_owner(uid) and bot._image_budget_exhausted():
         log.info("[draw] Refused: global daily image budget exhausted (chat=%s).", cid)
         bot._record_stats_event("daily_limit_denials")
         await bot._safe_reply(message, bot._t(cid, "draw_day_over", limit=bot.IMAGE_DAILY_LIMIT))
         return False
-    # Дневные лимиты пользователя: общий и отдельный на картинки. Резерв атомарный и
-    # ДО первого await — проверка в начале со списанием после генерации позволяли
-    # пяти параллельным /draw пробить лимит (аудит 01.11.2026).
-    if not bot._reserve_user_daily(uid, total=1, draw=1):
+    # User daily limits: overall and a separate one for images. The reserve is atomic and
+    # BEFORE the first await — checking at the start and charging after generation allowed
+    # five parallel /draw calls break the limit (audit 01.11.2026).
+    _draw_reservation = bot._reserve_user_daily(uid, total=1, draw=1)
+    if not _draw_reservation:
+        if bot._user_daily_admission_blocked(uid):
+            log.info("[draw] Refused: daily quota admission blocked (chat=%s, uid=%s).", cid, uid)
+            bot._record_stats_event("daily_limit_denials")
+            await bot._safe_reply(
+                message,
+                bot._model_error_text("fallback", bot._chat_lang(cid)),
+            )
+            return False
         log.info("[draw] Refused: user daily limit reached (chat=%s, uid=%s).", cid, uid)
         _draw_entry = bot._user_daily_peek(uid)
         hours, mins = bot._user_daily_reset_in()
@@ -461,31 +466,35 @@ async def inline_draw(
                 used=(_draw_entry or {}).get("draw", 0), limit=bot._user_daily_limit(uid, "draw", _draw_entry),
             ))
         return False
-    # Одна генерация на человека: rate limit 5/30с этого не мешал, и пять висящих
-    # /draw по 30 МБ держал в памяти один и тот же человек (аудит 09.11.2026).
+    # One generation per person: the 5/30s rate limit did not prevent this, and five
+    # hanging
+    # /draw at 30 MB occupied the same person's memory (audit 09.11.2026).
     if uid is not None and uid in _draw_inflight:
         log.info("[draw] Refused: generation already in flight (chat=%s, uid=%s).", cid, uid)
-        bot._refund_user_daily(uid, total=1, draw=1)
+        bot._refund_user_daily(uid, reservation=_draw_reservation, total=1, draw=1)
         await bot._safe_reply(message, bot._t(cid, "draw_err_overloaded"))
         return False
     if uid is not None:
         _draw_inflight.add(uid)
-    # Инициализируем ДО try: сбой самого пузыря иначе уводил бы обработчик ошибки
-    # на несвязанное имя (аудит 01.11.2026).
+    # Initialize BEFORE try: otherwise, a failure of the bubble itself would divert the error handler
+    # to an unrelated name (audit 01.11.2026).
     status_obj = None
     status = None
     acquired = False
     generated = False
-    # Инициализируем до try: обработатели читают этот флаг, а отказ провайдера
-    # может прийти до его присваивания (ревью 10.11.2026).
+    # R3-02 (26.11.2026 audit): if Telegram has already accepted the photo, generation
+    # is paid, a daily-slot refund on cancellation in later awaits is not allowed.
+    sent_ok = False
+    # Initialize before try: handlers read this flag, and a provider failure
+    # may arrive before it is assigned (review 10.11.2026).
     moderation_blocked = False
     try:
         from lumen_status import StatusMessage
         session = await bot._get_http_session()
-        # Потолок сообщения (90 с) картинке не ставим: он считался бы уже после
-        # очереди и подготовки, и последний провайдер звался бы на остатке в
-        # секунду — таймаут парковал бы Cloudflare cooldown'ом на всех (ревью
-        # 10.11.2026). Рисование сознательно живёт дольше текстового маршрута.
+        # Do not apply the message ceiling (90 s) to an image: it would be counted only after
+        # queue and preparation, and the last provider would be called on the remainder in
+        # a second, or a timeout would park Cloudflare in cooldown for everyone (review
+        # 10.11.2026). Drawing intentionally outlives the text route.
         deadline = time.monotonic() + bot.DRAW_TOTAL_BUDGET_SEC
         sem = _image_semaphore()
         try:
@@ -502,30 +511,31 @@ async def inline_draw(
         )
         status = status_obj.message if status_obj is not None else None
 
-        # Пропорции из промпта (16:9, 9:16, 4:3, 3:4, квадрат): правка всегда
-        # сохраняет кадр референса, поэтому размер задаётся только генерации.
-        # Кадр читаем из слов человека, а не из переписанного описания: модель
-        # могла бы потерять «16:9» или переформулировать его (паритет 10.11.2026).
+        # Aspect ratios from the prompt (16:9, 9:16, 4:3, 3:4, square): an edit always
+        # preserves the reference frame, so size is set only for generation.
+        # Read the frame from the person words, not from a rewritten description: the
+        # model
+        # could lose "16:9" or rephrase it (10.11.2026 parity).
         width, height = bot.detect_image_size(prompt)
         if prepared_prompt is None:
             prepared_prompt = await _prepare_draw_prompt(
                 prompt, deadline, edit=reference is not None,
             )
 
-        # Правка идёт одной моделью: референс понимает только Cloudflare klein,
-        # у Pollinations/sana правки нет вовсе. Генерация — прежней цепочкой.
-        # Один или два референса (multi-image): список приходит из резолвера,
-        # одиночный tuple поддерживается для совместимости вызовов.
+        # The edit uses one model: only Cloudflare klein understands the reference,
+        # Pollinations/sana has no editing at all. Generation uses the previous chain.
+        # One or two references (multi-image): the list comes from the resolver,
+        # a single tuple is supported for call compatibility.
         ref_items = reference if isinstance(reference, list) else ([reference] if reference else [])
-        # Вес попытки в бюджете провайдера: генерация — 1.0, правка — плюс 21 Neuron
-        # на мегапиксель входа (12 МП фото ≈ 3.4 юнита; аудит 16.11.2026).
+        # Attempt weight in the provider budget: generation — 1.0, editing — plus 21 Neuron
+        # per input megapixel (12 MP photo ≈ 3.4 units; audit 16.11.2026).
         charge_units = 1.0
         if ref_items:
             ref_bytes = [item[0] for item in ref_items[:2]]
-            # Кадр правки повторяет ориентацию первого референса: 16:9 фото иначе
-            # возвращалось квадратом и теряло края (прод 10.11.2026).
-            # Разбор заголовков 20-мегабайтного файла байт за байтом вешал event
-            # loop примерно на секунду — все чаты ждали (ревью 10.11.2026).
+            # The edit frame repeats the orientation of the first reference: a 16:9 photo otherwise
+            # was returned as a square and lost its edges (prod 10.11.2026).
+            # Parsing a 20-megabyte file's headers byte by byte hung the event
+            # the loop for about a second — all chats waited (review 10.11.2026).
             _ref_dims = await asyncio.to_thread(bot.image_dimensions, ref_bytes[0])
             if _ref_dims:
                 log.info(
@@ -544,9 +554,9 @@ async def inline_draw(
 
             calls = {"cloudflare": _edit_call}
         else:
-            # Фолбэк — по провайдерам, не по моделям: классический Pollinations игнорирует
-            # model (замер 09.11.2026), так что перебор пяти моделей звал один и тот же
-            # эндпоинт пять раз подряд. Размер поддержан только Cloudflare.
+            # Fallback is by provider, not model: classic Pollinations ignores
+            # model (measured 09.11.2026), so iterating over five models called the same
+            # the endpoint five times in a row. Only Cloudflare supports the size.
             calls = {}
             for _name, _fn in _image_provider_calls().items():
                 if _name == "cloudflare":
@@ -572,8 +582,8 @@ async def inline_draw(
                     bot.DRAW_TOTAL_BUDGET_SEC, provider,
                 )
                 break
-            # Пропуск по паузе/бюджету обязан повлиять и на текст отказа: без этого
-            # «оба провайдера на минуте» выглядело как «сервисы умерли до завтра».
+            # Skipping due to a pause/budget must also affect the refusal text: without this,
+            # "both providers are at their limit for a minute" looked like "services are dead until tomorrow".
             blocked = bot._image_provider_block_reason(provider)
             if blocked == "cooldown":
                 rate_limited = True
@@ -583,9 +593,20 @@ async def inline_draw(
                 budget_out = True
                 log.info("[draw] Provider %s out of daily budget — skipping.", provider)
                 continue
+            reserved = False
+            if not bot._is_owner(uid):
+                # R4-04 (audit 26.11.2026): the shared daily neuron budget is reserved
+                # synchronously before the request. The `_image_budget_exhausted` check above ran before the network,
+                # while `_note_image_success` runs after the answer, and two concurrent images
+                # passed the gate together and exceeded the ceiling.
+                if not bot._reserve_image_neurons(charge_units):
+                    budget_out = True
+                    log.info("[draw] Daily image-neuron budget exhausted before trying %s — stopping the chain.", provider)
+                    break
+                reserved = True
             try:
-                # Статус без названий моделей и провайдеров (см. ИДЕНТИЧНОСТЬ в system_prompt.py);
-                # на первой попытке статус и так стоит.
+                # Status without model or provider names (see IDENTITY in system_prompt.py);
+                # on the first attempt, the status is already set.
                 if attempt:
                     if status_obj is not None:
                         await status_obj.set_action_key("status_taking_longer")
@@ -593,25 +614,26 @@ async def inline_draw(
                         await bot._edit_message_quietly(status, bot._t(cid, "status_taking_longer"))
                 attempt_started = time.monotonic()
                 text = prepared_prompt
-                # sana требует ASCII: если подготовка не сработала и осталась
-                # не-латиница, подключаем точечный перевод для резерва. Переводим
-                # именно то, что собрались слать, и один раз на серию (ревью 10.11.2026).
+                # sana requires ASCII: if preparation fails and
+                # non-Latin text, enable a targeted translation for the reserve. Translate
+                # exactly what we are about to send, and only once per series
+                # (review 10.11.2026).
                 if provider == "pollinations" and not text.isascii():
                     if translated_prompt is None:
                         translated_prompt = await _translate_for_reserve(text, deadline)
                     text = translated_prompt
-                # Таймаут попытки — не больше остатка бюджета и не больше
-                # IMAGE_ATTEMPT_TIMEOUT_SEC: один зависший провайдер не должен
-                # съедать весь бюджет (аудит 29.10.2026). Считаем после перевода:
-                # его 12 секунд иначе уходили бы сверх потолка (ревью 10.11.2026).
+                # Attempt timeout is no greater than the remaining budget and no greater than
+                # IMAGE_ATTEMPT_TIMEOUT_SEC: one stuck provider must not
+                # consume the entire budget (audit 29.10.2026). Count after translation:
+                # its 12 seconds would otherwise exceed the cap (review 10.11.2026).
                 attempt_timeout = max(1.0, min(bot.IMAGE_ATTEMPT_TIMEOUT_SEC, deadline - time.monotonic()))
                 image_bytes = await call(session, text, timeout_sec=attempt_timeout)
                 bot._note_image_success(provider, units=charge_units)
                 generated = True
                 break
             except ImageRateLimitedError as exc:
-                # Пауза именно на этого провайдера — следующий ещё может сработать
-                # (раньше 429 одного сервиса останавливал всю цепочку из пяти моделей).
+                # The pause is specific to that provider — the next one may still work
+                # (previously a 429 from one service stopped the entire chain of five models).
                 bot._note_image_rate_limited(provider, retry_after_sec=exc.retry_after_sec)
                 rate_limited = True
                 last_error = exc
@@ -622,15 +644,15 @@ async def inline_draw(
                 last_error = exc
                 log.warning("[draw] Provider %s daily budget exhausted (%s) — trying next.", provider, exc)
             except ImageModerationError as exc:
-                # Отказ по содержанию не «сетевая проблема»: резерв на sana
-                # повторил бы ровно тот контент, который flagged у Cloudflare
-                # (ревью 10.11.2026).
+                # A content refusal is not a "network problem": no fallback to sana
+                # would repeat exactly the content flagged by Cloudflare
+                # (review 10.11.2026).
                 moderation_blocked = True
                 last_error = exc
-                # klein картинку посчитал и Neuron списал (флаг ставится на выходе),
-                # поэтому попытка идёт в общий дневной бюджет: без этого цикл из
-                # запрещённых описаний выжигал бы квоту провайдера у всего чата
-                # (ревью 10.11.2026).
+                # klein counted the picture and charged Neuron (the flag is set on exit),
+                # therefore the attempt goes into the shared daily budget: without this, a loop of
+                # for prohibited descriptions would burn the provider quota for the entire chat
+                # (review 10.11.2026).
                 bot._note_image_success(provider, units=charge_units)
                 log.warning("[draw] Provider %s refused by content moderation — chain stopped.", provider)
                 break
@@ -638,12 +660,12 @@ async def inline_draw(
                 last_error = exc
                 elapsed = time.monotonic() - attempt_started
                 txt = bot._error_text(exc).lower()
-                # Висящий хост — это тоже «не трогать минуту»: без паузы каждый
-                # следующий человек платил бы полные IMAGE_ATTEMPT_TIMEOUT_SEC
-                # (прод 09.11.2026).
-                # Ответы relay-прокси ("Cloudflare HTTP 502/504") — тоже «не трогать
-                # минуту»: без паузы каждый следующий человек платил бы полный таймаут
-                # (прод 09.11.2026, ревю 10.11.2026).
+                # A hanging host also means “do not touch for a minute”: without a pause, every
+                # next person would pay the full IMAGE_ATTEMPT_TIMEOUT_SEC
+                # (production 09.11.2026).
+                # Relay-proxy responses ("Cloudflare HTTP 502/504") are also "do not touch
+                # minute": without a pause, every next person would pay the full timeout
+                # (production 09.11.2026, review 10.11.2026).
                 unreachable = isinstance(exc, (asyncio.TimeoutError, OSError)) or any(
                     kw in txt for kw in (
                         "timeout", "cannot connect", "ssl:", "no address", "connection", "dns",
@@ -658,21 +680,27 @@ async def inline_draw(
                     provider, elapsed, type(exc).__name__, exc,
                     "parked on cooldown" if unreachable else "trying next",
                 )
+            finally:
+                # Any attempt outcome (success, refusal, cancellation): if `_note_image_success`
+                # already charged neurons to actual spend, the fallback is released; otherwise
+                # it is returned to the budget (R4-04, audit 26.11.2026).
+                if reserved:
+                    bot._release_image_neurons(charge_units)
 
         if image_bytes:
             if status_obj is not None:
                 await status_obj.delete()
             else:
                 await bot._delete_message_quietly(status)
-            # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_photo.
-            # _tg_call отдаёт None вместо исключения — внешний except ждёт исключение,
-            # поэтому отсутствие результата превращаем в ошибку сервиса здесь.
+            # Through _tg_call: breaker gate, timeout, and RetryAfter instead of direct send_photo.
+            # _tg_call returns None instead of raising, while the external except expects an exception;
+            # turn a missing result into a service error here.
             caption = bot._t(cid, "draw_truncated", limit=IMAGE_PROMPT_MAX_CHARS) if truncated else None
-            # Кнопка «Ещё вариант» только под генерацией: повторять правку
-            # бессмысленно, у неё уже есть свой референс.
+            # The "Another option" button appears only for generation: repeating an edit
+            # pointless; it already has its own reference.
             reply_markup = None
-            # Якорь старой кнопки читаем до отправки: ниже состояние переезжает на
-            # новое фото, и снимать клавиатуру стало бы уже не с чего.
+            # Read the old button's anchor before sending: below, the state moves to
+            # a new photo, and there would no longer be anything to remove the keyboard from.
             _prev_drawn = bot.get_state(cid).get("last_drawn_message_id")
             _markup_editor = getattr(bot.bot, "edit_message_reply_markup", None)
             if reference is None:
@@ -691,9 +719,9 @@ async def inline_draw(
                 call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
             )
             if sent is None:
-                # Фото больше 10 МБ Telegram не принимает, а провайдер отдаёт до
-                # IMAGE_MAX_BYTES: без второго пути человек терял уже оплаченную
-                # генерацию (аудит 16.11.2026).
+                # Telegram does not accept photos over 10 MB, while the provider returns up to
+                # IMAGE_MAX_BYTES: without the second path, the person lost an already paid
+                # generation (audit 16.11.2026).
                 _send_doc = getattr(bot.bot, "send_document", None)
                 if _send_doc is not None:
                     sent = await bot._tg_call(
@@ -708,43 +736,35 @@ async def inline_draw(
                     )
             if sent is None:
                 raise RuntimeError("Telegram send_photo/send_document failed: connection timeout or proxy unavailable")
-            # Как в ChatGPT: «повторить» есть только у последней картинки. Снимаем
-            # клавиатуру с предыдущей уже после успешной отправки, иначе сбой отправки
-            # оставлял чат без единой рабочей кнопки (ревью 10.11.2026). Клавиатура
-            # пустая, а не None: aiogram выбрасывает falsy-поля, и снятие держалось
-            # бы на молчаливом «нет поля = нет кнопок» (тот же приём, что в lang/pick).
-            if reference is None and _prev_drawn and _markup_editor is not None:
-                await bot._tg_call(
-                    _markup_editor,
-                    chat_id=cid, message_id=_prev_drawn,
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
-                    call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
-                )
-            # Свой сгенерированный файл — в медиа-историю тем же путём, что и
-            # присланное: без этого «покажи ту картинку» и «что на ней» находили
-            # только реплай, а словесная ссылка на картинку проваливалась
-            # (аудит 09.11.2026). Файл_id отдан Telegram, поэтому повторного
-            # закачивания нет.
+            # R3-02 (audit 26.11.2026): a network await removing the old keyboard
+            # moved here to the end (after marks and mark_state_dirty): previously cancellation
+            # on it sent control to except with the photo already delivered, but without anchors and versions.
+            sent_ok = True
+            # Our own generated file enters media history through the same path as
+            # sent: without this, "show me that picture" and "what is on it" found
+            # only a reply, while a verbal reference to an image failed
+            # (audit 09.11.2026). file_id was provided by Telegram, so another
+            # no downloading.
             _drawn_source = bot._msg_media_source(sent)
-            # Метки пишем независимо от того, распознал ли хелпер фото: кнопка уже
-            # висит на новом сообщении, и без якоря каждое следующее фото снимало бы
-            # несуществующий id, а «ещё вариант» глох (ревью 10.11.2026).
+            # Write labels regardless of whether the helper recognized the photo: the button is already
+            # is attached to the new message, and without an anchor each subsequent photo would remove
+            # a nonexistent id, and "another option" goes silent (review 10.11.2026).
             try:
                 _state = bot.get_state(cid)
-                # Метка для «добавь звезду» без реплая: слабые глаголы правки
-                # относятся только к свежей генерации (прод 10.11.2026).
+                # Marker for "add a star" without a reply: weak edit verbs
+                # apply only to a fresh generation (prod 10.11.2026).
                 _state["last_drawn_at"] = time.time()
                 _state["last_drawn_user"] = uid
-                # «Ещё вариант» повторяет исходное описание (пропорции берутся
-                # из него же), и якорь кнопки — у генерации: правка не меняет ни
-                # то, ни другое, иначе кнопка и текст расходились (ревью 10.11.2026).
+                # "Another variant" repeats the original description (proportions are taken
+                # from it), and the button anchor belongs to the generation: an edit changes neither
+                # one or the other, so the button and text diverged (review 10.11.2026).
                 if reference is None:
                     _state["last_draw_prompt"] = prompt
-                    # id ОТПРАВЛЕННОГО фото, а не запроса: тап приходит с фото, и
-                    # запись id сообщения пользователя делала каждый тап «старым».
+                    # the id of the SENT photo, not the request: the tap comes with the photo, and
+                    # recording the user's message id made every tap "old".
                     _state["last_drawn_message_id"] = getattr(sent, "message_id", None)
-                    # Версии для «верни предыдущий вариант»: file_id уже у Telegram,
-                    # возврат не качает файл и не зовёт провайдера (паритет 10.11.2026).
+                    # Versions for "bring back the previous option": file_id is already with Telegram,
+                    # restoring does not download a file or call a provider (parity 10.11.2026).
                     if _drawn_source is not None:
                         from lumen_media import _media_file_id_and_mime
                         _vfid, _vmime, _ = _media_file_id_and_mime(_drawn_source)
@@ -755,23 +775,36 @@ async def inline_draw(
                                 "prompt": prompt, "user": uid, "ts": time.time(),
                             })
                             del _versions[:-5]
-                            # Новая генерация обнуляет отменённые версии: redo после
-                            # нового рисунка возвращал бы картинку из другой ветки.
+                            # A new generation clears canceled versions: redo after
+                            # of the new drawing would return an image from another branch.
                             _state.pop("draw_redo", None)
-                # Корзина после меток: её сбой не должен стирать контекст
-                # кнопки и слабых глаголов.
+                # Basket after labels: its failure must not erase context
+                # of buttons and weak verbs.
                 if _drawn_source is not None:
                     bot._save_media_to_history(_drawn_source, _state, uid)
             except Exception as exc:
-                # Молчаливый пропуск превращал следующее «ещё вариант» в «no fresh
-                # context» без единой зацепки в логе (ревью 10.11.2026).
+                # A silent skip turned the next "another option" into "no fresh
+                # context" with no trace evidence at all (review 10.11.2026).
                 log.warning("[draw] Fresh-draw context marks failed: %s", exc)
-            # Без пометки «грязно» корзинка не уезжала в хранилище: после
-            # рестарта «измени эту картинку» не находил своё фото (прод 10.11.2026).
+            # Without the "dirty" flag, the bucket did not reach storage: after
+            # restart, 'edit this picture' did not find its photo (prod 10.11.2026).
             bot.mark_state_dirty(cid)
-            # Суточный счётчик уже списан резервом выше; в /stats картинка — и
-            # полученное сообщение, и отправленный ответ (иначе «ответов» было
-            # больше, чем «сообщений» — аудит 01.11.2026).
+            # Like ChatGPT: "repeat" exists only for the last image. Remove
+            # the previous keyboard already after a successful send; otherwise a send failure
+            # left the chat without a single working button (review 10.11.2026). The keyboard
+            # empty, not None: aiogram drops falsy fields, and removal depended
+            # the result would have been a silent "no field = no buttons" (the same approach as in lang/pick).
+            if reference is None and _prev_drawn and _markup_editor is not None:
+                await bot._tg_call(
+                    _markup_editor,
+                    chat_id=cid, message_id=_prev_drawn,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+                    call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
+                )
+            # The daily counter was already charged by the reservation above; in /stats,
+            # the image is
+            # received message and the sent response (otherwise, "responses" counted
+            # than "messages" — audit 01.11.2026).
             bot._record_stats_event("messages_received")
             bot._record_stats_event("answers_sent")
             log.info("[draw] Image sent (chat=%s, %d bytes, %dx%d, edit=%s).",
@@ -788,21 +821,24 @@ async def inline_draw(
                 raise RuntimeError("image generation daily budget exhausted") from last_error
             raise last_error or RuntimeError("all image generation providers unavailable")
 
-    except asyncio.CancelledError:
-        # Возврат слота ДО правки статуса: отмена во время await stop() иначе
-        # съедала слот до полуночи (ревью 09.11.2026).
-        bot._refund_user_daily(uid, total=1, draw=0 if (generated or moderation_blocked) else 1)
+    except asyncio.CancelledError as exc:
+        # Return the slot BEFORE editing status: otherwise, cancellation during await stop()
+        # consumed the slot until midnight (review 09.11.2026). A cancelled photo/document send
+        # may already be delivered, so only a definite non-delivery refunds the reservation.
+        send_methods = (bot.bot.send_photo, getattr(bot.bot, "send_document", None))
+        if not bot._tg_cancelled_unknown(exc, *send_methods):
+            bot._refund_user_daily(uid, reservation=_draw_reservation, total=0 if sent_ok else 1, draw=0 if (generated or moderation_blocked) else 1)
         if status_obj is not None:
             await status_obj.stop()
         raise
     except Exception as exc:
         log.exception("Image generation failed:")
-        # Слот возвращаем ДО ответов в Telegram: тот же порядок, что в ветке
-        # отмены (ревью 09.11.2026), иначе сбой правки статуса съедал слот до полуночи
-        # (ревью 10.11.2026). Отказ модерации слот НЕ возвращает: модель работу
-        # сделала, и без этого один человек циклом запрещённых описаний выжигал бы
-        # общий дневной бюджет за 8 минут (ревью 10.11.2026).
-        bot._refund_user_daily(uid, total=1, draw=0 if (generated or moderation_blocked) else 1)
+        # Return the slot BEFORE sending Telegram responses: the same order as the branch
+        # of cancellation (review 09.11.2026); otherwise a status-edit failure consumed the slot until midnight
+        # (review 10.11.2026). A moderation refusal does not return the slot because the
+        # model already performed the work; refunding it would let one person burn the
+        # shared daily budget in eight minutes (review 10.11.2026).
+        bot._refund_user_daily(uid, reservation=_draw_reservation, total=0 if sent_ok else 1, draw=0 if (generated or moderation_blocked) else 1)
         txt = bot._error_text(exc).strip()
         if any(kw in txt.lower() for kw in ("cannot connect", "ssl:", "no address", "connection", "timeout", "host")):
             user_err = bot._t(cid, "draw_err_unavailable")
@@ -813,19 +849,18 @@ async def inline_draw(
         elif "time budget" in txt.lower():
             user_err = bot._t(cid, "draw_err_budget")
         else:
-            # Сырой текст провайдера пользователю не показываем — generic-текст.
+            # Do not show raw provider text to the user — use generic text.
             user_err = bot._t(cid, "draw_err_generic")
-        # Статус уже снесён выше (перед send_photo): если правка не прошла — дублируем реплаем,
-        # иначе пользователь не увидит вообще ничего (найдено внешним аудитом).
+        # The status has already been removed above (before send_photo): if the edit fails, duplicate it with a reply,
+        # otherwise the user would see nothing at all (found by an external audit).
         try:
             if status_obj is not None:
                 await status_obj.stop()
             if not await bot._edit_message_quietly(status, user_err):
                 await bot._safe_reply(message, user_err)
         except Exception as notice_exc:
-            # Сбой самого уведомления не имел права уходить наружу из обработчика
-            # ошибки: слот уже возвращён, а генератор падал бы на пустом месте
-            # (ревью 10.11.2026).
+            # A notification failure itself had no right to escape from the handler
+            # errors: the slot was already returned, while the generator would fail out of nowhere
             log.warning("[draw] Failure notice failed: %s", notice_exc)
         return False
     finally:
@@ -835,28 +870,58 @@ async def inline_draw(
             _draw_inflight.discard(uid)
 
 
+def _draw_series_refusal_certain(message: Message) -> bool:
+    # R4-05 (audit 26.11.2026): _prepare_draw_prompt uses paid Munito, and previously
+    # was called even for series whose first variant was doomed to be refused by daily
+    # limits. This is an advisory peek before the verdict, not the verdict itself: refusal
+    # takes inline_draw out with its atomic reservation; a peek error merely returned
+    # the old order (summary before refusal), while a false “yes” rolls back only
+    # retelling that inline_draw will build itself when the skip value is set.
+    import bot
+    uid = bot._user_key_for_message(message)
+    if uid is None or bot._is_owner(uid):
+        return False
+    if bot._image_budget_exhausted():
+        return True
+    entry = bot._user_daily_peek(uid)
+    if entry is None:
+        # No entry — fallback will create a zero one; refusal is not guaranteed.
+        return False
+    try:
+        used_draw = int(entry.get("draw") or 0)
+        used_total = int(entry.get("total") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (used_draw >= bot._user_daily_limit(uid, "draw", entry)
+            or used_total >= bot._user_daily_limit(uid, "total", entry))
+
+
 async def inline_draw_variants(
     message: Message, prompt: str, *, variants: int = 1,
     reference: tuple[bytes, str] | None = None, prepared: str | None = None,
 ) -> None:
-    """Несколько вариантов подряд, как в генераторе ChatGPT: каждый вариант —
-    своя генерация и свой дневной слот. Отказ/сбой останавливает серию, чтобы
-    не тратить лимиты в пустоту."""
+    """Several variants in a row, as in the ChatGPT generator: each variant is
+    a separate generation and consumes its own daily slot. A refusal or failure
+    stops the series to avoid wasting limits for nothing."""
     import bot
     count = max(1, min(int(variants or 1), 4))
     log.info("[draw] Variants request: chat=%s count=%s", message.chat.id, count)
-    # Описание пишем один раз на серию: N вариантов — один сюжет, а N вызовов
-    # модели добавили бы только задержку и квоту (паритет 10.11.2026).
+    # Write the description once per series: N variants share one plot, while N calls
+    # the model would only add delay and quota usage (parity 10.11.2026).
     _remaining = bot._msg_remaining_sec()
     _prep_deadline = time.monotonic() + (
         min(bot.DRAW_TOTAL_BUDGET_SEC, _remaining) if _remaining is not None
         else bot.DRAW_TOTAL_BUDGET_SEC
     )
-    # Уже разрешённое резолвером описание не переписываем вторым вызовом:
-    # лишний Munito, лишний пересказ и потеря деталей (ревью 10.11.2026).
-    _prepared = prepared if prepared is not None else await _prepare_draw_prompt(
-        prompt, _prep_deadline, edit=reference is not None,
-    )
+    # Do not rewrite a description already approved by the resolver with a second call:
+    # an extra Munito call, an extra recap, and lost details (review 10.11.2026).
+    # A series with a predetermined quota refusal needs no paid summarization at all.
+    # If the peek fails, inline_draw builds the description itself (R4-05).
+    _prepared = prepared
+    if _prepared is None and not _draw_series_refusal_certain(message):
+        _prepared = await _prepare_draw_prompt(
+            prompt, _prep_deadline, edit=reference is not None,
+        )
     for _index in range(count):
         if _index:
             remaining = bot._msg_remaining_sec()
@@ -869,9 +934,10 @@ async def inline_draw_variants(
 
 
 async def revert_draw_version(message: Message, state: dict, *, redo: bool = False) -> bool:
-    """Предыдущая (или отменённая) версия картинки: пересылаем уже готовое фото
-    по file_id, без провайдера и без списания дневного слота. Возврат чужой
-    картинки в группе запрещён тем же правилом, что и кнопка «Ещё вариант»."""
+    """Previous (or canceled) image version: forward the already finished photo by file_id,
+    without calling a provider or consuming a daily slot. Returning another person's image
+    in a group is forbidden by the same rule as the "Another version" button.
+    """
     import bot
     cid = message.chat.id
     uid = bot._user_key_for_message(message)
@@ -905,11 +971,28 @@ async def revert_draw_version(message: Message, state: dict, *, redo: bool = Fal
         reply_to_message_id=message.message_id,
         call_timeout=bot.TELEGRAM_MEDIA_TIMEOUT,
     )
-    if sent is None:
-        # Отправка не удалась — списки возвращаем как были, иначе версия
-        # потерялась бы без единой картинки в чате.
+    if not sent:
+        # Sending failed (None), or the outcome is unknown (_TG_UNKNOWN, false but not None, review I23 26.11.2026, R3-06): leave the lists unchanged — state must not be advanced
+        # of the photo, which may not have been in the chat; repeating the return would duplicate the frame, and a broken anchor breaks both the return and "another option".
         log.warning("[draw] Version resend failed (chat=%s, redo=%s).", cid, redo)
         return False
+    # R3-03 (audit 26.11.2026): state is written immediately after a confirmed
+    # send path. Previously the version/anchor was assigned after the old keyboard was consumed,
+    # and cancellation in that window left a visible returned frame with a stale
+    # state: the next return duplicated the version, while "another option" hit
+    # old message. Removing the keyboard is only cosmetic; losing it is not a problem.
+    state["draw_versions"] = versions[-5:]
+    state["draw_redo"] = undone[-5:]
+    state["last_draw_prompt"] = target.get("prompt") or state.get("last_draw_prompt")
+    state["last_drawn_message_id"] = getattr(sent, "message_id", None)
+    state["last_drawn_at"] = time.time()
+    # The context owner remains the version author: otherwise, returning another frame
+    # by the owner let weak verbs apply the edit to the wrong person (review 10.11.2026).
+    state["last_drawn_user"] = target.get("user") or uid
+    _source = bot._msg_media_source(sent)
+    if _source is not None:
+        bot._save_media_to_history(_source, state, uid)
+    bot.mark_state_dirty(cid)
     _markup_editor = getattr(bot.bot, "edit_message_reply_markup", None)
     if _prev_drawn and _markup_editor is not None:
         await bot._tg_call(
@@ -918,25 +1001,13 @@ async def revert_draw_version(message: Message, state: dict, *, redo: bool = Fal
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
             call_timeout=bot.TELEGRAM_REQUEST_TIMEOUT,
         )
-    state["draw_versions"] = versions[-5:]
-    state["draw_redo"] = undone[-5:]
-    state["last_draw_prompt"] = target.get("prompt") or state.get("last_draw_prompt")
-    state["last_drawn_message_id"] = getattr(sent, "message_id", None)
-    state["last_drawn_at"] = time.time()
-    # Владелец контекста остаётся автор версии: иначе возврат чужого кадра
-    # владельцем передавал слабым глаголам правки не того человека (ревью 10.11.2026).
-    state["last_drawn_user"] = target.get("user") or uid
-    _source = bot._msg_media_source(sent)
-    if _source is not None:
-        bot._save_media_to_history(_source, state, uid)
-    bot.mark_state_dirty(cid)
     log.info("[draw] Version restored (chat=%s, redo=%s, left=%d).", cid, redo, len(versions))
     return True
 
 
 async def handle_draw_more_callback(query: CallbackQuery) -> None:
-    """Кнопка «Ещё вариант»: повтор последней генерации тем же описанием.
-    Чужой тап не тратит ни слот человека, ни бюджет провайдера."""
+    """“Another option” button: repeats the last generation with the same description.
+    Another person's tap spends neither their slot nor the provider budget."""
     import bot
     if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
         log.info("[draw] More tap refused: banned (uid=%s).", query.from_user.id)
@@ -951,51 +1022,6 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
             await query.answer()
         return
     chat = question_msg.chat
-    state = bot.get_state(chat.id)
-    user_id = query.from_user.id if query.from_user else None
-    owner = state.get("last_drawn_user")
-    lang = bot._chat_lang(chat.id)
-    if owner is not None and user_id is not None and owner != user_id:
-        log.info("[draw] More tap refused: not the author (chat=%s, uid=%s, owner=%s).", chat.id, user_id, owner)
-        with contextlib.suppress(Exception):
-            await query.answer(_lang_t(lang, "pick_not_yours"), show_alert=True)
-        return
-    last_prompt = state.get("last_draw_prompt")
-    # Тап не под последней картинкой: повторять текущий сюжет под старым фото значит
-    # врать человеку; кнопки старых фото снимаются при новой генерации, а здесь
-    # страховка после рестарта (ревью 10.11.2026).
-    _bound_msg = state.get("last_drawn_message_id")
-    _stale_button = bool(_bound_msg) and _bound_msg != getattr(question_msg, "message_id", None)
-    if (
-        _stale_button
-        or not isinstance(last_prompt, str) or not last_prompt.strip()
-        or not bot._fresh_generation_ref(state, user_id)
-    ):
-        # Кнопки из старых сообщений не должны генерировать по вчерашнему описанию.
-        log.info(
-            "[draw] More tap refused: no fresh context (chat=%s, uid=%s, drawn_at=%r, prompt=%r, stale=%s).",
-            chat.id, user_id, state.get("last_drawn_at"), bool(last_prompt and last_prompt.strip()), _stale_button,
-        )
-        with contextlib.suppress(Exception):
-            await query.answer(_lang_t(lang, "pick_expired"), show_alert=False)
-        return
-    # Тап — тоже сообщение: без этого кнопки обходили лимит 5/30с (ревью 10.11.2026),
-    # но True у гейта значит «лимит исчерпан»: обратное условие срезало каждый тап
-    # (прод 10.11.2026). Двойной тап отдельно режет _draw_inflight в inline_draw,
-    # поэтому клавиатуру не снимаем: после сбоя человеку не нужно ждать новое фото.
-    if bot._check_and_register_rate_limit(user_id if user_id is not None else chat.id):
-        # Окно 5/30с общее с сообщениями: без размера корзины отказ по тапу
-        # нельзя объяснить ни по логам, ни человеку (прод 10.11.2026).
-        _rl_key = user_id if user_id is not None else chat.id
-        log.info(
-            "[draw] More tap refused: rate limited (chat=%s, uid=%s, in_window=%d).",
-            chat.id, user_id, len(bot.user_rate_limits.get(_rl_key) or []),
-        )
-        with contextlib.suppress(Exception):
-            await query.answer(_lang_t(lang, "rate_limited"), show_alert=False)
-        return
-    with contextlib.suppress(Exception):
-        await query.answer()
 
     async def _cb_reply(text: str, **kwargs: Any) -> Any:
         return await bot._tg_call(
@@ -1010,15 +1036,78 @@ async def handle_draw_more_callback(query: CallbackQuery) -> None:
         message_id=getattr(question_msg, "message_id", None),
         reply=_cb_reply,
     )
-    # Под тем же чат-локом и потолком, что обычный /draw (та же защита, что у кнопок-пиков).
-    await bot._run_under_chat_lock(ns, lambda: bot.inline_draw(ns, last_prompt))
+
+    answered = False
+
+    async def _answer_callback(*args: Any, **kwargs: Any) -> None:
+        nonlocal answered
+        answered = True
+        with contextlib.suppress(Exception):
+            await query.answer(*args, **kwargs)
+
+    async def _dispatch() -> None:
+        # Reset and generation publish draw state under this lock. Re-read everything
+        # after admission so a queued tap cannot spend a token on replaced state.
+        state = bot.get_state(chat.id)
+        user_id = query.from_user.id if query.from_user else None
+        owner = state.get("last_drawn_user")
+        lang = bot._chat_lang(chat.id)
+        if owner is not None and user_id is not None and owner != user_id:
+            log.info("[draw] More tap refused: not the author (chat=%s, uid=%s, owner=%s).", chat.id, user_id, owner)
+            await _answer_callback(_lang_t(lang, "pick_not_yours"), show_alert=True)
+            return
+        last_prompt = state.get("last_draw_prompt")
+        # Tap not under the latest image: repeating the current subject against an old photo means
+        # lie to the user; old photo buttons are removed on a new generation, while here
+        # a safeguard after restart (review 10.11.2026).
+        _bound_msg = state.get("last_drawn_message_id")
+        _stale_button = bool(_bound_msg) and _bound_msg != getattr(question_msg, "message_id", None)
+        if (
+            _stale_button
+            or not isinstance(last_prompt, str) or not last_prompt.strip()
+            or not bot._fresh_generation_ref(state, user_id)
+        ):
+            # Buttons from old messages must not generate from yesterday's description.
+            log.info(
+                "[draw] More tap refused: no fresh context (chat=%s, uid=%s, drawn_at=%r, prompt=%r, stale=%s).",
+                chat.id, user_id, state.get("last_drawn_at"), bool(last_prompt and last_prompt.strip()), _stale_button,
+            )
+            await _answer_callback(_lang_t(lang, "pick_expired"), show_alert=False)
+            return
+        # A tap is also a message: without this, buttons bypassed the 5/30s limit (review 10.11.2026),
+        # but True from the gate means 'quota exhausted': the inverted condition cut off every tap
+        # (prod 10.11.2026). The lock serializes rapid taps; keep the button on failure
+        # so retrying does not require a new image.
+        if bot._check_and_register_rate_limit(user_id if user_id is not None else chat.id):
+            # The 5/30 s window is shared with messages: without a basket size, refusal on tap
+            # cannot be explained through logs or to a person (prod 10.11.2026).
+            _rl_key = user_id if user_id is not None else chat.id
+            log.info(
+                "[draw] More tap refused: rate limited (chat=%s, uid=%s, in_window=%d).",
+                chat.id, user_id, len(bot.user_rate_limits.get(_rl_key) or []),
+            )
+            await _answer_callback(_lang_t(lang, "rate_limited"), show_alert=False)
+            return
+        await _answer_callback()
+        # Quota admission and the in-flight marker run in inline_draw before its first
+        # await, while this same chat lock is still held.
+        await bot.inline_draw(ns, last_prompt)
+
+    # Under the same chat lock and cap as regular /draw (the same protection used
+    # by the picker buttons).
+    try:
+        await bot._run_under_chat_lock(ns, _dispatch)
+    finally:
+        # A lock refusal never enters _dispatch; still dismiss Telegram's spinner.
+        if not answered:
+            await _answer_callback()
 
 
 async def cmd_draw(message: Message) -> None:
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
         return
-    # Подпись к фото тоже команда: "/draw сделай синим" в реплае/подписи — правка.
+    # A photo caption is also a command: "/draw make it blue" in a reply/caption means an edit.
     text = message.text or message.caption or ""
     prompt = text.partition(" ")[2].strip()
     if not prompt:
@@ -1043,7 +1132,7 @@ async def cmd_draw(message: Message) -> None:
             except Exception as exc:
                 log.warning("[draw] Edit reference resolve failed (cmd_draw): %s", exc)
         if reference:
-            # Правка — всегда одна: «измени … 2 варианта» не превращается в две правки.
+            # An edit is always one: 'change ... 2 variants' does not turn into two edits.
             await bot.inline_draw_variants(message, prompt, variants=1, reference=reference)
         else:
             _variants, _clean_prompt = _split_image_variants(prompt)
@@ -1051,10 +1140,10 @@ async def cmd_draw(message: Message) -> None:
                 message, _clean_prompt or prompt, variants=_variants, reference=None,
             )
 
-    # Тот же per-chat лок, что у пути словами: без него два человека в группе
-    # читали один и тот же старый якорь кнопки, обе генерации снимали клавиатуру
-    # с одного фото, и под чатом оставалось две живые «Ещё вариант»
-    # (ревью 10.11.2026).
+    # The same per-chat lock as the text path: without it, two people in a group
+    # read the same old button anchor, so both generations removed the keyboard
+    # from one photo, and two live "Another option" buttons remained under the chat
+    # (review 10.11.2026).
     await bot._run_under_chat_lock(message, _dispatch)
 
 
@@ -1065,9 +1154,9 @@ async def _gemini_tts_bytes(text: str) -> tuple[bytes, str, str]:
         err_txt = bot._error_text(e).strip() or e.__class__.__name__
         return bot._classify_model_error(bot._error_status(e, err_txt), err_txt) == "rate_limit"
 
-    # TTS пишется в провайдер "gemini" — модели видны в /stats рядом с остальными.
-    # Различаем суточную квоту и минутный всплеск так же, как текстовый маршрут:
-    # иначе один 429 убирал бы TTS-модель из квоты до полуночи.
+    # TTS is recorded under provider "gemini"; models appear in /stats alongside the others.
+    # Distinguish a daily quota from a minute-level burst just like the text route:
+    # otherwise one 429 would remove the TTS model from the quota until midnight.
     def _is_daily_quota(e: Exception) -> bool:
         err_txt = bot._error_text(e).strip() or e.__class__.__name__
         return bot._is_gemini_daily_quota(err_txt)
@@ -1083,15 +1172,15 @@ async def _gemini_tts_bytes(text: str) -> tuple[bytes, str, str]:
     )
 
 
-# Длинную озвучку бьём на части вместо отказа: кап частей — чтобы вставка
-# целой статьи не сожгла дневную квоту TTS и не спамила десятками голосовых.
+# Split long narration into parts instead of refusing it: the part cap prevents an insertion
+# a whole article would not burn the daily TTS quota or spam dozens of voice
+# messages.
 TTS_MAX_PARTS = 5
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…\n])\s+")
 
 def _split_tts_chunks(text: str, limit: int) -> list[str]:
-    """Режем текст на куски ≤ limit по границам предложений; одиночное
-    предложение длиннее лимита — жёстко. Пустой вход — пустой список."""
+    """Splits text into chunks of at most limit at sentence boundaries; a single sentence longer than the limit is cut hard. Empty input produces an empty list."""
     text = (text or "").strip()
     if not text:
         return []
@@ -1121,13 +1210,13 @@ def _split_tts_chunks(text: str, limit: int) -> list[str]:
 
 
 async def _synthesize_tts_voice(text: str) -> tuple[bytes, str, int]:
-    """Синтез + ffmpeg-конвертация одного куска в OGG/Opus. Тело прежнего
-    inline_tts без смены логики — чанки идут тем же путём, что одиночный текст."""
+    """Synthesis + ffmpeg conversion of one chunk to OGG/Opus. The body of the former
+inline_tts without a logic change — chunks follow the same path as single text."""
     import bot
     pcm_bytes, mime_type, used_tts_model = await bot._gemini_tts_bytes(text)
     log.info('[tts] Synthesis received from %s, mime_type=%s, bytes=%d', used_tts_model, mime_type, len(pcm_bytes))
 
-    # определяем формат исходника
+    # determine the source format
     if mime_type.startswith("audio/mp3") or mime_type.startswith("audio/mpeg") or pcm_bytes.startswith(b'ID3') or pcm_bytes.startswith(b'\xff\xfb'):
         src_ext = ".mp3"
         raw_audio = pcm_bytes
@@ -1135,11 +1224,11 @@ async def _synthesize_tts_voice(text: str) -> tuple[bytes, str, int]:
         src_ext = ".wav"
         raw_audio = pcm_bytes
     else:
-        # сырой PCM сначала оборачиваем в WAV
+        # wrap raw PCM in WAV first
         src_ext = ".wav"
         raw_audio = pcm_to_wav(pcm_bytes, sample_rate=24000)
 
-    # send_voice без ffmpeg-конвертации показал бы 0:00.
+    # send_voice without ffmpeg conversion would show 0:00.
     final_audio = raw_audio
     final_filename = "speech.ogg"
     voice_duration = 0
@@ -1160,7 +1249,7 @@ async def _synthesize_tts_voice(text: str) -> tuple[bytes, str, int]:
             if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
                 with open(dst_path, "rb") as fh:
                     final_audio = fh.read()
-                # ffprobe — получаем длительность для Telegram (без неё показывает 0:00)
+                # ffprobe — get the duration for Telegram (without it, it shows 0:00)
                 try:
                     probe = await asyncio.create_subprocess_exec(
                         "ffprobe", "-v", "error",
@@ -1196,15 +1285,23 @@ async def inline_tts(message: Message, text: str) -> None:
             bot._t(message.chat.id, "tts_too_long", limit=bot.TTS_MAX_CHARS * TTS_MAX_PARTS, length=len(text)),
         )
         return
-    # Дневные лимиты пользователя: общий и отдельный на озвучку (он же тратит квоту Gemini TTS).
-    # Проба без создания: отказ не заводит запись и не раздувает day_users.
-    # Считаем сразу все чанки: каждый — отдельный синтез, иначе длинный текст
-    # уводил бы счётчик за лимит.
+    # Per-user daily limits: a general limit and a separate TTS limit (which also consumes the Gemini TTS quota).
+    # Probe without creating: a refusal does not create an entry or inflate day_users.
+    # Count all chunks up front: each requires a separate synthesis, or a long text
+    # would push the counter past the limit.
     uid = bot._user_key_for_message(message)
-    # Атомарный резерв ДО первого await: параллельные /tts раньше читали 0
-    # и обходили дневной лимит (аудит 28.10.2026). Резерв списывает сразу все
-    # чанки, потому что каждый — отдельный синтез за квоту.
-    if not bot._reserve_user_daily(uid, total=len(chunks), tts=len(chunks)):
+    # Atomic reserve BEFORE the first await: parallel /tts calls previously read 0
+    # and bypassed the daily limit (audit 28.10.2026). The fallback charges all
+    # chunks, because each one is a separate synthesis charged to the quota.
+    _tts_reservation = bot._reserve_user_daily(uid, total=len(chunks), tts=len(chunks))
+    if not _tts_reservation:
+        if bot._user_daily_admission_blocked(uid):
+            bot._record_stats_event("daily_limit_denials")
+            await bot._safe_reply(
+                message,
+                bot._model_error_text("fallback", bot._chat_lang(message.chat.id)),
+            )
+            return
         _tts_entry = bot._user_daily_peek(uid)
         try:
             _tts_over_total = int((_tts_entry or {}).get("total") or 0) + len(chunks) > bot._user_daily_limit(uid, "total", _tts_entry)
@@ -1213,7 +1310,7 @@ async def inline_tts(message: Message, text: str) -> None:
             _tts_over_total = _tts_over_tts = False
         if bot._user_daily_total_exhausted(uid, _tts_entry) or _tts_over_total:
             hours, mins = bot._user_daily_reset_in()
-            # Суточный счётчик /stats: отказ по лимиту, озвучки не будет.
+            # Daily /stats counter: a limit refusal means there will be no speech.
             bot._record_stats_event("daily_limit_denials")
             await bot._safe_reply(message, bot._t(
                 message.chat.id, "user_daily_total",
@@ -1228,6 +1325,11 @@ async def inline_tts(message: Message, text: str) -> None:
                 used=(_tts_entry or {}).get("tts", 0), limit=bot._user_daily_limit(uid, "tts", _tts_entry),
             ))
             return
+        bot._record_stats_event("daily_limit_denials")
+        await bot._safe_reply(
+            message,
+            bot._model_error_text("fallback", bot._chat_lang(message.chat.id)),
+        )
         return
     from lumen_status import StatusMessage
     try:
@@ -1235,17 +1337,17 @@ async def inline_tts(message: Message, text: str) -> None:
             message, bot._chat_lang(message.chat.id), bot._t(message.chat.id, "status_voicing"),
         )
     except asyncio.CancelledError:
-        # Резерв уже списан: отмена на пузыре статуса не должна стоить слотов
-        # до полуночи за неполученную озвучку (ревью 17.11.2026).
-        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
+        # The reserve is already charged: cancellation on the status bubble must not cost slots
+        # until midnight for speech that was never received (review 17.11.2026).
+        bot._refund_user_daily(uid, reservation=_tts_reservation, total=len(chunks), tts=len(chunks))
         raise
     status = status_obj.message if status_obj is not None else None
-    # Общий дедлайн на все чанки: зависший синтез иначе держал per-chat lock без края.
+    # One deadline for all chunks; otherwise a hung synthesis could hold the per-chat lock indefinitely.
     deadline = time.monotonic() + bot.TTS_TOTAL_BUDGET_SEC
     shortened = False
     voices: list = []
     try:
-        # Весь синтез ДО отправки: упавший кусок — одна ошибка вместо рваного "пол-ответа + ошибка".
+        # Synthesize everything BEFORE sending: a failed chunk then produces one error instead of a torn "half-response + error".
         voices = []
         for chunk in chunks:
             remaining = deadline - time.monotonic()
@@ -1258,24 +1360,24 @@ async def inline_tts(message: Message, text: str) -> None:
                 shortened = True
                 break
         if not voices:
-            # Даже первый кусок не уложился — честная ошибка, а не пустота.
+            # Even the first chunk did not fit — show an honest error, not an empty response.
             raise RuntimeError("TTS total budget exceeded before the first chunk")
     except asyncio.CancelledError:
-        # Возврат до stop(): отменённая задача не доходит до следующего await.
-        bot._refund_user_daily(uid, total=len(chunks), tts=len(chunks))
+        # Return before stop(): a cancelled task does not reach the next await.
+        bot._refund_user_daily(uid, reservation=_tts_reservation, total=len(chunks), tts=len(chunks))
         if status_obj is not None:
             await status_obj.stop()
         raise
     except Exception as exc:
-        # Возврат до любых await: отмена на правке статуса иначе съедала резерв.
-        # Сбой синтеза случается до цикла отправки: человек не получил ни одного
-        # файла, поэтому возвращаем все слоты. Провайдерский расход — не слот
-        # человека (проход №5, 17.11.2026).
+        # Return before any await: cancellation during a status edit would otherwise consume the reserve.
+        # Synthesis fails before the send loop, so the person received no file and all
+        # slots are returned. Provider usage is not a person-facing slot
+        # (pass 5, 17.11.2026).
         refund = len(chunks)
         if refund:
-            bot._refund_user_daily(uid, total=refund, tts=refund)
+            bot._refund_user_daily(uid, reservation=_tts_reservation, total=refund, tts=refund)
         log.exception("TTS synthesis failed:")
-        # Сырой текст ошибки содержит ID моделей — показываем классифицированный текст.
+        # Raw error text contains model IDs; show the classified text instead.
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
         kind = bot._classify_model_error(bot._error_status(exc, txt), txt)
         cid = message.chat.id
@@ -1283,7 +1385,8 @@ async def inline_tts(message: Message, text: str) -> None:
             user_err = bot._t(cid, "tts_err_exhausted")
         else:
             user_err = bot._t(cid, "tts_err_generic")
-        # Статус уже снесён выше (перед send_voice): если правка не прошла — дублируем реплаем.
+        # The status was already removed above (before send_voice); if the edit fails, duplicate
+        #     it with a reply.
         if status_obj is not None:
             await status_obj.stop()
         if not await bot._edit_message_quietly(status, user_err):
@@ -1296,8 +1399,10 @@ async def inline_tts(message: Message, text: str) -> None:
         else:
             await bot._delete_message_quietly(status)
         for i, (final_audio, final_filename, voice_duration) in enumerate(voices):
-            # Через _tg_call: breaker-гейт, таймаут и RetryAfter вместо прямого send_voice.
-            # None вместо исключения — наружу то же исключение, что раньше при прямом вызове.
+            # Through _tg_call: breaker gate, timeout, and RetryAfter instead of direct
+            # send_voice.
+            # None instead of an exception: callers see the same exception as before with a
+            # direct call.
             sent = await bot._tg_call(
                 bot.bot.send_voice,
                 chat_id=message.chat.id,
@@ -1308,28 +1413,33 @@ async def inline_tts(message: Message, text: str) -> None:
             )
             sent_count += 1
             if sent is None:
-                # Неотправленные чанки возвращаем в лимит: резерв списал их заранее.
-                bot._refund_user_daily(uid, total=len(chunks) - i, tts=len(chunks) - i)
-                # Не оставляем пользователя без сообщения: статус уже удалён.
+                # Return unsent chunks to the limit: the reserve charged for them in advance.
+                bot._refund_user_daily(uid, reservation=_tts_reservation, total=len(chunks) - i, tts=len(chunks) - i)
+                # Do not leave the user without a message: the status has already been removed.
                 await bot._safe_reply(message, bot._t(message.chat.id, "tts_err_generic"))
                 return
-    except asyncio.CancelledError:
-        # Отмена в цикле отправки: уже отданные чанки списаны, остальные — нет.
-        # Резерв покрывает все чанки, а синтезировано могло быть меньше (обрезка).
+    except asyncio.CancelledError as exc:
+        # Cancellation in the send loop: already delivered chunks are charged; the rest are not.
+        # The reserve covers all chunks, while fewer may have been synthesized (trimming).
+        # A cancelled send_voice may already be delivered, so keep that chunk charged.
         remaining = len(chunks) - sent_count
-        if remaining > 0:
-            bot._refund_user_daily(uid, total=remaining, tts=remaining)
+        # Only the interrupted voice has an unknown outcome. Later chunks were never started,
+        # so an accepted-or-cancelled current send must not consume those reservations too.
+        refund = remaining - 1 if bot._tg_cancelled_unknown(exc, bot.bot.send_voice) else remaining
+        if refund > 0:
+            bot._refund_user_daily(uid, reservation=_tts_reservation, total=refund, tts=refund)
         raise
     unsent = len(chunks) - len(voices)
     if unsent > 0:
-        # Обрезка по общему дедлайну: за несозданные чанки не списываем.
-        bot._refund_user_daily(uid, total=unsent, tts=unsent)
-    # Оба счётчика пары: без messages_received «ответов» было больше, чем
-    # «сообщений» (слэш-команды и триггеры выходят из ядра раньше — аудит 01.11.2026).
+        # Truncate by the shared deadline: do not charge for chunks that were not
+        # created.
+        bot._refund_user_daily(uid, reservation=_tts_reservation, total=unsent, tts=unsent)
+    # Both counters in the pair: without messages_received, there were more 'answers' than
+    # "messages" (slash commands and triggers leave the core earlier; audit 01.11.2026).
     bot._record_stats_event("messages_received")
     bot._record_stats_event("answers_sent")
     if shortened:
-        # Обрезка по общему дедлайну — говорим прямо, что озвучено начало.
+        # Trimming by the common deadline — state plainly that only the beginning was voiced.
         await bot._safe_reply(message, bot._t(message.chat.id, "tts_shortened"))
 
 async def cmd_tts(message: Message) -> None:
@@ -1346,8 +1456,8 @@ async def cmd_tts(message: Message) -> None:
 
 
 async def handle_stop_callback(query: CallbackQuery) -> None:
-    """Кнопка «Остановить» под ответом: права и семантика те же, что у /stop —
-    автор вопроса или владелец; чужое нажатие молча не срабатывает."""
+    """Handle /stop outside the lock: the command only needs its token and does not read the chat;
+    taking the lock would make it wait for the current answer and defeat cancellation."""
     import bot
     with contextlib.suppress(Exception):
         await query.answer()
@@ -1360,16 +1470,16 @@ async def handle_stop_callback(query: CallbackQuery) -> None:
     parts = str(getattr(query, "data", "")).split(":")
     token = parts[2] if len(parts) > 2 else None
     if chat_id:
-        # Старая кнопка без токена не должна гасить новый стрим того же чата.
+        # An old button without a token must not stop a new stream in the same chat.
         if token is None and bot._stream_stop_token(chat_id) is not None:
             return
         bot._request_stream_stop(chat_id, sender, token=token)
 
 
 async def cmd_stop(message: Message) -> None:
-    """Остановка текущего ответа. В меню команды нет, как у /help: это аварийный
-    контроль, а не витрина. Молчаливо игнорирует чужого человека в группе и
-    вызов, когда стрима нет — лишнее сообщение в чат не пишем (аудит 16.11.2026)."""
+    """Stops the current answer. The command is absent from the menu, like /help: it is an emergency
+control, not a showcase. It silently ignores another person in a group and
+calls made when no stream is running; no extra chat message is sent (audit 16.11.2026)."""
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
         return
@@ -1380,12 +1490,12 @@ async def cmd_stop(message: Message) -> None:
 
 
 async def cmd_reset(message: Message) -> None:
-    """Сброс истории чата. В меню. Личка — всем, группа — админам/владельцу."""
+    """Reset chat history. In the menu. Private chat—everyone; group—admins/owner."""
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
         return
-    # Слэш-команды регистрируются раньше catch-all и к общему лимиту не доходили
-    # (тот же пропуск, что закрыли для /start — аудит 01.11.2026).
+    # Slash commands are registered before the catch-all and did not reach the general limit
+    # (the same skip closed for /start — audit 01.11.2026).
     if await bot._reject_rate_limited_message(message):
         return
     requester_id = message.from_user.id if message.from_user else None
@@ -1397,26 +1507,27 @@ async def cmd_reset(message: Message) -> None:
         return
     state = bot.get_state(message.chat.id)
     state["history"] = []
-    # Сводка и очередь на неё — та же память: после /reset старое не должно всплывать.
-    # Поколение гасит сводку, которая уже летит в сеть и вернулась бы после сброса.
+    # The summary and the queue for it are the same memory: after /reset, old content must not resurface.
+    # The generation invalidates a summary already in flight that would otherwise
+    # return after the reset.
     state["memory_summary"] = ""
     state["memory_pending"] = []
     state["memory_epoch"] = int(state.get("memory_epoch") or 0) + 1
     state.pop("memory_trimming", None)
     state.pop("memory_retry_at", None)
-    # Старое раздельное поле фона (ctx) после миграции обычно пустое, но /reset
-    # обязан чистить и его, если снимок пришёл из прежней версии.
+    # The old separate background field (ctx) is usually empty after migration, but /reset
+    # must also clear it if the snapshot came from an older version.
     legacy_ctx = state.get("ctx")
     if hasattr(legacy_ctx, "clear"):
         legacy_ctx.clear()
-    # Сброс должен забывать и ссылки на медиа/имена: иначе старые файлы
-    # всплывали после /reset (аудит 28.10.2026).
+    # A reset must forget both media links and names: otherwise old files
+    # appeared after /reset (audit 28.10.2026).
     state.get("recent_media_ids", {}).clear()
     state.get("user_names", {}).clear()
-    # Контекст рисования — тоже память чата: после «забудь всё» кнопка и слово
-    # «ещё вариант» не должны возвращать забытое описание (ревью 10.11.2026).
-    # Якорь кнопки читаем до сброса: после него снимать клавиатуру было бы уже
-    # не с чего, и старое фото жило бы с рабочей кнопкой вечно (ревью 10.11.2026).
+    # Drawing context is also chat memory: after "forget everything", the button and word
+    # "another option" must not bring back a forgotten description (review 10.11.2026).
+    # Read the button anchor before resetting: after that, removing the keyboard would already
+    # to anchor, and the old photo would keep a working button forever (review 10.11.2026).
     _prev_drawn = state.get("last_drawn_message_id")
     _markup_editor = getattr(bot.bot, "edit_message_reply_markup", None)
     if _prev_drawn and _markup_editor is not None:
@@ -1437,13 +1548,13 @@ async def cmd_reset(message: Message) -> None:
         bot._t(message.chat.id, "reset_done")
     )
 
-# ── Язык системных сообщений (/lang) — ответы ИИ не трогает (см. RESPONSE LANGUAGE в system_prompt.py). Права как у /reset; кнопки без флагов/эмодзи/галочек, текущий язык — в заголовке, меню по алфавиту кода.
+# ── System-message language (/lang) — does not affect AI responses (see RESPONSE LANGUAGE in system_prompt.py). Permissions match /reset; buttons have no flags, emoji, or checkmarks; the current language appears in the header; the menu is alphabetical by code.
 async def cmd_lang(message: Message) -> None:
     import bot
     if getattr(message, "from_user", None) is not None and bot._is_banned(message.from_user.id):
         return
-    # Меню из 26 кнопок на каждое сообщение спамера = круг к Telegram + новая запись
-    # чата (см. лимит в cmd_start, аудит 01.11.2026).
+    # A 26-button menu for every spammer message = a Telegram round trip + a new record
+    # of the chat (see the limit in cmd_start, audit 01.11.2026).
     if await bot._reject_rate_limited_message(message):
         return
     lang = bot._chat_lang(message.chat.id)
@@ -1465,7 +1576,7 @@ async def cmd_lang(message: Message) -> None:
 
 
 async def handle_lang_callback(query: CallbackQuery) -> None:
-    """Кнопка языка ("lang:<код>", влезает в лимит 64 байт): права, сохранение, подтверждение на новом языке."""
+    """Language button ("lang:<code>", within the 64-byte limit): permissions, saving, and confirmation in the new language."""
     import bot
     if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
         with contextlib.suppress(Exception):
@@ -1487,8 +1598,8 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
         return
     chat = question_msg.chat
     requester_id = query.from_user.id if query.from_user else None
-    # Каждый тап — правка Telegram плюс запись чата: без окна спамер гонял бы
-    # edit_text на каждое нажатие (ревью 17.11.2026, тот же гейт, что у draw:more).
+    # Each tap is a Telegram edit plus a chat write: without a window, a spammer would drive
+    # edit_text on every tap (review 17.11.2026, the same gate as draw:more).
     if bot._check_and_register_rate_limit(requester_id if requester_id is not None else chat.id):
         with contextlib.suppress(Exception):
             await query.answer(bot._t(chat.id, "rate_limited"), show_alert=False)
@@ -1511,8 +1622,8 @@ async def handle_lang_callback(query: CallbackQuery) -> None:
         )
 
 def chat_locked(handler):
-    """Слэш-команда, трогающая чат, идёт через тот же лок: кап ожидающих,
-    честное «занято» и дедлайн сообщения (ревью 17.11.2026)."""
+    """A slash command that touches a chat goes through the same lock: a waiter cap,
+    an honest "busy" response, and the message deadline (review 17.11.2026)."""
     async def _run(message):
         import bot
         await bot._run_under_chat_lock(message, lambda: handler(message))
@@ -1520,10 +1631,10 @@ def chat_locked(handler):
     return _run
 
 
-# выгрузка логов (только для владельца)
+# log export (owner only)
 
 def _build_logs_attachment() -> str | None:
-    """Блокирующая часть /logs: прочитать, вычистить токены, отдать путь файла."""
+    """Blocking part of /logs: read the file, scrub tokens, and return the file path."""
     import bot
     if not bot.LOG_FILE_PATH.exists():
         return None
@@ -1555,11 +1666,11 @@ async def cmd_logs(message: Message) -> None:
          return
 
     if message.chat.type != ChatType.PRIVATE:
-        # Результат команды видят ВСЕ в чате — файл логов с ID моделей в группы не отдаём.
+        # EVERYONE in the chat sees the command result; do not send log files containing model IDs to groups.
         await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_group_only"))
         return
 
-    # Флашим хендлеры _LOG_LISTENER (у root — только QueueHandler с no-op flush).
+    # Flush the _LOG_LISTENER handlers (root has only a QueueHandler with a no-op flush).
     try:
         if bot._LOG_LISTENER is not None:
             for handler in bot._LOG_LISTENER.handlers:
@@ -1569,8 +1680,8 @@ async def cmd_logs(message: Message) -> None:
 
     temp_log_path = None
     try:
-        # Чтение, скраб и запись файла — блокирующая часть: лог растёт сутками,
-        # и весь этот объём раньше стопорил event loop (ревью 17.11.2026).
+        # Reading, scrubbing, and writing the file are blocking: the log grows over days,
+        # and this entire volume previously stalled the event loop (review 17.11.2026).
         temp_log_path = await asyncio.to_thread(_build_logs_attachment)
         if temp_log_path is None:
             await bot._tg_call(message.reply, bot._t(message.chat.id, "logs_empty"))
@@ -1587,7 +1698,7 @@ async def cmd_logs(message: Message) -> None:
                 pass
 
 async def cmd_stats(message: Message) -> None:
-    """Статистика (скрыта, только владелец — данные по всем чатам)."""
+    """Statistics (hidden, owner only — data across all chats)."""
     import bot
     is_owner = bot._is_owner(message.from_user.id if message.from_user else None)
     if not is_owner:
@@ -1595,20 +1706,20 @@ async def cmd_stats(message: Message) -> None:
         return
 
     if message.chat.type != ChatType.PRIVATE:
-    # ID моделей в группы не отдаём — та же проверка, что в /logs.
+    # Do not expose model IDs in groups — the same check as in /logs.
         await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_group_only"))
         return
 
-    # Счётчики — по датам Google (сброс в _reset_quota_if_new_day проверяем перед отрисовкой: фоновый тик мог не успеть, а used копились через рестарты).
+    # Counters use Google dates (the reset in _reset_quota_if_new_day is checked before rendering: the background tick may not have run in time, while used accumulated across restarts).
     bot._reset_quota_if_new_day()
 
-    # Вебхук опрашиваем параллельно со сборкой текста: иначе висящий API
-    # держал бы всю команду до 10с уже после готовой статистики.
+    # Poll the webhook in parallel with text assembly: otherwise a hanging API
+    # would hold the entire command for up to 10s after the statistics were ready.
     _webhook_task = asyncio.ensure_future(_webhook_info_text())
 
     total_chats = len(bot.chat_state)
-    # "Активные" — с живой активностью за сутки по настенным часам (monotonic
-    # сбрасывался рестартом и считал активными всех). Без метки — неактивен.
+    # "Active" — with live activity over a day by wall clock (monotonic
+    # resets on restart and counted everyone as active). Without a mark — inactive.
     _active_cutoff = time.time() - 24 * 3600
 
     def _is_active(s: Any) -> bool:
@@ -1625,15 +1736,15 @@ async def cmd_stats(message: Message) -> None:
     _noData = _lang_t(_stats_lang, "stats_no_data")
 
     def _quota_section(quota: dict, daily_limit: int | None, per_model_limits: dict | None = None) -> str:
-        # Показываем только модели с движением (расход или метка исчерпания) — нули по
-        # давно мёртвым моделям копятся в хранилище через рестарты и превращали вывод в простыню.
+        # Show only models with activity (usage or an exhausted mark) — zeros across
+        # for models that have long been dead accumulate in storage across restarts and turned the output into a wall of text.
         items = sorted(quota.items(), key=lambda kv: -(kv[1].get("used") or 0))
         used_total = sum(int(e.get("used") or 0) for _, e in items)
         active = [(mid, e) for mid, e in items if (e.get("used") or 0) or e.get("exhausted_at")]
         lines = []
         for mid, e in active:
             line = f"  • {mid}: {e.get('used', 0)}"
-            # Лимит Gemini — только где задан в env (у каждой модели свой RPD).
+            # Gemini limit — only where set in env (each model has its own RPD).
             _mlim = (per_model_limits or {}).get(mid)
             if isinstance(_mlim, int) and not isinstance(_mlim, bool) and _mlim > 0:
                 line += f" / {_mlim}"
@@ -1650,7 +1761,7 @@ async def cmd_stats(message: Message) -> None:
         return "\n".join(lines) or _noData
 
     gemini_text = _quota_section(gemini_quota, None, bot.GEMINI_DAILY_LIMITS)
-    # Секция Munito только при активном провайдере: пустая строка в /stats не нужна.
+    # Show the Munito section only when the provider is active: no empty line in /stats.
     from lumen_router_config import _munito_active
     munito_block = (
         f"<b>Munito — запросов по моделям (лимит провайдера справочно):</b>\n"
@@ -1670,8 +1781,8 @@ async def cmd_stats(message: Message) -> None:
     if _quarantined_now:
         import lumen_router_config
 
-        # Не «подряд до конца суток»: окно считается от первого плохого ответа,
-        # и это другое обещание человеку (ревью документов 12.11.2026).
+        # Not "consecutively until the end of the day": the window starts at the first bad response,
+        # and this is a different promise to the person (docs review 12.11.2026).
         quarantine_text = "\n".join(
             f"  • {provider}/{mid}: {bad} плохих ответа за окно "
             f"{lumen_router_config.QUARANTINE_WINDOW_SEC} с"
@@ -1680,16 +1791,16 @@ async def cmd_stats(message: Message) -> None:
     else:
         quarantine_text = "  нет"
 
-    # Суточные счётчики: уникальные пользователи — только числом, без ID.
+    # Daily counters: unique users only as a number, without IDs.
     _day_stats = bot._stats_entry()
     _day_users = bot.GLOBAL_QUOTA.get(bot.USER_DAILY_KEY)
     day_users = len(_day_users) if isinstance(_day_users, dict) else 0
 
-    # Состояние прокси — из самого breaker'а (раньше команда лезла в четыре глобала напрямую).
+    # Proxy state comes from the breaker itself (previously the command reached into four globals directly).
     proxy_line = bot._tg_proxy_breaker.status_text()
     import lumen_search
-    # Слой внешнего поиска: сколько обращений к источникам уже было сегодня и
-    # разрешён ли он вовсе — эту строку owner смотрит после деплоя цикла.
+    # External search layer: how many source requests have already been made today and
+    # whether it is enabled at all — the owner checks this line after deploying the cycle.
     _search_calls = lumen_search.search_calls_today()
     _search_limit = lumen_search.WEB_SEARCH_DAILY_LIMIT
     _search_on = lumen_search.web_search_is_enabled()
@@ -1721,14 +1832,14 @@ async def cmd_stats(message: Message) -> None:
         f"Хранилище: {_storage_backend_text()}"
         f"{proxy_line}"
     )
-    # Короткий вывод для одного сообщения: режем по целым строкам, чтобы не
-    # разорвать HTML-тег и не получить 400 от Telegram при parse_mode=HTML.
+    # Short output for one message: cut along whole lines so we do not
+    # break the HTML tag and avoid a 400 from Telegram with parse_mode=HTML.
     if len(text) > bot.TG_MAX_LEN:
         cut = text[:bot.TG_MAX_LEN - 1]
         nl = cut.rfind("\n")
         if nl > bot.TG_MAX_LEN // 2:
             cut = cut[:nl]
-        # Оборванный тег (<b ... без >) — откатываемся до его начала.
+        # An unclosed tag (<b ... without >): roll back to its start.
         lt, gt = cut.rfind("<"), cut.rfind(">")
         if lt > gt:
             cut = cut[:lt]
@@ -1740,15 +1851,15 @@ _SELFTEST_LAST_RUN_MONOTONIC = 0.0
 SELFTEST_COOLDOWN_SEC = 60.0
 
 def _selftest_row(label: str, ok: bool, detail: str, elapsed: float) -> str:
-    """Одна строка итога без ID моделей (в группы команда не ходит вовсе)."""
+    """One summary line without model IDs (the command does not go to groups at all)."""
     base = f"{label}: {'OK' if ok else 'FAIL'} ({elapsed:.1f}s)"
     return base if ok or not detail else f"{base} — {detail}"
 
 async def cmd_selftest(message: Message) -> None:
-    """Живая проверка голов маршрутов: по крошечной пробе в Munito
-    и сеть (прокси Telegram, TikWM) логикой /diag. Gemini — только по явному
-    аргументу, квота самая дефицитная. Только владелец, только личка, не чаще
-    раза в минуту. Успешные пробы честно пишутся в квоту."""
+    """Live check of route heads: a tiny probe to Munito
+and the network (Telegram proxy, TikWM) through /diag logic. Gemini only with an explicit
+argument, because its quota is the scarcest. Owner only, DMs only, no more than
+once per minute. Successful probes are counted against quota."""
     import bot
     global _SELFTEST_LAST_RUN_MONOTONIC
     if not bot._is_owner(message.from_user.id if message.from_user else None):
@@ -1758,21 +1869,22 @@ async def cmd_selftest(message: Message) -> None:
         await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_group_only"))
         return
     now = time.monotonic()
-    # Ноль — «ещё ни разу», а не время: monotonic() свежего процесса тоже
-    #тики от загрузки, и 60 − 45 давали ложный кулдаун первому запуску (CI).
+    # Zero means "never", not a time: monotonic() in a fresh process also
+    # ticks since loading, and 60 − 45 produced a false cooldown on the first run (CI).
     if _SELFTEST_LAST_RUN_MONOTONIC > 0:
         wait = SELFTEST_COOLDOWN_SEC - (now - _SELFTEST_LAST_RUN_MONOTONIC)
         if wait > 0:
             await bot._tg_call(message.reply, bot._t(message.chat.id, "selftest_cooldown", sec=int(wait) + 1))
             return
-    # Метку ставим до проб: повторный вызов во время долгой проверки тоже ждёт.
+    # Set the marker before probing: a repeated call during a long check must also wait.
     _SELFTEST_LAST_RUN_MONOTONIC = now
     args = (getattr(message, "text", "") or "").split()
     want_gemini = len(args) > 1 and args[1].split("@")[0].lower() == "gemini"
     rows: list[str] = []
     summary: list[str] = []
     from lumen_router_config import _munito_active
-    # Munito в списке только когда провайдер активен — иначе /selftest тратит пробу впустую.
+    # Munito still serves text, but not images, so /selftest skips image checks and
+    #     saves the quota.
     probe_providers = (("munito", "Munito"),) if _munito_active() else ()
     for provider, label in probe_providers:
         ok, detail, elapsed = await bot.selftest_llm_head(provider, chat_id=message.chat.id)
@@ -1782,8 +1894,8 @@ async def cmd_selftest(message: Message) -> None:
         ok, detail, elapsed = await bot.selftest_llm_head("gemini", chat_id=message.chat.id)
         rows.append(_selftest_row("Gemini", ok, detail, elapsed))
         summary.append(f"gemini={'ok' if ok else 'FAIL'}/{elapsed:.1f}s")
-    # У слоя поиска своя пробы нет: важнее переключатели и остаток дневного
-    # бюджета обращений — по этой строке видно, активен ли цикл после рестарта.
+    # The search layer has no probe of its own: the switches and remaining daily
+    # call budget — this line shows whether the cycle is active after a restart.
     import lumen_agent
     import lumen_read_page
     import lumen_search
@@ -1803,8 +1915,8 @@ async def cmd_selftest(message: Message) -> None:
         proxy_url = bot.TELEGRAM_API_BASE_URL + "/bot" + (token[:6] if token else "x") + "/getMe"
         proxy_headers = {"X-Lumen-Proxy-Secret": bot.LUMEN_PROXY_SECRET} if bot.LUMEN_PROXY_SECRET else None
         tg_headers = proxy_headers if bot.TELEGRAM_API_BASE_URL != "https://api.telegram.org" else None
-        # TikWM из HF доступен только через прокси: проверяем настроенный адрес
-        # и путь /api/, как у реальных запросов, а не прямой хост (аудит 28.10.2026).
+        # TikWM from HF is reachable only through a proxy: check the configured address
+        # and the /api/ path, like real requests, rather than the direct host (audit 28.10.2026).
         from urllib.parse import urlsplit
         tikwm_base = bot.TIKWM_API_BASE_URL
         tikwm_via_proxy = bool(tikwm_base) and urlsplit(tikwm_base).hostname not in {"www.tikwm.com", "tikwm.com"}
@@ -1833,7 +1945,7 @@ async def cmd_selftest(message: Message) -> None:
 
 
 def _ban_target_id(message: Message) -> int | None:
-    """ID цели /ban//unban: ответ на сообщение или числовой аргумент."""
+    """Target ID for /ban//unban: a message reply or numeric argument."""
     replied = getattr(message, "reply_to_message", None)
     replied_user = getattr(replied, "from_user", None) if replied is not None else None
     replied_id = getattr(replied_user, "id", None)
@@ -1847,7 +1959,7 @@ def _ban_target_id(message: Message) -> int | None:
     return None
 
 async def cmd_ban(message: Message) -> None:
-    """Владельческая блокировка (только владелец, только личка)."""
+    """Owner-only lock (owner only, private chat only)."""
     import bot
     if not bot._is_owner(message.from_user.id if message.from_user else None):
         await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
@@ -1867,7 +1979,7 @@ async def cmd_ban(message: Message) -> None:
     log.info("[ban] Owner banned user %s", target)
 
 async def cmd_unban(message: Message) -> None:
-    """Снятие владельческой блокировки (только владелец, только личка)."""
+    """Release the owner lock (owner only, private chat only)."""
     import bot
     if not bot._is_owner(message.from_user.id if message.from_user else None):
         await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
@@ -1886,7 +1998,7 @@ async def cmd_unban(message: Message) -> None:
         await bot._tg_call(message.reply, bot._t(message.chat.id, "unban_missing", user_id=target))
 
 async def cmd_banlist(message: Message) -> None:
-    """Список заблокированных (только владелец, только личка)."""
+    """List of blocked users (owner only, private chat only)."""
     import bot
     if not bot._is_owner(message.from_user.id if message.from_user else None):
         await bot._tg_call(message.reply, bot._t(message.chat.id, "stats_deny"))
@@ -1899,8 +2011,8 @@ async def cmd_banlist(message: Message) -> None:
         await bot._tg_call(message.reply, bot._t(message.chat.id, "banlist_empty"))
         return
     text = bot._t(message.chat.id, "banlist_header") + "\n" + "\n".join(f"• {uid}" for uid in ids)
-    # Список растёт руками, но упереться в лимит Telegram не должен: режем по
-    # строкам, как вывод /stats выше.
+    # The list is maintained manually, but must not hit Telegram's limit: split by
+    # lines, like the /stats output above.
     if len(text) > bot.TG_MAX_LEN:
         cut = text[:bot.TG_MAX_LEN - 1]
         nl = cut.rfind("\n")
@@ -1914,9 +2026,9 @@ _BUILD_VERSION_CACHED: str | None = None
 
 
 def _build_version() -> str:
-    """Короткий хеш сборки для /stats: env сборки, иначе git, иначе unknown."""
+    """Short build hash for /stats: build environment, otherwise git, otherwise unknown."""
     global _BUILD_VERSION_CACHED
-    # git-вызов блокирует loop до 5с — считаем один раз за жизнь процесса.
+    # a git call blocks the loop for up to 5s, so compute it once per process lifetime.
     if _BUILD_VERSION_CACHED is not None:
         return _BUILD_VERSION_CACHED
     for env_name in ("LUMEN_BUILD_VERSION", "BUILD_VERSION", "GIT_COMMIT", "COMMIT_SHA"):
@@ -1943,14 +2055,14 @@ _WEBHOOK_INFO_TIMEOUT_SEC = 10.0
 
 
 async def _webhook_info_text() -> str:
-    """Строка про вебхук для /stats: очередь и последняя ошибка, иначе н/д."""
+    """Webhook line for /stats: queue and last error, otherwise n/a."""
     import bot
     try:
         if bot.bot is None:
             return "н/д"
         info = await asyncio.wait_for(bot.bot.get_webhook_info(), timeout=_WEBHOOK_INFO_TIMEOUT_SEC)
     except Exception:
-        # Сбой/таймаут не роняют всю статистику: показываем н/д.
+        # Failure/timeout does not crash all statistics: show N/A.
         return "н/д"
     try:
         pending = getattr(info, "pending_update_count", None)
@@ -1960,9 +2072,9 @@ async def _webhook_info_text() -> str:
         if len(err_msg) > 120:
             err_msg = err_msg[:117] + "..."
         if err_msg:
-            # last_error_message — текст Telegram (часто обрывок HTML-страницы): без
-            # экранирования /stats ловил 400 и молчал ровно при сломанном вебхуке
-            # (аудит 01.11.2026).
+            # last_error_message is Telegram text (often an HTML page fragment): without
+            # /stats escaping caught the 400 and stayed silent exactly when the webhook was broken
+            # (audit 01.11.2026).
             return f"pending={pending}, ошибка: {html.escape(err_msg)}"
         return f"pending={pending}, ошибок нет"
     except Exception:
@@ -1970,7 +2082,7 @@ async def _webhook_info_text() -> str:
 
 
 def _process_memory_text() -> str:
-    """RSS процесса для /stats: сначала текущий (Linux), иначе пик, иначе н/д."""
+    """Process RSS for /stats: current first (Linux), then peak, otherwise n/a."""
     try:
         with open("/proc/self/statm", encoding="utf-8") as fh:
             rss_pages = int(fh.read().split()[1])
@@ -1981,7 +2093,7 @@ def _process_memory_text() -> str:
     try:
         import resource
         rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        # macOS отдаёт байты, Linux — килобайты; на Windows модуля нет вообще.
+        # macOS returns bytes, Linux kilobytes; on Windows the module is absent entirely.
         if getattr(os, "uname", None) is not None and os.uname().sysname == "Darwin":
             rss /= 1024 * 1024
         else:
@@ -1992,7 +2104,7 @@ def _process_memory_text() -> str:
 
 
 def _storage_backend_text() -> str:
-    """Бэкенд хранилища и время последней успешной записи для /stats."""
+    """Storage backend and time of the last successful write for /stats."""
     import bot
     backend = "Upstash" if bot.USE_UPSTASH else "локальный диск"
     ts = bot._last_storage_write_ts()
@@ -2000,9 +2112,9 @@ def _storage_backend_text() -> str:
         ts_value = float(ts)
     except (TypeError, ValueError):
         ts_value = 0.0
-    # time.localtime(inf) — OverflowError, и /stats умирал целиком.
-    # Конечный, но нереальный timestamp (1e300) тоже роняет localtime:
-    # OverflowError/OSError/ValueError не должны убивать /stats (проход №4).
+    # time.localtime(inf) raises OverflowError, and all of /stats died.
+    # A finite but impossible timestamp (1e300) also makes localtime fail:
+    # OverflowError/OSError/ValueError must not kill /stats (pass #4).
     if (isinstance(ts, (int, float)) and not isinstance(ts, bool)
             and math.isfinite(ts_value) and 0 < ts_value < 4102444800.0):
         try:
@@ -2014,8 +2126,9 @@ def _storage_backend_text() -> str:
 
 
 async def _send_pick_question(message: Message, scenario: str, original_text: str) -> None:
-    """Отправляет уточняющий вопрос с кнопками и запоминает контекст выбора.
-    token в callback_data короткий (лимит Telegram — 64 байта на всю строку)."""
+    """Sends a clarifying question with buttons and remembers the choice context.
+    The callback_data token is short (Telegram limits the entire string to
+    64 bytes)."""
     import bot
     _purge_expired_picks()
     _enforce_pending_picks_cap(pending_add=1)
@@ -2042,10 +2155,10 @@ async def _send_pick_question(message: Message, scenario: str, original_text: st
 
 
 async def handle_pick_callback(query: CallbackQuery) -> None:
-    """Кнопки-уточнения: чужие отклоняем, протухшие известные перевыпускаем разок, выбор дописываем к запросу и гоним обычным путём (_handle_message_core)."""
+    """Clarification buttons: reject those from other chats, reissue known stale ones once, append the choice to the query and run the normal path (_handle_message_core)."""
     import bot
     if getattr(query, "from_user", None) is not None and bot._is_banned(query.from_user.id):
-        # Забаненный и кнопками не отвечает: иначе игнор обходился живыми пиками.
+        # A banned user gets no button replies either: otherwise the ignore was bypassed by live taps.
         with contextlib.suppress(Exception):
             await query.answer()
         return
@@ -2064,19 +2177,20 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer()
         return
-    # Сначала все проверки по записи, удаление — только перед делом: чужой тап
-    # или кривой индекс больше не сжигают кнопку владельца. Атомарность та же,
-    # что у прежнего pop-first: всё синхронно до первого await ниже.
+    # Run all record checks first; delete only just before acting: a foreign tap
+    # or a corrupt index can no longer burn the owner's button. Between get and pop there is
+    # awaits (answer, waiting for the lock), so one-shot behavior keeps the pop guard
+    # inside the lock (review 26.11.2026), not source order.
     rec = bot._pending_picks.get(token)
-    # Язык для служебных реплик: из записи (если есть), иначе из чата кнопки.
-    # Фолбэк без создания записи: обычный _chat_lang через get_state заводил бы чат
-    # даже на чужой тап по неизвестному токену.
+    # Language for service replies: from the record (if any), otherwise from the button chat.
+    # Fallback without creating a record: the normal _chat_lang path through get_state would create a chat
+    # even for someone else's tap on an unknown token.
     _qchat = query.message.chat.id if query.message and query.message.chat else None
     rec_lang = (rec or {}).get("lang") or bot._peek_chat_lang(_qchat)
 
     def _is_rec_owner(rec_rec: dict) -> bool:
-        """Чей это выбор. Запись без user_id (пост канала/аноним) принадлежит чату:
-        иначе любой участник нажал бы чужую кнопку и сжёг токен (аудит 26.09.2026)."""
+        """Whose choice this is. An entry without user_id (channel post/anonymous) belongs to the chat:
+        otherwise any member could press someone else's button and burn the token (audit 26.09.2026)."""
         owner_id = rec_rec.get("user_id")
         if owner_id is not None and query.from_user is not None and query.from_user.id != owner_id:
             return False
@@ -2085,16 +2199,16 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         return True
 
     if rec is not None and not _is_rec_owner(rec):
-        # Проверка авторства ДО перевыпуска: иначе чужой тап по протухшей кнопке
-        # продлевал бы чужой выбор новыми кнопками (враждебное ревью 27.09.2026).
+        # Check authorship BEFORE reissuing: otherwise someone else's tap on a stale button
+        # would extend someone else's selection with new buttons (hostile review 27.09.2026).
         with contextlib.suppress(Exception):
             await query.answer(_lang_t(rec_lang, "pick_not_yours"), show_alert=True)
         return
 
     if rec is None or rec["expires"] < time.monotonic():
         if rec is not None and query.message is not None:
-            # Протухший известный выбор — молча свежие кнопки вместо стены текста.
-            # Один ресенд: второй тап упрётся в rec None и честно покажет expired.
+            # A stale known choice — silently show fresh buttons instead of a wall of text.
+            # One resend: a second tap hits rec None and honestly shows expired.
             bot._pending_picks.pop(token, None)
             _purge_expired_picks()
             _enforce_pending_picks_cap(pending_add=1)
@@ -2129,26 +2243,17 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         with contextlib.suppress(Exception):
             await query.answer()
         return
-    # Все проверки пройдены — только теперь забираем токен (см. комментарий у get выше).
-    # Без сообщения кнопки не во что упереть: токен не трогаем, иначе тап из инлайн
-    # режима сжёг бы чужой выбор без дела.
+    # All checks passed; take the token only inside the lock (R3-04, audit
+    # 26.11.2026), so a busy lock or cancellation does not burn a live choice.
+    # Without a message, there is nothing to attach buttons to: do not touch inline-mode taps.
     question_msg = query.message
     if question_msg is None:
         with contextlib.suppress(Exception):
             await query.answer()
         return
-    bot._pending_picks.pop(token, None)
     choice = options[idx]
     with contextlib.suppress(Exception):
         await query.answer()
-    with contextlib.suppress(Exception):
-        # Клавиатуру снимаем пустой разметкой, иначе кнопки повиснут (повторный тап всё равно упрётся в pop).
-        await bot._tg_call(
-            question_msg.edit_text,
-            f"{_q}\n\n{_lang_t(rec_lang, 'pick_choice', choice=choice)}",
-            parse_mode=None, call_timeout=15.0,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
-        )
     augmented = tpl.format(original=rec["original"], choice=choice)
     chat = question_msg.chat
     from_user = query.from_user
@@ -2166,8 +2271,26 @@ async def handle_pick_callback(query: CallbackQuery) -> None:
         message_id=getattr(question_msg, "message_id", None),
         reply=_pick_reply,
     )
-    # Флаг против зацикливания: дополненный текст всё ещё матчит детектор — без флага снова ушёл бы в кнопки.
+    # Loop guard: the supplemented text still matches the detector — without the flag, it would go into buttons again.
     ns._pick_resolved = True
-    # Один помощник на все пути: он же ставит _MSG_DEADLINE и кап ожидающих,
-    # которых тут не было (аудит run-2: pick-путь держал лок без бюджета сообщения).
-    await bot._run_under_chat_lock(ns, lambda: bot._handle_message_core(ns))
+
+    async def _pick_admitted() -> Any:
+        # R3-04 (audit 26.11.2026): token spend and keyboard removal — only when
+        # the chat acquired the lock; otherwise a lock refusal left the chat with a dead button.
+        # Review 26.11.2026: get and pop are separated by awaits — without a guard, two taps
+        # one button would enter the core twice (duplicate answer and charge).
+        if bot._pending_picks.pop(token, None) is None:
+            return None
+        with contextlib.suppress(Exception):
+            # Remove the keyboard with empty markup, or the buttons will remain stuck (a repeated tap will still hit pop).
+            await bot._tg_call(
+                question_msg.edit_text,
+                f"{_q}\n\n{_lang_t(rec_lang, 'pick_choice', choice=choice)}",
+                parse_mode=None, call_timeout=15.0,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+            )
+        return await bot._handle_message_core(ns)
+
+    # One helper for every path: it also sets _MSG_DEADLINE and the waiter cap,
+    # which were not present here (run-2 audit: the pick path held the lock without a message budget).
+    await bot._run_under_chat_lock(ns, _pick_admitted)

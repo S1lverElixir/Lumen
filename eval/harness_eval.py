@@ -1,31 +1,34 @@
-"""Эксперимент: помогает ли автоматическая правка AGENTS.md агенту решать задачи.
+"""Experiment: whether automatic AGENTS.md edits help an agent solve tasks.
 
-Идея из google-research/harness2, но без фреймворка: берём реальные задачи из
-истории репозитория, гоняем агента (OpenCode CLI) в песочнице с текущим
-AGENTS.md, затем модель предлагает правку AGENTS.md, и те же задачи гоняются
-с новым файлом. Судья — гейт репозитория: pytest и pyflakes.
+The idea comes from google-research/harness2, but without the framework: we take real tasks from
+repository history, run an agent (OpenCode CLI) in a sandbox with the current
+AGENTS.md, then a model proposes an AGENTS.md edit, and the same tasks run
+with the new file. The judge is the repository gate: pytest and pyflakes.
 
-Подкоманды: run (одна задача и вариант), propose (кандидатная правка AGENTS.md),
-report (сводка), check (проверка задач без агента).
+Subcommands: run (one task and variant), propose (a candidate AGENTS.md edit),
+report (summary), check (validate tasks without an agent).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TASKS_FILE = Path(__file__).resolve().parent / "tasks.json"
-# Артефакты держим вне %TEMP%\opencode: эту папку OpenCode чистит сам, и
-# прогоны вместе с песочницей исчезали бы, не оставив следа.
+# Keep artifacts outside %TEMP%\opencode: OpenCode cleans that folder itself, and
+# runs and their sandboxes would disappear without a trace.
 OUT_ROOT = Path(
     os.environ.get(
         "EVAL_OUT",
@@ -35,13 +38,29 @@ OUT_ROOT = Path(
 OPENCODE_DB = Path(os.environ.get("USERPROFILE", ".")) / ".local" / "share" / "opencode" / "opencode.db"
 
 AGENT_MODEL = os.environ.get("EVAL_AGENT_MODEL", "opencode/glm-5.3-flash-free")
-# Google-модели из этого аккаунта недоступны ("User location is not supported"),
-# поэтому и агент, и редактор берутся из бесплатной линейки opencode.
+# Google models are unavailable on this account ("User location is not supported"),
+# so both the agent and the editor come from the free opencode lineup.
 PROPOSER_MODEL = os.environ.get("EVAL_PROPOSER_MODEL", "opencode/nemotron-3-ultra-free")
 AGENT_TIMEOUT = int(os.environ.get("EVAL_AGENT_TIMEOUT", "1200"))
+# Change together with the sandbox rules, gate composition, or result schema.
+HARNESS_VERSION = "2"
+UNSAFE_HOST_ACK_MESSAGE = (
+    "Отказ: HARNESS_UNSAFE_HOST_ACK=1 не задан. Имена-носители ключей и deny-паттерны "
+    "не являются ОС-изоляцией: агент может читать файлы хоста по абсолютному пути, "
+    "включая секреты. Запускайте агентский код только в одноразовой ОС-изолированной "
+    "VM/контейнере без учётных данных хоста; эта переменная лишь явно принимает риск."
+)
 
-# Команды, которые агент в песочнице запускать не должен: часть из них ломает
-# песочницу, часть — хост (формат диска, удаление файлов, push в origin).
+# R8-01 (review 26.11.2026): key-carrier names. The agent and judge no longer
+# receive the entire os.environ: the filter removes obvious secret carriers,
+# but leaves toolchain variables (PATH, HOME, PYTHONPATH) alone.
+SECRET_ENV_RE = re.compile(
+    r"(^|_)(API_KEY|APIKEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS"
+    r"|AUTH|AUTHORIZATION|WEBHOOK|DSN)(_|$|\d)"
+)
+
+# Commands the agent must not run in the sandbox: some break
+# the sandbox, others the host (disk formatting, file deletion, push to origin).
 DENY_PATTERNS = {
     "git push*": "deny",
     "git remote*": "deny",
@@ -54,9 +73,15 @@ DENY_PATTERNS = {
     "format *": "deny",
     "shutdown*": "deny",
     "reg delete*": "deny",
+    # R8-01: the read tool already denies *.env, but bash could simply cat the
+    # file; the patterns are crude (argument reordering bypasses them), but they block
+    # explicit calls in both shells: the Windows host uses PowerShell.
+    "cat *.env*": "deny",
+    "type *.env*": "deny",
+    "Get-Content *.env*": "deny",
 }
 
-# Признаки unix-команд в песочнице: хост под Windows, шелл — PowerShell.
+# Signs of Unix commands in the sandbox: the host is Windows, and the shell is PowerShell.
 UNIX_SHELL_PATTERNS = [
     r"\bls -[a-zA-Z]",
     r"\bcat \S",
@@ -99,6 +124,8 @@ class RunResult:
     new_failures: list[str] = field(default_factory=list)
     pyflakes_ok: bool = True
     pyflakes_out: str = ""
+    pytest_ok: bool = False
+    agent_ok: bool = False
     violations: dict = field(default_factory=dict)
     final_message: str = ""
     duration_s: float = 0.0
@@ -111,7 +138,18 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def run_cmd(args: list[str], cwd: Path | None = None, timeout: int = 600) -> subprocess.CompletedProcess:
+def require_unsafe_host_ack() -> None:
+    # R8-01: scrub/env and command bans do not restrict an agent from reading the host FS.
+    if os.environ.get("HARNESS_UNSAFE_HOST_ACK") != "1":
+        raise RuntimeError(UNSAFE_HOST_ACK_MESSAGE)
+
+
+def run_cmd(
+    args: list[str],
+    cwd: Path | None = None,
+    timeout: int = 600,
+    env: dict | None = None,
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         args,
         cwd=str(cwd) if cwd else None,
@@ -120,11 +158,12 @@ def run_cmd(args: list[str], cwd: Path | None = None, timeout: int = 600) -> sub
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        env=env,
     )
 
 
-def git(repo: Path, *args: str) -> str:
-    proc = run_cmd(["git", "-C", str(repo), *args])
+def git(repo: Path, *args: str, env: dict | None = None) -> str:
+    proc = run_cmd(["git", "-C", str(repo), *args], env=env)
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
     return proc.stdout
@@ -164,7 +203,7 @@ def sandbox_config() -> dict:
 
 
 def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool = False) -> Path:
-    """Клонирует репозиторий на состояние до правки и ставит тесты из fix-коммита."""
+    """Clones the repository at its pre-fix state and installs the tests from the fix commit."""
     if sandbox.exists():
         for _ in range(5):
             shutil.rmtree(sandbox, ignore_errors=True)
@@ -172,7 +211,7 @@ def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool =
                 break
             time.sleep(2)
         if sandbox.exists():
-            # каталог держит живой процесс OpenCode: берём другое имя, чтобы не мешать
+            # the directory holds a live OpenCode process: use another name to avoid interfering
             sandbox = sandbox.with_name(f"{sandbox.name}-{int(time.time())}")
     sandbox.parent.mkdir(parents=True, exist_ok=True)
     clone = run_cmd(["git", "clone", "--no-hardlinks", "--quiet", str(REPO), str(sandbox)])
@@ -200,7 +239,7 @@ def prepare(task: Task, sandbox: Path, agents_md: Path | None, apply_fix: bool =
 
 
 def source_files_of(task: Task) -> list[str]:
-    """Файлы, которые менял fix-коммит, кроме тестов: без них задача не собирается."""
+    """Files changed by the fix commit, excluding tests: without them the task cannot be built."""
     changed = git(REPO, "diff", "--name-only", task.base, task.fix).splitlines()
     return [f for f in changed if f and not f.startswith("tests/")]
 
@@ -209,26 +248,70 @@ def targets_cache_path() -> Path:
     return OUT_ROOT / "targets.json"
 
 
-def compute_targets(task: Task) -> dict:
-    """FAIL_TO_PASS: тесты, что падают на базе и проходят после правки.
+def targets_cache_key(task: Task) -> str:
+    # R8-07: task@fix produced stale targets after the base, tests, or harness changed.
+    inputs = {
+        "task": task.id,
+        "fix": task.fix,
+        "tests": sorted(task.tests),
+        "base": task.base,
+        "model": AGENT_MODEL,
+        "harness": HARNESS_VERSION,
+    }
+    raw = json.dumps(inputs, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
-    Считаем эмпирически, а не по diff: fix-коммит мог менять ожидания существующих
-    тестов, а не только добавлять новые.
+
+_TARGETS_CACHE_LOCK = threading.Lock()
+
+
+def update_targets_cache(cache_file: Path, key: str, entry: dict) -> None:
+    """Serialize the complete read-merge-write cycle for parallel batches."""
+    with _TARGETS_CACHE_LOCK:
+        cache = {}
+        if cache_file.exists():
+            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+        cache[key] = entry
+        write_targets_cache(cache_file, cache)
+
+
+def write_targets_cache(cache_file: Path, cache: dict) -> None:
+    # R8-07: a shared targets.json.tmp overwrote another write in parallel batches.
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=cache_file.parent,
+            prefix=f".{cache_file.name}.", suffix=".tmp", delete=False,
+        ) as tmp:
+            tmp_name = tmp.name
+            json.dump(cache, tmp, ensure_ascii=False, indent=2)
+        Path(tmp_name).replace(cache_file)
+    finally:
+        if tmp_name:
+            Path(tmp_name).unlink(missing_ok=True)
+
+
+def compute_targets(task: Task) -> dict:
+    """FAIL_TO_PASS: tests that fail on the base and pass after the fix.
+
+    Calculated empirically, not from the diff: the fix commit could change expectations in existing
+    tests, not only add new ones.
     """
     cache = {}
     cache_file = targets_cache_path()
     if cache_file.exists():
         cache = json.loads(cache_file.read_text(encoding="utf-8"))
-    key = f"{task.id}@{task.fix}"
+    key = targets_cache_key(task)
     if key in cache:
         return cache[key]
 
     work = OUT_ROOT / "targets"
     sandbox = work / task.id
     prepare(task, sandbox, None)
-    failed_base, _ = pytest_state(sandbox)
+    failed_base, _, _ = pytest_state(sandbox)
     git(sandbox, "checkout", task.fix, "--", *source_files_of(task))
-    failed_fix, _ = pytest_state(sandbox)
+    failed_fix, _, _ = pytest_state(sandbox)
     shutil.rmtree(sandbox, ignore_errors=True)
 
     entry = {
@@ -236,17 +319,12 @@ def compute_targets(task: Task) -> dict:
         "broken_at_fix": sorted(failed_base & failed_fix),
         "failed_base": sorted(failed_base),
     }
-    cache[key] = entry
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    # запись через временный файл: батчи считают цели параллельно
-    tmp = cache_file.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(cache_file)
+    update_targets_cache(cache_file, key, entry)
     return entry
 
 
 def target_tests(task: Task) -> list[str]:
-    """Тесты, добавленные fix-коммитом (по diff). Точный список падающих — compute_targets."""
+    """Tests added by the fix commit (from the diff). The exact failing list comes from compute_targets."""
     diff = git(REPO, "diff", task.base, task.fix, "--", *task.tests)
     ids: list[str] = []
     current_file = ""
@@ -260,30 +338,41 @@ def target_tests(task: Task) -> list[str]:
     return ids
 
 
-def pytest_state(sandbox: Path) -> tuple[set[str], str]:
-    proc = run_cmd([sys.executable, "-m", "pytest", "-q", "--tb=no", "-rf"], cwd=sandbox, timeout=900)
+def pytest_state(sandbox: Path) -> tuple[set[str], str, bool]:
+    # R8-01: the judge runs sandbox code the agent could modify — the env uses the same
+    # cleaned template as the agent.
+    proc = run_cmd(
+        [sys.executable, "-m", "pytest", "-q", "--tb=no", "-rf"],
+        cwd=sandbox,
+        timeout=900,
+        env=agent_env(sandbox),
+    )
     failed = set()
     for line in proc.stdout.splitlines():
         match = re.match(r"^(FAILED|ERROR)\s+(\S+)", line.strip())
         if match:
             failed.add(match.group(2))
-    return failed, proc.stdout[-4000:]
+    return failed, proc.stdout[-4000:], proc.returncode == 0
 
 
 def pyflakes_state(sandbox: Path) -> tuple[bool, str]:
-    # Гейт как в CI: bot.py, system_prompt.py, все lumen_*.py и все tests/*.py.
+    # The gate, as in CI: bot.py, system_prompt.py, all lumen_*.py, and all tests/*.py.
     modules = sorted(p.name for p in sandbox.glob("lumen_*.py"))
     tests = sorted(f"tests/{p.name}" for p in (sandbox / "tests").glob("*.py"))
     proc = run_cmd(
         [sys.executable, "-m", "pyflakes", "bot.py", "system_prompt.py", *modules, *tests],
         cwd=sandbox,
         timeout=300,
+        env=agent_env(sandbox),
     )
     return proc.returncode == 0, (proc.stdout + proc.stderr)[-2000:]
 
 
 def agent_env(sandbox: Path) -> dict:
-    env = dict(os.environ)
+    # R8-01 (review 26.11.2026): this used to receive the entire os.environ, and a leaked
+    # key variable became a key in the model context; this is not OS
+    # isolation, only removal of obvious secret carriers.
+    env = {k: v for k, v in os.environ.items() if not SECRET_ENV_RE.search(k.upper())}
     env["PIP_TARGET"] = str(sandbox / ".pip-target")
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -291,7 +380,7 @@ def agent_env(sandbox: Path) -> dict:
 
 
 def session_from_db(sandbox: Path, retries: int = 10) -> dict | None:
-    """Достаёт сессию агента из базы OpenCode: лог в stdout может пропасть, база нет."""
+    """Retrieves the agent session from the OpenCode database: the stdout log may disappear, but the database does not."""
     import sqlite3
 
     if not OPENCODE_DB.exists():
@@ -366,16 +455,19 @@ def session_from_db(sandbox: Path, retries: int = 10) -> dict | None:
 
 
 def keep_sandbox(sandbox: Path, kept: Path, base_status: list[str]) -> dict:
-    """Снимает слепок песочницы: после прогона содержимое могут снести.
+    """Takes a snapshot of the sandbox: its contents may be deleted after the run.
 
-    base_status — состояние git сразу после постановки задачи: staged-тесты и
-    записанные нами AGENTS.md/opencode.json не считаются правками агента.
+    base_status is the git state immediately after task setup: staged tests and
+    the AGENTS.md/opencode.json files we wrote are not counted as agent edits.
     """
     info = {"changed_files": [], "diff": ""}
     if not sandbox.exists():
         return info
+    # R8-01 (review 26.11.2026): after the agent runs, the sandbox belongs to it — the agent could
+    # set a filter or hooksPath in .git/config, and the git call below would execute that code.
+    # The env is cleaned, as for the agent and judge: untrusted code does not carry host keys.
     try:
-        status = [line for line in git(sandbox, "status", "--porcelain").splitlines() if line]
+        status = [line for line in git(sandbox, "status", "--porcelain", env=agent_env(sandbox)).splitlines() if line]
     except RuntimeError:
         status = []
     base_keys = {line[3:] for line in base_status}
@@ -384,17 +476,18 @@ def keep_sandbox(sandbox: Path, kept: Path, base_status: list[str]) -> dict:
         shutil.rmtree(kept, ignore_errors=True)
     shutil.copytree(sandbox, kept, ignore=shutil.ignore_patterns(".pip-target"), dirs_exist_ok=True)
     try:
-        info["diff"] = git(kept, "diff", "HEAD")
+        info["diff"] = git(kept, "diff", "HEAD", env=agent_env(kept))
     except RuntimeError:
         info["diff"] = ""
     return info
 
 
-def run_agent(sandbox: Path, prompt: str, model: str, transcript: Path, timeout: int) -> tuple[str, str]:
-    """Гоняет агента в песочнице. Возвращает (последнее сообщение, путь к логу)."""
+def run_agent(sandbox: Path, prompt: str, model: str, transcript: Path, timeout: int) -> tuple[str, str, bool]:
+    """Runs the agent. Returns (last message, log path, exit code 0)."""
+    require_unsafe_host_ack()
     cli = find_cli()
-    # --standalone в argv был до 10.11.2026: CLI 1.19.5 на неизвестный флаг печатает usage и
-    # выходит с кодом 0, прогон молча превращался в solved=False.
+    # --standalone was in argv before 10.11.2026: CLI 1.19.5 printed usage for the unknown flag and
+    # exited with code 0, so the run silently became solved=False.
     args = [cli, "run", "--auto", "--model", model, "--format", "json", prompt]
     with transcript.open("w", encoding="utf-8", errors="replace") as out:
         proc = subprocess.Popen(
@@ -407,8 +500,10 @@ def run_agent(sandbox: Path, prompt: str, model: str, transcript: Path, timeout:
             encoding="utf-8",
             errors="replace",
         )
+        agent_ok = False
         try:
             proc.wait(timeout=timeout)
+            agent_ok = proc.returncode == 0
         except subprocess.TimeoutExpired:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
             proc.wait(timeout=60)
@@ -430,11 +525,11 @@ def run_agent(sandbox: Path, prompt: str, model: str, transcript: Path, timeout:
                 if part.get("type") == "text" and part.get("text"):
                     texts.append(part["text"])
         final = texts[-1] if texts else ""
-    return final, str(transcript)
+    return final, str(transcript), agent_ok
 
 
 def check_violations(session: dict | None, changed_files: list[str]) -> dict:
-    """Грубые нарушения правил проекта: по командам агента и по изменённым файлам."""
+    """Coarse project-rule violations, based on the agent's commands and changed files."""
     commands = (session or {}).get("shell_commands") or []
     joined = "\n".join(commands)
     unix_hits = sorted({p for p in UNIX_SHELL_PATTERNS if re.search(p, joined)})
@@ -455,13 +550,18 @@ def score(task: Task, result: RunResult, targets: list[str]) -> None:
         t for t in targets if any(f == t or f.startswith(t + "[") for f in result.post_fail)
     ]
     result.new_failures = sorted(set(result.post_fail) - set(result.pre_fail))
-    # Пустые targets — это не «решено»: без единой проверки успех не выдаём
-    # (ревью 17.11.2026).
-    result.solved = bool(targets) and not result.target_failed and not result.new_failures
+    # Empty targets do not mean “solved”: without a single check, do not award success
+    # (review 17.11.2026).
+    result.solved = (
+        bool(targets) and not result.target_failed and not result.new_failures
+        and not result.violations.get("tests_touched")
+        and result.pyflakes_ok and result.pytest_ok and result.agent_ok
+    )
 
 
 def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, model: str) -> dict:
-    """Один прогон: песочница, агент, слепок, судья. Возвращает payload результата."""
+    """One run: sandbox, agent, snapshot, judge. Returns the result payload."""
+    require_unsafe_host_ack()
     tasks = {t.id: t for t in load_tasks()}
     task = tasks[task_id]
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -472,7 +572,7 @@ def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, m
     sandbox = prepare(task, sandbox, agents_md)
     repo_status_before = [line for line in git(REPO, "status", "--porcelain").splitlines() if line]
 
-    pre_fail, _ = pytest_state(sandbox)
+    pre_fail, _, _ = pytest_state(sandbox)
     targets = compute_targets(task)["fail_to_pass"]
     base_status = [line for line in git(sandbox, "status", "--porcelain").splitlines() if line]
     log(f"до агента падают {len(pre_fail)} тестов, целевых (FAIL_TO_PASS): {len(targets)}")
@@ -480,10 +580,10 @@ def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, m
     transcript = out_dir / f"{task.id}.{variant}.jsonl"
     log(f"агент: {model}, таймаут {AGENT_TIMEOUT}с")
     started = time.time()
-    final, _ = run_agent(sandbox, task.prompt(), model, transcript, AGENT_TIMEOUT)
+    final, _, agent_ok = run_agent(sandbox, task.prompt(), model, transcript, AGENT_TIMEOUT)
     duration = round(time.time() - started, 1)
 
-    # Слепок снимаем сразу: содержимое песочницы могут снести (чистка temp, OpenCode).
+    # Take the snapshot immediately: sandbox contents may be deleted (temp cleanup, OpenCode).
     snapshot = keep_sandbox(sandbox, kept, base_status)
     session = session_from_db(sandbox)
     if session:
@@ -497,10 +597,11 @@ def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, m
         model=model,
         duration_s=duration,
         final_message=final,
+        agent_ok=agent_ok,
         transcript=str(transcript),
         sandbox=str(sandbox),
     )
-    result.post_fail, post_out = pytest_state(kept)
+    result.post_fail, post_out, result.pytest_ok = pytest_state(kept)
     result.pyflakes_ok, result.pyflakes_out = pyflakes_state(kept)
     result.violations = check_violations(session, snapshot["changed_files"])
     result.pre_fail = sorted(pre_fail)
@@ -517,6 +618,8 @@ def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, m
         "target_failed": result.target_failed,
         "new_failures": result.new_failures,
         "pyflakes_ok": result.pyflakes_ok,
+        "pytest_ok": result.pytest_ok,
+        "agent_ok": result.agent_ok,
         "violations": result.violations,
         "final_message": result.final_message,
         "session_id": (session or {}).get("session_id", ""),
@@ -534,12 +637,13 @@ def run_one(task_id: str, variant: str, out_dir: Path, agents_md: Path | None, m
 def cmd_run(args: argparse.Namespace) -> int:
     out_dir = Path(args.out) if args.out else OUT_ROOT / time.strftime("%Y%m%d-%H%M%S")
     agents_md = Path(args.agents_md) if args.agents_md else None
-    run_one(args.task, args.variant, out_dir, agents_md, args.model or AGENT_MODEL)
-    return 0
+    payload = run_one(args.task, args.variant, out_dir, agents_md, args.model or AGENT_MODEL)
+    return 0 if payload.get("solved") else 1
 
 
 def cmd_batch(args: argparse.Namespace) -> int:
-    """Прогоняет набор задач одним вариантом AGENTS.md."""
+    """Runs a set of tasks with one AGENTS.md variant."""
+    require_unsafe_host_ack()
     from concurrent.futures import ThreadPoolExecutor
 
     tasks = [t.id for t in load_tasks()]
@@ -552,19 +656,27 @@ def cmd_batch(args: argparse.Namespace) -> int:
     model = args.model or AGENT_MODEL
     log(f"batch: {len(tasks)} задач, вариант {args.variant}, потоков {args.jobs}")
 
+    failures: list[str] = []
+    failures_lock = threading.Lock()
+
     def work(task_id: str) -> None:
         try:
-            run_one(task_id, args.variant, out_dir, agents_md, model)
-        except Exception as exc:  # noqa: BLE001 — прогон не должен валить весь батч
+            payload = run_one(task_id, args.variant, out_dir, agents_md, model)
+            if not payload.get("solved"):
+                with failures_lock:
+                    failures.append(task_id)
+        except Exception as exc:  # noqa: BLE001 — one run must not crash the entire batch
             log(f"ошибка на {task_id}: {exc}")
+            with failures_lock:
+                failures.append(task_id)
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         list(pool.map(work, tasks))
-    return 0
+    return 1 if failures else 0
 
 
 def check_repo_untouched(before: list[str]) -> None:
-    """Сторож: настоящий репозиторий не должен меняться во время прогона."""
+    """Guard: the real repository must not change during a run."""
     try:
         status = [line for line in git(REPO, "status", "--porcelain").splitlines() if line]
     except RuntimeError as exc:
@@ -577,24 +689,28 @@ def check_repo_untouched(before: list[str]) -> None:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    """Проверяет, что задачи валидны: на базе падают только целевые тесты."""
+    """Validates the tasks: only the target tests fail on the base."""
     out_dir = Path(args.out) if args.out else OUT_ROOT / "check"
     out_dir.mkdir(parents=True, exist_ok=True)
+    valid = True
     for task in load_tasks():
         entry = compute_targets(task)
         broken = entry["broken_at_fix"]
         targets = entry["fail_to_pass"]
-        status = "ok" if targets and not broken else "проблема"
+        task_valid = bool(targets) and not broken
+        valid = valid and task_valid
+        status = "ok" if task_valid else "проблема"
         log(f"{task.id}: {status}; целевых {len(targets)}, ломаных даже после правки {len(broken)}")
         for item in broken[:5]:
             log(f"    ломается и после правки: {item}")
         if not targets:
             log("    на базе нет падающих целевых тестов — задача негодная")
-    return 0
+    return 0 if valid else 1
 
 
 def cmd_propose(args: argparse.Namespace) -> int:
-    """Собирает кандидатную правку AGENTS.md по провалам базовых прогонов."""
+    """Builds a candidate AGENTS.md edit from failures in baseline runs."""
+    require_unsafe_host_ack()
     base_dir = Path(args.base_dir)
     runs = sorted(base_dir.glob("*.base.json"))
     if not runs:
@@ -716,7 +832,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_probe(args: argparse.Namespace) -> int:
-    """Разведка: какие кандидаты в истории дают годные задачи."""
+    """Reconnaissance: which candidates in history yield usable tasks."""
     for spec in args.commits:
         fix, _, files = spec.partition(":")
         tests = files.split(";") if files else []

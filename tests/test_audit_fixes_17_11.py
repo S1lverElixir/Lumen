@@ -1,7 +1,6 @@
-"""
-Регрессии ревью 17.11.2026: маршрутизация, защита состояния, квоты, /tts.
+"""Regressions from the 17.11.2026 review: routing, state protection, quotas, /tts.
 
-Каждый тест падает на коде до соответствующего фикса и проходит после него.
+Each test fails on the code before the corresponding fix and passes after it.
 """
 import asyncio
 import copy
@@ -29,8 +28,8 @@ from tests.bot_test_helpers import _FakeIncomingMessage
 
 @pytest.fixture(autouse=True)
 def _isolate_global_state():
-    """Каждый тест файла оставляет квоту, чаты и флаги как были: иначе соседний
-    файл сьюта видит обрезанную квоту и грязные очереди (адверсариальный проход)."""
+    """Each test in this file leaves quotas, chats, and flags as they were; otherwise, the
+    next file in the suite sees a reduced quota and dirty queues (adversarial pass)."""
     saved_quota = copy.deepcopy(bot.GLOBAL_QUOTA)
     saved_chats = dict(bot.chat_state)
     yield
@@ -62,11 +61,11 @@ def _reset_state_flags():
     lcs._quota_dirty = False
 
 
-# ── F-031: память чата не теряется в нестримовом цикле Munito ──
+# ── F-031: chat memory is not lost in the non-streaming Munito loop ──
 
 
 def test_chat_completion_chain_keeps_memory_in_system_message():
-    # Память обязана пережить КАЖДУЮ попытку: перезапись system шла на каждой модели.
+    # Memory must survive EVERY attempt: rewriting system happened on every model.
     chat_id = 998301
     state = bot.get_state(chat_id)
     state["memory_summary"] = "MEMFACT-7731: любит чай"
@@ -93,7 +92,7 @@ def test_chat_completion_chain_keeps_memory_in_system_message():
         assert len(system) > 500, "базовый промпт подменён пустотой"
 
 
-# ── F-032: перестановка по скорости не ломает голову search-цепочки ──
+# ── F-032: reordering by speed does not break the head of the search chain ──
 
 
 def test_search_chain_keeps_grounded_head_after_speed_reorder():
@@ -115,7 +114,7 @@ def test_search_chain_keeps_grounded_head_after_speed_reorder():
         head = ordered[0][1]
         assert lumen_router_config.GEMINI_MODELS.get(head, {}).get("search_grounding") is True, (
             f"голова search-цепочки {head} без search grounding")
-        # Сортировка по скорости не выключена: самый быстрый из негрупповых — первый.
+        # Speed sorting is not disabled: the fastest non-group model is first.
         non_grounded = [
             m for _, m in ordered
             if not lumen_router_config.GEMINI_MODELS.get(m, {}).get("search_grounding", True)
@@ -125,7 +124,7 @@ def test_search_chain_keeps_grounded_head_after_speed_reorder():
         lumen_model_speed._latency_ema.clear()
 
 
-# ── F-033: HTTP 400 одного запроса не выключает модель для всех ──
+# F-033: one request's HTTP 400 does not disable the model for everyone.
 
 
 def test_chat_completion_chain_does_not_cool_down_on_400():
@@ -148,7 +147,7 @@ def test_chat_completion_chain_does_not_cool_down_on_400():
         bot.GLOBAL_QUOTA.get(provider, {}).pop(model, None)
 
 
-# ── F-039: флаш не удаляет удалённые истории замороженных чатов ──
+# ── F-039: a flush does not delete deleted histories of frozen chats ──
 
 
 def test_flush_skips_deletes_of_frozen_and_failed_state():
@@ -158,7 +157,7 @@ def test_flush_skips_deletes_of_frozen_and_failed_state():
     lcs._pending_chat_deletions.update({ok_chat, frozen_chat})
     lcs._chat_snapshot_unloaded.add(frozen_chat)
 
-    def fake_delete(cid):
+    def fake_delete(cid, *, generation=None, order=None):
         deleted.append(cid)
         return True
 
@@ -183,7 +182,7 @@ def test_flush_skips_deletes_of_frozen_and_failed_state():
         _reset_state_flags()
 
 
-# ── F-042: четвёртая попытка лока не отдаёт чужой лок ──
+# ── F-042: the fourth lock attempt does not return someone else's lock ──
 
 
 def test_acquire_chat_lock_never_returns_unregistered_lock(monkeypatch):
@@ -192,7 +191,7 @@ def test_acquire_chat_lock_never_returns_unregistered_lock(monkeypatch):
     def fake_get_chat_lock(chat_id):
         lock = asyncio.Lock()
         made.append(lock)
-        return lock  # реестр его не помнит: поколение всегда другое
+        return lock  # the registry does not remember it: the generation is always different
 
     monkeypatch.setattr(lcs, "get_chat_lock", fake_get_chat_lock)
 
@@ -204,7 +203,7 @@ def test_acquire_chat_lock_never_returns_unregistered_lock(monkeypatch):
     assert len(made) == lcs._CHAT_LOCK_MAX_RETRIES, "ровно три попытки, без четвёртой"
 
 
-# ── F-043: восстановление квоты во флаше не блокирует event loop ──
+# ── F-043: quota restoration in a flush does not block the event loop ──
 
 
 def test_flush_quota_recovery_runs_off_event_loop():
@@ -228,7 +227,7 @@ def test_flush_quota_recovery_runs_off_event_loop():
         _reset_state_flags()
 
 
-# ── F-045: нулевая метка ретрая не блокирует первое чтение квоты ──
+# ── F-045: a zero retry mark does not block the first quota read ──
 
 
 def test_quota_recovery_first_retry_reads_immediately(monkeypatch):
@@ -249,7 +248,7 @@ def test_quota_recovery_first_retry_reads_immediately(monkeypatch):
         lq._quota_retry_last_ts = 0.0
 
 
-# ── F-075: нефинитный Retry-After не замораживает картинки навсегда ──
+# ── F-075: a non-finite Retry-After must not freeze images forever ──
 
 
 @pytest.mark.parametrize(("raw", "expected"), [
@@ -268,14 +267,14 @@ def test_image_rate_limit_cooldown_is_bounded():
         entry = bot._quota_entry(lq.IMAGE_QUOTA_PROVIDER, provider)
         until = entry["cooldown_until"]
         assert until is not None and until < float("inf")
-        # Нижняя граница — штатная пауза провайдера, верхняя — сутки.
+        # The lower bound is a normal provider pause; the upper bound is one day.
         assert until >= time.time() + bot.IMAGE_PROVIDER_COOLDOWN_SEC - 1
         assert until <= time.time() + 86400 + 60
     finally:
         bot.GLOBAL_QUOTA.get(lq.IMAGE_QUOTA_PROVIDER, {}).pop(provider, None)
 
 
-# ── F-086: валидный JSON не-словарь — сбой загрузки, а не успех ──
+# ── F-086: valid non-dict JSON is a load failure, not success ──
 
 
 @pytest.mark.parametrize("raw", ["null", "[]", "\"text\""])
@@ -289,7 +288,7 @@ def test_quota_load_treats_non_dict_payload_as_failure(raw, monkeypatch):
         lcs._quota_load_failed = False
 
 
-# ── F-087: recovery сливает живую память с удалённым снапшотом ──
+# F-087: recovery merges live memory with the deleted snapshot
 
 
 def test_quota_recovery_sums_live_counters_and_merges_all_providers(monkeypatch):
@@ -327,7 +326,7 @@ def test_quota_recovery_sums_live_counters_and_merges_all_providers(monkeypatch)
 
 
 def test_quota_recovery_keeps_ban_across_midnight(monkeypatch):
-    # Сутки сменились за время сбоя: счётчики не воскрешаем, но бан обязан остаться.
+    # The day changed during the outage: do not resurrect the counters, but the ban must remain.
     remote = json.dumps({
         "gemini": {}, "user_daily": {}, "banned_users": {}, "quota_day": "2000-01-01",
     })
@@ -340,7 +339,7 @@ def test_quota_recovery_keeps_ban_across_midnight(monkeypatch):
     assert bot._is_banned(998333) is True
 
 
-# ── F-181: ответ шлюза без result — сбой чтения, а не «ключа нет» ──
+# ── F-181: a gateway response without result is a read failure, not "no key" ──
 
 
 def test_upstash_get_raises_when_gateway_response_has_no_result(monkeypatch):
@@ -354,7 +353,7 @@ def test_upstash_get_missing_key_still_returns_none(monkeypatch):
     assert lss._upstash_get("https://example.invalid", "token", "lumen:chat_index") is None
 
 
-# ── F-085: отмена /tts возвращает зарезервированные слоты ──
+# ── F-085: cancelling /tts returns the reserved slots ──
 
 
 def _tts_incoming(chat_id):
@@ -437,7 +436,8 @@ def test_inline_tts_cancel_during_status_refunds_slots(monkeypatch):
     assert ("res", 1, 1) in calls and ("ref", 1, 1) in calls
 
 
-# ── F-049: фото-пост без скачанных слайдов отказывает, а не шлёт аудио видео ──
+# ── F-049: a photo post without downloaded slides refuses rather than sending
+# video audio ──
 
 
 def test_slideshow_with_no_downloaded_slides_refuses_instead_of_sending_audio(monkeypatch):
@@ -476,7 +476,7 @@ def test_slideshow_with_no_downloaded_slides_refuses_instead_of_sending_audio(mo
     bot.chat_state.pop(998351, None)
 
 
-# ── F-050: отмена в finally музыкального шага не глотается ──
+# ── F-050: cancellation in the music-step finally block is not swallowed ──
 
 
 def test_music_cancellation_in_finally_propagates(monkeypatch):
@@ -523,7 +523,7 @@ def test_music_cancellation_in_finally_propagates(monkeypatch):
     bot.chat_state.pop(998361, None)
 
 
-# ── F-034: законный короткий ответ «None» не считается плейсхолдером ──
+# ── F-034: a legitimate short answer of 'None' is not a placeholder ──
 
 
 @pytest.mark.parametrize("text", ["None", "none", "N/A", "n/a"])
@@ -536,14 +536,14 @@ def test_placeholders_are_still_empty_like(text):
     assert lumen_errors._is_empty_like(text) is True
 
 
-# ── F-037: 402 важнее слова «quota» в тексте ──
+# ── F-037: 402 takes precedence over the word 'quota' in text ──
 
 
 def test_402_billing_quota_is_paid_not_rate_limit():
     assert bot._classify_model_error(402, "billing quota exceeded") == "paid"
 
 
-# ── F-039 (адверсариальный проход): shutdown-флаш не удаляет замороженные чаты ──
+# ── F-039 (adversarial pass): the shutdown flush does not delete frozen chats ──
 
 
 def test_shutdown_flush_skips_frozen_chat_deletes():
@@ -553,7 +553,7 @@ def test_shutdown_flush_skips_frozen_chat_deletes():
     lcs._chat_snapshot_unloaded.add(frozen_chat)
     deleted = []
 
-    def fake_delete(cid):
+    def fake_delete(cid, *, generation=None, order=None):
         deleted.append(cid)
         return True
 
@@ -564,35 +564,63 @@ def test_shutdown_flush_skips_frozen_chat_deletes():
     assert ok_chat in deleted
 
 
-# ── F-181 (адверсариальный проход): сбой загрузки сам будит ретрай индекса ──
+# ── F-181 (adversarial pass): a download failure itself wakes the index retry ──
 
 
 def test_flush_retries_index_after_load_failure_without_dirty_flag():
     _reset_state_flags()
     lcs._state_load_failed = True
     lcs._index_dirty = False
-    calls = []
-    with patch.object(lcs, "_fetch_index_ids", side_effect=lambda: calls.append(1) or set()),          patch.object(lcs, "_apply_recovered_ids", side_effect=lambda ids: True):
+    fetched = {4242}
+    pending_seen = []
+    applied = []
+    saved = []
+
+    def fake_fetch(*, migration_pending=None):
+        pending_seen.append(migration_pending)
+        return set(fetched)
+
+    def fake_apply(ids, pending):
+        applied.append((ids, pending))
+        return True
+
+    def fake_save(payload, *, generation=None):
+        saved.append((payload, generation))
+        return True
+
+    with patch.object(lcs, "_fetch_index_ids", side_effect=fake_fetch),          patch.object(lcs, "_apply_recovered_ids", side_effect=fake_apply),          patch.object(bot, "_save_chat_index_payload", side_effect=fake_save):
         asyncio.run(bot._flush_dirty_state_once())
-    assert calls, "без ретрая запись стоит до рестарта"
+    # R7-16: the full retry contract, not "something was called": exactly one fetch
+    # with fresh pending, the same IDs applied to the same pending, the index written
+    # once with the current generation (otherwise the snapshot becomes orphaned after restart).
+    assert pending_seen == [set()], "ретрай идёт ровно раз со свежим pending-множеством"
+    assert len(applied) == 1 and applied[0][0] == fetched, "извлечённые id применяются к индексу"
+    assert applied[0][1] is pending_seen[0], "pending из fetch доходит до apply тем же объектом"
+    assert len(saved) == 1, "индекс после ретрая пишется ровно один раз"
+    assert saved[0][1] == lcs._index_generation, "запись идёт с текущей генерацией индекса"
+    json.loads(saved[0][0])
+    lcs._state_load_failed = False  # arm it only here; do not carry it further (review 26.11.2026)
 
 
-# ── F-075 (адверсариальный проход): Infinity из старого снапшота снимается ──
+# ── F-075 (adversarial pass): Infinity from an old snapshot is cleared ──
 
 
-def test_loaded_non_finite_cooldown_is_cleared(monkeypatch):
+def test_loaded_non_finite_cooldown_keeps_write_guard(monkeypatch):
     raw = json.dumps({
         "image": {"cf": {"used": 1, "neurons": 104.2, "exhausted_at": None,
                           "cooldown_until": float("inf")}},
         "quota_day": bot._current_quota_day(),
     })
+    local = {"image": {"cf": {"used": 1, "cooldown_until": None}}}
+    lcs._quota_load_failed = False
     monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: raw)
-    lq.load_global_quota()
-    assert bot.GLOBAL_QUOTA["image"]["cf"]["cooldown_until"] is None
-    assert bot._image_provider_block_reason("cf") is None
+    with patch.dict(bot.GLOBAL_QUOTA, local, clear=True):
+        assert lq.load_global_quota() is False
+        assert lcs._quota_load_failed is True
+        assert bot.GLOBAL_QUOTA == local
 
 
-# ── F-033 (адверсариальный проход): 503 и invalid model по-прежнему остывают ──
+# ── F-033 (adversarial pass): 503 and invalid model still cool down ──
 
 
 @pytest.mark.parametrize(("status", "text"), [
@@ -622,7 +650,7 @@ def test_unavailable_and_invalid_model_still_cool_down(status, text):
         bot.GLOBAL_QUOTA.get("munito", {}).pop(model, None)
 
 
-# ── F-032 (адверсариальный проход): обычный маршрут по-прежнему снимает медленную голову ──
+# F-032 (adversarial pass): the normal route still removes a slow head.
 
 
 def test_heavy_route_still_demotes_slow_grounded_head():
@@ -634,13 +662,13 @@ def test_heavy_route_still_demotes_slow_grounded_head():
         lumen_model_speed.record_response(
             lumen_model_speed.speed_key("gemini", "gemini-3.8-flash"), total_sec=2.0)
         route = [("gemini", "gemini-2.5-flash"), ("gemini", "gemini-3.8-flash")]
-        ordered = lumen_routes._reorder_route_by_speed(route)  # без пина головы
+        ordered = lumen_routes._reorder_route_by_speed(route)  # without pinning the head
         assert ordered[0][1] == "gemini-3.8-flash", "медленная голова тяжёлой цепочки не снята"
     finally:
         lumen_model_speed._latency_ema.clear()
 
 
-# ── F-085 (адверсариальный проход): отмена в отправке возвращает неотданные чанки ──
+# F-085 (adversarial pass): cancellation during sending returns undelivered chunks.
 
 
 def test_inline_tts_cancel_during_send_refunds_remaining(monkeypatch):
@@ -676,7 +704,7 @@ def test_inline_tts_cancel_during_send_refunds_remaining(monkeypatch):
     asyncio.run(scenario())
 
 
-# ── F-077: после SOS размеры не ищем, GIL не держим на энтропии ──
+# F-077: after SOS, do not look for sizes or hold the GIL during entropy generation
 
 
 def test_jpeg_scan_stops_at_scan_start():
@@ -688,7 +716,7 @@ def test_jpeg_scan_stops_at_scan_start():
         "SOF после SOS — это энтропия, а не заголовок")
 
 
-# ── F-078: правка сохраняет новые пропорции ──
+# F-078: editing preserves the new aspect ratio
 
 
 @pytest.mark.parametrize(("dims", "expected"), [
@@ -701,7 +729,7 @@ def test_size_for_reference_keeps_supported_proportions(dims, expected):
     assert lumen_images.size_for_reference(dims) == expected
 
 
-# ── F-036: бюджет, истёкший до первой попытки, — RouteBudgetExceededError ──
+# ── F-036: a budget expired before the first attempt — RouteBudgetExceededError ──
 
 
 def test_run_route_budget_exhausted_before_first_attempt_raises_budget_error(monkeypatch):
@@ -720,7 +748,7 @@ def test_run_route_budget_exhausted_before_first_attempt_raises_budget_error(mon
     bot.chat_state.pop(998381, None)
 
 
-# ── F-039/F-181 (проход №2): замороженный чат не вытесняется, ключ не сиротеет ──
+# ── F-039/F-181 (pass #2): a frozen chat is not evicted, and the key is not orphaned ──
 
 
 def test_prune_keeps_frozen_chat_and_does_not_queue_deletion(monkeypatch):
@@ -742,7 +770,7 @@ def test_shutdown_flush_skips_all_deletes_on_load_failure():
     lcs._pending_chat_deletions.update({998393, 998394})
     deleted = []
 
-    def fake_delete(cid):
+    def fake_delete(cid, *, generation=None, order=None):
         deleted.append(cid)
         return True
 
@@ -752,7 +780,7 @@ def test_shutdown_flush_skips_all_deletes_on_load_failure():
     assert {998393, 998394} <= lcs._pending_chat_deletions
 
 
-# ── F-087 (проход №2): отсутствующий в снапшоте ключ не складывается сам с собой ──
+# F-087 (pass #2): a key missing from the snapshot is not added to itself
 
 
 def test_quota_recovery_does_not_double_count_absent_remote_keys(monkeypatch):
@@ -776,21 +804,23 @@ def test_quota_recovery_does_not_double_count_absent_remote_keys(monkeypatch):
     assert bot.GLOBAL_QUOTA["stats"]["answers_sent"] == 503
 
 
-def test_quota_load_survives_infinity_in_user_stats_and_bans(monkeypatch):
+def test_quota_load_rejects_infinity_in_user_stats_and_bans(monkeypatch):
     raw = json.dumps({
         "user_daily": {"1": {"total": float("inf")}},
         "stats": {"answers_sent": float("inf"), "model_attempts": 5},
         "banned_users": {"2": float("inf")},
         "quota_day": bot._current_quota_day(),
     })
-    lcs._quota_load_failed = True
+    local = {"stats": {"model_attempts": 5}, "banned_users": {"2": 7}}
+    lcs._quota_load_failed = False
     monkeypatch.setattr(bot, "_storage_read_text", lambda key, path: raw)
-    lq.load_global_quota()
-    assert lcs._quota_load_failed is False, "OverflowError не должен ронять всю загрузку"
-    assert bot.GLOBAL_QUOTA["stats"]["model_attempts"] == 5
+    with patch.dict(bot.GLOBAL_QUOTA, local, clear=True):
+        assert lq.load_global_quota() is False
+        assert lcs._quota_load_failed is True
+        assert bot.GLOBAL_QUOTA == local
 
 
-# ── F-033 (проход №2): ошибка запроса на 400 не остывает ──
+# ── F-033 (pass #2): a request error on 400 does not cool down ──
 
 
 def test_request_specific_400_does_not_cool_the_model():
@@ -807,7 +837,7 @@ def test_request_specific_400_does_not_cool_the_model():
     assert entry.get("cooldown_until") is None
 
 
-# ── F-110: дедуп по паре «заголовок + текст», а не по одному заголовку ──
+# F-110: deduplicate by the pair "title + text", not by title alone.
 
 
 def test_dedupe_keeps_same_title_with_different_bodies():
@@ -821,7 +851,7 @@ def test_dedupe_keeps_same_title_with_different_bodies():
     assert [i["url"] for i in kept] == ["https://example.com/1", "https://example.org/2"]
 
 
-# ── F-113: невидимки и чужой маркер поиска не доходят до промпта ──
+# F-113: invisible characters and another user's search marker do not reach the prompt
 
 
 def test_snippet_one_line_strips_tag_chars_and_foreign_search_marker():
@@ -833,7 +863,7 @@ def test_snippet_one_line_strips_tag_chars_and_foreign_search_marker():
     assert lumen_search.search_marker_requested(clean) is False
 
 
-# ── F-033 (проход №3): файл, в имени которого есть «model», не остывает ──
+# ── F-033 (pass #3): a file whose name contains "model" does not cool down ──
 
 
 @pytest.mark.parametrize("text", [
@@ -855,7 +885,7 @@ def test_file_and_output_errors_do_not_cool_the_model(text):
     assert entry.get("cooldown_until") is None
 
 
-# ── F-182 (новая, проход №3): Infinity в timestamp не роняет /stats ──
+# ── F-182 (new, pass #3): Infinity in timestamp does not crash /stats ──
 
 
 def test_stats_survives_infinite_last_write_ts(monkeypatch):
@@ -875,7 +905,7 @@ def test_quota_load_drops_infinite_last_write_ts(monkeypatch):
     assert ts is None or math.isfinite(float(ts))
 
 
-# ── F-102: служебный адрес из RSS/keyed-выдачи не доходит ни до промпта, ни до пузыря ──
+# ── F-102: a service URL from RSS/keyed results reaches neither the prompt nor the bubble ──
 
 
 def test_private_url_is_dropped_from_snippets_and_dedupe():
@@ -897,7 +927,7 @@ def test_stats_survives_out_of_range_finite_timestamp(monkeypatch):
     assert "записей пока не было" in text
 
 
-# ── F-072/F-073/F-178: непарные теги и LaTeX больше не квадратичны ──
+# ── F-072/F-073/F-178: unmatched tags and LaTeX are no longer quadratic ──
 
 
 def _finishes_within(fn, *args, seconds=2.0):
@@ -931,27 +961,35 @@ def test_guest_truncation_of_adversarial_text_is_bounded():
     assert isinstance(out, str)
 
 
-# ── F-114 (часть): неудачный keyed-запрос не тратит кредит ──
+# ── F-114 (part): a failed keyed request does not spend a credit ──
 
 
 def test_failed_keyed_request_does_not_spend_api_call(monkeypatch):
     import lumen_search
     monkeypatch.setenv("TAVILY_API_KEY", "test-key-not-real")
     monkeypatch.setenv("SEARCH_API_PROVIDER", "tavily")
-    spent = []
-    monkeypatch.setattr(lumen_search, "note_search_api_call", lambda: spent.append(1))
+    before = lumen_search._search_api_calls
+
+    seen = []
 
     class _BrokenSession:
         def post(self, *args, **kwargs):
+            # Review I22 (26.11.2026): the credit is already taken during the request — otherwise
+            # the gate is not atomic, and rolling back the take wiring is invisible in the test.
+            seen.append(lumen_search._search_api_calls)
             raise RuntimeError("network down")
 
     out = asyncio.run(lumen_search._api_provider_snippets(
         _BrokenSession(), "q", 3, deadline=time.monotonic() + 5))
     assert out == []
-    assert spent == [], "упавший запрос не должен списывать кредит"
+    assert seen == [before + 1]
+    # R4-04 (audit 26.11.2026): the credit is taken synchronously before the request and returned
+    # on failure — "a failed request does not spend quota" is verified by a pure change
+    # of the counter, not a spy on note_search_api_call (it is now called inside take).
+    assert lumen_search._search_api_calls == before
 
 
-# ── F-074: модерация распознаётся при 403/500 и за капом detail ──
+# ── F-074: moderation is recognized on 403/500 and beyond the detail cap ──
 
 
 @pytest.mark.parametrize("status", [403, 500])
@@ -970,7 +1008,7 @@ def test_generic_500_without_marker_is_provider_error():
     assert not isinstance(exc.value, lumen_images.ImageModerationError)
 
 
-# ── F-114: per-user кап keyed-поиска; владелец без лимита ──
+# ── F-114: per-user cap for keyed search; the owner has no limit ──
 
 
 def test_keyed_per_user_cap_and_owner_bypass(monkeypatch):
@@ -1004,7 +1042,7 @@ def test_keyed_per_user_cap_and_owner_bypass(monkeypatch):
 
 
 
-# ── F-044: сводка памяти не теряет старые факты молча ──
+# ── F-044: the memory summary does not silently lose old facts ──
 
 
 def test_summary_consumes_from_the_start_and_keeps_leftover(monkeypatch):
@@ -1026,7 +1064,7 @@ def test_summary_consumes_from_the_start_and_keeps_leftover(monkeypatch):
     assert state["memory_summary"] == "ok-summary"
 
 
-# ── F-111: подпись DDG принадлежит своей ссылке, а не соседней ──
+# ── F-111: the DDG caption belongs to its own link, not the neighboring one ──
 
 
 def test_ddg_snippet_is_paired_with_its_own_link():
@@ -1041,7 +1079,7 @@ def test_ddg_snippet_is_paired_with_its_own_link():
     assert out[1]["snippet"] == "Snippet belonging to B"
 
 
-# ── F-081: подготовка /logs идёт в рабочем потоке ──
+# ── F-081: /logs preparation runs in a worker thread ──
 
 
 def test_logs_preparation_runs_off_event_loop(monkeypatch):
@@ -1067,7 +1105,7 @@ def test_logs_preparation_runs_off_event_loop(monkeypatch):
     assert seen["thread"] is not threading.main_thread(), "чтение лога не должно идти в петле"
 
 
-# ── F-082: забаненный не останавливает ответ ни командой, ни кнопкой ──
+# F-082: a banned user cannot stop the response with either a command or a button.
 
 
 def test_stop_command_and_callback_ignore_banned_user(monkeypatch):
@@ -1088,7 +1126,7 @@ def test_stop_command_and_callback_ignore_banned_user(monkeypatch):
     assert calls == [], "забаненный не должен управлять остановкой"
 
 
-# ── F-080: смена языка под общим окном 5/30с ──
+# ── F-080: language switching under the shared 5/30s window ──
 
 
 def test_lang_callback_is_rate_limited(monkeypatch):
@@ -1109,7 +1147,7 @@ def test_lang_callback_is_rate_limited(monkeypatch):
     assert writes == [], "язык не должен меняться при отказе по окну"
 
 
-# ── F-079: /tts и /reset идут через лок чата ──
+# ── F-079: /tts and /reset go through the chat lock ──
 
 
 def test_chat_locked_runs_handler_under_the_lock(monkeypatch):
@@ -1130,7 +1168,7 @@ def test_chat_locked_runs_handler_under_the_lock(monkeypatch):
     assert locked == [message] and done == [message]
 
 
-# ── F-046: _deleted_chat_ids не растёт без капа ──
+# F-046: _deleted_chat_ids does not grow without a cap
 
 
 def test_deleted_chat_ids_are_capped(monkeypatch):
@@ -1145,7 +1183,7 @@ def test_deleted_chat_ids_are_capped(monkeypatch):
     assert len(lcs._deleted_chat_ids) <= 3
 
 
-# ── F-104: DOCTYPE/ENTITY во всём теле RSS, а не в первых 2000 символах ──
+# ── F-104: DOCTYPE/ENTITY across the entire RSS body, not just the first 2000 characters ──
 
 
 def test_rss_guard_sees_doctype_after_long_prefix():
@@ -1159,7 +1197,7 @@ def test_rss_guard_sees_doctype_after_long_prefix():
     assert lumen_search.parse_rss_snippets(xml) == []
 
 
-# ── F-108/F-109: ранг до капа издателя, authority по границам домена ──
+# ── F-108/F-109: rank before the publisher cap, authority by domain boundaries ──
 
 
 def test_publisher_cap_is_applied_after_ranking():
@@ -1180,7 +1218,7 @@ def test_authority_uses_domain_boundaries():
     assert lumen_search._authority({"publisher": "reuters.com.evil.tld"}) == 0
 
 
-# ── F-089: нулевая метка не блокирует первый сброс суток ──
+# ── F-089: a zero marker does not block the first daily reset ──
 
 
 def test_first_quota_day_reset_is_not_throttled_on_fresh_runner(monkeypatch):
@@ -1198,7 +1236,7 @@ def test_first_quota_day_reset_is_not_throttled_on_fresh_runner(monkeypatch):
         lq._last_quota_check_monotonic = original
 
 
-# ── F-107: протухшее не выдаётся за свежее ──
+# ── F-107: stale content must not pass as fresh ──
 
 
 def test_rank_does_not_fall_back_to_stale_items():
@@ -1208,7 +1246,7 @@ def test_rank_does_not_fall_back_to_stale_items():
     assert lumen_search._rank(stale, wants_fresh=True, wants_entity=False) == []
 
 
-# ── F-088: вытеснение не сносит израсходованные записи и bonus ──
+# ── F-088: eviction does not remove consumed records and bonus ──
 
 
 def test_lru_eviction_keeps_spent_and_bonus_entries(monkeypatch):
@@ -1229,7 +1267,7 @@ def test_lru_eviction_keeps_spent_and_bonus_entries(monkeypatch):
     assert "999" in bucket
 
 
-# ── F-106: погода не выходит за общий дедлайн ──
+# ── F-106: weather stays within the shared deadline ──
 
 
 def test_weather_sequence_respects_the_deadline(monkeypatch):
@@ -1272,7 +1310,7 @@ def test_weather_sequence_respects_the_deadline(monkeypatch):
     assert _time.monotonic() - started < 1.6, "последовательность вышла за дедлайн"
 
 
-# ── Medium-пакет 1: F-055, F-059, F-103, F-052 ──
+# ── Medium batch 1: F-055, F-059, F-103, F-052 ──
 
 
 def test_draw_budget_treats_zero_as_exhausted():
@@ -1308,7 +1346,7 @@ def test_log_safe_url_hides_the_account():
         "https://www.tiktok.com/@private_person/video/1")
 
 
-# ── F-112: алиасы по границам слов ──
+# ── F-112: aliases at word boundaries ──
 
 
 def test_aliases_respect_word_boundaries():
@@ -1318,7 +1356,7 @@ def test_aliases_respect_word_boundaries():
     assert lumen_search._alias_present("eth", "цена eth растёт") is True
 
 
-# ── F-095: неудачное чтение не списывает личный кап ──
+# ── F-095: a failed read does not spend the personal cap ──
 
 
 def test_failed_read_does_not_spend_user_quota(monkeypatch):
@@ -1334,7 +1372,7 @@ def test_failed_read_does_not_spend_user_quota(monkeypatch):
     rp.reset_read_page_counters_for_tests()
 
 
-# ── F-064: история на обрыве/стопе проходит тот же скраб ──
+# F-064: history on disconnect/stop goes through the same scrubber
 
 
 def test_stream_history_answer_is_scrubbed():
@@ -1344,7 +1382,7 @@ def test_stream_history_answer_is_scrubbed():
     assert "Ответ" in cleaned
 
 
-# ── F-105: тело поискового ответа с капом ──
+# ── F-105: search-response body with a cap ──
 
 
 def test_search_body_is_capped():
@@ -1375,7 +1413,7 @@ def test_search_body_falls_back_for_test_doubles():
     assert asyncio.run(lumen_search._read_search_text(_Resp())) == "ok"
 
 
-# ── F-057: отшитый «занято» не становится владельцем stop-области ──
+# F-057: a rejected "busy" response does not make the sender owner of the stop area.
 
 
 def test_waiter_cap_does_not_claim_stop_scope(monkeypatch):
@@ -1395,7 +1433,7 @@ def test_waiter_cap_does_not_claim_stop_scope(monkeypatch):
     assert begun == [], "отшитый запрос не должен открывать область стопа"
 
 
-# ── F-005: честное «основано на исследованиях Google» не вырезается ──
+# ── F-005: the honest "based on Google research" wording is not cut ──
 
 
 def test_identity_based_on_needs_first_person_in_the_same_sentence():
@@ -1408,7 +1446,7 @@ def test_identity_based_on_needs_first_person_in_the_same_sentence():
     assert sec._leak_spans(leak)
 
 
-# ── F-047: чтение индекса не мутирует общие множества ──
+# ── F-047: reading the index does not mutate shared sets ──
 
 
 def test_index_fetch_does_not_mutate_shared_sets():
@@ -1426,7 +1464,7 @@ def test_index_fetch_does_not_mutate_shared_sets():
     _reset_state_flags()
 
 
-# ── F-069: ротация не закрывает сессию под живыми запросами ──
+# ── F-069: rotation does not close a session with live requests ──
 
 
 def test_proxy_rotation_defers_old_session_close(monkeypatch):
@@ -1464,7 +1502,7 @@ def test_proxy_rotation_defers_old_session_close(monkeypatch):
         bot.bot = original_bot
 
 
-# ── F-014: пост канала банится по sender_chat ──
+# ── F-014: a channel post is banned by sender_chat ──
 
 
 def test_channel_post_is_banned_by_sender_chat(monkeypatch):
@@ -1485,7 +1523,7 @@ def test_channel_post_is_banned_by_sender_chat(monkeypatch):
     assert called == [], "забаненный канал не должен обрабатываться"
 
 
-# ── Low-партия 2: кап DSP-кэша, neurons fallback, DST-арифметика ──
+# ── Low batch 2: DSP cache cap, fallback Neurons, DST arithmetic ──
 
 
 def test_dsp_cache_is_capped(monkeypatch):
@@ -1503,19 +1541,19 @@ def test_corrupt_neurons_fall_back_to_used(monkeypatch):
     bot.GLOBAL_QUOTA[lq.IMAGE_QUOTA_PROVIDER] = {"cf": {"used": 2, "neurons": "bad"}}
     total = lq._image_neurons_total()
     assert total == 2 * lq.IMAGE_UNIT_NEURONS
-    lq._note_image_success("cf", units=1.0)  # не должно упасть на битом neurons
+    lq._note_image_success("cf", units=1.0)  # must not crash on broken neurons
 
 
 def test_la_midnight_difference_is_absolute_across_dst():
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
     la = ZoneInfo("America/Los_Angeles")
-    now = datetime(2026, 3, 8, 23, 59, tzinfo=la)  # за час до перехода на летнее время
+    now = datetime(2026, 3, 8, 23, 59, tzinfo=la)  # an hour before the switch to daylight saving time
     nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     assert 59 <= (nxt - now).total_seconds() <= 61
 
 
-# ── Low-партия 4: доля скраба, границы алиасов, копия кэша ──
+# ── Low batch 4: scrubber coverage, alias boundaries, cache copy ──
 
 
 def test_scrub_ratio_counts_the_leading_separator():
@@ -1546,7 +1584,7 @@ def test_reference_cache_returns_a_copy():
     lumen_search._reference_cache.clear()
 
 
-# ── Low-партия 5: Sentry-эскейп, бюджет сниппетов ──
+# ── Low batch 5: Sentry escapes, snippet budget ──
 
 
 def test_sentry_scrub_handles_json_escaped_secret(monkeypatch):
@@ -1569,7 +1607,7 @@ def test_five_snippets_fit_the_prompt_block():
     assert block.count("\n• ") >= 4
 
 
-# ── F-076: хвост голого URL не входит в ссылку ──
+# ── F-076: the tail of a bare URL is not part of the link ──
 
 
 def test_bare_url_tail_stays_outside_the_link():
@@ -1582,8 +1620,8 @@ def test_bare_url_tail_stays_outside_the_link():
 
 
 def test_identity_questions_do_not_trigger_web_search():
-    # Прод 17.11.2026: «Кто ты?» после любой реплики считалось продолжением темы,
-    # и бот жёг Tavily на вопрос о себе. Повод для поиска — тема, а не «кто».
+    # Prod 17.11.2026: “Who are you?” after any reply was treated as a continuation of the topic,
+    # and the bot burned Tavily on a question about itself. The reason to search is the topic, not "who".
     import lumen_message_core as core
     prev = "Кто сейчас канцлер Германии?"
     for q in ("Кто ты?", "кто ты и какое сегодня число?", "как тебя зовут",
@@ -1594,8 +1632,8 @@ def test_identity_questions_do_not_trigger_web_search():
 
 
 def test_note_extra_thought_never_lowers_the_block():
-    # Прод 17.11.2026: «Думал 2 с» при двадцатисекундном ожидании. Блок берёт
-    # максимум из времени до первого куска и до первого текста на экране.
+    # Production 17.11.2026: "Thought for 2 s" after a twenty-second wait. The block takes
+    # the maximum of the time to the first chunk and to the first text on screen.
     from lumen_status import StatusMessage
     st = StatusMessage.__new__(StatusMessage)
     st._thought_seconds = 2
@@ -1606,8 +1644,8 @@ def test_note_extra_thought_never_lowers_the_block():
 
 
 def test_media_relay_prefers_big_and_skips_small_body_host():
-    # Vercel держит тело только до 4,5 МБ: голова медиа обязана обходить его,
-    # пока жив хоть один «большой» релей (прод 17.11.2026).
+    # Vercel keeps a body only up to 4.5 MB: the media head must bypass it,
+    # as long as at least one "big" relay is alive (prod 17.11.2026).
     import bot
     small = "https://small.example/fetch/api.telegram.org"
     big = "https://big.example/fetch/api.telegram.org"
@@ -1619,8 +1657,8 @@ def test_media_relay_prefers_big_and_skips_small_body_host():
 
 
 def test_group_wake_word_matrix():
-    # Позитивы: имя в начале, делимитер, просьба после. Негативы: часть слова,
-    # середина фразы, третье лицо, голое имя, упоминание, URL.
+    # Positives: name at the start, delimiter, request after. Negatives: part of a word,
+    # mid-sentence, third person, a bare name, a mention, a URL.
     from lumen_message_parse import strip_group_wake_word as wake
     for q in (
         "Люмен, сколько будет 2+2?",
@@ -1649,12 +1687,13 @@ def test_group_wake_word_matrix():
 
 
 def test_greetings_do_not_trigger_web_search():
-    # Прод 18.11.2026: «люмен привет» в группе ушёл в Tavily (нашёл «люмен» в викисловаре).
+    # Production 18.11.2026: "lumen hi" in a group went to Tavily (it found "lumen" in Wiktionary).
     import lumen_message_core as core
     for q in ("привет", "Люмен, привет", "спасибо!", "hello"):
         assert core._wants_web_search(q, previous="нет") is False, q
     assert core._wants_web_search("Кто сейчас канцлер Германии?", previous="привет") is True
-# ── Прод 18.11.2026: фон группы молчит в занятом чате и не занимает очередь людей ──
+# ── Production 18.11.2026: group background stays silent in a busy chat and does
+#     not join the people queue ──
 
 
 def test_group_message_without_mention_enters_lock_as_background(monkeypatch):
@@ -1679,7 +1718,7 @@ def test_group_message_without_mention_enters_lock_as_background(monkeypatch):
     asyncio.run(bot._handle_message(message))
     assert calls == [{}], "адресованный вопрос идёт обычным путём"
 
-    # «Люмен, …» — обращение, а не фон: в занятом чате он должен получить «занято».
+    # "Lumen, ..." is a direct address, not background: in a busy chat it must receive "busy".
     calls.clear()
     monkeypatch.setattr(bot, "message_mentions_bot", lambda message: False)
     monkeypatch.setattr(bot, "GROUP_WAKE_ENABLED", True)
@@ -1754,3 +1793,42 @@ def test_passive_album_is_background(monkeypatch):
     assert mc._album_passes_to_background(
         SimpleNamespace(chat=SimpleNamespace(id=1, type="private"), text=None, caption="")
     ) is False
+
+
+_LEAK_PROBE: dict = {}
+
+
+def test_guard_leak_probe_producer():
+    # Review 17.11.2026 (R7-12): the test deliberately does NOT clean up its state,
+    # that _bot_global_state_guard does not clear: streaming stop flags, counters
+    # waiting for the chat lock, the locks themselves (bound to a dead loop), webhook deduplication
+    # and the aiohttp session cache. The next test checks this.
+    bot._STREAM_STOPS[999471] = {"token": "probe"}
+    bot._chat_lock_waiters[999471] = 1
+    bot._chat_lock_background_waiters[999471] = 1
+    bot._chat_locks[999471] = asyncio.Lock()
+    import lumen_admin
+    lumen_admin._seen_update_ids.append(777001)
+    lumen_admin._seen_update_id_set.add(777001)
+    import aiohttp
+
+    async def _mk():
+        return aiohttp.ClientSession()
+
+    _LEAK_PROBE["session"] = asyncio.run(_mk())
+    bot._http_session = _LEAK_PROBE["session"]
+
+
+def test_guard_restores_leaked_module_and_loop_state():
+    # A leak from a neighboring test must not reach a third: the guard must
+    # roll back both module dictionaries and loop-bound objects (R7-12).
+    assert 999471 not in bot._STREAM_STOPS
+    assert 999471 not in bot._chat_lock_waiters
+    assert 999471 not in bot._chat_lock_background_waiters
+    assert 999471 not in bot._chat_locks
+    import lumen_admin
+    assert 777001 not in lumen_admin._seen_update_id_set
+    assert 777001 not in list(lumen_admin._seen_update_ids)
+    leaked = _LEAK_PROBE.pop("session")
+    assert bot._http_session is not leaked
+    assert leaked.closed is True

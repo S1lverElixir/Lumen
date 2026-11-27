@@ -1,13 +1,13 @@
-"""
-test_search_wikidata.py — слой руководителей из Wikidata: тема сущности, действующее
-назначение, лимит обращений и кэш.
+"""test_search_wikidata.py — Wikidata leaders layer: entity topic, current position,
+request limit, and cache.
 
-Что защищают: промер 11.11.2026 — «кто сейчас возглавляет Центральный банк России»
-не давал имени ни в DDG (страница-аномалия), ни в новостях (сюжеты про ставку),
-а индекс сущностей молчал, потому что запросили его полной фразой с глаголом.
-Сеть не трогаем: ответы Wikidata отдаёт стаб на границе aiohttp.
+It protects against a measurement from 11.11.2026: “who currently heads the Central
+Bank of Russia” returned no name from DDG (an anomaly page) or the news (stories about
+the rate), while the entity index stayed silent because it was queried with the full
+phrase including a verb. No network calls: a stub returns Wikidata responses at the
+aiohttp boundary.
 
-Запуск:
+Run:
     pytest tests/test_search_wikidata.py -v
 """
 import asyncio
@@ -18,7 +18,7 @@ import lumen_search
 
 
 class _WikidataSession:
-    """Граница I/O: три разных ответа Wikidata на одном хосте — разбор по action."""
+    """I/O boundary: three different Wikidata responses on one host — parsing by action."""
 
     def __init__(self, *, rate_limited=False, expired=False):
         self.rate_limited = rate_limited
@@ -76,7 +76,7 @@ def _run(session, query="кто сейчас возглавляет Центра
 
 
 class _MappedWikidataSession:
-    """Граница I/O: поиск отвечает по термину (регистронезависимо), утверждения — по Qid."""
+    """I/O boundary: search responds by term (case-insensitively), statements by Qid."""
 
     def __init__(self, searches, claims, labels=None):
         self.searches = {k.lower(): v for k, v in searches.items()}
@@ -129,8 +129,8 @@ def _leader_claims(target="Q28946", start="+2013-06-24T00:00:00Z"):
 
 
 def test_entity_topic_drops_role_words():
-    # Индекс сущностей ищется по имени организации: с «кто возглавляет»
-    # wbsearchentities не находил ничего (замер 11.11.2026).
+    # The entity index is searched by organization name: with "who heads"
+    # wbsearchentities found nothing (measurement 11.11.2026).
     assert lumen_search._entity_topic("кто сейчас возглавляет Центральный банк России") == "Центральный банк России"
     assert lumen_search._entity_topic("chairperson of the Federal Reserve") == "Federal Reserve"
 
@@ -146,14 +146,14 @@ def test_wikidata_returns_current_leader_with_start_date():
 
 
 def test_wikidata_skips_finished_appointments():
-    # Действующим считаем только назначение без даты конца, иначе модель назвала бы
-    # нынешним председателем того, кто ушёл.
+    # Only an appointment with no end date counts as current; otherwise the model would name
+    # the current chairperson, rather than the one who left.
     lumen_search.clear_reference_cache()
     assert _run(_WikidataSession(expired=True)) == []
 
 
 def test_wikidata_gives_up_on_rate_limit(monkeypatch):
-    # 429 от Wikimedia — не повод жевать бюджет сообщения: слой отдаёт пусто сразу.
+    # A 429 from Wikimedia is no reason to chew through the message budget: the layer returns empty immediately.
     lumen_search.clear_reference_cache()
     calls = []
     monkeypatch.setattr(lumen_search, "log", types.SimpleNamespace(info=lambda *args: calls.append(args)))
@@ -162,8 +162,8 @@ def test_wikidata_gives_up_on_rate_limit(monkeypatch):
 
 
 def test_reference_cache_serves_repeated_query():
-    # Второй тот же вопрос не должен ходить в Wikimedia: лимит считается обращениями,
-    # а не объёмом (замер 11.11.2026).
+    # A repeated identical question must not hit Wikimedia: the limit counts requests,
+    # not by volume (measurement 11.11.2026).
     lumen_search.clear_reference_cache()
     session = _WikidataSession()
     first = _run(session)
@@ -173,8 +173,9 @@ def test_reference_cache_serves_repeated_query():
 
 
 def test_entity_candidates_cover_case_compound_and_of():
-    # Каждый кандидат ловит свой класс промаха замера 11.11.2026: падеж, составной
-    # хвост, выброшенные «of»/«the». Полный вариант остаётся первым — он точнее.
+    # Each candidate catches a class of miss from the 11.11.2026 measurement: case, compound
+    # tail, with "of"/"the" discarded. The full variant remains first because it
+    # is more precise.
     compound = lumen_search._entity_candidates(
         "кто сейчас возглавляет Центральный банк России и какая ключевая ставка")
     assert compound[0] == "Центральный банк России ключевая ставка"
@@ -186,8 +187,9 @@ def test_entity_candidates_cover_case_compound_and_of():
 
 
 def test_wikidata_navigates_around_declined_term():
-    # Прод 11.11.2026: индексу unknown «банка россии», а срез «банк росси» даёт
-    # Q806651 — слой обязан дойти до среза, а не останавливаться на падежной форме.
+    # Prod 11.11.2026: the index has unknown “bank of Russia,” while the slice “bank russi” gives
+    # Q806651: the layer must reach the slice rather than stop at an inflected
+    # form.
     lumen_search.clear_reference_cache()
     session = _MappedWikidataSession(
         {"банка россии": [], "банк росси": ["Q806651"]},
@@ -198,8 +200,8 @@ def test_wikidata_navigates_around_declined_term():
 
 
 def test_wikidata_cuts_compound_question_tail():
-    # Прод 11.11.2026: «...и какая ключевая ставка» — второй факт, индекс с ним
-    # не находит ничего; хвост после союза отрезается отдельным кандидатом.
+    # Production 11.11.2026: “...and what is the key rate” — a second fact, the index with it
+    # finds nothing; the tail after the conjunction is cut off as a separate candidate.
     lumen_search.clear_reference_cache()
     session = _MappedWikidataSession(
         {"центральный банк россии": ["Q806651"]},
@@ -210,8 +212,8 @@ def test_wikidata_cuts_compound_question_tail():
 
 
 def test_wikidata_keeps_prepositions_in_english_names():
-    # Прод 11.11.2026: «Central Bank Russia» индекс не знает, «Central Bank of
-    # Russia» — знает; предлоги имени не выбрасываются.
+    # Prod 11.11.2026: the index does not know "Central Bank Russia", while "Central Bank of
+    # Russia" — it knows; prepositions in names are not discarded.
     lumen_search.clear_reference_cache()
     session = _MappedWikidataSession(
         {"central bank of russia": ["Q806651"]},
@@ -223,8 +225,8 @@ def test_wikidata_keeps_prepositions_in_english_names():
 
 
 def test_wikidata_takes_entity_with_leader_claim_not_first_hit():
-    # Прод 11.11.2026: «великобритании» даёт новостный заголовок без утверждений —
-    # брать надо Q с открытым P488/P6/P169, а не первый попавшийся.
+    # Production 11.11.2026: "United Kingdom" produces a news headline without statements —
+    # take the Q with an open P488/P6/P169, not the first one found.
     lumen_search.clear_reference_cache()
     session = _MappedWikidataSession(
         {"цб россии": ["Q99018474", "Q806651"]},
@@ -235,8 +237,8 @@ def test_wikidata_takes_entity_with_leader_claim_not_first_hit():
 
 
 def test_wikidata_respects_deadline_without_requests():
-    # Кандидатный цикл не имеет права запускать сетевые запросы после deadline:
-    # бюджет сообщения общий, а кандидатов теперь до восьми (замер 11.11.2026).
+    # The candidate loop must not start network requests after the deadline:
+    # the message budget is shared, and there are now up to eight candidates (measurement 11.11.2026).
     lumen_search.clear_reference_cache()
     session = _MappedWikidataSession({"цб россии": ["Q806651"]}, {"Q806651": _leader_claims()})
 

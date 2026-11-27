@@ -1,4 +1,4 @@
-"""lumen_memory.py — единая память чата: лог с авторами и медиа, форматирование и выбор прошлых фото."""
+"""lumen_memory.py provides shared chat memory: author/media logs, formatting and past-photo selection."""
 from __future__ import annotations
 
 import os
@@ -11,15 +11,15 @@ from zoneinfo import ZoneInfo
 from lumen_media import _media_file_id_and_mime
 from lumen_message_parse import _mime_matches_media_category
 
-# Лимит памяти на чат: фон и обращения вместе. 200 — примерно день живого
-# группового чата; при 201-м старые уходят в сводку, последние 150 остаются дословно.
+# Per-chat memory cap: background and requests together. 200 is roughly a day of live
+# group chat; at 201, old messages move into the summary while the latest 150 remain verbatim.
 MAX_MEMORY_MESSAGES = 200
 MEMORY_KEEP_MESSAGES = 150
-# Сколько старых сообщений может ждать сводку при сбое: без капа состояние росло бы вечно.
+# How many old messages may await summarization after a failure: without a cap, state would grow forever.
 MAX_MEMORY_PENDING = 400
-# Фото видит модель, пока они в последних 30 сообщениях; база — 2, явная ссылка
-# на медиа поднимает потолок до 4 (эталон Claude видит все изображения переписки,
-# у нас цена — входные токены и скачивание файла на каждое сообщение, аудит 16.11.2026).
+# The model sees photos while they are in the last 30 messages; the baseline is 2, an explicit link
+# on media raises the cap to 4 (the Claude reference sees all images in the conversation,
+# for us, the cost is input tokens plus downloading the file for every message, audit 16.11.2026).
 def _env_positive(name: str, default: int) -> int:
     try:
         return max(0, int((os.getenv(name, "") or str(default)).strip()))
@@ -33,8 +33,8 @@ PHOTO_CONTEXT_MAX_REFERENCED = _env_positive("PHOTO_CONTEXT_MAX_REFERENCED", 4)
 
 
 def photo_context_limit(user_text: str) -> int:
-    """Сколько прошлых фото приложить к ходу: явная ссылка на фото/видео/стикер
-    ("те фото", "первое") разрешает больше, обычная реплика — базу."""
+    """How many past photos to attach to the turn: an explicit reference to a photo/video/sticker
+    (\"those photos\", \"the first one\") allows more; an ordinary reply uses the base number."""
     from lumen_message_parse import _looks_like_media_reference
     try:
         if _looks_like_media_reference(user_text or ""):
@@ -42,13 +42,14 @@ def photo_context_limit(user_text: str) -> int:
     except Exception:
         pass
     return PHOTO_CONTEXT_MAX
-# «Сейчас кину фото, что мне идёт?» — просьба перед фото, не старше 5 минут и 3 реплик.
+# “I’ll send a photo now, what suits me?” — a request before a photo, no older than 5 minutes and 3 replies.
 PENDING_INSTRUCTION_WINDOW_SEC = 300.0
 PENDING_INSTRUCTION_WINDOW_MSGS = 3
 
 _MOSCOW_TZ = ZoneInfo("Europe/Moscow")
-# Только явная подготовка к фото: «кину/скину», «что мне идёт», «оцени это фото».
-# Голые «вот» и любой вопрос сюда не входят: иначе «как дела?» превращалось в просьбу.
+# Only explicit photo preparation: "I'll send it", "what suits me", "rate this photo".
+# Bare "here" and any question are excluded; otherwise "how are you?" became
+# a request.
 _PENDING_INSTRUCTION_RE = re.compile(
     r"\b(?:кину|скину|отправлю|пришлю)\b"
     r"|\b(?:что|как)\s+мне\s+(?:больше\s+)?(?:идёт|идет)\b"
@@ -68,7 +69,7 @@ def _ts(value: Any) -> float | None:
 
 
 def _clock(ts: float | None, *, now: float | None = None) -> str:
-    """Время реплики в МСК: сегодня — ЧЧ:ММ, иначе ДД.ММ ЧЧ:ММ."""
+    """Reply time in Moscow time: today — HH:MM, otherwise DD.MM HH:MM."""
     stamp = _ts(ts)
     if stamp is None:
         return ""
@@ -83,7 +84,7 @@ def _clock(ts: float | None, *, now: float | None = None) -> str:
 
 
 def _media_marker(media: Any) -> str:
-    """Короткая метка медиа в реплике: модель должна знать, что это было фото."""
+    """A short media label in a reply: the model needs to know that this was a photo."""
     if not isinstance(media, list) or not media:
         return ""
     mimes = [
@@ -109,7 +110,7 @@ def _media_marker(media: Any) -> str:
 
 
 def _entry_text(entry: dict[str, Any]) -> str:
-    """Текст реплики: строки как есть, старые структуры провайдера разбираем через bot."""
+    """Reply text: keep lines as they are; parse legacy provider structures via bot."""
     content = entry.get("content")
     if isinstance(content, str):
         return content.strip()
@@ -123,7 +124,7 @@ def _entry_text(entry: dict[str, Any]) -> str:
 
 
 def format_entry(entry: Any, *, now: float | None = None) -> str:
-    """Реплика для модели: у людей автор и время, у бота только текст."""
+    """A turn for the model: for people, author and time; for the bot, text only."""
     if not isinstance(entry, dict):
         return ""
     text = _entry_text(entry)
@@ -131,8 +132,8 @@ def format_entry(entry: Any, *, now: float | None = None) -> str:
         return text
     parts: list[str] = []
     sender = entry.get("sender")
-    # Ник приходит от чужого человека: скобки метки не подделываем (та же защита,
-    # что _flatten_untrusted в текущем промпте).
+    # The nickname comes from another person: do not forge the label brackets (the same protection,
+    # that _flatten_untrusted in the current prompt).
     sender = (
         sender.replace("[", "(").replace("]", ")").replace("\n", " ").strip()
         if isinstance(sender, str) else ""
@@ -152,7 +153,7 @@ def format_entry(entry: Any, *, now: float | None = None) -> str:
 
 
 def format_summary_line(entry: Any, *, now: float | None = None) -> str:
-    """Компактная строка для сводки: роль, автор, время, текст."""
+    """Compact summary line: role, author, time, text."""
     if not isinstance(entry, dict):
         return ""
     text = _entry_text(entry)
@@ -169,7 +170,7 @@ def format_summary_line(entry: Any, *, now: float | None = None) -> str:
 
 
 def media_ref(source: Any) -> dict[str, str] | None:
-    """Ссылка на медиа для памяти: file_id и mime, без байтов."""
+    """Media reference for memory: file_id and MIME type, without bytes."""
     if source is None:
         return None
     try:
@@ -186,7 +187,7 @@ def append_user(
     sender_id: int | None = None, ts: float | None = None,
     media: list[dict[str, str]] | None = None, addressed: bool = True,
 ) -> dict[str, Any]:
-    """Добавляет реплику человека; фон группы идёт с addressed=False."""
+    """Adds a person's reply; group background comes with addressed=False."""
     history = state.get("history")
     if not isinstance(history, list):
         history = []
@@ -218,7 +219,8 @@ def append_user(
 def append_user_from_meta(
     state: dict[str, Any], content: str, meta: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Добавляет реплику по meta маршрута: skip_file_ids/attach_past в лог не уходят."""
+    """Adds an utterance by route meta: skip_file_ids/attach_past do not go into the
+log."""
     meta = meta if isinstance(meta, dict) else {}
     return append_user(
         state, content,
@@ -229,7 +231,8 @@ def append_user_from_meta(
 
 
 def append_assistant(state: dict[str, Any], content: str) -> dict[str, Any]:
-    """Добавляет ответ бота: без автора и времени, его и так видно по роли."""
+    """Adds a bot response: without author or timestamp, since the role already
+shows them."""
     history = state.get("history")
     if not isinstance(history, list):
         history = []
@@ -246,7 +249,7 @@ def recent_media(
     max_items: int = 2, skip_file_ids: set[str] | list[str] | None = None,
     sender_id: int | None = None, any_sender: bool = True,
 ) -> list[tuple[dict[str, Any], dict[str, str]]]:
-    """Последние медиа нужного типа: (реплика, ссылка), от старых к новым."""
+    """Most recent media of the required type: (reply, link), oldest to newest."""
     history = state.get("history") if isinstance(state, dict) else None
     if not isinstance(history, list):
         return []
@@ -281,7 +284,7 @@ def recent_media(
 def last_media_for_user(
     state: dict[str, Any], category: str, *, sender_id: int | None, private: bool,
 ) -> tuple[dict[str, Any], dict[str, str]] | None:
-    """Последнее медиа для явного «покажи фото»: своё, в личке — любое."""
+    """The latest media for an explicit 'show the photo': their own, or any in a private chat."""
     found = recent_media(
         state, category, window=None, max_items=1, skip_file_ids=None,
         sender_id=sender_id, any_sender=bool(private),
@@ -294,7 +297,7 @@ def pending_instruction(
     window_sec: float = PENDING_INSTRUCTION_WINDOW_SEC,
     window_msgs: int = PENDING_INSTRUCTION_WINDOW_MSGS,
 ) -> str | None:
-    """Просьба, сказанная перед фото: «сейчас кину, что мне идёт?»."""
+    """A request made before a photo: \"I will send it now; what suits me?\""""
     history = state.get("history") if isinstance(state, dict) else None
     if not isinstance(history, list):
         return None
@@ -321,7 +324,7 @@ def pending_instruction(
 
 
 def system_prompt_with_memory(base: str, state: dict[str, Any]) -> str:
-    """Системный промпт с долговременной памятью: данные, не новая просьба."""
+    """System prompt with long-term memory: data, not a new request."""
     summary = state.get("memory_summary") if isinstance(state, dict) else ""
     if not isinstance(summary, str) or not summary.strip():
         return base
@@ -336,10 +339,11 @@ def system_prompt_with_memory(base: str, state: dict[str, Any]) -> str:
 def summary_batch(
     previous: str, entries: list[dict[str, Any]], *, max_chars: int = 16000,
 ) -> tuple[str, int]:
-    """Порция сводки с начала и число съеденных записей.
+    """A portion of the summary from the beginning and the number of consumed entries.
 
-    Раньше длина резалась с хвоста, а pending очищался целиком: старые факты
-    не доходили до модели и терялись молча (ревью 17.11.2026, правило 06.11.2026)."""
+    Previously, length was trimmed from the end and pending was cleared in full:
+    old facts never reached the model and were silently lost (review 17.11.2026,
+    rule 06.11.2026)."""
     prev = previous.strip() if isinstance(previous, str) else ""
     head = f"Previous memory:\n{prev}\n\n" if prev else ""
     budget = max_chars - len(head)
@@ -354,7 +358,7 @@ def summary_batch(
         add = len(line) + (1 if lines else 0)
         if budget <= 0 or used + add > budget:
             if not lines and budget > 0:
-                # Один факт длиннее бюджета: берём его срезом, иначе прогресса нет.
+                # A fact longer than the budget: take a slice of it, otherwise there is no progress.
                 lines.append(line[:budget - 1] + "…")
                 used = budget
                 consumed += 1
@@ -368,5 +372,5 @@ def summary_batch(
 
 
 def summary_input(previous: str, entries: list[dict[str, Any]], *, max_chars: int = 16000) -> str:
-    """Вход сводки: прошлая память плюс уходящие из окна реплики."""
+    """Summary input: previous memory plus turns leaving the window."""
     return summary_batch(previous, entries, max_chars=max_chars)[0]

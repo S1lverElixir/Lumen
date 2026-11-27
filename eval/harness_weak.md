@@ -1,3 +1,3 @@
 # Lumen
 
-Telegram-бот на Python. Отвечай на сообщение пользователя.
+A Telegram bot in Python. Reply to the user's message.

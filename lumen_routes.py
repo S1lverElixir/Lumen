@@ -1,7 +1,6 @@
-"""
-lumen_routes.py — LLM-маршрутизация: Munito с фолбэком в Gemini, история,
-конфиги, _run_route. Подменяемые в тестах имена вызываются через `bot.`,
-чтобы monkeypatch видел их как раньше.
+"""lumen_routes.py handles LLM routing: Munito with fallback to Gemini, history,
+configs, and _run_route. Replaceable names are called through `bot.` in tests
+so monkeypatch sees them as before.
 """
 from __future__ import annotations
 
@@ -38,34 +37,34 @@ from lumen_search import _SearchRequested, search_marker_requested, strip_search
 from lumen_security import _polish_answer, _detect_garbled_mix, _is_garbled_echo
 from lumen_rich import NO_LINK_PREVIEW
 
-# Транскрипт длинного войса режем сверху — иначе маршрут ниже упрётся в лимиты моделей.
+# Trim the long voice transcript from the top — otherwise, the downstream route hits model limits.
 _TRANSCRIPT_MAX_CHARS = 4000
-# Транскрибация не должна съедать весь бюджет маршрута: войсы короткие (до
-# VOICE_TRANSCRIBE_MAX_BYTES), turbo-модель отвечает секундами — остаток оставляем модели.
+# Transcription must not consume the entire route budget: voice notes are short (up to
+# VOICE_TRANSCRIBE_MAX_BYTES), the turbo model responds in seconds — leave the remainder to the model.
 _TRANSCRIBE_TIMEOUT_SEC = 15.0
 
 log = logging.getLogger("bot")
 
 class MunitoAPIError(RuntimeError):
-    """Ошибка OpenAI-совместимого эндпоинта Munito (статус кладём рядом — его читает _error_status/_classify_model_error)."""
+    """Error from Munito's OpenAI-compatible endpoint (the status is stored alongside it; _error_status/_classify_model_error read it)."""
     def __init__(self, message: str, status_code: int | None = None, payload: Any = None) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
 
 def _attempt_timeout(bot: Any, deadline: float | None) -> float:
-    """Таймаут одной попытки: не больше ROUTE_MODEL_TIMEOUT_SEC и не больше
-    остатка бюджета маршрута. Раньше каждая попытка ждала полные 22с, из-за
-    чего маршрут держал лок чата до 40+22с вместо заявленных 40с (аудит 26.09.2026).
-    Нижняя граница 0.5с: истёкший бюджет должен дать быстрый отказ, а не висеть."""
+    """Timeout for one attempt: no more than ROUTE_MODEL_TIMEOUT_SEC and no more than
+    the route's remaining budget. Previously each attempt waited the full 22s, so
+    the route held the chat lock for up to 40+22s instead of the stated 40s (audit 26.09.2026).
+    The 0.5s lower bound makes an expired budget fail quickly instead of hanging."""
     if deadline is None:
         return bot.ROUTE_MODEL_TIMEOUT_SEC
     return max(0.5, min(bot.ROUTE_MODEL_TIMEOUT_SEC, deadline - time.monotonic()))
 
 async def _munito_request(path: str, method: str = "GET", *, json_body: dict | None = None, deadline: float | None = None) -> Any:
-    """Прямой запрос к Munito AI (OpenAI-совместимый API): бюджет одной попытки и
-    вычистка ключа из текста ошибок. Whisper к Groq ходит отдельно и напрямую
-    (_transcribe_audio: multipart-форма, а не JSON)."""
+    """Direct request to Munito AI (OpenAI-compatible API): one-attempt budget and
+    removal of the key from error text. Whisper calls Groq separately and directly
+    (_transcribe_audio uses multipart form, not JSON)."""
     import bot
     if not bot.MUNITO_API_KEY:
         raise bot.MunitoAPIError("MUNITO_API_KEY is not set")
@@ -104,8 +103,7 @@ def _or_extract_text(data: Any) -> str:
     return ""
 
 def _note_provenance(provenance: dict | None, provider: str, out: dict) -> None:
-    """Кто фактически ответил и чем закончил ответ: без модели в provenance след
-    нельзя привязать к модели (выборка бэкапа 05.11.2026 — OR/Groq писали None)."""
+    """Who actually answered and how the answer ended: without a model in the provenance, the trace cannot be tied to a model (backup sample 05.11.2026: OR/Groq wrote None)."""
     if provenance is None:
         return
     provenance.update(provider=provider, model=out.get("model"), finish_reason=str(out.get("finish_reason") or ""))
@@ -113,7 +111,7 @@ def _note_provenance(provenance: dict | None, provider: str, out: dict) -> None:
 
 def _log_llm_usage(*, chat_id: Any, provider: str, model_id: str,
                     prompt: Any = None, completion: Any = None, total: Any = None) -> None:
-    """Одна строка usage на успешный ответ — только если API вернуло счётчики (иначе молчим)."""
+    """One usage line per successful response — only if the API returned counters (otherwise stay silent)."""
     if prompt is None and completion is None and total is None:
         return
     log.info("[usage] chat=%s provider=%s model=%s prompt=%s completion=%s total=%s",
@@ -137,18 +135,18 @@ def _usage_from_gemini_response(resp: Any) -> tuple[Any, Any, Any]:
 
 
 def _is_gemini_daily_quota(text: str) -> bool:
-    """Суточная квота Gemini против минутного лимита запросов. Оба приходят как 429,
-    но запирать модель до утра можно только за первый: минутный лимит у Google сыпется
-    на любом всплеске (враждебное ревью 27.09.2026). Тексты ошибок — по документации
-    Google (RESOURCE_EXHAUSTED с "per day"/"daily limit"). Отдельно ловим слитное
-    PerDay из имён метрик вида GenerateRequestsPerDayPerProjectPerModel — иначе
-    настоящая суточная квота выглядела бы минутным всплеском."""
+    """Gemini daily quota versus per-minute request limit. Both arrive as 429,
+    but only the former should lock the model until morning: the per-minute limit at Google can
+    trigger on any spike (adversarial review 27.09.2026). Error texts follow Google's
+    documentation (RESOURCE_EXHAUSTED with \"per day\"/\"daily limit\"). We also catch joined
+    PerDay in metric names such as GenerateRequestsPerDayPerProjectPerModel; otherwise a
+    real daily quota looked like a per-minute spike."""
     low = text.lower()
     return any(tok in low for tok in (
         "per day", "per_day", "perday", "daily limit", "daily quota", "quota exceeded for the day",
     ))
 
-# Отказ имени/версии модели в тексте 400: «invalid model», «does not exist»,
+# Refusal to name/version a model in 400 text: "invalid model," "does not exist,"
 # «not found for API version», «deprecated», «unsupported model».
 _MODEL_MISSING_RE = re.compile(
     r"(?:invalid|unknown|no such|unsupported|deprecated|not a valid)\s+model"
@@ -160,27 +158,26 @@ _MODEL_MISSING_RE = re.compile(
 
 
 def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> bool:
-    """Отказ "модель недоступна" (503/404/invalid model) → короткая остывка, как на 429.
+    """A \"model unavailable\" error (503/404/invalid model) → a short cooldown, as for 429.
 
-    Прод 05.10.2026: пять моделей линейки Gemini 3.x подряд отдавали 503, и каждая
-    повторялась на каждом обращении — до 22 секунд и пяти попыток впустую на запрос.
-    Официальный список моделей и дашборд AI Studio показывали, что модели живы и
-    квота есть, то есть это был временный отказ, а не снятие с free. Поэтому НЕ
-    выкидываем модель из цепочек, а пропускаем её на QUOTA_RATE_LIMIT_COOLDOWN_SEC:
-    остывка сама истекает, успешный ответ и так снимает метку.
-    """
+Production 05.10.2026: five Gemini 3.x models in a row returned 503, and each
+retried on every request — up to 22 seconds and five wasted attempts per request.
+The official model list and the AI Studio dashboard showed that the models were alive and
+quota was available, so this was a temporary refusal, not removal from the free tier. Therefore we do NOT
+remove the model from the chains; we skip it for QUOTA_RATE_LIMIT_COOLDOWN_SEC:
+the cooldown expires on its own, and a successful response clears the mark anyway."""
     import bot
     try:
         txt = bot._error_text(exc).strip() or exc.__class__.__name__
         status = bot._error_status(exc, txt)
         if bot._classify_model_error(status, txt) != "unavailable":
             return False
-        # 400 — детерминированная ошибка одного запроса (слишком большая картинка),
-        # а не недоступность модели: остывка выключала голову для всех (ревью 17.11.2026).
+        # 400 — a deterministic error for one request (an oversized image),
+        # rather than model unavailability: cooldown disabled the head for everyone (review 17.11.2026).
         if status == 400:
-            # Только отказ про МОДЕЛЬ: «File ... does not exist» и «Requested
-            # entity does not exist» — ошибка запроса и остывки не заслуживают
-            # (адверсариальный проход №2).
+            # Only a refusal about the MODEL: "File ... does not exist" and "Requested
+            # entity does not exist" — a request error and cooldown do not deserve
+            # (adversarial pass no. 2).
             if not _MODEL_MISSING_RE.search(txt):
                 return False
         bot._mark_rate_limited(provider, model_id)
@@ -190,10 +187,7 @@ def _mark_model_unavailable(provider: str, model_id: str, exc: Exception) -> boo
 
 
 def _raise_if_search_requested(answer: str, provider: str, model_id: str) -> str:
-    """Ответ — ровно маркер [[SEARCH]]: данных не хватило, модель просит поиск.
-    Останавливает маршрут ДО записи в память чата (маркер в истории подсказывал
-    бы себе в следующих ходах); квоту вызова пишем — он реально состоялся
-    (замер 11.11.2026)."""
+    """The response is exactly the [[SEARCH]] marker: data was insufficient and the model requests a search. Stops the route BEFORE writing to chat memory (the marker in history would prime subsequent turns); the call quota is still recorded because the call really happened (measured 11.11.2026)."""
     if not search_marker_requested(answer):
         return strip_search_marker(answer)
     import bot
@@ -209,22 +203,13 @@ async def _chat_completion_chain(
     out: dict | None = None, extra_payload: dict | None = None,
     extra_payload_fn=None, record_latency: bool = True,
 ) -> tuple[str, str]:
-    """Общий fallback-цикл по цепочке OpenAI-совместимых моделей (сейчас — Munito).
+    """Shared fallback loop over a chain of OpenAI-compatible models (currently Munito).
 
-    extra_payload — провайдерские поля поверх стандартного тела (у Munito это
-    reasoning_effort): копия payload в одной ветке не должна расходиться с
-    остальными (аудит 26.09.2026). extra_payload_fn нужен там, где поля зависят от
-    модели попытки: reasoning_effort принимают не все модели каталога (замер
-    12.11.2026: gemma-4-12b отвечает 400), и после откатa на другую модель поле
-    обязано пересчитаться.
+    extra_payload contains provider-specific fields on top of the standard body (for Munito, reasoning_effort): a payload copy in one branch must not diverge from the others (audit 26.09.2026). extra_payload_fn is needed where fields depend on the attempted model: not all catalog models accept reasoning_effort (measurement 12.11.2026: gemma-4-12b returns 400), and the field must be recalculated after falling back to another model.
 
-    Ровно одна попытка на модель — ретраи одной модели при массовой нестабильности
-    замедляли весь маршрут. Раньше этот цикл жил в трёх копиях, и копии молча
-    расходились с оригиналом (аудит 26.09.2026). Возвращает (answer, used_model);
-    иначе последнее исключение или RouteBudgetExceededError.
+    Exactly one attempt per model: retries of the same model during widespread instability slowed the entire route. This loop previously lived in three copies that silently diverged from the original (audit 26.09.2026). Returns (answer, used_model); otherwise raises the last exception or RouteBudgetExceededError.
 
-    log_label — тег для логов/источников скраба: у провайдеров он исторически
-    короткий ("or"), поэтому задаётся извне, а не выводится из provider-строки."""
+    log_label is a tag for logs/scrub sources: providers historically used a short tag (\"or\"), so it is supplied externally rather than derived from the provider string."""
     import bot
     label = log_label or provider
     last_exc: Exception | None = None
@@ -237,8 +222,8 @@ async def _chat_completion_chain(
         bot._record_stats_event("model_attempts")
         system_text = bot.get_system_prompt(model_trial)
         if chat_id is not None:
-            # Билдер уже вкладывает память; перезапись голым промптом теряла её
-            # на каждой попытке нестримового Munito (ревью 17.11.2026).
+            # The builder already includes memory; overwriting it with a bare prompt lost the memory
+            # on every non-streaming Munito attempt (review 17.11.2026).
             system_text = lumen_memory.system_prompt_with_memory(
                 system_text, bot.get_state(chat_id))
         messages[0]["content"] = system_text
@@ -253,14 +238,15 @@ async def _chat_completion_chain(
                 answer = bot._or_extract_text(choices[0].get("message") or "")
             answer = _strip_provider_artifacts(answer)
             if _is_empty_like(answer):
-                # Пустой ответ — повод попробовать следующую модель (прод 17.09.2026: юзер дважды увидел "Empty response").
+                # An empty response is a reason to try the next model (prod 17.09.2026: a user
+                # saw "Empty response" twice).
                 bot._record_model_outcome(provider, model_trial, bad=True)
                 raise RuntimeError(f"Model {model_trial} returned an empty response")
 
             answer = _polish_answer(answer, source=f"{provider}_chat_completion:{model_trial}")
-            # Каша-каша тоже считается плохим (доставляется как есть, как раньше),
-            # успех сбрасывает счётчик карантина. Повтор смешанных токенов за
-            # пользователем — эхо, а не каша модели, в счётчик не идёт.
+            # Mush-mush also counts as bad (delivered as is, as before),
+            # success resets the quarantine counter. Retrying mixed tokens for
+            # by the user is an echo, not model word salad, and does not count.
             mush = _detect_garbled_mix(answer) and not _is_garbled_echo(answer, user_text)
             bot._record_model_outcome(provider, model_trial, bad=mush)
             if out is not None:
@@ -268,16 +254,16 @@ async def _chat_completion_chain(
                 out["model"] = model_trial
                 out["finish_reason"] = str(first.get("finish_reason") or "")
                 if out["finish_reason"] == "length":
-                    # Потолок вывода провайдера: ответ обрезан (прод 05.11.2026 —
-                    # обрезки не было видно ни в логе, ни в следе).
+                    # Provider output cap: the answer was cut off (prod 05.11.2026 —
+                    # trimming was visible in neither the log nor the trace).
                     log.warning('[%s] Model %s hit the output cap, answer truncated', label, model_trial)
             log.info('[%s] Successful response from model %s (primary=%s, models tried: %d)', label, model_trial, primary_model_id, len(tried))
             _pt, _ct, _tt = _usage_from_openai_response(resp)
             _log_llm_usage(chat_id=chat_id, provider=provider, model_id=model_trial,
                            prompt=_pt, completion=_ct, total=_tt)
             if record_latency:
-                # Служебная проба (selftest) не кормит общий EMA: четырьмя токенами
-                # сдвинулся бы порядок моделей для всех чатов (ревью 08.11.2026).
+                # A service probe (selftest) does not feed the overall EMA: four tokens
+                # would shift the model order for all chats (review 08.11.2026).
                 _record_model_latency(_model_speed_key(provider, model_trial), total_sec=time.monotonic() - attempt_start)
             return answer, model_trial
         except bot.RouteBudgetExceededError:
@@ -286,9 +272,9 @@ async def _chat_completion_chain(
             last_exc = exc
             bot._record_stats_event("model_failures")
             _mark_model_unavailable(provider, model_trial, exc)
-            # 429 — в остывку, как стриминг выше: у Munito лимиты оконные
-            # (200 запросов за 30-секундное окно), суточной квоты, которую стоило
-            # бы держать закрытой до утра, у него нет.
+            # 429 goes into cooldown, like streaming above: Munito has windowed limits
+            # (200 requests per 30-second window), and a daily quota that was worth
+            # keep it closed until morning; it has none.
             try:
                 _txt = bot._error_text(exc).strip() or exc.__class__.__name__
                 if bot._classify_model_error(bot._error_status(exc, _txt), _txt) == "rate_limit":
@@ -303,8 +289,7 @@ async def _chat_completion_chain(
 
 
 async def ask_munito_text(chat_id: int, user_text: str, model_chain: list[str], *, deadline: float | None = None, history_text: str | None = None, provenance: dict | None = None, history_meta: dict[str, Any] | None = None, effort: str | None = None) -> str:
-    """Текст через Munito AI: одна попытка на модель, скраб утечек, расход в квоту "munito".
-    Память — единый лог до 200 сообщений; прошлые фото прикладываются отдельной репликой."""
+    """Text through Munito AI: one attempt per model, identity leak scrubbing, charged to the \"munito\" quota. Memory is a single log of up to 200 messages; past photos are attached as a separate message."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_payload_extras
     state = bot.get_state(chat_id)
@@ -339,10 +324,7 @@ async def ask_munito_multimodal(
     provenance: dict | None = None, history_meta: dict[str, Any] | None = None,
     effort: str | None = None,
 ) -> str:
-    """Картинки через Munito AI (vision проверен 05.11.2026 живым вызовом): все картинки
-    одним сообщением блоками image_url — по одному на фото, иначе 2-9 фото альбома
-    молча терялись. Видео и аудио сюда не доходят: их забирает ветка Gemini,
-    OpenAI-формат не-изображений не принимает. Остальное — как в ask_munito_text."""
+    """Images through Munito AI (vision verified by a live call on 05.11.2026): all images in one message as image_url blocks, one per photo; otherwise 2-9 album photos were silently lost. Video and audio do not reach this path: the Gemini branch handles them because the OpenAI format does not accept non-images. Everything else follows ask_munito_text."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_payload_extras
     state = bot.get_state(chat_id)
@@ -389,24 +371,24 @@ _SELFTEST_PING_TEXT = "Reply with exactly: ok"
 
 
 def _selftest_short_error(exc: BaseException) -> str:
-    """Короткий однострочник для строки /selftest (только личка — ID моделей тут допустимы)."""
+    """Short one-liner for the /selftest row (DMs only — model IDs are allowed here)."""
     text = f"{exc.__class__.__name__}: {exc}".strip()
-    # ID организации провайдера — внутрянка даже для владельца: затираем, как токены.
+    # The provider's organization ID is internal information even for the owner: scrub it like tokens.
     text = re.sub(r"org_[A-Za-z0-9]+", "<ORG>", text)
     return " ".join(text.split())[:120] or exc.__class__.__name__
 
 async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool, str, float]:
-    """Одна крошечная проба в голову маршрута (munito/gemini) для /selftest.
+    """One tiny probe to the route head (munito/gemini) for /selftest.
 
-    Проба сервисная (service=True): квоту НЕ пишет ни при успехе, ни при неуспехе —
-    она не ответ человеку. Историю чата не трогаем — проба не должна оседать в
-    контексте владельца. Никогда не кидает: неуспех возвращается кортежем
-    (False, причина, секунды)."""
+    This is a service probe (service=True): it does NOT write to quota on either
+    success or failure — it is not an answer to a person. It does not touch chat
+    history — the probe must not linger in the owner's context. It never raises:
+    failure is returned as a (False, reason, seconds) tuple."""
     import bot
     from lumen_router_config import _MUNITO_ORDER, _munito_payload_extras
     start = time.monotonic()
     try:
-        # Имена запросов читаем через bot. в момент вызова — так подмена тестами продолжает работать.
+        # Read query names through bot. at call time so test substitution keeps working.
         if provider == "munito":
             model = _MUNITO_ORDER[0]
             messages = [{"role": "system", "content": ""}, {"role": "user", "content": _SELFTEST_PING_TEXT}]
@@ -421,14 +403,14 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
                 extra_payload=_munito_payload_extras(),
                 record_latency=False,
             )
-            # Пробный пинг — служебный вызов: в квоту и в снятые отметки об исчерпании
-            # он не пишется, иначе одна проверка возвращает в строй весь провайдер.
-            # Латентность тоже не пишем: флаг record_latency=False выше.
+            # A trial ping is a service call: it must not count toward the quota or clear exhaustion marks
+            # it is not written; otherwise one check restores the entire provider.
+            # Do not record latency either: record_latency=False is set above.
             bot._record_quota_usage("munito", used, service=True)
             return True, "", round(time.monotonic() - start, 2)
         if provider == "gemini":
-            # Квота самая дефицитная — проба минимальная: голый текст без системного
-            # промпта и истории (в отличие от ask_gemini, чистит только живость).
+            # The scarcest quota gets a minimal probe: bare text without a system
+            # prompt and history (unlike ask_gemini, which only checks liveness).
             model = GEMINI_DEFAULT_CHAIN[0]
             deadline = start + bot.ROUTE_MODEL_TIMEOUT_SEC
             contents = [types.Content(role="user", parts=[types.Part.from_text(text=_SELFTEST_PING_TEXT)])]
@@ -442,15 +424,15 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
             if _is_empty_like(_strip_provider_artifacts(ans)):
                 bot._record_model_outcome("gemini", model, bad=True)
                 raise RuntimeError(f"Model {model} returned an empty response")
-            # Та же честность, что у остальных проб: успех сбрасывает счётчик.
-            # Пинг без смешанных токенов — эху тут браться негде, проверка для единообразия.
+            # The same honesty as the other probes: success resets the counter.
+            # A ping without mixed tokens has nowhere for an echo to come from; this check is for consistency.
             bot._record_model_outcome("gemini", model,
                                       bad=_detect_garbled_mix(ans) and not _is_garbled_echo(ans, _SELFTEST_PING_TEXT))
             _gpt, _gct, _gtt = _usage_from_gemini_response(resp)
             _log_llm_usage(chat_id=chat_id, provider="gemini", model_id=model,
                            prompt=_gpt, completion=_gct, total=_gtt)
-            # Пинг в несколько токенов не идёт в общий EMA латентности: он сдвигал бы
-            # порядок моделей и первый таймаут для всех чатов (аудит run-2).
+            # A few-token ping does not feed the overall latency EMA: it would shift
+            # model order and the first timeout for all chats (audit run-2).
             bot._record_quota_usage("gemini", model, service=True)
             return True, "", round(time.monotonic() - start, 2)
         raise ValueError(f"unknown selftest provider: {provider}")
@@ -458,9 +440,10 @@ async def selftest_llm_head(provider: str, *, chat_id: Any = None) -> tuple[bool
         return False, _selftest_short_error(exc), round(time.monotonic() - start, 2)
 
 async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int, deadline: float | None = None) -> str | None:
-    """Голос/аудио в текст через Groq Whisper (дешевле Gemini-квоты на порядок). None при
-    любой неудаче — вызывающий код молча идёт прежним путём (аудио напрямую в Gemini).
-    Таймаут — остаток бюджета маршрута, а не полный лимит: иначе войс держал лок сверх бюджета."""
+    """Transcribes voice/audio to text via Groq Whisper (an order of magnitude cheaper
+    than Gemini quota). Returns None on any failure; the caller silently continues
+    via the existing path (audio sent directly to Gemini). The timeout is the remaining
+    route budget, not the full limit; otherwise voice notes would hold the lock past the budget."""
     import bot
     from lumen_media import _mime_suffix
     if not bot.GROQ_API_KEY or not audio_bytes:
@@ -498,7 +481,7 @@ async def _transcribe_audio(audio_bytes: bytes, mime: str, chat_id: int, deadlin
     text = (data.get("text") or "").strip() if isinstance(data, dict) else ""
     if not text:
         return None
-    # Длинный войс без обрезки упёрся бы в лимиты моделей ниже по маршруту.
+    # An untrimmed long voice note would hit the model limits further down the route.
     if len(text) > _TRANSCRIPT_MAX_CHARS:
         text = text[:_TRANSCRIPT_MAX_CHARS].rstrip() + "…"
     bot._record_quota_usage("groq", "whisper-large-v3-turbo", service=True)
@@ -513,7 +496,8 @@ async def _gemini_history_contents(history: list[dict]) -> list[types.Content]:
             continue
         r = "model" if str(entry.get("role")).lower() in {"assistant", "model"} else "user"
         cont = entry.get("content") or ""
-        # Старые записи могли хранить не строку, а структуру провайдера: разбираем.
+        # Old records may have stored a provider structure instead of a string: parse
+        # it.
         txt = lumen_memory.format_entry(entry) if isinstance(cont, str) else bot._or_extract_text(cont)
         if txt:
              contents.append(types.Content(role=r, parts=[types.Part.from_text(text=txt)]))
@@ -523,36 +507,35 @@ def _build_gemini_call_config(
     model_id: str, contents: list[types.Content], *, memory_summary: str = "",
     effort: str | None = None,
 ) -> tuple[list[types.Content], "types.GenerateContentConfig | None"]:
-    """Строит (call_contents, gconfig) для ОДНОГО вызова Gemini: system_instruction и
-    grounding по дашборду. Одна функция на ask_gemini и стриминг — чтобы не расходились."""
+    """Builds (call_contents, gconfig) for ONE Gemini call: system_instruction and dashboard grounding. One function serves ask_gemini and streaming so they cannot diverge."""
     import bot
     conf = GEMINI_MODELS.get(model_id, {})
     kwargs: dict[str, Any] = {}
     kwargs["system_instruction"] = lumen_memory.system_prompt_with_memory(
         bot.get_system_prompt(model_id), {"memory_summary": memory_summary},
     )
-    # Инструменты — только у кого есть free-квота по дашборду (у 3.5/preview map 0/0).
+    # Tools — only for those with free quota on the dashboard (3.5/preview map is 0/0).
     tools_list = []
     if conf.get("search_grounding", True):
         try:
             tools_list.append(types.Tool(google_search=types.GoogleSearch()))
         except Exception:
-            pass  # в этом SDK нет google_search
+            pass  # this SDK does not have google_search
     if conf.get("map_grounding", False):
         try:
             tools_list.append(types.Tool(google_maps=types.GoogleMaps()))
         except Exception:
-            pass  # в этом SDK нет google_maps
+            pass  # this SDK does not have google_maps
     if conf.get("url_context", True):
         try:
             tools_list.append(types.Tool(url_context=types.UrlContext()))
         except Exception:
-            pass  # в этом SDK нет url_context
+            pass  # this SDK has no url_context
     if tools_list:
         kwargs["tools"] = tools_list
-    # Эффорт мышления: с 12.11.2026 уровень считается для всего запроса (Claude-style
-    # effort) и только при EFFORT_AUTO=0 остаётся прежняя эвристика не-heavy (калибровка
-    # 18.08.2026 поймала 3.7-flash на 17 таймаутах из 18). 3.x — thinking_level, 2.5 — thinking_budget.
+    # Thinking effort: since 12.11.2026 the level has been computed for the entire request (Claude-style
+    # effort) and only when EFFORT_AUTO=0 does the previous non-heavy heuristic remain (calibration
+    # On 18.08.2026, 3.7-flash was caught timing out 17 times out of 18). 3.x uses thinking_level; 2.5 uses thinking_budget.
     if effort is not None:
         from lumen_router_config import gemini_thinking_for
 
@@ -571,7 +554,7 @@ def _build_gemini_call_config(
     return contents, gconfig
 
 async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents: list, gconfig, deadline: float | None = None) -> str:
-    """Текст ответа Gemini: сначала resp.text, иначе разбор candidates/parts вручную (включая повтор БЕЗ инструментов при MALFORMED_FUNCTION_CALL)."""
+    """Gemini response text: resp.text first, otherwise manual parsing of candidates/parts (including a retry WITHOUT tools on MALFORMED_FUNCTION_CALL)."""
     import bot
     ans = ""
     tool_calls: list[str] = []
@@ -607,15 +590,15 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                              tool_calls.append("response")
         if not ans and (tool_calls or reasons):
             if tool_calls or any("MALFORMED_FUNCTION_CALL" in r for r in reasons):
-                # Ответ без текста: битый вызов или голый tool_call — пользователю
-                # JSON инструментов не показываем (прод 07.10.2026), повторяем без них.
+                # A response without text: a broken call or a bare tool_call — the user
+                # Do not show tool JSON (production 07.10.2026); retry without it.
                 if tool_calls:
                     log.warning("[gemini] Model %s returned only tool calls without text, retrying without tools.", model_id)
                 try:
                     retry_gconfig = gconfig.model_copy(update={"tools": None}) if gconfig is not None else None
-                    # Async-клиент, а не to_thread: wait_for реально отменяет зависший
-                    # запрос. Повтор тоже в бюджет маршрута, иначе держал бы лок
-                    # поверх истраченного.
+                    # Async client, not to_thread: wait_for genuinely cancels a hung
+                    # request. The retry also counts against the route budget, otherwise it would hold the lock
+                    # on top of what has already been spent.
                     retry_timeout = bot.TELEGRAM_AI_TIMEOUT
                     if deadline is not None:
                         retry_timeout = min(retry_timeout, max(0.0, deadline - time.monotonic()))
@@ -630,27 +613,28 @@ async def _extract_gemini_answer_text(resp: Any, *, model_id: str, call_contents
                         ans = retry_text
                         log.warning("[gemini] Model %s had MALFORMED_FUNCTION_CALL, retried without tools successfully.", model_id)
                     elif retry_resp is not None:
-                        # Повтор прошёл, но вернул пусто без исчерпания бюджета:
-                        # это повод на следующую модель.
+                        # The retry succeeded but returned empty without exhausting the budget:
+                        # this is a reason to move to the next model.
                         log.warning("[gemini] Retry after MALFORMED_FUNCTION_CALL returned empty text, trying the next model.")
                     elif deadline is not None and deadline - time.monotonic() <= 0:
-                        # Повтор не успел уложиться в бюджет маршрута: отдаём пусто,
-                        # ask_gemini перейдёт к следующей модели.
+                        # The retry did not fit within the route budget: return empty,
+                        # ask_gemini will move to the next model.
                         log.warning("[gemini] Retry after MALFORMED_FUNCTION_CALL skipped: route budget is exhausted, trying the next model.")
                 except Exception as retry_exc:
                     log.warning("[gemini] Retry without tools after MALFORMED_FUNCTION_CALL also failed: %s", retry_exc)
-                    # Повтор упал — отдаём пусто: маршрут уйдёт к следующей модели,
-                    # а не остановится на первой же битой.
-            # Блокировка (SAFETY/RECITATION) — не ответ: пустая строка двигает цепочку
-            # дальше, а локализованный отказ пользователь увидит, только если не ответил
-            # никто (аудит 27.10.2026: русская заглушка останавливала маршрут).
-    # Пустая строка без блокировки — не "Empty response": ask_gemini пробует следующую модель.
+                    # The retry failed — return empty: the route will move to the next model,
+                    # rather than stopping at the first broken one.
+            # A block (SAFETY/RECITATION) is not an answer: an empty string advances the chain
+            # further, and the user sees the localized refusal only if no answer was produced
+            # anyone (27.10.2026 audit: a Russian placeholder stopped the route).
+    # An empty line without blocking is not “Empty response”: ask_gemini tries the next model.
     return ans.strip()
 
 def _user_mime_label(mime: str | None) -> str:
-    """Подпись типа вложения для текста ошибки: клиентский mime не должен стать
-    разметкой (markdown-ссылка) в сообщении бота (аудит run-2, low). Параметры
-    типа (charset) разрешены, скобки и угловые скобки — нет."""
+    """Attachment type label for an error message: a client-supplied MIME type must
+    not become markup (a markdown link) in the bot message (run-2 audit, low).
+    Type parameters (charset) are allowed; parentheses and angle brackets are
+    not."""
     if mime and mime.isascii() and all(c.isalnum() or c in "._+-/:;= " for c in mime):
         return mime
     return "неизвестный тип"
@@ -669,7 +653,7 @@ async def ask_gemini(
     if deadline is None:
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
 
-    # Медиа/YouTube-части в тот же Content, что и текст (сборка — только в _build_gemini_turn_contents).
+    # Media/YouTube parts in the same Content as the text (assembly happens only in _build_gemini_turn_contents).
     extra_parts: list[types.Part] = []
     if media:
         for b, mime in media:
@@ -679,21 +663,22 @@ async def ask_gemini(
                  raise bot.UserFacingInputError(bot._t(
                      chat_id, "err_unsupported_attachment", mime=_user_mime_label(mime)))
     if youtube_url:
-          # YouTube — file_uri без скачивания. mime_type явно video/*: SDK не угадывает его для shorts-ссылок ("Failed to determine mime type").
+          # YouTube is a file_uri with no download. Set mime_type explicitly to video/*:
+          # the SDK does not infer it for shorts URLs ("Failed to determine mime type").
          extra_parts.append(types.Part.from_uri(file_uri=youtube_url, mime_type="video/*"))
     contents = await bot._build_gemini_turn_contents(
         chat_id, user_text, extra_parts=extra_parts or None, history_meta=history_meta,
     )
 
-    # to_thread — не вешаем event loop. Ровно одна попытка на модель (ретраи одной давали ответы по 2+ минуты); порядок — от роутера, сверху режет общий deadline.
+    # to_thread keeps the event loop unblocked. Exactly one attempt per model (retries of the same model produced answers taking 2+ minutes); the order comes from the router, with the overall deadline cutting it off at the top.
     resp = None
     curr_model_id = chain[0]
     tried_models: set[str] = set()
     quota_exhausted_models: list[str] = []
 
     loop_guard = 0
-    # Запас len+4 сверх длины цепочки: страховка от зацикливания при будущих
-    # ветках фолбэка (сейчас все переходы идут только внутри chain).
+    # An extra len+4 beyond the chain length: protection against looping in future
+    # fallback branches (currently all transitions occur only within chain).
     max_loop_guard = len(chain) + 4
 
     while True:
@@ -712,8 +697,8 @@ async def ask_gemini(
 
         attempt_start = time.monotonic()
         try:
-            # Async-клиент, а не to_thread: wait_for тогда реально отменяет зависший
-            # запрос (поток to_thread отменить нельзя — он бы жил дальше в фоне).
+            # Use an async client, not to_thread: this way wait_for actually cancels a hung
+            # request (a to_thread stream cannot be canceled — it would keep running in the background).
             resp = await asyncio.wait_for(
                 bot.client.aio.models.generate_content(model=curr_model_id, contents=call_contents, config=gconfig),
                 timeout=_attempt_timeout(bot, deadline),
@@ -721,7 +706,7 @@ async def ask_gemini(
             ans = await bot._extract_gemini_answer_text(resp, model_id=curr_model_id, call_contents=call_contents, gconfig=gconfig, deadline=deadline)
             ans = _strip_provider_artifacts(ans)
             if _is_empty_like(ans):
-                # Пустой ответ — пробуем следующую модель (прод 17.09.2026: юзер увидел буквальное "Empty response").
+                # Empty response — try the next model (prod 17.09.2026: a user saw the literal “Empty response”).
                 bot._record_model_outcome("gemini", curr_model_id, bad=True)
                 raise RuntimeError(f"Model {curr_model_id} returned an empty response")
             break
@@ -738,17 +723,17 @@ async def ask_gemini(
             log.warning("[gemini] Model %s timed out and no fallback models remain in route.", curr_model_id)
             raise
         except Exception as exc:
-            # Классификация — общими хелперами (_error_status/_classify_model_error), а не третьей ad-hoc копией.
+            # Use shared helpers (_error_status/_classify_model_error) for classification, not a third ad-hoc copy.
             txt = bot._error_text(exc).strip() or exc.__class__.__name__
             status_code = bot._error_status(exc, txt)
             kind = bot._classify_model_error(status_code, txt)
             exc_class = exc.__class__.__name__
 
             if kind == "rate_limit":
-                # 429 у Google — обычно минутный лимит запросов, а не суточная квота.
-                # Раньше любой 429 ставил суточную метку, и один всплеск убирал модель из
-                # роута до полуночи (враждебное ревью 27.09.2026). Суточную квоту Google
-                # опознаём по тексту ошибки — тогда метка держится до утра.
+                # A 429 from Google is usually a per-minute request limit, not a daily quota.
+                # Previously, any 429 set a daily mark, and one burst removed the model from
+                # route until midnight (adversarial review 27.09.2026). The daily Google quota
+                # identify it by the error text — then the marker stays until morning.
                 if bot._is_gemini_daily_quota(txt):
                     bot._mark_quota_exhausted("gemini", curr_model_id)
                     quota_exhausted_models.append(curr_model_id)
@@ -763,12 +748,12 @@ async def ask_gemini(
                 if quota_exhausted_models:
                     log.warning("[gemini] All Gemini models in route exhausted their quota (429): %s", ", ".join(quota_exhausted_models))
                     raise bot.GeminiAllModelsExhaustedError(quota_exhausted_models) from exc
-                # Одни минутные всплески: суточного исчерпания не было — отдаём
-                # последний 429 как есть, а не пустой "исчерпано всё".
+                # Per-minute spikes only: there was no daily exhaustion — return
+                # return the last 429 as-is, not an empty "everything exhausted".
                 log.warning("[gemini] All Gemini models in route rate-limited (429), no daily exhaustion.")
                 raise
 
-            # Остальные исходы — одна попытка и сразу следующая модель, без ретраев.
+            # All other outcomes get one attempt, then move directly to the next model, without retries.
             _mark_model_unavailable("gemini", curr_model_id, exc)
             next_model = bot._next_fallback_model(tried_models, chain)
             if next_model:
@@ -797,7 +782,7 @@ async def ask_gemini(
     hist_text = _history_user_text(history_text if history_text is not None else user_text)
     lumen_memory.append_user_from_meta(state, hist_text, history_meta)
     lumen_memory.append_assistant(state, ans)
-    # Обрезка со сводкой старого (см. _trim_history), а не молчаливый срез.
+    # Trim old content with a summary (see _trim_history), rather than silently slicing.
     await bot._trim_history(state["history"], state)
     bot._record_quota_usage("gemini", curr_model_id)
     if provenance is not None:
@@ -808,7 +793,7 @@ async def _build_gemini_turn_contents(
     chat_id: int, user_text: str, extra_parts: list[types.Part] | None = None,
     *, history_meta: dict[str, Any] | None = None,
 ) -> list[types.Content]:
-    """Contents на один ход: память с авторами, прошлые фото и текущий вопрос."""
+    """Contents for one turn: memory with authors, past photos, and the current question."""
     import bot
     state = bot.get_state(chat_id)
     contents = await bot._gemini_history_contents(state.get("history") or [])
@@ -853,10 +838,9 @@ async def _build_openai_turn_messages(
     history_meta: dict[str, Any] | None = None,
     current_parts: list[dict] | None = None,
 ) -> list[dict]:
-    """Сообщения для OpenAI-совместимого chat/completions: память, авторы, прошлые фото.
+    """Messages for OpenAI-compatible chat/completions: memory, authors, and past photos.
 
-    Прошлые фото прикладываются отдельной user-репликой, а не к текущему вопросу:
-    модель не должна путать их с только что присланным вложением."""
+Past photos are attached as a separate user message rather than to the current question, so the model does not confuse them with the newly sent attachment."""
     import bot
     state = bot.get_state(chat_id)
     meta = history_meta if isinstance(history_meta, dict) else {}
@@ -889,13 +873,13 @@ async def _build_openai_turn_messages(
                 parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
             if len(parts) > 1:
                 messages.append({"role": "user", "content": parts})
-    # История: авторы и время; старые служебные блоки вычищаем на лету.
+    # History: authors and time; clean old service blocks on the fly.
     for item in history:
         entry = _clean_history_entry(item) if isinstance(item, dict) else None
         if entry is None:
             continue
         cont = entry.get("content")
-        # Старые записи могли хранить структуру провайдера: разбираем, как Gemini-ветка.
+        # Old records could store a provider structure: parse it like the Gemini branch.
         text = lumen_memory.format_entry(entry) if isinstance(cont, str) else bot._or_extract_text(cont)
         if not text:
             continue
@@ -909,7 +893,7 @@ async def _build_openai_turn_messages(
 
 
 def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_analyze: str | None, lang: str = DEFAULT_LANG) -> str:
-    """Текст ответа на исключение из _run_route — чистая функция (owner-алерт остаётся в вызывающем коде: там сетевой вызов)."""
+    """Response text for an exception from _run_route; a pure function (the owner alert stays in the calling code, where the network call is made)."""
     import bot
     if youtube_url_to_analyze:
         return bot._lang_t(lang, "err_youtube_fail")
@@ -923,7 +907,7 @@ def _route_error_reply_text(exc: Exception, head_model: str, *, youtube_url_to_a
 
 
 class RouteBudgetExceededError(RuntimeError):
-    """Бюджет времени маршрута исчерпан — защита от многоминутного ожидания при массовом сбое моделей подряд."""
+    """The route budget expired before a provider response was accepted, including before the first attempt."""
     def __init__(self, tried: list[str]) -> None:
         self.tried = tried
         super().__init__(f"Route time budget exhausted. Tried: {', '.join(tried) or 'none'}")
@@ -932,24 +916,24 @@ class RouteBudgetExceededError(RuntimeError):
 def _reorder_route_by_speed(
     route: list[tuple[str, str]], *, preserve_grounded_head: bool = False,
 ) -> list[tuple[str, str]]:
-    """Порядок по замеренной скорости. На свежем маршруте границу search grounding
-    не переступаем: иначе в голове модель без живого поиска (ревью 17.11.2026).
-    На обычном маршруте пин головы не нужен — там сортировка и создана, чтобы
-    убрать медленную модель (прод 17.09.2026), и адверсариальный проход показал,
-    что общий пин замораживал медленную голову тяжёлой цепочки."""
+    """Order by measured speed. On a fresh route, do not cross the search-grounding
+    boundary: otherwise a model without live search is at the head (review 17.11.2026).
+    On the regular route, pinning the head is unnecessary — the sorting was created
+    to remove a slow model (prod 17.09.2026), and an adversarial pass showed
+    that a shared pin froze the slow head of the heavy chain."""
     if not preserve_grounded_head:
         return _speed_reorder_route(route)
 
     def _capability(item: tuple[str, str]) -> bool:
         provider, model_id = item
         if provider == "gemini":
-            # Неизвестная конфигурация — не повод ставить её вперёд головы.
+            # An unknown configuration is no reason to put it ahead of the other.
             return bool(GEMINI_MODELS.get(model_id, {}).get("search_grounding", False))
         return True
     return _speed_reorder_route(route, group_key=_capability)
 
 
-# Маршрутизация вынесена в lumen_router_config.py — порядок имён для остального кода не менялся.
+# Routing has been moved to lumen_router_config.py — the order of names for the rest of the code has not changed.
 
 async def _run_route(
     chat_id: int, ai_prompt: str, route: list[tuple[str, str]], message: Message, *,
@@ -960,24 +944,24 @@ async def _run_route(
     history_meta: dict[str, Any] | None = None, effort: str | None = None,
     preserve_grounded_head: bool = False,
 ) -> tuple[str, bool]:
-    """Идёт по маршруту _build_route: внутри провайдера — по одной попытке на модель, при отказе всего провайдера — резервный. Возвращает (ответ, reply_already_sent)."""
+    """Follows the _build_route route: one attempt per model within a provider, then the reserve if the entire provider fails. Returns (response, reply_already_sent)."""
     import bot
     if not route:
         raise RuntimeError("Empty route — no model to choose from.")
-    # В историю пишем чистый запрос пользователя, а не ai_prompt со сниппетами
-    # и датой: чужой текст не должен переживать ход (аудит 28.10.2026).
-    # Пустая строка — законный текст фото без подписи, поэтому None, а не or.
+    # Write the clean user query to history, not ai_prompt with snippets
+    # and date: third-party text must not survive a turn (audit 28.10.2026).
+    # An empty string is valid text for a photo without a caption, so use None, not or.
     if history_text is None:
         history_text = ai_prompt
-    # Порядок внутри провайдера — по измеренным задержкам; сами блоки и защита квоты Gemini не трогаем.
+    # Order within a provider follows measured latencies; the blocks themselves and Gemini quota protection are untouched.
     route = _reorder_route_by_speed(route, preserve_grounded_head=preserve_grounded_head)
     if deadline is None:
-        # Снаружи дедлайн приходит с транскрибацией: она уже потратила часть бюджета.
+        # Externally, the deadline arrives with transcription: it has already spent part of the budget.
         deadline = time.monotonic() + bot.ROUTE_TOTAL_BUDGET_SEC
 
-    # Блоки идут ПОДРЯД, как собраны: Munito → Gemini-резерв.
-    # Склейка по провайдеру ставила 11 Gemini-моделей впереди независимого провайдера
-    # и съедала 40-секундный бюджет до него (аудит 27.10.2026).
+    # Blocks go in order, as assembled: Munito → Gemini reserve.
+    # Provider-based merging placed 11 Gemini models ahead of an independent provider
+    # and consumed the entire 40-second budget before it (audit 27.10.2026).
     runs: list[tuple[str, list[str]]] = []
     for provider, model_id in route:
         if runs and runs[-1][0] == provider:
@@ -985,34 +969,34 @@ async def _run_route(
         else:
             runs.append((provider, [model_id]))
 
-    # Учёт дневных лимитов пользователя — только дошедшие до модели ответы.
-    # С 05.11.2026 в счёт идёт только Gemini: у Munito лимит оконный на стороне
-    # провайдера, своя суточная метка ему не нужна.
+    # Per-user daily limit accounting — only responses that reached the model.
+    # Since 05.11.2026, only Gemini counts toward the quota: the Munito limit is windowed on the
+    # provider; it does not need its own daily mark.
     def _count_user_answer(provider_name: str) -> None:
-        # Один апдейт — одно списание: ретрай после [[SEARCH]], повтор за свежестью
-        # и автопродолжение входят в _run_route повторно (аудит 16.11.2026).
+        # One update means one charge: a retry after [[SEARCH]] or a freshness retry
+        # and auto-continuation re-enter _run_route (audit 16.11.2026).
         if bot._ANSWER_COUNTED.get():
             return
         bot._ANSWER_COUNTED.set(True)
         bot._record_user_daily(bot._user_key_for_message(message), gemini=provider_name == "gemini")
         bot._record_stats_event("answers_sent")
 
-    # Кто фактически ответил (прод 12.10.2026): для пост-проверки живого поиска.
+    # Who actually answered (production 12.10.2026): for post-checking live search.
     def _note_answered(provider_name: str, model_id: str | None) -> None:
         if provenance is not None:
             provenance.update(provider=provider_name, model=model_id)
 
-    # Стрим пробуем на каждой модели маршрута, а не только на голове: раньше
-    # сбой головной модели (квота/404/таймаут) навсегда лишал чат эффекта
-    # печати, хотя резервные модели отвечали (прод 28.10.2026).
-    # Ранний сбой стрима не отменяет обычный вызов: модель пробуется ещё раз
-    # без потока, иначе сломанный SSE у провайдера остался бы без ответа вовсе.
+    # Try streaming on every model in the route, not just the head: previously
+    # a head-model failure (quota/404/timeout) permanently deprived the chat of the effect
+    # of typing, although the reserve models answered (prod 28.10.2026).
+    # An early stream failure does not cancel a normal call: the model is tried again
+    # without a stream; otherwise a broken provider SSE would leave no answer at all.
     reusable_placeholder: Message | None = status.message if status is not None else None
-    # Единый старт ожидания на весь маршрут: таймер «Думаю… N с» не должен
-    # откатываться при переходе к следующей модели (ревью 28.10.2026).
+    # One wait start covers the entire route: the "Thinking... N s" timer must not
+    # restart when moving to the next model (review 28.10.2026).
     stream_wait_started: float | None = None
     if allow_stream and (media or youtube_url):
-        # Стрим-обёртки собирают контекст без вложений: с медиа только обычный путь.
+        # Streaming wrappers build context without attachments: media uses only the ordinary path.
         allow_stream = False
 
     def _streamable(provider_name: str, model_id: str) -> bool:
@@ -1036,8 +1020,8 @@ async def _run_route(
     media_note_added = False
     for run_index, (provider, run_ids) in enumerate(runs):
         if provider == "munito" and is_video_or_audio:
-            # Munito принимает только картинки: смешанный альбом уходит целиком в Gemini,
-            # иначе видео-слайд потерялся бы без ответа на него.
+            # Munito accepts images only: a mixed album goes entirely to Gemini,
+            # otherwise the video slide would be lost without a response to it.
             continue
         ids = list(run_ids)
         if time.monotonic() > deadline:
@@ -1057,15 +1041,15 @@ async def _run_route(
                     reusable_placeholder = placeholder
                 if streamed is not None:
                     log.info('[router] chat=%s response received via streaming (%s:%s)', chat_id, provider, stream_model)
-                    # Остановка до первого куска: пузырь закрыт пометкой, ответа нет,
-                    # слот не списываем (низкая находка аудита 16.11.2026).
+                    # Stop before the first chunk: the bubble is closed with a marker, there is no answer,
+                    # do not deduct a slot (low-severity audit finding 16.11.2026).
                     if (streamed or "").strip():
                         _count_user_answer(provider)
                         _note_answered(provider, stream_model)
                     return streamed, True
         if reusable_placeholder is not None and getattr(reusable_placeholder, "reply_markup", None):
-            # Нестримовый фолбэк не умеет реагировать на Stop: убираем кнопку,
-            # чтобы она не выглядела рабочей во время обычного запроса (review
+            # The non-streaming fallback cannot respond to Stop: remove the button,
+            # so it does not look active during a normal request (review
             # 24.11.2026).
             clear = getattr(status, "clear_reply_markup", None) if status is not None else None
             if clear is not None and getattr(status, "reply_markup", None) is not None:
@@ -1086,16 +1070,16 @@ async def _run_route(
             elif provider == "munito":
                 ans = await bot.ask_munito_text(chat_id, ai_prompt, model_chain=ids, deadline=deadline, history_text=history_text, provenance=provenance, history_meta=history_meta, effort=effort)
             else:
-                # Явный провайдер вместо «всё остальное = Munito»: опечатка в имени
-                # молча ушла бы в чужой API с нашим ключом (ревью 05.11.2026).
+                # An explicit provider instead of “everything else = Munito”: a typo in the name
+                # silently gone to someone else's API with our key (review 05.11.2026).
                 raise RuntimeError(f"Route has unknown provider {provider!r}")
 
             if status is not None:
-                # Фиксируем длительность ожидания и останавливаем анимацию до
-                # записи ответа, иначе тикер перезапишет готовый текст.
+                # Fix the wait duration and stop the animation before writing the answer;
+                # otherwise, the ticker will overwrite the finished text.
                 await status.finish()
             if reusable_placeholder is not None:
-                # Готовый ответ — прямо в плейсхолдер (если влезает в одно сообщение), иначе обычным путём с разбиением.
+                # A finished answer goes straight into the placeholder if it fits in one message; otherwise it follows the normal splitting path.
                 fits_one_message = len(_split_text_chunks(ans, bot.TG_MAX_LEN)) == 1
                 reused = False
                 if fits_one_message:
@@ -1123,8 +1107,8 @@ async def _run_route(
                     await bot._delete_message_quietly(reusable_placeholder)
                 reusable_placeholder = None
                 if reused:
-                    # Пустой ответ (остановка до первого куска) не списывает слот:
-                    # человек не получил ничего, а лимит — про ответы (аудит 16.11.2026).
+                    # An empty response (stopped before the first chunk) does not consume a slot:
+                    # the person received nothing, and the limit concerns responses (audit 16.11.2026).
                     if (ans or "").strip():
                         _count_user_answer(provider)
                     return ans, True
@@ -1132,14 +1116,14 @@ async def _run_route(
                 _count_user_answer(provider)
             return ans, False
         except _SearchRequested as req:
-            # Не неудача провайдера: следующая модель ничего не изменит, а пузырь
-            # (если он уже в чате) отдаётся вызывающему коду живым.
+            # Not a provider failure: the next model will change nothing, while the bubble
+            # (if already in the chat) is returned to the calling code alive.
             if req.placeholder is None:
                 req.placeholder = reusable_placeholder
             raise
         except asyncio.CancelledError:
-            # Отмена посреди ответа: плейсхолдер чистим, отмену пробрасываем —
-            # иначе в чате навсегда висело "…".
+            # Cancellation mid-response: clean up the placeholder and propagate the cancellation—
+            # otherwise, "…" would remain in the chat forever.
             if status is not None:
                 try:
                     await status.delete()
@@ -1156,27 +1140,28 @@ async def _run_route(
         except Exception as exc:
             last_exc = exc
             if provider == "gemini" and isinstance(exc, ValueError) and media and not media_note_added:
-                # Неподдерживаемый mime: текстовый фолбэк медиа не видит, без пометки ответит вслепую.
+                # Unsupported MIME type: the media text fallback does not see it and would answer blindly without a note.
                 if not ai_prompt.endswith(bot._NO_MEDIA_NOTE):
                     ai_prompt += bot._NO_MEDIA_NOTE
                 media_note_added = True
             log.warning('[router] Provider %s failed completely (%s), trying the next one on the route, if any.', provider, exc)
-            # Суточный счётчик /stats: дальше по маршруту есть кому ответить.
+            # Daily /stats counter: someone later in the route can answer it.
             if any(ids for _, ids in runs[run_index + 1:]):
                 bot._record_stats_event("fallbacks")
                 if status is not None:
                     await status.set_phase("progress_retry")
 
     if status is not None:
-        # Невостребованный статус убираем перед raise — иначе «Думаю…» повиснет в чате навсегда.
+        # Remove an unclaimed status before raising; otherwise "Thinking..." stays in the chat forever.
         await status.delete()
     elif reusable_placeholder is not None:
         await bot._delete_message_quietly(reusable_placeholder)
 
-    # Суточный счётчик /stats: маршрут исчерпан, ответа не будет.
+    # Daily /stats counter: the route is exhausted; there will be no response.
     bot._record_stats_event("all_failed")
     if last_exc is None and time.monotonic() > deadline:
-        # Бюджет кончился до первой попытки: это RouteBudgetExceededError, а не
-        # невнятный RuntimeError — иначе неверный текст и статистика (ревью 17.11.2026).
+        # The budget ended before the first attempt: raise RouteBudgetExceededError,
+        # not a vague RuntimeError, or the response text and statistics will be wrong
+        # (review 17.11.2026).
         raise RouteBudgetExceededError([])
     raise last_exc or RuntimeError("No route candidate returned an answer.")

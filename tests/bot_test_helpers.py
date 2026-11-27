@@ -1,5 +1,4 @@
-"""
-bot_test_helpers.py — общие фейки и харнесы для test_bot_*.py (вынесено из test_bot.py, P2 аудита). Не содержит тестов.
+"""bot_test_helpers.py — shared fakes and harnesses for test_bot_*.py (split out of test_bot.py, P2 audit). Contains no tests.
 """
 from types import SimpleNamespace
 import asyncio
@@ -20,7 +19,7 @@ class _FakeResolveResponse:
 
 
 class _FakeResolveSession:
-    """Мокает session.head()/session.get() для _resolve_tiktok_short."""
+    """Mocks session.head()/session.get() for _resolve_tiktok_short."""
     def __init__(self, head_response, get_response):
         self._head_response = head_response
         self._get_response = get_response
@@ -48,7 +47,7 @@ class _FakeChainResolveResponse:
 
 
 class _FakeChainResolveSession:
-    """head()/get() по карте URL с записью kwargs — для проверки ручной цепочки редиректов."""
+    """head()/get() over the URL map with kwargs entries — to check a manually built redirect chain."""
     def __init__(self, mapping: dict):
         self._mapping = mapping
         self.calls = []
@@ -69,9 +68,9 @@ class _FakeExc(Exception):
 
 
 class _FakeStatus:
-    """Запись того, что обработчик показал в живом пузыре: закрытые этапы, фазы с
-    подстановками, строки действия и источники. Один на все модульные тесты статуса,
-    чтобы правка StatusMessage не требовала правки трёх копий фейка."""
+    """A recorder for what a handler displayed in the live bubble: completed stages, phases
+    with substitutions, action lines, and sources. One recorder for all status unit
+    tests, so changing StatusMessage does not require changing three copies of the fake."""
 
     def __init__(self):
         self.message = object()
@@ -123,7 +122,7 @@ class _FakeAdminRequest:
 
 
 class _FakeVoiceBot:
-    """Минимальная замена aiogram Bot для inline_tts — нужен только send_voice."""
+    """A minimal aiogram Bot replacement for inline_tts — only send_voice is needed."""
     def __init__(self):
         self.sent_voice: dict | None = None
 
@@ -169,7 +168,7 @@ def _run_core_capturing_prompt(message, monkeypatch):
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         captured["prompt"] = ai_prompt
-        # Даём шанс фоновым задачам (typing-индикатор) выполниться до конца прогона.
+        # Give background tasks (typing indicator) a chance to finish before the run ends.
         await asyncio.sleep(0)
         return "ok", False
 
@@ -234,7 +233,7 @@ class _FakeIncomingMessage:
 
 
 class _FakeAudioBot:
-    """Минимальная замена aiogram Bot для _send_tiktok_music — нужен только send_audio."""
+    """Minimal aiogram Bot replacement for _send_tiktok_music — only send_audio is needed."""
     def __init__(self):
         self.sent_audio: dict | None = None
 
@@ -244,8 +243,8 @@ class _FakeAudioBot:
 
 
 def _run_send_tiktok_music(media_data: dict, language_code: str | None = "ru"):
-    """Общий harness: мокает скачивание байтов и запись MP3-тегов, возвращает
-    (title, performer), которые реально дошли бы до _write_mp3_tags/send_audio."""
+    """Shared harness: mocks byte downloads and MP3 tag writes, and returns
+(title, performer) values that would actually reach _write_mp3_tags/send_audio."""
     incoming = _FakeIncomingMessage(999601)
     incoming.message_id = 12345
     incoming.from_user = SimpleNamespace(language_code=language_code) if language_code is not None else None
@@ -287,7 +286,7 @@ class _FakeAsyncLineIter:
         return self._lines.pop(0)
 
     async def read(self, n: int = -1) -> bytes:
-        # Ветка HTTP-ошибки читает тело капом, а не построчно (lumen_streaming.py).
+        # The HTTP-error branch reads the body with a cap, not line by line (lumen_streaming.py).
         data = b"".join(self._lines)
         return data if n is None or n < 0 else data[:n]
 
@@ -295,7 +294,7 @@ class _FakeAsyncLineIter:
 class _FakeSSEResponse:
     def __init__(self, lines: list[bytes], status: int = 200):
         self.status = status
-        self._lines = lines
+        self.content = _FakeAsyncLineIter(lines)
 
     async def __aenter__(self):
         return self
@@ -305,10 +304,6 @@ class _FakeSSEResponse:
 
     async def read(self):
         return b""
-
-    @property
-    def content(self):
-        return _FakeAsyncLineIter(self._lines)
 
 
 class _FakeSessionForSSE:
@@ -347,10 +342,7 @@ class _FakeWebhookRequest:
 
 
 async def _run_webhook_handler(req: "_FakeWebhookRequest") -> dict:
-    """asyncio.create_task внутри webhook_handler запускает обработку апдейта не
-    дожидаясь её завершения — один await asyncio.sleep(0) после вызова даёт
-    планировщику шанс выполнить уже запланированную задачу (фейковый обработчик
-    ниже не делает собственных await, поэтому этого достаточно для детерминизма)."""
+    """asyncio.create_task in webhook_handler starts update handling without waiting for it to finish. One await asyncio.sleep(0) after the call gives the scheduler a chance to run the scheduled task (the fake handler below performs no awaits of its own, so this is enough for determinism)."""
     result = await bot.webhook_handler(req)
     await asyncio.sleep(0)
     return result
@@ -388,8 +380,8 @@ class _FakeTikTokResponse:
         import json as _json
         self.status = status
         self._json_body = json_body or {}
-        # Честный фейк: настоящий aiohttp парсит .json() из тела — контент
-        # выводим из того же json, чтобы код шёл боевым путём чтения с капом.
+        # An honest fake: real aiohttp parses .json() from the body — content
+        # derive it from the same JSON so the code follows the production read path with the cap.
         self.headers = {}
         self.content = _FakeDownloadContent([_json.dumps(self._json_body).encode("utf-8")])
 
@@ -404,16 +396,28 @@ class _FakeTikTokResponse:
 
 
 class _FakeTikTokSession:
-    """Мокает aiohttp.ClientSession для целого handle_tiktok: session.get() отдаёт
-    ответ TikWM API. _download_url_bin/_resolve_tiktok_short патчатся отдельно
-    (они принимают сессию, но не обязаны реально использовать её методы)."""
+    """Mocks aiohttp.ClientSession for all of handle_tiktok: session.get() returns
+    a TikWM API response. _download_url_bin/_resolve_tiktok_short are patched separately
+    (they accept a session but need not actually use its methods).
+
+    Raise alone is not a safeguard: production wraps get() in except
+    Exception, so without an assert on session.requests extra requests would
+    become invisible again (review 17.11.2026). The test must check the exact sequence of
+    requests; for the 403 fallback and multiple responses, use the strict _FakeTikwmApiSession."""
     def __init__(self, tikwm_json: dict):
         self._tikwm_json = tikwm_json
+        self.requests: list[str] = []
 
     def get(self, url, *args, **kwargs):
+        # Request accounting (review 17.11.2026): the fake used to repeat one payload any
+        # number of times and allow foreign hosts, making extra network calls invisible in
+        # E2E tests. A repeated TikWM call or an unknown host is now an error.
+        self.requests.append(url)
         if "tikwm.com/api" in url:
+            if sum("tikwm.com/api" in u for u in self.requests) > 1:
+                raise AssertionError(f"extra TikWM request: {url}")
             return _FakeTikTokResponse(200, self._tikwm_json)
-        return _FakeTikTokResponse(200, {})
+        raise AssertionError(f"unexpected E2E request: {url}")
 
 
 class _FakeTikwmApiResponse:
@@ -421,8 +425,8 @@ class _FakeTikwmApiResponse:
         import json as _json
         self.status = status
         self._json_body = json_body or {}
-        # Явно заданные байты (включая пустые) едут и в read(), и в стрим,
-        # как у настоящего ответа.
+        # Explicitly supplied bytes (including empty ones) go to both read() and the stream,
+        # like a real response.
         self._body_bytes = body_bytes if body_bytes is not None else _json.dumps(self._json_body).encode("utf-8")
         self.headers = {}
         self.content = _FakeDownloadContent([self._body_bytes])
@@ -441,10 +445,10 @@ class _FakeTikwmApiResponse:
 
 
 class _FakeTikwmApiSession:
-    """session.get(url) — очередь заранее заготовленных ответов (по одному на
-    каждый вызов, в порядке вызова) плюс список реально запрошенных URL/заголовков —
-    тесты ниже проверяют и содержимое ответов, и сам порядок/число обращений, и
-    заголовки, с которыми ушёл каждый запрос."""
+    """session.get(url) is a queue of prepared responses (one per call, in call
+    order) plus a list of the URLs/headers actually requested. The tests below
+    check the response contents, the order and number of calls, and the headers
+    sent with each request."""
     def __init__(self, responses: list):
         self._responses = list(responses)
         self.requested_urls: list[str] = []
@@ -457,8 +461,8 @@ class _FakeTikwmApiSession:
 
 
 class _FakeDownloadContent:
-    """Мокает resp.content.iter_chunked(n) — асинхронный генератор чанков байт,
-    как у настоящего aiohttp.StreamReader."""
+    """A stand-in for resp.content.iter_chunked(n) that yields the entire chunk without
+    the final-size behavior of aiohttp.StreamReader."""
     def __init__(self, chunks: list[bytes]):
         self._chunks = list(chunks)
 
@@ -594,8 +598,7 @@ class _FakeRichMessage:
 
 
 class _FakeRichBot:
-    """Бот с рич-методами: фиксирует rich_message.html и возвращает НАСТОЯЩИЙ
-    aiogram Message (нужен isinstance-гейт в хелперах)."""
+    """A bot with rich methods: records rich_message.html and returns a REAL aiogram Message (needed for the isinstance gate in helpers)."""
     def __init__(self):
         from aiogram.types import Chat as TgChat
         from aiogram.types import Message as TgMessage

@@ -1,12 +1,12 @@
-"""Живой замер агентного цикла: что модель просит искать, за сколько шагов и что находит.
+"""Live measurement of the agent loop: what the model asks to search for, how many steps it takes, and what it finds.
 
-Меряет не «пришлился ли блок», а поведение надстройки в бою: число планирующих
-вызовов, число и формулировки запросов, долинувших источников, время фазы и токены.
-Ключ только из окружения или .env, значение нигде не печатается.
-Запуск:  python eval/agent_loop_probe.py
-Переменные прогона: PROBE_EFFORT (например, high — уровень фиксируется, и вместе с
-ним потолок поисков становится равен двум: проверяется, уточняет ли модель запрос
-после первой выдачи) и LUMEN_ENV_DIR (где искать .env при запуске из worktree).
+Measures not “whether the block arrived,” but the overlay's behavior in practice: the number of planning
+calls, the number and wording of queries, failed sources, phase time, and tokens.
+The key comes only from the environment or .env; its value is never printed.
+Run:  python eval/agent_loop_probe.py
+Run variables: PROBE_EFFORT (for example, high — the level is pinned, and with
+it the search cap becomes two: this checks whether the model refines the query
+after the first result) and LUMEN_ENV_DIR (where to find .env when running from a worktree).
 """
 from __future__ import annotations
 
@@ -19,14 +19,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-# .env живёт только в общем checkout: worktree его не получает (gitignore), а
-# импорты берутся из worktree, где лежит проверяемый код.
+# .env lives only in the shared checkout: a worktree does not receive it (gitignore), while
+# imports come from the worktree containing the code under test.
 ENV_FILE = Path(os.getenv("LUMEN_ENV_DIR", r"C:/Users/egork/Documents/Default Project/Lumen")) / ".env"
 
 BASE_DEFAULT = "https://api.munito.ai/inference/v1"
 
-# Вопросы, где ответ обязан быть датированным: разные намерения из живой выдачи,
-# а не одна тема. Первый блок — то, что ловит детектор свежести.
+# Questions whose answers must be dated: varied intents from live output,
+# not a single topic. The first block is what the freshness detector catches.
 QUESTIONS = [
     "кто сейчас главный тренер сборной Беларуси по футболу",
     "какая ключевая ставка ЦБ России",
@@ -58,7 +58,7 @@ def _env(name: str, default: str = "") -> str:
 
 
 def _payload_stats() -> dict:
-    """Сколько запросов и токенов ушло: считаем по обёртке _munito_request."""
+    """How many requests and tokens were sent: counted through the _munito_request wrapper."""
     return {"requests": 0, "prompt": 0, "completion": 0, "thinking": 0, "errors": 0}
 
 
@@ -100,8 +100,8 @@ async def main() -> None:
         return data
 
     async def fake_build(chat_id, user_text, model_id, *, history_meta=None, current_parts=None):
-        # Тот же системный текст, что уходит в бой, но без состояния чата и фото:
-        # замеряется цикл, а не сборка истории.
+        # The same system text sent in production, but without chat state or photos:
+        # the loop is measured, not history assembly.
         return [{"role": "system", "content": bot.get_system_prompt(model_id)},
                 {"role": "user", "content": user_text}]
 
@@ -112,9 +112,9 @@ async def main() -> None:
     print(f"голова: {head} · хост {base} · вопросов {len(QUESTIONS)}")
     rows = []
     for question in QUESTIONS:
-        # PROBE_EFFORT фиксирует уровень, а с ним и потолок поисков: при high
-        # лимит равен двум, и прогон отвечает на вопрос «уточняет ли модель
-        # запрос, увидев выдачу» (после правки 12.11.2026).
+        # PROBE_EFFORT pins the level and the search cap: at high the
+        # limit is two, and the run answers whether the model refines the
+        # query after seeing results (after the 12.11.2026 change).
         effort = (os.getenv("PROBE_EFFORT", "").strip()
                   or pick_reasoning_effort(question, needs_freshness=True))
         limit = agent_max_searches(effort)

@@ -1,491 +1,490 @@
-# Результаты harness-eval (21.10.2026)
+# Harness-eval results (21.10.2026)
 
-Эксперимент: помогает ли автоматическая правка `AGENTS.md` агенту решать задачи
-(метод из google-research/harness2, но без самого фреймворка).
+Experiment: does automatically editing `AGENTS.md` help an agent solve tasks
+(the method from google-research/harness2, but without the framework itself).
 
-## Условия
+## Conditions
 
-- Агент: OpenCode CLI v2.1.2, модель `opencode/glm-5.3-flash-free` (бесплатная).
-- Редактор: `opencode/nemotron-3-ultra-free`. Google-модели из этого аккаунта
-  недоступны («User location is not supported»), так что модель из статьи
-  (Gemini 3.5 Flash) воспроизвести не удалось.
-- Задачи: 7 штук из истории репозитория (fix-коммит меняет код и тесты). Песочница
-  на `fix^` + тесты из `fix`; целевые тесты (FAIL_TO_PASS) посчитаны эмпирически.
-- Судья: гейт репозитория (`pytest -q` + `pyflakes`), как в CI.
-- Варианты обвязки:
-  - **base** — текущий `AGENTS.md`;
-  - **weak** — `AGENTS.md` из двух строк (контроль: влияет ли файл вообще);
-  - **candidate** — `AGENTS.md`, предложенный редактором по отчётам о базовых
-    прогонах: 0 удалённых строк, добавлен раздел «Shell and tooling rules»;
-  - **fixed** — `AGENTS.md` с двумя ручными строками про PowerShell и форму гейта
-    для Windows (вариант, который в итоге предложен владельцу).
+- Agent: OpenCode CLI v2.1.2, model `opencode/glm-5.3-flash-free` (free).
+- Editor: `opencode/nemotron-3-ultra-free`. Google models were unavailable from this account
+  ("User location is not supported"), so the model from the article
+  (Gemini 3.5 Flash) could not be reproduced.
+- Tasks: 7 items from the repository history (a fix commit changes code and tests). The sandbox
+  starts at `fix^` with tests from `fix`; the target tests (FAIL_TO_PASS) were determined empirically.
+- Judge: the repository gate (`pytest -q` + `pyflakes`), as in CI.
+- Harness variants:
+  - **base** — the current `AGENTS.md`;
+  - **weak** — a two-line `AGENTS.md` (control: whether the file has any effect at all);
+  - **candidate** — an `AGENTS.md` proposed by the editor based on reports from baseline
+    runs: 0 deleted lines, with a "Shell and tooling rules" section added;
+  - **fixed** — an `AGENTS.md` with two manual lines about PowerShell and the gate form
+    for Windows (the variant ultimately proposed to the owner).
 
-## Итоги
+## Summary
 
-| Задача | base | candidate | fixed | weak |
+| Task | base | candidate | fixed | weak |
 |---|---|---|---|---|
-| format-newlines-br | решено 311с | решено 675с | решено 329с | решено 155с |
-| format-table-separator-bound | решено 337с | решено 469с | решено 265с | решено 192с |
-| presplit-glued-bullets | решено 212с | решено 248с | решено 309с | решено 175с |
-| state-corrupt-index | решено 262с | решено 512с | решено 242с | решено 282с |
-| state-dirty-counters | решено 353с | решено 406с | решено 328с | решено 344с |
-| streaming-catchup-throttle | решено 340с | решено 537с | решено 529с | решено 348с |
-| tiktok-dns-private-ips | решено 580с | решено 501с | решено 360с | решено 319с |
+| format-newlines-br | solved 311s | solved 675s | solved 329s | solved 155s |
+| format-table-separator-bound | solved 337s | solved 469s | solved 265s | solved 192s |
+| presplit-glued-bullets | solved 212s | solved 248s | solved 309s | solved 175s |
+| state-corrupt-index | solved 262s | solved 512s | solved 242s | solved 282s |
+| state-dirty-counters | solved 353s | solved 406s | solved 328s | solved 344s |
+| streaming-catchup-throttle | solved 340s | solved 537s | solved 529s | solved 348s |
+| tiktok-dns-private-ips | solved 580s | solved 501s | solved 360s | solved 319s |
 
-| Показатель | base | candidate | fixed | weak |
+| Metric | base | candidate | fixed | weak |
 |---|---|---|---|---|
-| Решено | 7/7 | 7/7 | 7/7 | 7/7 |
-| Правил тесты | 0 | 0 | 0 | 0 |
-| Задачи с unix-командами | 5 | 1 | 0 | 4 |
-| Запустил pyflakes | 7/7 | 7/7 | 7/7 | 0/7 |
-| Запустил pytest | 7/7 | 7/7 | 7/7 | 7/7 |
-| Суммарное время | 2395с | 3348с | 2362с | 1814с |
-| Всего команд в шелле | 77 | 76 | 67 | 48 |
+| Solved | 7/7 | 7/7 | 7/7 | 7/7 |
+| Edited tests | 0 | 0 | 0 | 0 |
+| Tasks with Unix commands | 5 | 1 | 0 | 4 |
+| Ran pyflakes | 7/7 | 7/7 | 7/7 | 0/7 |
+| Ran pytest | 7/7 | 7/7 | 7/7 | 7/7 |
+| Total time | 2395s | 3348s | 2362s | 1814s |
+| Total shell commands | 77 | 76 | 67 | 48 |
 
-## Что это значит
+## What this means
 
-1. **Потолка нет.** Все три обвязки решают 7/7. На таких задачах «починить баг с
-   падающими тестами» содержимое `AGENTS.md` не меняет результат — работают модель и
-   сами тесты. Автоправка правил тут выигрыша не даёт.
-2. **Разница видна только в дисциплине.** Слабая обвязка не знает про pyflakes и
-   ни разу его не запустила — гейт формально «зелёный» по тестам, но неполный.
-   Полный `AGENTS.md` гейт всегда прогоняет.
-3. **Автоправка решает то, что видит, но платит за это.** Unix-команды в PowerShell
-   (`pytest ... | tail -30`, `tail` там не существует) сократились с 5 задач до 1, но
-   суммарное время выросло на 40% (3348с против 2395с): правил стало больше, контекст
-   дороже.
-4. **Автоправка без валидатора даёт противоречие.** В список «никогда не
-   использовать» редактор записал `python`, `pip`, `python -m` — а гейт требует
-   `python -m pytest`. Правило отменяет гейт. В harness2 за это отвечают валидаторы
-   в каркасе (у них есть свои проверки дерева и защита от утечек в рубрику), в моей
-   упрощённой версии их нет.
-5. **Две ручные строки бьют автоправку.** Вариант `fixed` (две строки про PowerShell
-   и форма гейта для Windows) дал 0 unix-команд, 67 команд в шелле вместо 77 и время
-   2362с против 2395с у базы — то есть меньше шума и быстрее, при полном гейте.
-   Автоправка на том же месте дала 1 unix-команду и +40% времени.
-6. **Остаточная unix-команда в candidate — показательна.** Агент выполнил гейт как
-   `bash -lc 'pyflakes bot.py lumen_*.py ...'`: то есть обернул в bash, чтобы
-   получить линуксовые глобы. Причина в самом `AGENTS.md`: строка гейта записана в
-   CI-виде (линукс), а хост — Windows, PowerShell.
+1. **No ceiling.** All three harnesses solve 7/7. On tasks like these, "fix a bug with
+   failing tests," the content of `AGENTS.md` does not change the outcome — the model and
+   the tests themselves do the work. Automatically editing the rules provides no gain here.
+2. **The difference shows only in discipline.** The weak harness does not know about pyflakes and
+   never ran it — the gate is formally "green" on tests, but incomplete.
+   The full `AGENTS.md` always runs the gate.
+3. **Automatic edits solve what they can see, but at a cost.** Unix commands in PowerShell
+   (`pytest ... | tail -30`, where `tail` does not exist) dropped from 5 tasks to 1, but
+   total time rose by 40% (3348s versus 2395s): there are more rules, and the context
+   costs more.
+4. **Automatic edits without a validator create a contradiction.** The editor added `python`, `pip`, and `python -m` to the "never use" list — but the gate requires
+   `python -m pytest`. The rule overrides the gate. In harness2, validators
+   in the framework handle this (they have their own tree checks and protection against leaks into the rubric); my
+   simplified version has none.
+5. **Two manual lines beat automatic edits.** The `fixed` variant (two lines about PowerShell
+   and the gate form for Windows) produced 0 Unix commands, 67 shell commands instead of 77, and a time of
+   2362s versus 2395s for the baseline — that is, less noise and faster, with a complete gate.
+   Automatic edits in the same place produced 1 Unix command and 40% more time.
+6. **The remaining Unix command in candidate is telling.** The agent ran the gate as
+   `bash -lc 'pyflakes bot.py lumen_*.py ...'`: that is, it wrapped the command in bash to
+   get Linux globs. The reason is in `AGENTS.md` itself: the gate line is written in
+   CI form (Linux), while the host is Windows, PowerShell.
 
-## Побочно найденное и починенное
+## Incidental issues found and fixed
 
-Полный прогон тестов на Windows заканчивался мусором в stderr: «Unclosed client
-session» от aiohttp и «--- Logging error ---» от логгера, который пытается
-отформатировать запись уже во время выхода интерпретатора. Код возврата pytest при
-этом был 0 — шум вводил в заблуждение и меня (и агента: он тратил по 2-3 команды на
-разбор «упавшего» прогона).
+A full test run on Windows ended with noise in stderr: "Unclosed client
+session" from aiohttp and "--- Logging error ---" from a logger that tried to
+format a record while the interpreter was already exiting. The pytest exit code in
+this case was 0 — the noise was misleading and changed me (and the agent: it spent 2-3 commands each time
+analyzing a supposedly "failed" run).
 
-Причины и правки:
+Causes and fixes:
 
-- `tests/test_bot_commands.py`: юнит-тесты дёргали настоящую `aiohttp.ClientSession`
-  бота. Добавлена автофикстура, подменяющая `_get_http_session` заглушкой.
-- (историческая запись; `_fish_audio_tts_bytes`, `FISH_AUDIO_ENABLED` и OpenRouter удалены 05.11.2026)
-- `lumen_commands._fish_audio_tts_bytes`: сессия открывалась до проверки ключа
-  OpenRouter. Теперь при пустом ключе возвращается None сразу, без сессии (в
-  продукте ветка и так выключена флагом FISH_AUDIO_ENABLED, правка убирает мусор из
-  юнитов и лишнюю сессию в принципе).
+- `tests/test_bot_commands.py`: unit tests invoked the bot's real `aiohttp.ClientSession`.
+  An autofixture was added to replace `_get_http_session` with a stub.
+- (historical note; `_fish_audio_tts_bytes`, `FISH_AUDIO_ENABLED`, and OpenRouter were removed on 05.11.2026)
+- `lumen_commands._fish_audio_tts_bytes`: the session opened before the key was checked
+  for OpenRouter. Now, if the key is empty, the function returns None immediately, without a session (in
+  the product, the branch was already disabled by FISH_AUDIO_ENABLED; the fix removes noise from
+  unit tests and an unnecessary session in general).
 
-После правок: 999 тестов прошли, stderr пуст, код возврата 0.
+After the fixes: 999 tests passed, stderr was empty, exit code 0.
 
-## Вывод
+## Conclusion
 
-Harness²-подход («агент сам чинит свою обвязку») на этом репозитории не окупается:
-потолок достигнут без всякой автоправки, а сама автоправка даёт побочный эффект
-(противоречие с гейтом) и удорожание по времени.
+The Harness² approach ("the agent fixes its own harness") does not pay off on this repository:
+the ceiling was reached without any automatic edits, while the edits themselves have a side effect
+(a contradiction with the gate) and increase the time cost.
 
-Что стоит забрать:
+What is worth keeping:
 
-- две ручные строки в `AGENTS.md` про PowerShell и форму гейта для Windows —
-  измеримый выигрыш: 0 unix-команд вместо 5, меньше команд в шелле, гейт не
-  пострадал;
-- «уроки с доказательствами» (вторая рекурсия harness2) — дёшево, без каркаса:
-  после провала записать в файл правило со ссылкой на провал;
-- сам измеритель `eval/` — им можно проверять любое будущее изменение `AGENTS.md`.
+- two manual lines in `AGENTS.md` about PowerShell and the gate form for Windows —
+  a measurable gain: 0 Unix commands instead of 5, fewer shell commands, and the gate was
+  unaffected;
+- "evidence-backed lessons" (the second recursion of harness2) — cheap, without a framework:
+  after a failure, write a rule into the file with a reference to that failure;
+- the measurement tool `eval/` itself — it can be used to check any future change to `AGENTS.md`.
 
-## Ограничения
+## Limitations
 
-- По одному прогону на задачу и на вариант: разброс не измерен, выводы качественные.
-- Задачи одного типа (починка бага по падающим тестам) — на них правила обвязки
-  почти не влияют; на других типах (рефакторинг, релиз, правка промпта) эффект
-  может быть иным, но это уже другой эксперимент.
-- MCP-серверы в песочнице отключены: прогоны быстрее и без сети, но это не ровно
-  обычная обстановка агента.
+- One run per task and per variant: variance was not measured; the conclusions are qualitative.
+- Tasks of a single type (fixing a bug from failing tests) — harness rules have
+  almost no effect on them; on other types (refactoring, releases, prompt edits) the effect
+  may differ, but that is already a different experiment.
+- MCP servers were disabled in the sandbox: runs were faster and network-free, but this is not exactly
+  the agent's usual environment.
 
 ---
 
-# Замер агентного цикла поиска (12.11.2026)
+# Agent search-loop measurement (12.11.2026)
 
-Эксперимент: приносит ли цикл `lumen_agent.run_search_turn` больше свежих
-источников, чем прежний один внешний поиск по сырой фразе человека, и чего это
-стоит по времени и токенам. Инструмент — `eval/agent_loop_probe.py`, голова
-`deepseek-ai/deepseek-v4.1-flash-1017`, хост глобальный, ключ владельца.
+Experiment: does the `lumen_agent.run_search_turn` loop bring in more fresh
+sources than the previous single external search on the person's raw phrase, and what does it
+cost in time and tokens? The tool is `eval/agent_loop_probe.py`, the head is
+`deepseek-ai/deepseek-v4.1-flash-1017`, the host is global, and the key belongs to the owner.
 
-## Условия
+## Conditions
 
-- 12 реальных свежих вопросов из разных намерений (тренер, ставка, билет, релиз
-  модели, погода, курс, матч, версия пакета, сериал, руководитель, выбор железа,
-  новости страны).
-- `effort` по каждому вопросу посчитан автовыбором (`medium` — такова форма этих
-  вопросов), потолок поиска из усилия = 1.
-- Системный текст боевой (`get_system_prompt`), история и прошлые фото отключены:
-  меряется цикл, а не сборка контекста.
+- 12 real, recent questions covering different intents (trainer, rate, ticket, model release,
+  weather, exchange rate, match, package version, TV series, executive, hardware choice,
+  country news).
+- `effort` was selected automatically for each question (`medium` — that is the form of these
+  questions), and the search cap derived from effort = 1.
+- The production system text was used (`get_system_prompt`); history and past photos were disabled:
+  the measurement covers the loop, not context assembly.
 
-## Итоги
+## Summary
 
-| Метрика | Значение |
+| Metric | Value |
 |---|---|
-| цикл позвал поиск | 11 из 12 |
-| источники найдены | 11 из 12 (3-5 штук на вопрос) |
-| среднее время фазы | 3.12 с (разброс 2.5-4.6 с, отказ от поиска 0.59 с) |
-| запросов к провайдеру | 12, ошибок 0, 429 не было |
-| токены | in 69 549, out 1 370, из них размышление 523; ~5.9 К токенов на планирующий вызов |
-| число поисков > 1 | 0 — при потолке 1 уточнение физически не происходит |
+| loop invoked search | 11 out of 12 |
+| sources found | 11 out of 12 (3-5 per question) |
+| average phase time | 3.12 s (range 2.5-4.6 s, search skipped in 0.59 s) |
+| provider requests | 12, errors 0, no 429s |
+| tokens | in 69,549, out 1,370, of which reasoning 523; ~5.9K tokens per planning call |
+| searches > 1 | 0 — with a cap of 1, refinement is physically impossible |
 
-Формулировки запросов модель писала сама и они лучше исходной фразы: «ключевая
-ставка ЦБ РФ сегодня», «стоимость билета поезд Минск Москва 2026», «погода в
-Гомеле на завтра 13 ноября 2026» (год и дату подставила из контекста). Один
-вопрос («кто возглавляет NVIDIA сейчас») цикл проигнорировал и ответил бы по
-памяти — это и есть цена права модели выбирать.
+The model wrote the query formulations itself, and they were better than the original phrase: "current
+Central Bank of Russia key rate today," "Minsk to Moscow train ticket price 2026," "weather in
+Gomel tomorrow, November 13, 2026" (it inserted the year and date from context). One
+question ("who currently leads NVIDIA") was ignored by the loop, which would have answered from
+memory — that is the price of giving the model the right to choose.
 
-## Ограничения
+## Limitations
 
-- Один прогон этих двенадцати вопросов; вечером того же дня он повторён ещё дважды,
-  и числитель поиска остался 11 из 12 — но это три выборки по n=12, а не измеренный
-  разброс времени.
-- При `effort=medium` потолок поиска = 1, поэтому этот прогон про уточнение ничего не
-  говорит; «уточняет ли модель запрос, увидев выдачу» измерено вечером тем же зондом
-  при потолке 2 — см. раздел «Потолок в два поиска» ниже.
-- Планирующий вызов в прозоне идёт без истории чата; боевой путь добавит к её
-  цене, и прошлые фото (выключены `attach_past=False`) — реальная цена выше.
-- Источники считаются найденными, а не достаточными: «есть ли в блоке ответ»
-  меряет другой зонд, `eval/search_parity_probe.py` (10/10 на 12.11.2026).
+- One run of these twelve questions; it was repeated twice more that evening,
+  and the search count remained 11 out of 12 — but these are three samples with n=12, not a measured
+  time variance.
+- With `effort=medium`, the search cap = 1, so this run says nothing about
+  refinement; "does the model refine its query after seeing the results" was measured that evening with the same probe
+  at a cap of 2 — see the "Cap of two searches" section below.
+- The planning call in the probe runs without chat history; the production path will add to its
+  cost, as will past photos (disabled with `attach_past=False`) — the real cost is higher.
+- Sources are counted as found, not sufficient: "does the block contain the answer"
+  is measured by a different probe, `eval/search_parity_probe.py` (10/10 on 12.11.2026).
 
-## Сетка усилия: автовыбор против человеческой метки (12.11.2026)
+## Effort grid: automatic selection versus human labels (12.11.2026)
 
-`eval/effort_grid.py` — 46 формулировок с ручной меткой уровня. Это детерминированная
-линейка, как `search_trigger_corpus`: судья не нужен, потому что проверяется правило,
-а не вкус модели. Порог из плана: не меньше 80 % совпадений и ноль промахов
-«думает меньше, чем надо».
+`eval/effort_grid.py` — 46 formulations with manually assigned levels. This is a deterministic
+yardstick, like `search_trigger_corpus`: no judge is needed, because the rule is being checked,
+not the model's taste. The plan's threshold: at least 80% matches and zero misses of
+"thinks less than needed."
 
-| Прогон | Совпадений | недо-усилие |
+| Run | Matches | Under-effort |
 |---|---|---|
-| сигнал «знак вопроса + цифра + не короче трёх слов» | 40/46 = 87 % | 2: «кто такие викинги» и «почему небо голубое» уезжали на low |
-| сигнал «вопросительные слова 25 языков + просьбы коротко не только RU + слова и длина» | 46/46 = 100 % | 0 |
+| signal "question mark + digit + at least three words" | 40/46 = 87% | 2: "who are the Vikings" and "why is the sky blue" fell to low |
+| signal "question words in 25 languages + requests for brevity not only in RU + words and length" | 46/46 = 100% | 0 |
 
-Метка в сетке была неверной, а не код (такой же кейз в тестах — тоже): «реши ещё раз, ты не прав,
-перепроверь расчёт» человек просит думать ВНИМАТЕЛЬНЕЕ (ступень вверх, high), а метка
-стояла medium. Старая метка была следствием прежнего правила «короче сорока знаков —
-значит болтовня», которое роняло базу в low и тем самым прятало повышения.
+The label in the grid was wrong, not the code (the same case in the tests was also wrong): "solve it again, you're wrong,
+recheck the calculation" is a request to think MORE CAREFULLY (one level up, high), but the label
+was medium. The old label resulted from the previous rule "shorter than forty characters —
+that means small talk," which dropped the baseline to low and thereby hid the increase.
 
-Что сетка НЕ мерит:
+What the grid does NOT measure:
 
-- Правильность ответов. Связь уровня с фактами стоит на одном замере арифметики
-  (glm-5.3-flash: 64 при low против верных 60 при high, 12.11.2026); на остальных
-  вопросах метки — это согласие с правилом, а не доказанная точность.
-- Орфографию тех списков, которых нет в корпусе бота: из 67 не-латинских
-  вопросительных форм 45 не встречаются в строках самого бота, то есть локально
-  сверить их нечем; ошибиться можно только в лишнюю ступень (короткая реплика
-  уйдёт с low на medium, а не наоборот).
-- Письменности без пробелов, кроме тайского: хинди и бенгали покрыты словами,
-  но вопрос, написанный слитно и без знака вопроса, сигнал не увидит.
+- Answer correctness. The relationship between level and facts rests on a single arithmetic
+  measurement (glm-5.3-flash: 64 at low versus 60 correct at high, 12.11.2026); on the remaining
+  questions, the labels represent agreement with the rule, not proven accuracy.
+- Spelling of lists that are absent from the bot's corpus: of 67 non-Latin
+  question-word forms, 45 do not appear in the bot's own strings, so there is no local way to
+  verify them; an error can only add a level (a short reply
+  will move from low to medium, not the reverse).
+- Scripts without spaces, except Thai: Hindi and Bengali are covered by words,
+  but a question written without spaces and without a question mark will not be detected by the signal.
 
-## Повтор прогона после правки сигнала усилия (12.11.2026, вечер)
+## Repeat run after the effort signal was edited (12.11.2026, evening)
 
-Тот же зонд, те же 12 вопросов, тот же потолок поиска (medium = 1), но уже с новым
-сигналом вопроса в `pick_reasoning_effort`.
+The same probe, the same 12 questions, the same search cap (medium = 1), but now with the new
+question signal in `pick_reasoning_effort`.
 
-| Метрика | Значение |
+| Metric | Value |
 |---|---|
-| цикл позвал поиск | 11 из 12 (как и утром) |
-| источники найдены | 11 из 12 |
-| среднее время фазы | 4.36 с (утром 3.12 с); медиана 4.66 с, p95 по 12 замерам 4.94 с, худший 5.13 с — планка «p95 внутри 40 с» взята с восьмикратным запасом |
-| запросов к провайдеру | 12, ошибок 0 |
-| планирующий вызов | 0.73 с, in 69 549 / out 1 350 / thinking 439 токенов, ~5.9К на запрос |
+| loop invoked search | 11 out of 12 (same as in the morning) |
+| sources found | 11 out of 12 |
+| average phase time | 4.36 s (3.12 s in the morning); median 4.66 s, p95 across 12 measurements 4.94 s, worst 5.13 s — the "p95 within 40 s" target has an eightfold margin |
+| provider requests | 12, errors 0 |
+| planning call | 0.73 s, in 69,549 / out 1,350 / thinking 439 tokens, ~5.9K per request |
 
-Ухудшение времени к правке отношения не имеет: в этом прогоне DuckDuckGo lite, DuckDuckGo
-html и Wikidata упали по TimeoutError, и блок собрался из Bing News и Google News
-(по 5 сниппетов вместо датированных строк Wikidata и DuckDuckGo). Правка сигнала не трогает ни маршрут свежести, ни
-потолок поисков — она меняет только low/medium на коротких репликах без вопросительных
-слов, а все 12 вопросов этого зонда и раньше были medium.
+The time increase is unrelated to the edit: in this run, DuckDuckGo lite, DuckDuckGo
+html, and Wikidata all raised TimeoutError, and the block was assembled from Bing News and Google News
+(5 snippets each instead of dated Wikidata and DuckDuckGo rows). The signal edit does not touch either the freshness route or
+the search cap — it only changes low/medium on short replies without question
+words, and all 12 questions in this probe were already medium.
 
 
-## Перезапуск детерминированных замеров вечером 12.11.2026
+## Repeat of the deterministic measurements on the evening of 12.11.2026
 
-Оба запускались после правки сигнала усилия и после правок документов — чтобы пороги
-плана (§6.1, §6.2) опирались на текущее дерево, а не на утренний снимок.
+Both ran after the effort signal was edited and after the documents were edited — so the plan's thresholds
+(§6.1, §6.2) were based on the current tree, not the morning snapshot.
 
-| Замер | Результат | Что это значит |
+| Measurement | Result | What this means |
 |---|---|---|
-| `eval/search_trigger_corpus.py` | должен искать 35 из 35, промахов 0; не должны 20 из 20, ложных 0 | детектор свежести не сдвинулся ни в одну сторону после правки усилия; вторая панель (20 болтливых формулировок) — это и есть проверка «не врал про поиск» на текстовом уровне: ни одна короткая реплика не зовёт поиск и не получает пометку «без live-поиска» |
-| `eval/search_parity_probe.py` | 10 из 10, фаза 4.0-7.5 с на вопрос | в собранном блоке есть обязательный токен ответа; десятый кейз («Абдулманова Угона») обязан быть пустым, и он пуст |
+| `eval/search_trigger_corpus.py` | should search 35 out of 35, misses 0; should not search 20 out of 20, false positives 0 | the freshness detector did not shift in either direction after the effort edit; the second panel (20 conversational formulations) is the text-level check for "not lying about search": not one short reply invokes search or receives a "without live search" label |
+| `eval/search_parity_probe.py` | 10 out of 10, phase 4.0-7.5 s per question | the assembled block contains the required answer token; the tenth case ("Ugoona Abdulmanova") must be empty, and it is empty |
 
-Оговорка к скорости: в этом прогоне DuckDuckGo lite, DuckDuckGo html и Wikidata падали по
-TimeoutError на каждом вопросе, и блок собирался из Bing News, Bing Web и Google News.
-Базовый замер 11.11.2026 давал 4 с вместо прежних 7 с (строка журнала в docs/PROMPT_EVAL.md);
-сегодня они медленнее, и это состояние сети, а не регрессия кода.
+A caveat about speed: in this run, DuckDuckGo lite, DuckDuckGo html, and Wikidata raised
+TimeoutError on every question, and the block was assembled from Bing News, Bing Web, and Google News.
+The baseline measurement on 11.11.2026 gave 4 s instead of the previous 7 s (the log entry in docs/PROMPT_EVAL.md);
+today they are slower, and this is the state of the network, not a code regression.
 
-Что порог §6.4 («бот не врёт про поиск») реально покрывает: корпус выше (ни одного
-ложного вызова), пометка «без live-поиска» в code-пути и — с 13.11.2026 — отдельный
-зонд `eval/no_search_honesty_probe.py`, который слушает именно текст ответа
-(0 заявок об источниках из 10, см. раздел ниже).
+What the §6.4 threshold ("the bot does not lie about search") actually covers: the corpus above (no
+false invocations), the "without live search" label in the code path, and — since 13.11.2026 — a separate
+probe, `eval/no_search_honesty_probe.py`, which listens specifically to the answer text
+(0 claims about sources out of 10, see the section below).
 
 
-## Карта возможностей Munito: живой прогон 12.11.2026
+## Munito capability map: live run on 12.11.2026
 
-До этого часа утверждение «gemma-4-12b и pplx-decider-v1.2 отвечают 400 на
-`reasoning_effort`, текстовые головы принимают» висело на разовых вызовах, которых
-в репозитории не было: `eval/munito_probe.py` ни `tools`, ни `reasoning_effort` не
-проверяет, а прозондированный 05.11 `probe-tools` снимал другие модели и на другом
-провайдере. Добавлен `eval/provider_caps_probe.py` — 10 обращений, по одному на пару
-(модель, параметр), max_tokens=8, ключ из основного дерева, значений нигде не печатает.
+Before this hour, the claim that "gemma-4-12b and pplx-decider-v1.2 return 400 on
+`reasoning_effort`, while text heads accept it" rested on one-off calls that
+were not in the repository: `eval/munito_probe.py` checked neither `tools` nor `reasoning_effort`,
+and the `probe-tools` run from 05.11 sampled other models and on a different
+provider. `eval/provider_caps_probe.py` was added — 10 requests, one per pair
+(model, parameter), max_tokens=8, with a key from the main tree; it never prints the values.
 
-| Модель | `reasoning_effort` | `tools` |
+| Model | `reasoning_effort` | `tools` |
 |---|---|---|
-| deepseek-ai/deepseek-v4.1-flash-1017 | принято (200, 0.46 с) | принято (200, 0.32 с) |
-| zai-org/glm-5.3-flash | принято (200, 0.44 с) | принято (200, 0.35 с) |
-| deepseek-ai/deepseek-v4-flash | принято (200, 0.27 с) | принято (200, 0.35 с) |
-| google/gemma-4-12b | 400 «'reasoning_effort' is not supported» (0.16 с) | принято (200, 0.73 с) |
-| perplexity-ai/pplx-decider-v1.2 | 400 (0.15 с) | 400 (0.14 с) |
+| deepseek-ai/deepseek-v4.1-flash-1017 | accepted (200, 0.46 s) | accepted (200, 0.32 s) |
+| zai-org/glm-5.3-flash | accepted (200, 0.44 s) | accepted (200, 0.35 s) |
+| deepseek-ai/deepseek-v4-flash | accepted (200, 0.27 s) | accepted (200, 0.35 s) |
+| google/gemma-4-12b | 400 "'reasoning_effort' is not supported" (0.16 s) | accepted (200, 0.73 s) |
+| perplexity-ai/pplx-decider-v1.2 | 400 (0.15 s) | 400 (0.14 s) |
 
-Отказ — это `invalid_request_error` с `param`, а не таймаут и не 5xx, поэтому
-`_MUNITO_CAPS` имеет право молча снимать параметр для этих двух моделей, а не
-переносить вину на сеть. Ошибка 400 на «не тот параметр» приходит за 0.14-0.16 с —
-то есть тест в `tests/test_bot_routes.py`, который эмулирует её фейковым 400,
-проверяет поведение кода, а не факт провайдера: факт теперь у этого прогона.
+The failure is an `invalid_request_error` with a `param`, not a timeout or a 5xx, so
+`_MUNITO_CAPS` may silently drop the parameter for these two models rather than
+blame the network. A 400 for "the wrong parameter" arrives in 0.14-0.16 s —
+that is, the test in `tests/test_bot_routes.py`, which emulates it with a fake 400,
+checks the code's behavior, not a provider fact: the fact now comes from this run.
 
-## Что стоит ответ на живом прогоне персоны (12.11.2026, 25 вопросов)
+## What a live persona run showed (12.11.2026, 25 questions)
 
-Метод: `eval/persona_models.py run --models munito:deepseek-v4.1-flash-1017
---judge munito:zai-org/glm-5.3-flash`, системный промпт боевой, история не
-подмешивается, автовыбор усилия включён (из 25 вопросов 21 ушёл на medium, 4 на
-low). Цифры из лога прогона, он же даёт 50/50.
+Method: `eval/persona_models.py run --models munito:deepseek-v4.1-flash-1017
+--judge munito:zai-org/glm-5.3-flash`, production system prompt, no chat history
+added, automatic effort selection enabled (of 25 questions, 21 went to medium, 4 to
+low). The figures come from the run log, which also gives 50/50.
 
-| Метрика | Значение |
+| Metric | Value |
 |---|---|
-| первый токен | медиана 0.80 с, среднее по итоговой строке инструмента 1.3 с |
-| весь ответ | медиана 4.00 с, среднее 5.4 с, худший 17.9 с |
-| токенов на запрос | 5 461-5 880 (медиана 5 658), два выброса 12.1-12.4 К — вопросы, где модель попросила поиск и блок сниппетов приехал в промпт |
+| first token | median 0.80 s, average 1.3 s according to the tool's final line |
+| entire answer | median 4.00 s, average 5.4 s, worst 17.9 s |
+| tokens per request | 5,461-5,880 (median 5,658), two outliers at 12.1-12.4K — questions where the model requested search and the snippet block arrived in the prompt |
 
-Это и есть цена уровня: на боевом промпте medium добавляет к ответу единицы секунд,
-а не десятки. Раздельный замер «только усилие, промпт тот же» сделан 13.11.2026 пином
-`MUNITO_REASONING_EFFORT=low`: 49/50 против 50/50 на автовыборе. Разница в один балл —
-в пределах шума одного прогона, поэтому «46/50 стало 50/50 благодаря усилию» остаётся
-не утверждением, а подозрением: в прогон 12.11 попали и новый уровень, и клауза
-системного промпта про инструмент из 01d44ec.
+This is the cost of the level: on the production prompt, medium adds single-digit seconds to the answer,
+not tens. A separate measurement, "effort only, same prompt," was made on 13.11.2026 with
+`MUNITO_REASONING_EFFORT=low` pinned: 49/50 versus 50/50 with automatic selection. A one-point difference —
+is within the noise of a single run, so "46/50 became 50/50 thanks to effort" remains
+unproven, only a suspicion: the 12.11 run included both the new level and the system prompt clause
+about the tool from 01d44ec.
 
-## Врёт ли бот про источники, когда поиска нет (13.11.2026)
+## Does the bot lie about sources when there was no search (13.11.2026)
 
-Пункт §6.4 плана («не врёт про поиск») до этого опирался только на корпус
-`eval/search_trigger_corpus.py`, который проверяет вызов поиска, а не текст ответа.
-Добавлен `eval/no_search_honesty_probe.py`: десять свежих вопросов, к боевому
-системному промпту приложена та же пометка, что код кладёт при пустом поиске
-(импортом из `lumen_message_core`, не копией), ответ проверяется на слова заявки об
-источниках и на отрицание рядом.
+Item §6.4 of the plan ("does not lie about search") previously relied only on the corpus
+`eval/search_trigger_corpus.py`, which checks whether search was invoked, not the answer text.
+`eval/no_search_honesty_probe.py` was added: ten recent questions, with the same label attached to the production
+system prompt that the code adds when search is empty
+(imported from `lumen_message_core`, not copied); the answer is checked for words claiming
+sources and for a nearby negation.
 
-| Прогон | Результат |
+| Run | Result |
 |---|---|
-| 10 вопросов (ставка ЦБ, тренер, биткоин, погода, новости, Fable 5.2, канцлер, курс евро, прокат, билеты) | **0 заявок об источниках из 10** |
-| Первый прогон того же зонда | 1 «заявка» — ложная: ответ «Точный курс подтвердить не могу — актуальных данных у меня сейчас нет» классификатор принял за выдачу, потому что отрицание стояло в обратном порядке. Классификатор исправлен, ответы те же |
+| 10 questions (Central Bank rate, trainer, bitcoin, weather, news, Fable 5.2, chancellor, euro exchange rate, rentals, tickets) | **0 claims about sources out of 10** |
+| First run of the same probe | 1 "claim" — false: the answer "I cannot confirm the exact rate — I do not have current data right now" was classified as a source listing because the negation appeared in the opposite order. The classifier was fixed; the answers are unchanged |
 
-Типичный честный ответ из прогона: «Живые цены на завтра я посмотреть не могу —
-доступа к кассам и агрегаторам в этот момент нет, так что цифры ниже
-ориентировочные». То есть пометка «без live-поиска» делает свою работу: модель
-называет цифры как ориентир, а не как найденное.
+A typical honest answer from the run: "I cannot check live prices for tomorrow —
+I do not have access to ticketing systems or aggregators right now, so the figures below
+are approximate." That is, the "without live search" label does its job: the model
+presents figures as estimates, not as findings.
 
-## A/B усилия на персоне: один балл, то есть в пределах шума (13.11.2026)
+## A/B of effort on the persona: one point, that is, within noise (13.11.2026)
 
-Открытый вопрос был таким: можно ли приписать вчерашние 46/50 → 50/50 новому
-уровню усилия. Раздельный замер сделан пином: `MUNITO_REASONING_EFFORT=low`
-(плоское поведение до ветки) против автовыбора, один и тот же системный промпт,
-одни и те же 25 вопросов, один и тот же судья.
+The open question was this: can yesterday's 46/50 → 50/50 be attributed to the new
+effort level. A separate measurement was made with a pin: `MUNITO_REASONING_EFFORT=low`
+(flat behavior before the branch) versus automatic selection, with the same system prompt,
+the same 25 questions, and the same judge.
 
-| Прогон | Баллы | Первый токен | Ответ |
+| Run | Score | First token | Answer |
 |---|---|---|---|
-| усилие запинено на `low` | **49/50** | 1.8 с | 6.7 с |
-| автовыбор (21 вопрос из 25 на medium) | **50/50** | 1.3 с | 5.4 с |
+| effort pinned to `low` | **49/50** | 1.8 s | 6.7 s |
+| automatic selection (21 questions out of 25 at medium) | **50/50** | 1.3 s | 5.4 s |
 
-Вывод: на этой сетке рубрика уже насыщена (49-50 из 50 в обоих плечах), и один
-балл разницы ничего не доказывает — разница усилия здесь меньше разрешения судьи.
-Цифра полезна другим: она запрещает утверждать «50/50 благодаря усилию», и по
-прошлой записи это и было исправлено. Усилие остаётся оправданным не персоной, а
-другим замером — glm-5.3-flash на арифметике (64 при low против верных 60 при high).
+Conclusion: on this grid, the rubric is already saturated (49-50 out of 50 in both arms), and one
+point of difference proves nothing — the effort difference here is below the judge's resolution.
+The figure is useful in another way: it rules out claiming "50/50 thanks to effort," and
+the earlier entry was corrected for this. Effort remains justified not by the persona, but by
+another measurement — glm-5.3-flash on arithmetic (64 at low versus 60 correct at high).
 
-## Стоимость самого сигнала усилия (12.11.2026)
+## Cost of the effort signal itself (12.11.2026)
 
-Метод: `time.perf_counter` на 20 000 вызовах `pick_reasoning_effort`, прогрев
-обязателен; импорт модуля — отдельным процессом.
+Method: `time.perf_counter` over 20,000 calls to `pick_reasoning_effort`, with a mandatory warmup;
+module import was measured in a separate process.
 
-| Что | Значение |
+| What | Value |
 |---|---|
-| импорт `lumen_router_config` | 26-50 мс (первый импорт в процессе, на прогретом дереве ~40 мс) |
-| один вызов на короткой реплике | 4.4 мкс («привет»), 21-35 мкс на реплике со словами-сигналами |
-| 20 000 знаков одним словом после «программ» | 11-13 мс |
-| 200 000 знаков | 103-119 мс |
+| importing `lumen_router_config` | 26-50 ms (first import in a process, ~40 ms on a warm tree) |
+| one call on a short reply | 4.4 μs ("hello"), 21-35 μs on a reply containing signal words |
+| 20,000 characters in one word after "software" | 11-13 ms |
+| 200,000 characters | 103-119 ms |
 
-Рост линейный (20 К/40 К/80 К знаков → 16/32/63 мс), катастрофического
-возврата в регулярках нет: все альтернативы — литералы, а окно дальнего горизонта
-сужено до 25 знаков внутри одной фразы.
+Growth is linear (20K/40K/80K characters → 16/32/63 ms), with no catastrophic
+backtracking in the regexes: all alternatives are literals, and the long-range window
+is narrowed to 25 characters within a phrase.
 
-## Первая ночь в проде: планирующий вызов упирался в потолок (13.11.2026)
+## First night in production: the planning call hit the cap (13.11.2026)
 
-Ветка легла на Space в 14:23, и за первые шесть часов в бою набралось пять планирующих
-вызовов. Другого способа увидеть цикл на настоящем размере промпта не было: в прозоне
-транскрипт короткий, там планирование стоило 0.73 с:
+The branch was deployed to Space at 14:23, and in the first six hours in production there were five planning
+calls. There was no other way to see the loop at a real prompt size: in the probe
+the transcript is short, and planning cost 0.73 s:
 
-| Время | Чат | planning_ms | Исход |
+| Time | Chat | planning_ms | Outcome |
 |---|---|---|---|
-| 14:29:01 | #1a3c4b4f | 2680 | шаги 1, поиск 1, сниппетов 5 |
-| 14:29:54 | #1a3c4b4f | 6351 | модель решила не искать (отказ честный, steps=0) |
-| 14:32:43 | #1a3c4b4f | 8433 | `planning call failed: MunitoAPIError`, поиск не состоялся |
-| 14:57:43 | #1a3c4b4f | 8723 | то же самое, и резервный внешний поиск тоже дал ноль |
-| 15:30:26 | #b571760e | 2000 | шаги 1, поиска 2, сниппетов 10 — уточнение запроса в бою |
+| 14:29:01 | #1a3c4b4f | 2680 | steps 1, searches 1, snippets 5 |
+| 14:29:54 | #1a3c4b4f | 6351 | the model decided not to search (an honest refusal, steps=0) |
+| 14:32:43 | #1a3c4b4f | 8433 | `planning call failed: MunitoAPIError`, search did not happen |
+| 14:57:43 | #1a3c4b4f | 8723 | same thing, and the fallback external search also returned zero |
+| 15:30:26 | #b571760e | 2000 | steps 1, searches 2, snippets 10 — query refinement in production |
 
-Два отказа из пяти — это ровно прежний потолок одного вызова (8 с): планирование у
-Munito на 10-тысячном промпте с размышлением укладывается в него не всегда. Деградация
-отработала как задумано (ответ ушёл обычным маршрутом, карантина модель не получила,
-исключений и падений в логе нет), но права «искать как Claude» человека лишила.
-Потолок одного вызова стал производным от фазы, а не отдельной цифрой: остаток фазы
-минус один внешний поиск, но не больше 16 с; если и на вызов, и на сеть не хватает —
-вызов не берётся вовсе. Замеры прогона 12.11.2026 (медиана 4.66 с, p95 4.94 с) этим не
-отменяются: они про длину фазы целиком при коротком транскрипте.
+Two failures out of five are exactly the previous single-call cap (8 s): planning with
+Munito on a 10,000-token prompt with reasoning does not always fit within it. The fallback
+worked as designed (the answer went through the normal route, the model was not
+quarantined, and there were no exceptions or crashes in the log), but the person was denied
+the right to "search like Claude." The single-call cap is now derived from the phase,
+rather than being a separate number: the phase remainder minus one external search,
+but no more than 16 s; if there is not enough time for both the call and the network,
+the call is not made at all. The measurements from the 12.11.2026 run (median 4.66 s, p95 4.94 s) do not
+invalidate this: they describe the entire phase with a short transcript.
 
-## Потолок в два поиска: уточняет ли модель запрос (12.11.2026, вечер)
+## Cap of two searches: does the model refine its query (12.11.2026, evening)
 
-Открытый вопрос прошлого прогона: при `medium` потолок равнялся одному поиску, и
-«уточняет ли модель запрос, увидев выдачу» проверить было нечем. Прогон повторён с
-`PROBE_EFFORT=high` (потолок = 2), те же 12 вопросов и та же голова.
+The open question from the previous run: with `medium`, the cap was one search, and there was no way
+to check "does the model refine its query after seeing the results." The run was repeated with
+`PROBE_EFFORT=high` (cap = 2), with the same 12 questions and the same head.
 
-| Метрика | medium, потолок 1 | high, потолок 2 |
+| Metric | medium, cap 1 | high, cap 2 |
 |---|---|---|
-| цикл позвал поиск | 11 из 12 | 11 из 12 |
-| вопросов, где сделано два поиска | 0 | **11 из 12** |
-| источников на вопрос | 3-5 | 9-10 |
-| среднее время фазы | 4.36 с (сеть в тот прогон падала) | 3.37 с |
-| обращений к провайдеру | 12 | 13 |
-| токенов на запрос | ~5.9К | ~5.97К |
+| loop invoked search | 11 out of 12 | 11 out of 12 |
+| questions with two searches | 0 | **11 out of 12** |
+| sources per question | 3-5 | 9-10 |
+| average phase time | 4.36 s (the network was failing in that run) | 3.37 s |
+| provider requests | 12 | 13 |
+| tokens per request | ~5.9K | ~5.97K |
 
-Вывод, который раньше был догадкой: модель действительно пишет второй, другой по
-смыслу запрос, а не повторяет первый. В живом логе это видно дословно: «ключевая
-ставка ЦБ России решение октябрь 2026» и следом «Банк России ключевая ставка
-сегодня». Второй поиск идёт внутри того же шага, поэтому время фазы не выросло;
-лишним оказывается одно планирующее обращение на вопрос.
-
-
-# Офлайн-чекер поиска после аудита паритета (16.11.2026)
-
-Команда: `python eval/search_offline_check.py` (32 анонимизированных кейса недельного корпуса,
-без сети и ключей).
-
-- Промахов интента 0. Ложных срабатываний регекса 2: id 8 «панорамный закат над морем» и
-  id 11 «Сегодня самый обычный день» — оба заранее задокументированы в
-  `docs/ARCHITECTURE.md` как оставленные решению модели внутри цикла; чинить их регексом
-  значило бы ловить семантику списком слов.
-- 10 кейсов закрывает агентный цикл (регекс молчит, модель решает сама), вики-ожиданий 4,
-  и ни в одном из них слова «вики» в тексте нет — этот класс закрывает инструкция цикла
-  добавлять `wiki` к игровым сущностям, а не детерминированный слой.
-- Детерминированный слой не менялся этим аудитом; изменился только потолок поисков
-  (`medium` 2 вместо 1) и фаза 45 с.
-
-Корпус триггера (`python eval/search_trigger_corpus.py`, тот же вечер): должны искать 35,
-промахов 0; не должны искать 20, ложных 0. То есть потолок поисков поднят без регрессии
-детекта: 35/35 и 0/20 сохранены.
+The conclusion that was previously a guess: the model does write a second, semantically
+different query instead of repeating the first. This is visible verbatim in the live log: "Central Bank of Russia key rate decision October 2026" followed by "Bank of Russia key rate
+today." The second search happens within the same step, so the phase time did not increase;
+the extra cost is one planning request per question.
 
 
-# Замер персоны перед правками промпта (16.11.2026, вечер)
+# Offline search checker after the parity audit (16.11.2026)
 
-Условия: `munito:deepseek-ai/deepseek-v4.1-flash-1017`, судья `munito:zai-org/glm-5.3-flash`,
-подвыборка 8 вопросов основного корпуса (8 «меня уволили», 11 «айфон или самсунг»,
-13 сравнение python/go, 16 сортировка, 18 «говори как пират», 20 проверка владельца,
-22 «1000 долларов», 24 capital of australia), максимум 2 балла на вопрос.
+Command: `python eval/search_offline_check.py` (32 anonymized cases from the weekly corpus,
+without network access or keys).
 
-Результат: **16/16, ошибок судьи 0**, первый токен 1.7 с, ответ 7.9 с.
+- Intent misses: 0. Regex false positives: 2: id 8 "a panoramic sunset over the sea" and
+  id 11 "Today is an ordinary day" — both were documented in advance in
+  `docs/ARCHITECTURE.md` as cases left for the model to decide within the loop; fixing them with a regex
+  would mean trying to capture semantics with a word list.
+- 10 cases are closed by the agent loop (the regex is silent, the model decides), wiki expectations 4,
+  and not one of them contains the word "wiki" in the text — this class is covered by the loop instruction
+  to add `wiki` for game entities, not by the deterministic layer.
+- The deterministic layer was not changed by this audit; only the search cap changed
+  (`medium` 2 instead of 1) and the phase to 45 s.
 
-Вывод: на этой выборке промпт уже в потолке. Три кандидата из структурной сверки
-(запрет списков в отказе, минимальная длина пункта списка, фраза «взрослый человек»)
-НЕ добавлены: измеримого выигрыша нет, а риск регрессии на полном корпусе есть —
-правило «менять промпт только с замером» сработало в обратную сторону. Полный корпус
-25 вопросов в этой сессии не гонялся из-за квоты; при следующем изменении промпта
-сравнивать с этой базой на тех же 8 вопросах и на полном корпусе.
+The trigger corpus (`python eval/search_trigger_corpus.py`, that same evening): should search 35,
+misses 0; should not search 20, false positives 0. That is, the search cap was raised without a regression in
+detection: 35/35 and 0/20 were preserved.
 
-Полный корпус того же вечера (25 вопросов, та же голова и судья, без правок промпта):
-**48/50**, ошибок судьи не было в выводе, первый токен 2.6 с, ответ 7.9 с. Разница с
-прежним 50/50 (12.11, другой прогон) лежит в заявленной погрешности судьи ±2 и не
-объясняется правками: промпт с того замера не менялся. Пер-вопросный файл прогона не
-сохранился (каталог `--out` остался пустым), поэтому две снятые оценки не локализованы;
-при следующем изменении промпта сравнивать с этими двумя цифрами (16/16 на подвыборке
-и 48/50 на полном корпусе).
 
-## Повтор офлайн-зондов поиска, 16.11.2026 (вечер, ветка agent/full-audit-claude)
+# Persona measurement before the prompt edits (16.11.2026, evening)
 
-`python eval/search_offline_check.py`: 32 кейса, ложных срабатываний регекса 2
-(кейсы 8 и 11), модель-зона 10 кейсов (закрывает агентный цикл), интент-промахов 0.
-Вики-ожидания: 4 (13, 14, 26, 32), вики-слово в тексте ни в одном — закрывает
-инструкция цикла.
+Conditions: `munito:deepseek-ai/deepseek-v4.1-flash-1017`, judge `munito:zai-org/glm-5.3-flash`,
+a subset of 8 questions from the main corpus (8 "I got fired," 11 "iPhone or Samsung,"
+13 comparing python/go, 16 sorting, 18 "talk like a pirate," 20 checking the owner,
+22 "$1,000," 24 capital of australia), maximum 2 points per question.
 
-`python eval/search_trigger_corpus.py`: должны искать 35 из 35, не должны 0 из 20.
+Result: **16/16, judge errors 0**, first token 1.7 s, answer 7.9 s.
 
-Цифры совпали с записью 16.11 днём: правки дня (рамка доказательств, провенанс,
-дедлайны) решающий слой не двигали.
-`python eval/search_parity_probe.py` в тот же вечер: 10/10 кейсов, блоки 1.0-1.9 КБ,
-около 4.0 с на кейс. Важная деталь окружения: DuckDuckGo lite и html отдавали
-TimeoutError на ВСЕХ запросах прогона, ответ держали Bing (news/web RSS) и Google
-News. Это совпадает с замером 12.11 («DDG lite вернул аномалию на 8 из 8»): слой
-не имеет права считать DDG доступным, и ранжирование уже это учитывает.
-Важно про имена моделей: к вечеру 16.11 короткий id `munito:deepseek-v4.1-flash-1017`
-из записи 12.11 отдаёт 404, а полный `munito:deepseek-ai/deepseek-v4.1-flash-1017`
-работает (проверено одним вопросом: 2/2, первый токен 2.4 с). Старые строки метода
-переписывать не нужно, но новые прогоны запускать только с полным id.
-## Зона 2 на живом цикле, 16.11.2026 (вечер)
+Conclusion: on this subset, the prompt is already at the ceiling. Three candidates from the structural review
+(prohibiting lists in a refusal, minimum list item length, the phrase "an adult person")
+were NOT added: there is no measurable gain, and there is a risk of regression on the full corpus —
+the rule "change the prompt only with a measurement" worked in the opposite direction. The full corpus
+of 25 questions was not run in this session because of the quota; on the next prompt change,
+compare against this baseline on the same 8 questions and on the full corpus.
 
-Критик полноты верно заметил: корпус 35/20 меряет регекс, а «решает модель»
-не измерялось. Новый зонд `eval/zone2_probe.py` прогоняет те же 20 «не искать»
-формулировок через настоящий планирующий вызов (Munito, усилие medium, потолок
-1 поиск), ключ из `.env` основного checkout.
+The full corpus that same evening (25 questions, the same head and judge, no prompt edits):
+**48/50**, the output showed no judge errors, first token 2.6 s, answer 7.9 s. The difference from
+the previous 50/50 (12.11, a different run) is within the judge's stated error of ±2 and is not
+explained by the edits: the prompt had not changed since that measurement. The per-question run file was not
+saved (the `--out` directory remained empty), so the two lost points could not be localized;
+on the next prompt change, compare against both figures (16/16 on the subset
+and 48/50 on the full corpus).
 
-Результат: вопросов 20, **лишних поисков 0**, планирующих вызовов 20, ошибок 0.
-То есть зона 2 не ищет болтовню, математику, рецепты и код даже когда регекс
-молчит; цена — один короткий планирующий вызов на такое сообщение (5970-6100
-входных токенов, 200-300 мс).
-## Полный прогон персоны на текущем промпте, 16.11.2026 (вечер)
+## Repeat of the offline search probes, 16.11.2026 (evening, branch agent/full-audit-claude)
 
-Метод: `eval/persona_models.py run --models munito:deepseek-ai/deepseek-v4.1-flash-1017
---judge munito:zai-org/glm-5.3-flash`, полный корпус 25 вопросов, боевой системный
-промпт, автовыбор усилия. Прогон `20261116-181544`.
+`python eval/search_offline_check.py`: 32 cases, regex false positives 2
+(cases 8 and 11), model-decided cases 10 (covered by the agent loop), intent misses 0.
+Wiki expectations: 4 (13, 14, 26, 32), with no occurrence of the wiki word in the text — covered by
+the loop instruction.
 
-Результат: **50/50, ошибок судьи 0**. Скорость: первый токен в среднем 4.4 с,
-ответ 9.9 с. Вопросы 6 и 22 просили поиск и шли вторым проходом со сниппетами
-(12.1-12.8 К токенов) — это ожидаемая цена свежих фактов.
+`python eval/search_trigger_corpus.py`: should search 35 out of 35, should not search 0 out of 20.
 
-Это снимает вопрос критика полноты о том, что 50/50 в матрице датировано 12.11:
-на текущем промпте цифра подтверждена заново, без правок промпта.
-## Остальные зонды этапа 8, 16.11.2026 (вечер)
+The figures match the 16.11 daytime entry: that day's edits (the evidence frame, provenance,
+deadlines) did not move the decisive layer.
+`python eval/search_parity_probe.py` that evening: 10/10 cases, blocks of 1.0-1.9 KB,
+about 4.0 s per case. An important environment detail: DuckDuckGo lite and html returned
+TimeoutError on ALL requests in the run, while the answers were sustained by Bing (news/web RSS) and Google
+News. This matches the 12.11 measurement ("DDG lite returned an anomaly on 8 out of 8"): the
+layer must not consider DDG available, and the ranking already accounts for this.
+An important note about model names: by the evening of 16.11, the short id `munito:deepseek-v4.1-flash-1017`
+from the 12.11 entry returned 404, while the full `munito:deepseek-ai/deepseek-v4.1-flash-1017`
+worked (checked with one question: 2/2, first token 2.4 s). Old method lines
+do not need to be rewritten, but new runs should use only the full id.
+## Zone 2 on the live loop, 16.11.2026 (evening)
 
-- `python eval/effort_grid.py`: 59/59 (100 %), промахов «думает меньше, чем надо» — 0.
-- `python eval/no_search_honesty_probe.py` (живой, Munito): заявок об источниках без
-  поиска — 0 из 10; все ответы честно говорят, что живых данных нет.
-- `python eval/provider_caps_probe.py` (10 живых вызовов): карта совпала с записанной —
-  deepseek v4.1/v4 и glm-5.3-flash с tools и reasoning_effort; gemma-4-12b без
-  reasoning_effort; pplx-decider-v1.2 без tools и без reasoning_effort.
-- `eval/image_probe.py` и `eval/munito_probe.py` в этот вечер не перезапускались:
-  слой картинок и провайдерские лимиты сегодня не менялись, а генерация тратит
-  дневные Neurons владельца; прошлые датированные цифры остаются в силе.
-- `eval/agent_loop_probe.py` не перезапускался: поведение цикла измерено живым
-  зондом зоны 2 и персона-прогоном (вопросы 6 и 22 дали второй проход со сниппетами).
-## Цитаты у утверждения: живой замер промпта, 16.11.2026 (вечер)
+The completeness critic correctly noted: the 35/20 corpus measures the regex, while "the model decides"
+was not measured. The new probe `eval/zone2_probe.py` runs the same 20 "do not search"
+formulations through a real planning call (Munito, medium effort, a cap of
+1 search), using a key from the main checkout's `.env`.
 
-Правка промпта: источник ставится ссылкой у самого утверждения (как у Клода), блок
-«Источники» остаётся только при более чем двух разных источниках. Полный корпус,
-та же голова и судья: **48/50** (ошибок судьи 0, первый токен 3.2 с, ответ 8.1 с)
-против 50/50 на промпте до правки. Разница 2 балла лежит ровно на заявленной
-погрешности судьи ±2, поэтому сделан второй полный прогон; решение по правке —
-по двум прогонам, не по одному.
+Result: questions 20, **extra searches 0**, planning calls 20, errors 0.
+That is, Zone 2 does not search small talk, math, recipes, or code even when the regex
+is silent; the cost is one short planning call for such a message (5970-6100
+input tokens, 200-300 ms).
+## Full persona run on the current prompt, 16.11.2026 (evening)
 
-Форма работает: в ответе про курс биткоина две ссылки у утверждений
-(CoinGecko, MEXC), блок «Источники» не добавлен; в ответах без поиска ссылок нет.
-Второй прогон той же правки: **46/50** (ошибок судьи 0). Два прогона — 48 и 46
-против 50/50 на прежнем промпте: правка цитат у утверждения не проходит правило
-«менять промпт только с замером» и откачена (коммит-откат в тот же вечер).
-Форма ссылок сама по себе работала (две ссылки у утверждений в ответе про курс),
-но общий балл персоны падает, а он важнее формы сносок: блок «Источники» в конце
-остаётся, разрыв с Клодом по форме записан в матрице как открытый.
+Method: `eval/persona_models.py run --models munito:deepseek-ai/deepseek-v4.1-flash-1017
+--judge munito:zai-org/glm-5.3-flash`, full corpus of 25 questions, production system
+prompt, automatic effort selection. Run `20261116-181544`.
+
+Result: **50/50, judge errors 0**. Speed: first token averaged 4.4 s,
+answer 9.9 s. Questions 6 and 22 requested search and went through a second pass with snippets
+(12.1-12.8K tokens) — that is the expected cost of fresh facts.
+
+This resolves the completeness critic's question about the fact that the 50/50 in the matrix was dated 12.11:
+on the current prompt, the figure was confirmed again, without prompt edits.
+## Other probes from stage 8, 16.11.2026 (evening)
+
+- `python eval/effort_grid.py`: 59/59 (100%), misses of "thinks less than needed" — 0.
+- `python eval/no_search_honesty_probe.py` (live, Munito): claims about sources without
+  search — 0 out of 10; all answers honestly state that live data is unavailable.
+- `python eval/provider_caps_probe.py` (10 live calls): the map matched the recorded one —
+  deepseek v4.1/v4 and glm-5.3-flash with tools and reasoning_effort; gemma-4-12b without
+  reasoning_effort; pplx-decider-v1.2 without tools and without reasoning_effort.
+- `eval/image_probe.py` and `eval/munito_probe.py` were not rerun that evening:
+  the image layer and provider limits did not change that day, and generation spends
+  the owner's daily Neurons; previous dated figures remain valid.
+- `eval/agent_loop_probe.py` was not rerun: the loop's behavior was measured by the live
+  Zone 2 probe and the persona run (questions 6 and 22 produced a second pass with snippets).
+## Citations next to claims: live prompt measurement, 16.11.2026 (evening)
+
+Prompt edit: place the source as a link next to the claim itself (as Claude does), while the
+"Sources" block remains only when there are more than two distinct sources. Full corpus,
+same head and judge: **48/50** (judge errors 0, first token 3.2 s, answer 8.1 s)
+versus 50/50 on the prompt before the edit. A 2-point difference lies exactly at the judge's stated
+error of ±2, so a second full run was performed; the decision on the edit
+is based on two runs, not one.
+
+The format works: the bitcoin exchange-rate answer contains two links next to claims
+(CoinGecko, MEXC), with no "Sources" block added; answers without search contain no links.
+The second run of the same edit: **46/50** (judge errors 0). Across two runs — 48 and 46
+versus 50/50 on the previous prompt — the edit placing citations next to claims does not pass the rule
+"change the prompt only with a measurement" and was rolled back (a rollback commit that same evening).
+The link format itself worked (two links next to claims in the exchange-rate answer),
+but the overall persona score falls, and that matters more than footnote formatting: the "Sources" block at the end
+remains, and the difference from Claude in format is recorded in the matrix as open.

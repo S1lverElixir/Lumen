@@ -41,20 +41,35 @@ export function warnOnTruncation(
 ): ReadableStream<Uint8Array> | null {
   if (!stream) return stream;
   let total = 0;
-  let truncated = false;
-  return stream.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      if (truncated) return;
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        truncated = true;
-        console.warn(`[worker] ${host} response truncated at ${maxBytes} bytes`);
-        if (mode === "error") controller.error(new BodyTooLargeError(`Response exceeds ${maxBytes} byte cap`));
-        return;
+  const reader = stream.getReader();
+  // Зеркало proxy/proxy.ts (R6-02, аудит 26.11.2026): на пределе апстрим
+  // отменяется, а не досчитывается до EOF.
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        total += value.byteLength;
+        if (total > maxBytes) {
+          console.warn(`[worker] ${host} response truncated at ${maxBytes} bytes`);
+          await reader.cancel();
+          if (mode === "error") controller.error(new BodyTooLargeError(`Response exceeds ${maxBytes} byte cap`));
+          else controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (err) {
+        await reader.cancel().catch(() => {});
+        controller.error(err);
       }
-      controller.enqueue(chunk);
     },
-  }));
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
 }
 
 export function limitStreamBytes(
@@ -182,6 +197,15 @@ export function isPrivateAddress(ip: string): boolean {
   if (site === 0x3fan || site === 0x3fbn) return true; // fe80::/10 и fec0::/10
   if ((n >> 120n) === 0xffn) return true; // ff00::/8 multicast
   if ((n >> 64n) === 0x100n) return true; // 100::/64 discard
+  // R6-05: special-purpose внутри 2000::/3 (IANA IPv6 Address Registry) — раньше
+  // проходили как публичные и пропускали SSRF-проверку /read.
+  if ((n >> 96n) === 0x20010db8n) return true; // 2001:db8::/32 documentation
+  if ((n >> 80n) === 0x200100020000n) return true; // 2001:2::/48 benchmarking
+  if ((n >> 100n) === 0x2001001n) return true; // 2001:10::/28 ORCHID (RFC 7285)
+  if ((n >> 100n) === 0x2001002n) return true; // 2001:20::/28 ORCHIDv2 (RFC 9375, ревью 26.11.2026)
+  if (n === 0x20010001000000000000000000000001n) return true; // 2001:1::1/128 RTBH
+  if ((n >> 124n) === 0b0011n) return true; // 3000::-3fff:: (IANA GSE, зарезервирован)
+  if ((n >> 96n) === 0x26204f80n) return true; // 2620:4f80::/32 DCTP (ревью 26.11.2026)
   return false;
 }
 
@@ -235,14 +259,26 @@ export async function resolveReadTarget(
   return { ok: true, url: parsed.toString() };
 }
 
-async function handleReadPage(
+export async function handleReadPage(
   req: Request,
   url: URL,
   fetchImpl: typeof fetch,
   resolveDnsImpl?: (name: string, type: "A" | "AAAA") => Promise<string[]>,
+  readTimeoutMs: number = READ_PAGE_TIMEOUT_MS,
 ): Promise<Response> {
   if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
-  const target = await resolveReadTarget(url.searchParams.get("url") ?? "", resolveDnsImpl);
+  // R6-04 (аудит 26.11.2026): дедлайн считается с начала запроса, включая DNS.
+  const deadline = AbortSignal.timeout(readTimeoutMs);
+  // R6-01: DNS-ответ здесь и резолв внутри fetch не скреплены — workers не
+  // умеют pin; окно ребиндинга остаётся и задокументировано в отчёте аудита.
+  if (deadline.aborted) return new Response("Read timed out", { status: 504 });
+  const target = await Promise.race<ReadTarget | "timeout">([
+    resolveReadTarget(url.searchParams.get("url") ?? "", resolveDnsImpl),
+    // Ревью 26.11.2026 (R6-04): проверка после резолва не спасала бы от
+    // зависшего DoH — гонка DNS и дедлайна обязательна.
+    new Promise<"timeout">((res) => deadline.addEventListener("abort", () => res("timeout"), { once: true })),
+  ]);
+  if (target === "timeout") return new Response("Read timed out", { status: 504 });
   if (!target.ok) return new Response(target.message, { status: target.status });
   let upstream: Response;
   try {
@@ -252,7 +288,7 @@ async function handleReadPage(
       // Workers не принимает redirect:"error" (только follow/manual): manual и
       // явный отказ на 3xx даёт ту же семантику — за проверенный адрес не уходим.
       redirect: "manual",
-      signal: AbortSignal.timeout(READ_PAGE_TIMEOUT_MS),
+      signal: deadline,
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "TimeoutError") {
@@ -260,13 +296,21 @@ async function handleReadPage(
     }
     return new Response("Read failed", { status: 502 });
   }
+  // R6-03: любой отказ закрывает непрочитанное тело апстрима.
   if (upstream.status >= 300 && upstream.status < 400) {
+    await upstream.body?.cancel();
     return new Response("Redirect not followed", { status: 502 });
   }
   const rawType = upstream.headers.get("content-type") ?? "";
   const type = rawType.split(";")[0].trim().toLowerCase();
-  if (!READ_ALLOWED_TYPES.has(type)) return new Response("Unsupported content type", { status: 415 });
-  if (upstream.status !== 200) return new Response("Upstream status " + upstream.status, { status: 502 });
+  if (!READ_ALLOWED_TYPES.has(type)) {
+    await upstream.body?.cancel();
+    return new Response("Unsupported content type", { status: 415 });
+  }
+  if (upstream.status !== 200) {
+    await upstream.body?.cancel();
+    return new Response("Upstream status " + upstream.status, { status: 502 });
+  }
   return new Response(
     warnOnTruncation(upstream.body, READ_PAGE_MAX_BYTES, new URL(target.url).host, "close"),
     { status: 200, headers: { "content-type": rawType || type } },
@@ -331,9 +375,9 @@ export async function handleRequest(
   const respHeaders = buildResponseHeaders(upstreamResp.headers);
   const cappedBody = req.method === "HEAD"
     ? null
-    // close — как у Deno-релея: ответ сверх капа обрезается, а не рвётся
-    // ошибкой (ревью 17.11.2026, паритет контрактов).
-    : warnOnTruncation(upstreamResp.body, maxBodyBytes, new URL(target.url).host, "close");
+    // error — как у Deno-релея (proxy.ts:497, ревью 26.11.2026): ответ /fetch
+    // сверх капа рвётся ошибкой; обрезка close осталась только у /read.
+    : warnOnTruncation(upstreamResp.body, maxBodyBytes, new URL(target.url).host);
   return new Response(cappedBody, { status: upstreamResp.status, headers: respHeaders });
 }
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from collections import deque
 
 from lumen_router_config import GEMINI_MODELS, GEMINI_TTS_MODELS, _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
 
@@ -32,25 +33,167 @@ _LEAK_LITERAL_STRINGS: tuple[str, ...] = tuple(sorted(
     | set(GEMINI_TTS_MODELS)
     | set(_KNOWN_MODEL_IDS_FOR_LEAK_DETECTION)
 ))
-# Найдено код-ревью: полный перескан стрима это O(n²). Сканим хвост 300 символов:
-# самый длинный паттерн 61, стык кусков влезает с запасом.
-_LEAK_SCAN_TAIL_CHARS = 300
+_LEAK_LITERAL_PREFIXES = frozenset(
+    literal[:length]
+    for literal in _LEAK_LITERAL_STRINGS
+    for length in range(1, len(literal) + 1)
+)
+# A punctuation run is a sentence boundary only after the next visible
+# character arrives. This keeps decimal points and multi-period model IDs whole.
+_DISPLAY_PUNCTUATION = frozenset(".!?…．！？")
+_STREAM_SCAN_CHARS = 512
 
-def _leak_scan_window(full_text: str, latest_piece: str) -> str:
-    """Возвращает "хвост" накопленного текста, достаточный для обнаружения ЛЮБОГО
-    паттерна утечки, который мог образоваться после добавления latest_piece — без
-    необходимости пересканировать весь full_text целиком на каждой итерации стрима.
-    Окно берётся с запасом на случай аномально большого одиночного куска."""
-    window_size = max(_LEAK_SCAN_TAIL_CHARS, len(latest_piece) + 100)
-    return full_text[-window_size:]
 
-_INVISIBLE_RE = re.compile(r"[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u206f]")
+def _leak_kind(text: str) -> str | None:
+    if _detect_identity_leak(text):
+        return "identity"
+    if _detect_injected_payload_echo(text):
+        return "payload_echo"
+    return None
+
+
+def _strip_invisible(text: str) -> str:
+    def visible(char: str) -> bool:
+        code = ord(char)
+        if unicodedata.category(char) == "Cf":
+            return False
+        return not (
+            code == 0x034F
+            or 0x115F <= code <= 0x1160
+            or 0x17B4 <= code <= 0x17B5
+            or 0x180B <= code <= 0x180F
+            or code == 0x3164
+            or code == 0xFFA0
+            or 0xFFF0 <= code <= 0xFFF8
+            or 0xFE00 <= code <= 0xFE0F
+            or 0xE0100 <= code <= 0xE01EF
+            or 0xE0000 <= code <= 0xE0FFF
+        )
+    return "".join(char for char in text if visible(char))
+
 
 def _normalize_leak_text(text: str) -> str:
     """NFKC + удаление невидимых символов: fullwidth и zero-width обходили
     выходной фильтр (аудит 28.10.2026). Гомоглифы (кириллическая «а» в Gemini)
     этим не покрываются — остаточный риск отмечен в отчёте."""
-    return _INVISIBLE_RE.sub("", unicodedata.normalize("NFKC", text))
+    return _strip_invisible(unicodedata.normalize("NFKC", text))
+
+
+class _LeakScanState:
+    """Release a checked prefix while retaining enough context for every pattern."""
+
+    def __init__(self) -> None:
+        self.previous_sentence = ""
+        self._current_parts: list[str] = []
+        self._current_length = 0
+        self._current_has_visible = False
+        self._punctuation_run = False
+        self._has_first_person = False
+        self._normalized_tail = ""
+        self._context_word_prefix = ""
+        self._polish_hold_length = 0
+        self._normalized_positions: deque[tuple[str, int]] = deque()
+
+    def _reset_current(self) -> None:
+        self._current_parts.clear()
+        self._current_length = 0
+        self._current_has_visible = False
+        self._punctuation_run = False
+        self._has_first_person = False
+        self._normalized_tail = ""
+        self._context_word_prefix = ""
+        self._normalized_positions.clear()
+
+    def _complete_current(self) -> str | None:
+        completed = "".join(self._current_parts)
+        leak = _leak_kind(self.previous_sentence + completed)
+        if leak:
+            return leak
+        polished = _polish_answer(completed, source="stream_prefreeze")
+        if polished == _IDENTITY_LEAK_FALLBACK:
+            return "identity"
+        if polished == _INJECTED_PAYLOAD_ECHO_FALLBACK:
+            return "payload_echo"
+        # Raw offsets cannot be mapped safely after a text-removing transform.
+        # Keep that sentence private until the final polished answer is emitted.
+        if polished != completed or _EMOJI_RUN_RE.search(completed):
+            self._polish_hold_length += len(completed)
+        self.previous_sentence = completed
+        self._reset_current()
+        return None
+
+    def _append_char(self, char: str) -> str:
+        self._current_parts.append(char)
+        self._current_length += 1
+        normalized = _normalize_leak_text(char)
+        if not normalized:
+            return ""
+        self._current_has_visible = True
+        candidate = self._normalized_tail + normalized
+        context_candidate = self._context_word_prefix + normalized
+        if not self._has_first_person and _IDENTITY_CONTEXT_RE.search(context_candidate):
+            self._has_first_person = True
+        for normalized_char in normalized:
+            if normalized_char.isalnum() or normalized_char == "_":
+                self._context_word_prefix = (self._context_word_prefix + normalized_char)[-64:]
+            else:
+                self._context_word_prefix = ""
+        self._normalized_tail = candidate[-_STREAM_SCAN_CHARS:]
+        for normalized_char in normalized:
+            self._normalized_positions.append((normalized_char, self._current_length))
+        while len(self._normalized_positions) > _STREAM_SCAN_CHARS:
+            self._normalized_positions.popleft()
+        self._punctuation_run = normalized[-1] in _DISPLAY_PUNCTUATION
+        return normalized
+
+    def feed(self, piece: str) -> str | None:
+        """Return a leak kind before any unchecked text can be painted."""
+        scan_prefix = self._normalized_tail
+        segment_parts: list[str] = []
+        for char in piece:
+            if self._punctuation_run:
+                following = _normalize_leak_text(char)
+                if following and not (following[0].isalnum() or following[0] == "_"):
+                    leak = self._complete_current()
+                    if leak:
+                        return leak
+                    scan_prefix = ""
+                    segment_parts.clear()
+            normalized = self._append_char(char)
+            if normalized:
+                segment_parts.append(normalized)
+        if self._punctuation_run:
+            token = re.search(r"[\w/:.+\-]+$", self._normalized_tail)
+            if (
+                (not token or token.group(0) not in _LEAK_LITERAL_PREFIXES)
+                and (_LEAK_LITERAL_RE is None or not _LEAK_LITERAL_RE.search(self._normalized_tail))
+            ):
+                leak = self._complete_current()
+                if leak:
+                    return leak
+                return None
+        # The sentinel prevents a literal at the withheld tail edge from being
+        # mistaken for a complete token before its next character arrives.
+        checked = scan_prefix + "".join(segment_parts) + "x"
+        if _LEAK_LITERAL_RE is not None and _LEAK_LITERAL_RE.search(checked):
+            return "identity"
+        if _IDENTITY_LEAK_RE.search(checked):
+            return "identity"
+        if _INJECTED_PAYLOAD_ECHO_RE.search(checked):
+            return "payload_echo"
+        return None
+
+    def safe_length(self, total_length: int) -> int:
+        """Release a checked prefix, retaining bounded context or first-person text."""
+        current_withheld = 0
+        if self._has_first_person:
+            current_withheld = self._current_length
+        elif self._normalized_positions:
+            current_withheld = self._current_length - (self._normalized_positions[0][1] - 1)
+        withheld = self._polish_hold_length + current_withheld
+        if self.previous_sentence and not self._current_has_visible:
+            withheld += len(self.previous_sentence)
+        return max(0, total_length - withheld)
 
 
 # Слой Б — только точные фразы "я — бренд". Широкое окно рядом с "я" ложно ловило
@@ -121,6 +264,15 @@ _FIRST_PERSON_RE = re.compile(
     # Множественное число обязательно: «мы работаем на OpenAI» — то же
     # самоопределение, что и «I run on OpenAI» (ревью приватности 12.11.2026).
     r"\b(я|мы|меня|мне|мной|мною|нас|нам|нами|i|we|me|my|our)\b",
+    re.IGNORECASE,
+)
+_IDENTITY_CONTEXT_RE = re.compile(
+    _FIRST_PERSON_RE.pattern
+    + r"|\b(?:powered|built|based|running|run|runs)\b"
+    + r"|\b(?:основан\w*|работ\w*|это|модел\w*|нейросет\w*)\b"
+    + r"|\b(?:system|override|successful|complete|diagnostic|prompt|validation|jailbreak|bypass|injection|breach)\b"
+    + r"|\b(?:взлом|инъекция|проверка|успешн\w*|систем\w*|промпт\w*)\b"
+    + "|" + _LEAK_BRAND_TOKENS,
     re.IGNORECASE,
 )
 # «My system prompt is: …» и «мой системный промпт запрещает …» — выдача
@@ -533,7 +685,9 @@ def _polish_answer(text: str, *, source: str) -> str:
     polished = _strip_foreign_inserts(_trim_decoration_emoji(text, source=source), source=source)
     if text.strip() and not polished.strip():
         return text
-    return polished
+    # Removing decoration or foreign words can create a leak phrase that was not
+    # present in the original text, so the final output must be checked again.
+    return _scrub_identity_leak(polished, source=source)
 
 
 def _polished_prefix_len(text: str, index: int, *, source: str) -> int:
@@ -622,13 +776,23 @@ def _scrub_identity_leak(text: str, *, source: str) -> str:
     оставляем на случай, когда остаток нечитаем."""
     if _detect_identity_leak(text):
         scrubbed = _scrub_contaminated_sentences(text, kind="identity-leak")
-        if scrubbed is not None:
+        if (
+            scrubbed is not None
+            and scrubbed != text
+            and not _detect_identity_leak(scrubbed)
+            and not _detect_injected_payload_echo(scrubbed)
+        ):
             return scrubbed
         log.warning('[identity-leak] Detected and blocked an identity leak (source=%s, len=%d)', source, len(text))
         return _IDENTITY_LEAK_FALLBACK
     if _detect_injected_payload_echo(text):
         scrubbed = _scrub_contaminated_sentences(text, kind="injection-echo")
-        if scrubbed is not None:
+        if (
+            scrubbed is not None
+            and scrubbed != text
+            and not _detect_identity_leak(scrubbed)
+            and not _detect_injected_payload_echo(scrubbed)
+        ):
             return scrubbed
         log.warning('[injection-echo] Detected and blocked a likely injected-instruction echo (source=%s, len=%d)', source, len(text))
         return _INJECTED_PAYLOAD_ECHO_FALLBACK

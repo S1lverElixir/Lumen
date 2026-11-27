@@ -1,4 +1,4 @@
-"""lumen_devtrace.py — построчный JSONL-след запросов и ответов для разбора багов."""
+"""lumen_devtrace.py — a line-by-line JSONL trace of requests and responses for debugging."""
 from __future__ import annotations
 
 import json
@@ -28,7 +28,7 @@ def trace_path() -> Path:
     explicit = os.getenv("DEV_TRACE_PATH", "").strip()
     if explicit:
         return Path(explicit)
-    # Рядом с bot.log: в тестах BOT_LOG_PATH уже ведёт во временный каталог.
+    # Next to bot.log: in tests, BOT_LOG_PATH already points to a temporary directory.
     base = os.path.dirname(os.getenv("BOT_LOG_PATH", "/app/bot.log")) or "/app"
     return Path(base) / "devtrace.jsonl"
 
@@ -38,7 +38,7 @@ def max_bytes() -> int:
         value = int(os.getenv("DEV_TRACE_MAX_BYTES", str(_DEFAULT_MAX_BYTES)).strip())
     except (TypeError, ValueError):
         return _DEFAULT_MAX_BYTES
-    # Мусор и нули в env давали бы ротацию на каждой строке.
+    # Junk and zeros in env would cause rotation on every line.
     return value if value >= 1024 else _DEFAULT_MAX_BYTES
 
 
@@ -49,7 +49,7 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _current_secrets() -> tuple[str, ...]:
-    # Ленивый импорт: bot импортирует этот модуль, топ-уровень закольцует.
+    # Lazy import: bot imports this module, and the top level would create a cycle.
     try:
         import bot as _bot
         getter = getattr(_bot, "_current_log_secrets", None)
@@ -76,7 +76,7 @@ def _append(kind: str, payload: dict) -> bool:
         path = trace_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size >= max_bytes():
-            # Один бэкап вместо series: диску на Space есть предел, старьё не копим.
+            # One backup instead of a series: Space disk has a limit, so do not accumulate old copies.
             backup = Path(str(path) + ".1")
             try:
                 if backup.exists():
@@ -103,7 +103,7 @@ def _route_names(route: list | None) -> list[str]:
 
 
 def record_passive(chat_id: int, text: str, *, is_private: bool = False, mentioned: bool = False) -> bool:
-    # Сначала вычистка, потом обрезка: секрет в хвосте иначе срезался бы молча.
+    # Scrub first, then truncate: otherwise a secret in the tail would be silently cut off.
     return _append("passive", {
         "chat_id": chat_id,
         "text": _clip(_scrub(text or ""), _USER_CLIP),
@@ -113,7 +113,7 @@ def record_passive(chat_id: int, text: str, *, is_private: bool = False, mention
 
 
 def record_blocked(chat_id: int, *, reason: str, prompt_len: int = 0) -> bool:
-    # Текст не пишем, только длину: тот же запрет, что у injection-варнинга в логе.
+    # Do not log the text, only its length: the same prohibition as for the injection warning in logs.
     return _append("blocked", {"chat_id": chat_id, "reason": reason, "prompt_len": int(prompt_len)})
 
 
@@ -166,7 +166,7 @@ def read_tail(n: int = 200) -> list[dict]:
             return []
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()
-        # С конца до N валидных: битая строка в хвосте иначе съедала бы лимит.
+        # From the end up to N valid entries: otherwise a broken line at the tail would consume the limit.
         out = []
         for line in reversed(lines):
             if len(out) >= count:

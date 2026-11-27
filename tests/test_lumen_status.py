@@ -1,17 +1,17 @@
-"""
-test_lumen_status.py — живой статус-плейсхолдер: строки этапов и таймер ожидания.
+"""test_lumen_status.py covers the live status placeholder: stage lines and the wait timer.
 
-Что защищают: вместо голых точек пользователь видит этапы обработки
-(«Поиск в интернете · нашёл N», «Думаю… N с»), а сам пузырь затем
-становится ответом. Удалённое сообщение не должно ломать рендер.
+What it protects: instead of bare dots, the user sees processing stages
+("Searching the web · found N", "Thinking… Ns"), and the bubble then becomes the answer.
+A deleted message must not break rendering.
 
-Запуск:
+Run:
     pytest tests/test_lumen_status.py -v
 """
 import asyncio
 
 import bot
 import lumen_status
+import pytest
 from lumen_status import StatusMessage, discard_status_start
 from tests.bot_test_helpers import _FakeIncomingMessage, _FakeSentMessage
 
@@ -23,9 +23,7 @@ async def _passthrough(method, *args, **kwargs):
 
 
 class _FakeClock:
-    """Часы теста: sleep подменён на no-op, а «Думал N с» считается по
-    monotonic — без них любая проверка на секунды зависела бы от реальной
-    длительности прогона."""
+    """Test clock: sleep is replaced with a no-op, and \"Thinking for N s\" is calculated from monotonic time — without this, every check involving seconds would depend on the actual test run duration."""
 
     def __init__(self, start: float = 1000.0):
         self.now = start
@@ -66,7 +64,7 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     assert all(kw.get("reply_markup") is status.reply_markup for kw in sent.edit_kwargs)
     text = sent.edits[-1][0]
     assert "✓ Searched the web · found 5" in text
-    # При 0 с живая строка без числа (smoke 11.11.2026: было «Thinking… 0 seconds»).
+    # At 0 s, the live line has no number (smoke 11.11.2026: previously "Thinking… 0 seconds").
     assert "Thinking…" in text and "0 seconds" not in text
     html_block, plain_block = status.activity_prefix()
     assert html_block.startswith("<blockquote expandable>") and html_block.endswith("</blockquote>")
@@ -74,16 +72,17 @@ def test_status_message_renders_done_lines_and_timer(monkeypatch):
     assert "✓ Searched the web · found 5" in plain_block
     assert plain_block.count("· example.com") == 1
     assert "· second.example" in plain_block
-    # Таблицы показываются rich-сообщением: блок-цитата вернула бы None.
+    # Tables are shown as a rich message: a block quote would return None.
     assert status.compose_answer("| a | b |\n|---|---|\n| 1 | 2 |")[0] is None
-    # Язык статуса — это код языка, а не chat_id: строка "en" не должна
-    # попасть в chat_state как ключ (прод 28.10.2026).
+    assert status.compose_answer_with_reason("| a | b |\n|---|---|\n| 1 | 2 |")[2] == "table"
+    # The status language is a language code, not chat_id: the string "en" must not
+    # into chat_state as a key (prod 28.10.2026).
     assert "en" not in bot.chat_state
     bot.chat_state.pop(999900, None)
 
 
 def test_simple_thought_activity_is_italic_not_quote(monkeypatch):
-    # Простое ожидание без поиска/медиа — лёгкая курсивная строка, не цитата.
+    # Plain waiting without search/media is a light italic line, not a quote.
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999902)
 
@@ -103,8 +102,8 @@ def test_simple_thought_activity_is_italic_not_quote(monkeypatch):
 
 
 def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
-    # Фото/видео скачаны раньше вызова модели: этап закрывается галочкой,
-    # а в статусе тикает «Думаю… N с», как в Claude (ревью 28.10.2026).
+    # Photos/videos were downloaded before the model call: the stage closes with a checkmark,
+    # while the status ticks “Thinking… N s,” like Claude (review 28.10.2026).
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999903)
 
@@ -128,7 +127,7 @@ def test_media_stage_becomes_done_and_thinking_timer(monkeypatch):
 
 
 def test_initial_status_never_calls_audio_or_documents_a_video():
-    # Голосовое и PDF раньше показывали «Смотрю видео» — ложный этап.
+    # Voice notes and PDFs previously showed 'Watching video', a false stage.
     from lumen_message_core import _initial_status
     assert _initial_status(False, False, "image/jpeg", False) == ("progress_viewing_image", False)
     assert _initial_status(False, False, "video/mp4", False) == ("progress_watching_video", False)
@@ -138,8 +137,8 @@ def test_initial_status_never_calls_audio_or_documents_a_video():
 
 
 def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
-    # TikTok/рисование/озвучка: одна анимированная строка с секундами,
-    # смена фразы не откатывает счётчик (ревью 28.10.2026).
+    # TikTok/drawing/TTS: one animated line with seconds,
+    # changing the phrase does not roll back the counter (review 28.10.2026).
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999904)
 
@@ -153,7 +152,7 @@ def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
     assert status.message is incoming.sent[0]
     live = incoming.sent[0].edits[-1][0]
     assert "Taking a little longer" in live
-    # При 0 с счётчик действия убирается целиком, не печатая «· 0 seconds»
+    # At 0 s, the action counter is removed entirely, without printing "· 0 seconds"
     # (smoke 11.11.2026).
     assert "0 seconds" not in live
     import lumen_status
@@ -161,9 +160,39 @@ def test_action_status_keeps_animation_and_live_seconds(monkeypatch):
     bot.chat_state.pop(999904, None)
 
 
+def test_start_action_unknown_send_leaves_no_status(monkeypatch):
+    # Review I21 (26.11.2026): an unknown send result is a sentinel, not a Message.
+    # status.message must be a real message: tick and set_action call
+    # edit_text directly, and the sentinel would raise AttributeError in a background task.
+    incoming = _FakeIncomingMessage(999907)
+
+    async def unknown_send(reply_to, text, **kwargs):
+        return bot._TG_UNKNOWN
+
+    monkeypatch.setattr(lumen_status, "_send_status_message", unknown_send)
+    status = asyncio.run(StatusMessage.start_action(incoming, "en", "Processing the TikTok link"))
+    assert status is None
+    bot.chat_state.pop(999907, None)
+
+
+def test_start_unknown_send_leaves_no_status(monkeypatch):
+    # I21 round 2 review (26.11.2026): the same boundary as start_action, but on
+    # the normal search/answer status: a sentinel in status.message would deprive the stream
+    # the placeholder and leave an unrenderable bubble.
+    incoming = _FakeIncomingMessage(999908)
+
+    async def unknown_send(reply_to, text, **kwargs):
+        return bot._TG_UNKNOWN
+
+    monkeypatch.setattr(lumen_status, "_send_status_message", unknown_send)
+    status = asyncio.run(StatusMessage.start(incoming, "en", "progress_searching"))
+    assert status is None
+    bot.chat_state.pop(999908, None)
+
+
 def test_status_delete_is_idempotent_across_route_and_handler_cleanup(monkeypatch):
-    # Маршрут и внешний обработчик оба чистят статус при ошибке/отмене. Второй
-    # вызов не должен снова удалять сообщение и не должен ронять задачу.
+    # Both the route and external handler clean the status on error/cancellation. The second
+    # the call must not delete the message again and must not crash the task.
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999905)
     deleted = []
@@ -186,8 +215,8 @@ def test_status_delete_is_idempotent_across_route_and_handler_cleanup(monkeypatc
 
 
 def test_discard_status_start_waits_for_inflight_send(monkeypatch):
-    # Отмена после отправки, но до возврата Message теряет message_id и оставляет
-    # пузырь навсегда. Cleanup должен дождаться ограниченного _tg_call.
+    # Cancellation after sending but before Message is returned loses message_id and leaves
+    # the bubble forever. Cleanup must wait for the bounded _tg_call.
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999906)
     deleted = []
@@ -224,8 +253,8 @@ def test_discard_status_start_waits_for_inflight_send(monkeypatch):
 
 
 def test_status_start_cancellation_deletes_already_sent_message(monkeypatch):
-    # Отмена во время прямого await status_task не должна терять message_id:
-    # сама отправка дожидается _tg_call и удаляет уже принятое Telegram сообщение.
+    # Cancellation during a direct await of status_task must not lose message_id:
+    # the send itself waits for _tg_call and deletes the message already accepted by Telegram.
     incoming = _FakeIncomingMessage(999908)
     sent = _FakeSentMessage()
     deleted = []
@@ -263,8 +292,8 @@ def test_status_start_cancellation_deletes_already_sent_message(monkeypatch):
 
 
 def test_status_delete_can_retry_after_cancellation(monkeypatch):
-    # Флаг завершения до await делает повторное удаление невозможным, если cleanup
-    # отменили между остановкой тикера и удалением сообщения.
+    # The completion flag is set before await, making repeated deletion impossible if cleanup
+    # canceled between stopping the ticker and deleting the message.
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999907)
     deleted = []
@@ -322,8 +351,8 @@ def test_status_delete_retries_after_telegram_failure(monkeypatch):
 
 
 def test_retry_phase_is_not_a_completed_step(monkeypatch):
-    # Прод 28.10.2026: фолбэк «пробую ещё раз» попадал в итоговый блок как
-    # выполненный шаг и обнулял таймер «Думал N с».
+    # Prod 28.10.2026: the "trying again" fallback reached the final block as
+    # completed step and reset the "Thinking for N s" timer.
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999901)
 
@@ -344,9 +373,9 @@ def test_retry_phase_is_not_a_completed_step(monkeypatch):
     bot.chat_state.pop(999901, None)
 
 def test_progress_strings_plural_and_zero_across_languages():
-    # Регрессия smoke 11.11.2026: «Thought for 1 seconds» и живое
-    # «Thinking… 0 seconds». Склоняются только en и zu; ru остаётся с
-    # сокращением «с», компактные паки тест не трогает.
+    # Smoke regression 11.11.2026: "Thought for 1 seconds" and a live
+    # "Thinking... 0 seconds". Only en and zu decline; ru remains with
+    # abbreviating “s”; compact packs are not touched by the test.
     from lumen_lang import t
     assert t("en", "progress_thought_for", sec=1) == "Thought for 1 second"
     assert t("en", "progress_thought_for", sec=2) == "Thought for 2 seconds"
@@ -354,7 +383,7 @@ def test_progress_strings_plural_and_zero_across_languages():
     assert t("en", "progress_thinking", sec=1) == "Thinking… 1 second"
     assert t("en", "progress_seconds", sec=1) == "1 second"
     assert t("en", "progress_seconds", sec=5) == "5 seconds"
-    # Ноль: фраза без числа и в развёрнутом, и в компактном паке.
+    # Zero: the phrase has no number in either the expanded or compact pack.
     assert t("en", "progress_thinking", sec=0) == "Thinking…"
     assert t("ru", "progress_thinking", sec=0) == "Думаю…"
     assert t("ru", "progress_thinking", sec=1) == "Думаю… 1 с"
@@ -366,15 +395,15 @@ def test_progress_strings_plural_and_zero_across_languages():
 
 
 def test_live_thinking_line_no_number_at_zero_singular_at_one(monkeypatch):
-    # Тот же регресс на уровне живого статуса: кадры тикера при 0 и 1 с.
+    # The same regression at the live-status level: ticker frames at 0 and 1 s.
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999906)
     clock = _fixed_clock(monkeypatch)
 
     async def scenario():
         status = await StatusMessage.start(incoming, "en", "progress_thinking", timed=True)
-        # _render — ровно то, что пишет тикер между правками; set_phase
-        # сбрасывает фазу на тех же часах и всегда даёт нулевой кадр.
+        # _render — exactly what the ticker writes between edits; set_phase
+        # resets the phase at the same times and always produces a zero frame.
         zero = status._render(0)
         clock.advance(1)
         one = status._render(1)
@@ -388,8 +417,8 @@ def test_live_thinking_line_no_number_at_zero_singular_at_one(monkeypatch):
 
 
 def test_subsecond_answer_shows_no_thought_line(monkeypatch):
-    # Claude не пишет «Thought for 0 seconds». Ревью 11.11.2026: строка активности
-    # при <1 с должна исчезать целиком, а не печатать ноль.
+    # Claude does not write "Thought for 0 seconds". Review 11.11.2026: the activity line
+    # under 1 second should disappear entirely, not print zero.
     monkeypatch.setattr(bot, "_tg_call", _passthrough)
     incoming = _FakeIncomingMessage(999905)
     _fixed_clock(monkeypatch)
@@ -478,8 +507,8 @@ def test_discard_status_start_deletes_unclaimed_status_once():
 
 
 def test_done_stage_phrase_is_past_tense_in_every_language():
-    # Ревью 11.11.2026: закрытый этап брал тот же ключ, что и живой, и в 25
-    # языках показывал «✓ Смотрю изображение» вместо сделанного действия.
+    # Review 11.11.2026: the closed stage used the same key as the live one, and in 25
+    # languages showed "✓ Viewing image" instead of the completed action.
     import lumen_lang
     pairs = {
         "progress_viewing_image": "progress_image_done",
@@ -495,10 +524,58 @@ def test_done_stage_phrase_is_past_tense_in_every_language():
 
 
 def test_search_done_count_agrees_in_singular():
-    # Ревью 11.11.2026: «1 resultados», «1 trouvés», «1 trovati» — счётчик
-    # стоит существительным, и единственное число нужно языкам с флексией.
+    # Review 11.11.2026: “1 resultados”, “1 trouvés”, “1 trovati” — the counter
+    # is a noun, and singular is needed for inflected languages.
     import lumen_lang
     assert lumen_lang.t("es", "progress_search_done", count=1) == "Búsqueda en internet · 1 resultado"
     assert lumen_lang.t("fr", "progress_search_done", count=1) == "Recherche web · 1 trouvé"
     assert lumen_lang.t("it", "progress_search_done", count=1) == "Ricerca web · 1 trovato"
     assert lumen_lang.t("en", "progress_search_done", count=1) == "Searched the web · found 1"
+
+
+@pytest.mark.parametrize("answer", [
+    "x" * 4096,
+    "**" + "x" * 4080 + "**",
+    "😀" * 2047,
+])
+def test_activity_prefix_never_pushes_answer_over_telegram_limit(answer):
+    # R5-06 (audit 26.11.2026): chunking checks the body before activity is added.
+    # At the boundary, the prefix is disabled, while the answer remains complete and valid.
+    from lumen_formatting import _md_to_html, _tg_len
+    status = StatusMessage(message=object(), lang="en")
+    status._thought_seconds = 2
+    html, plain, reason = status.compose_answer_with_reason(answer)
+    assert html is None
+    assert plain == answer
+    assert reason == "overflow"
+    assert _tg_len(_md_to_html(answer)) <= bot.TG_MAX_LEN
+
+
+def test_activity_prefix_is_kept_when_composed_answer_fits():
+    from lumen_formatting import _tg_len
+    status = StatusMessage(message=object(), lang="en")
+    status._thought_seconds = 2
+    html_prefix, plain_prefix = status.activity_prefix()
+    room = min(bot.TG_MAX_LEN - _tg_len(html_prefix) - 2,
+               bot.TG_MAX_LEN - _tg_len(plain_prefix) - 2)
+    answer = "x" * room
+    html, plain, reason = status.compose_answer_with_reason(answer)
+    assert reason == "composed"
+    assert html is not None and html.startswith("<i>")
+    assert plain.startswith(plain_prefix)
+    assert _tg_len(html) <= bot.TG_MAX_LEN
+    assert _tg_len(plain) <= bot.TG_MAX_LEN
+
+
+def test_status_send_disables_link_previews(monkeypatch):
+    from aiogram.types import LinkPreviewOptions
+    incoming = _FakeIncomingMessage(999910)
+    captured = {}
+
+    async def capture(method, *args, **kwargs):
+        captured.update(kwargs)
+        return await method(*args, **kwargs)
+
+    monkeypatch.setattr(bot, "_tg_call", capture)
+    asyncio.run(lumen_status._send_status_message(incoming, "https://example.com"))
+    assert captured["link_preview_options"] == LinkPreviewOptions(is_disabled=True)

@@ -1,7 +1,6 @@
-"""
-lumen_tts.py — TTS: Gemini TTS (с 05.11.2026 единственная ветка: зеркало Fish Audio с OpenRouter снято вместе с провайдером), плюс pcm_to_wav.
+"""lumen_tts.py — TTS: Gemini TTS (the only branch since 05.11.2026: the Fish Audio mirror on OpenRouter was removed with the provider), plus pcm_to_wav.
 
-Вынесено из bot.py (аудит техдолга). Внешнее состояние (сессия, ключи, клиент, квота, классификация ошибок) не дублируется — принимается параметрами и callback'ами; bot.py держит тонкие обёртки с теми же именами, интерфейс и тесты не изменились.
+Extracted from bot.py (tech-debt audit). External state (session, keys, client, quota, error classification) is not duplicated — it is passed as parameters and callbacks; bot.py keeps thin wrappers with the same names, and the interface and tests are unchanged.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ log = logging.getLogger("bot")
 
 def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1, sample_width: int = 2) -> bytes:
     import wave
-    # Доверяем только настоящему WAV-заголовку: префикс RIFF есть и у WEBP/AVI.
+    # Trust only a real WAV header: WEBP/AVI also have a RIFF prefix.
     if pcm_data.startswith(b'RIFF') and pcm_data[8:12] == b'WAVE':
         return pcm_data
     wav_buf = io.BytesIO()
@@ -40,25 +39,28 @@ async def _gemini_tts_bytes(
     on_model_rate_limited: Callable[[str], None] | None = None,
     request_timeout_sec: float = 60.0,
 ) -> tuple[bytes, str, str]:
-    """Gemini TTS, возвращает (pcm_bytes, mime_type, used_model). Состояние параметрами, расход в GLOBAL_QUOTA (у TTS 10 запросов/сутки на модель). Async-клиент + wait_for: синхронный to_thread нельзя отменить, зависший вызов держал лок чата (аудит 26.09.2026)."""
+    """Gemini TTS; returns (pcm_bytes, mime_type, used_model). State is provided via parameters,
+    usage goes to GLOBAL_QUOTA (TTS has 10 requests/day per model). Async client +
+    wait_for: synchronous to_thread cannot be cancelled, and a hung call held the chat
+    lock (26.09.2026 audit)."""
     async def call_tts(model_name: str):
-        # GA-путь TTS — Interactions API: generate_content с speech_config теперь
-        # отвечает «Unknown name speechConfig» (прод 17.11.2026). Старый путь оставлен
-        # резервом для SDK без interactions и для тестовых двойников.
+        # GA TTS path — Interactions API: generate_content with speech_config now
+        # responds with "Unknown name speechConfig" (prod 17.11.2026). The old path remains
+        # as a fallback for SDKs without interactions and for test doubles.
         interactions = getattr(client.aio, "interactions", None)
         if interactions is not None:
             try:
                 return await interactions.create(
                     model=model_name,
                     input=text,
-                    # Строчными: API отвечает «'AUDIO' is not supported», ждёт 'audio'.
+                    # Lowercase: the API replies "'AUDIO' is not supported" and expects 'audio'.
                     response_modalities=["audio"],
-                    # v1 отвечает «response_modalities is only available in v1beta»
-                    # (прод 17.11.2026): звук живёт только на бете.
+                    # v1 responds "response_modalities is only available in v1beta"
+                    # (production 17.11.2026): audio lives only on beta.
                     api_version="v1beta",
                 )
             except (AttributeError, TypeError):
-                # Двойник без настоящего create: ниже старый путь generate_content.
+                # A double without a real create: below is the old generate_content path.
                 pass
         contents = [
             types.Content(
@@ -94,7 +96,8 @@ async def _gemini_tts_bytes(
             log.warning("[tts] Failed with model %s: %s", mname, e)
             last_exc = e
             if is_rate_limit_error(e):
-                # Минутная остывка, а не суточная метка: иначе один 429 убирал бы TTS-модель до полуночи (враждебное ревью 27.09.2026).
+                # A one-minute cooldown, not a daily timestamp: otherwise one 429 would remove
+                # the TTS model until midnight (hostile review 27.09.2026).
                 if (
                     is_daily_quota_error is not None
                     and on_model_rate_limited is not None
@@ -111,12 +114,12 @@ async def _gemini_tts_bytes(
         else:
             raise RuntimeError("Не удалось выполнить синтез с доступными моделями TTS.")
 
-    # Расход фиксируем сразу после resp: именно здесь тратится суточная квота, независимо от дальнейшей конвертации.
+    # Record usage immediately after resp: this is where the daily quota is spent, regardless of subsequent conversion.
     on_model_success(used_tts_model)
 
     audio_bytes = None
     mime_type = "audio/mp3"
-    # Interactions API: готовый output_audio с base64-данными.
+    # Interactions API: ready output_audio with base64 data.
     _out_audio = getattr(resp, "output_audio", None)
     if _out_audio is not None:
         audio_bytes = getattr(_out_audio, "data", None)
@@ -135,7 +138,8 @@ async def _gemini_tts_bytes(
     if not audio_bytes:
         raise RuntimeError("В ответе API отсутствуют звуковые данные.")
 
-    # SDK возвращает bytes, а не base64-строку: декодировать сырые байты как base64 — потерять треть данных (вместо речи клик).
+    # The SDK returns bytes, not a base64 string: decoding raw bytes as base64
+    # loses a third of the data (a click instead of speech).
     if isinstance(audio_bytes, (bytes, bytearray)):
         pcm_bytes = bytes(audio_bytes)
     else:

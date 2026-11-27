@@ -1,27 +1,26 @@
-"""
-test_lumen_router_config.py — юнит-тесты на lumen_router_config.py: конфигурация моделей
-(GEMINI_MODELS, GEMINI_TTS_MODELS), эвристики "это тяжёлый запрос?"/"нужна свежая
-информация?"/"просят поиск в вебе" (_looks_like_heavy_query/_looks_like_freshness_query/
-_looks_like_search_request), построение маршрута для одного сообщения (_build_route:
-провайдеры munito и gemini, выключатель _munito_active, extras запроса _munito_payload_extras,
-автовыбор усилия pick_reasoning_effort/agent_max_searches/gemini_thinking_for и карта
-возможностей моделей _MUNITO_CAPS),
-фильтры исчерпанной квоты и карантина моделей (_skip_exhausted/_is_quota_exhausted) и
-реестр ID для детекта утечки личности (_KNOWN_MODEL_IDS_FOR_LEAK_DETECTION).
+"""test_lumen_router_config.py — unit tests for lumen_router_config.py: model configuration
+(GEMINI_MODELS, GEMINI_TTS_MODELS), the \"is this a heavy query?\"/\"is fresh
+information needed?\"/\"is a web search requested?\" heuristics (_looks_like_heavy_query/_looks_like_freshness_query/
+_looks_like_search_request), route construction for one message (_build_route:
+the munito and gemini providers, the _munito_active switch, request extras _munito_payload_extras,
+automatic effort selection pick_reasoning_effort/agent_max_searches/gemini_thinking_for, and the model
+capability map _MUNITO_CAPS),
+filters for exhausted quotas and model quarantine (_skip_exhausted/_is_quota_exhausted), and
+the ID registry for identity leak detection (_KNOWN_MODEL_IDS_FOR_LEAK_DETECTION).
 
-Снятые провайдеры (OpenRouter, Groq-чат, Gemma) из маршрута убраны 05.11.2026 вместе с
-их реестром здоровья и order-списками — от них осталась только проверка, что их ID
-не возвращаются в выборку и не исчезают из детекта утечек.
+Removed providers (OpenRouter, Groq chat, Gemma) were taken out of routing on 05.11.2026 along with
+their health registry and order lists — the only remaining checks ensure their IDs
+are not returned in model selection and do not disappear from leak detection.
 
-Часть разбиения test_bot_helpers.py по модулям — см. test_lumen_formatting.py про общий
-принцип. lumen_router_config.py — чистые данные и функции принятия решения о маршруте без
-единого обращения к Telegram/Gemini/Munito API, поэтому тестируется здесь напрямую
-(import lumen_router_config), без импорта bot.py. Логгер внутри lumen_router_config.py
-намеренно называется "bot" (см. комментарий в самом модуле) — поэтому caplog.at_level(...,
-logger="bot") ниже продолжает работать так же, как и раньше, независимо от того, что этот
-файл не импортирует bot.py вообще (состояние квоты и карантина тесты берут всё же из bot).
+Part of the split of test_bot_helpers.py by module — see test_lumen_formatting.py for the general
+principle. lumen_router_config.py contains pure data and routing decision functions without
+a single call to the Telegram/Gemini/Munito APIs, so it is tested directly here
+(import lumen_router_config), without importing bot.py. The logger inside lumen_router_config.py
+is intentionally named \"bot\" (see the comment in the module itself) — so caplog.at_level(...,
+logger=\"bot\") below continues to work as before, regardless of the fact that this
+file does not import bot.py at all (the tests still take quota and quarantine state from bot).
 
-Запуск:
+Run:
     pytest test_lumen_router_config.py -v
 """
 import pytest
@@ -31,10 +30,10 @@ from datetime import date
 
 
 
-# ─────────────────────────── автоматический выбор модели (роутер) ───────────────────────────
-# /model и /provider удалены целиком — тесты на _gemini_display_fields/_or_display_fields/
-# _should_reveal_real_model_names/_check_public_model_names_configured удалены вместе с ними
-# (см. README/историю изменений). Ниже — тесты на роутер, который их заменил.
+# ─────────────────── automatic model selection (router) ───────────────────
+# /model and /provider were removed entirely, along with tests for _gemini_display_fields/_or_display_fields/.
+# _should_reveal_real_model_names/_check_public_model_names_configured were removed along with them
+# (see README/change history). Below are tests for the router that replaced them.
 
 def test_looks_like_heavy_query_detects_code_and_analysis_requests():
     assert lumen_router_config._looks_like_heavy_query("напиши функцию на питоне для сортировки списка") is True
@@ -51,8 +50,9 @@ def test_looks_like_heavy_query_false_for_simple_messages():
 
 
 def test_looks_like_heavy_query_detects_tests_bots_and_debug_requests():
-    # Расширение эвристики (сентябрь 2026): юнит-тесты, боты/сайты, разбор кода
-    # и поиск багов — тоже тяжёлые задачи, раньше уходили в лёгкую цепочку.
+    # Heuristic expansion (September 2026): unit tests, bots/sites, code parsing
+    # and bug searches are also heavy tasks; previously they went to the light
+    # chain.
     assert lumen_router_config._looks_like_heavy_query("напиши тест для функции сортировки") is True
     assert lumen_router_config._looks_like_heavy_query("напиши бота для телеграмма") is True
     assert lumen_router_config._looks_like_heavy_query("разбери этот код построчно") is True
@@ -76,22 +76,23 @@ def test_looks_like_freshness_query_false_for_timeless_questions():
 
 
 def test_looks_like_freshness_query_not_triggered_by_lookalikes():
-    # Корпус недели (15.11.2026): «погод-» без ограничения флексий ловил императив
-    # «Погоди», «последн-» без границы слова — «предпоследняя». Обычная болтовня
-    # получала поиск и пометку «без интернета».
+    # Week's corpus (15.11.2026): "pogod-" without an inflection limit matched the imperative
+    # "wait", "last-" without a word boundary — "penultimate". Ordinary chatter
+    # received search and the "offline" mark.
     assert lumen_router_config._looks_like_freshness_query("Погоди") is False
     assert lumen_router_config._looks_like_freshness_query("ну хз мб только предпоследняя") is False
-    # «погодка» — приятель, а не погода; «погоди» украинское — через «і» и осталось.
+    # "pohodka" is a friendly form of address, not weather; Ukrainian "pohodi" contains
+    # "i" (U+0456) and was left alone.
     assert lumen_router_config._looks_like_freshness_query("мой погодка сказал") is False
     assert lumen_router_config._looks_like_freshness_query("якій погоді") is True
-    # Настоящие погода/последние не потерять.
+    # Do not lose real weather/latest data.
     assert lumen_router_config._looks_like_freshness_query("какая погода в Минске") is True
     assert lumen_router_config._looks_like_freshness_query("последняя версия Blender") is True
 
 
 def test_search_planner_skipped_zones_chatter_out_of_agent_turn():
-    # Зона 2: цикл зовётся только на содержательных сообщениях. Кейсы — из
-    # реального корпуса недели: содержательные проходят, болтовня отсекается.
+    # Zone 2: the loop runs only for substantive messages. Cases come from
+    # the real week's corpus: substantive messages pass, chatter is filtered out.
     assert lumen_router_config.search_planner_skipped("скок стоит терминал старлинк") is False
     assert lumen_router_config.search_planner_skipped("чё за кросс игра") is False
     assert lumen_router_config.search_planner_skipped("расскажи про амурскую калугу") is False
@@ -102,13 +103,13 @@ def test_search_planner_skipped_zones_chatter_out_of_agent_turn():
     assert lumen_router_config.search_planner_skipped("/draw кот") is True
     assert lumen_router_config.search_planner_skipped("") is True
     assert lumen_router_config.search_planner_skipped("😀🔥👍") is True
-    # «привет, как дела?» с хвостом — не полный матч: пусть решает модель цикла.
+    # "hi, how are you?" with a suffix is not a full match: let the cycle model decide.
     assert lumen_router_config.search_planner_skipped("привет, как дела?") is False
 
 
 def test_looks_like_freshness_query_detects_schedule_and_forecast():
-    # Расширение эвристики (сентябрь 2026): расписание/афиша/прогноз без слова
-    # "погода" раньше не считались нуждой в свежей информации.
+    # Heuristic expansion (September 2026): a schedule/event listing/forecast without the word
+    # "weather" previously did not count as a need for fresh information.
     assert lumen_router_config._looks_like_freshness_query("расписание электричек") is True
     assert lumen_router_config._looks_like_freshness_query("дай прогноз на выходные") is True
     assert lumen_router_config._looks_like_freshness_query("афиша кино на неделю") is True
@@ -116,18 +117,18 @@ def test_looks_like_freshness_query_detects_schedule_and_forecast():
 
 
 def test_looks_like_freshness_query_detects_buying_advice():
-    # Прод-кейс 17.09.2026: "какой проц лучше всего брать под ртх 5060" ушёл
-    # лёгким маршрутом в слабую модель — та ответила протухшими знаниями
-    # (RTX 5060 "ещё не объявлена") вместо поиска. Советы по покупке всегда
-    # про цены/наличие/новинки — им нужен живой поиск.
+    # Prod case 17.09.2026: "which percent is best for an RTX 5060" went
+    # light route to a weak model, which then answered with stale knowledge
+    # (RTX 5060 "not yet announced") instead of searching. Buying advice always
+    # about prices, availability, or new releases need live search.
     assert lumen_router_config._looks_like_freshness_query("какой проц лучше всего брать под ртх 5060") is True
     assert lumen_router_config._looks_like_freshness_query("что лучше купить для игр") is True
     assert lumen_router_config._looks_like_freshness_query("какой телефон лучше взять") is True
 
 
 def test_looks_like_freshness_query_detects_date_dependent_astronomy():
-    # Eval 22.10.2026: «во сколько рассвет в Москве» не считался свежим — уезжал
-    # обычным текстом в Gemma без поиска и отвечал по памяти (Q6 провал).
+    # Eval 22.10.2026: “what time is sunrise in Moscow” was not considered fresh — it went
+    # plain text in Gemma without search and answered from memory (Q6 failed).
     assert lumen_router_config._looks_like_freshness_query("во сколько рассвет в Москве") is True
     assert lumen_router_config._looks_like_freshness_query("когда закат солнца") is True
     assert lumen_router_config._looks_like_freshness_query("восход солнца в Сочи") is True
@@ -137,15 +138,15 @@ def test_looks_like_freshness_query_detects_date_dependent_astronomy():
 
 
 def test_looks_like_heavy_query_detects_bare_compare():
-    # Прод-кейс 17.09.2026: "сравни конкурентов" без "и/с" между объектами
-    # пролетал мимо тяжёлой ветки — сравнение ехало на слабую модель.
+    # Production case 17.09.2026: "compare competitors" without "and/with" between the objects
+    # slipped past the heavy branch; the comparison was sent to the weak model.
     assert lumen_router_config._looks_like_heavy_query("сравни конкурентов") is True
     assert lumen_router_config._looks_like_heavy_query("сравни iphone и samsung") is True
 
 
 def test_looks_like_freshness_query_detects_english():
-    # Внешний аудит: детект свежести был только русским при DEFAULT_LANG=en —
-    # "latest news" уходило слабым моделям без поиска.
+    # External audit: freshness detection was Russian-only even with DEFAULT_LANG=en —
+    # "latest news" went to weak models without a search.
     assert lumen_router_config._looks_like_freshness_query("What is the latest news about NVIDIA?") is True
     assert lumen_router_config._looks_like_freshness_query("weather in Berlin today") is True
     assert lumen_router_config._looks_like_freshness_query("how much does it cost") is True
@@ -153,15 +154,15 @@ def test_looks_like_freshness_query_detects_english():
 
 
 def test_looks_like_freshness_query_ignores_substrings():
-    # Ревью ветки: голый now ловил know/snow — высокочастотные ложняки на обычной болтовне.
+    # Branch review: bare now matched know/snow, causing frequent false positives in ordinary conversation.
     assert lumen_router_config._looks_like_freshness_query("I know kung fu") is False
     assert lumen_router_config._looks_like_freshness_query("snow here") is False
     assert lumen_router_config._looks_like_freshness_query("groundbreaking discovery") is False
 
 
 def test_looks_like_freshness_query_detects_multilingual():
-    # Аудит 28.10.2026: бот говорит на 25 языках, а детект свежести был RU/EN —
-    # остальные языки уезжали обычным текстом без даты и внешнего поиска.
+    # Audit 28.10.2026: the bot speaks 25 languages, but freshness detection was RU/EN —
+    # other languages went out as plain text without a date or web search.
     assert lumen_router_config._looks_like_freshness_query("¿Cuánto cuesta el iPhone hoy?") is True
     assert lumen_router_config._looks_like_freshness_query("Wie ist das Wetter heute?") is True
     assert lumen_router_config._looks_like_freshness_query("Quelles sont les actualités aujourd'hui ?") is True
@@ -187,16 +188,16 @@ def test_looks_like_freshness_query_detects_multilingual():
 
 
 def test_looks_like_freshness_query_multilingual_ignores_common_words():
-    # Тот же аудит: слова «время/снова/конец/утро» есть почти в каждой бытовой
-    # фразе — их в детекте нет, иначе поиск включался бы на болтовне.
+    # Same audit: the words "time/again/end/morning" appear in almost every everyday
+    # the phrase — they are absent from detection, otherwise chatter would trigger a search.
     assert lumen_router_config._looks_like_freshness_query("me gusta el tiempo libre") is False
     assert lumen_router_config._looks_like_freshness_query("no meu tempo livre") is False
     assert lumen_router_config._looks_like_freshness_query("Ik kom weer terug") is False
     assert lumen_router_config._looks_like_freshness_query("son derece güzel") is False
     assert lumen_router_config._looks_like_freshness_query("Sa panahong ito") is False
     assert lumen_router_config._looks_like_freshness_query("Guten Morgen") is False
-    # Ревью 28.10.2026: без границ «завтра» ловил «завтрак», а «हाल/कल»
-    # срабатывали внутри हालांकि/कल्पना (матры не входят в \w).
+    # Review 28.10.2026: without boundaries, "tomorrow" matched "breakfast", while "हाल/कल"
+    # fired inside हालांकि/कल्पना (matras are not included in \w).
     assert lumen_router_config._looks_like_freshness_query("что приготовить на завтрак") is False
     assert lumen_router_config._looks_like_freshness_query("позавтракать вместе") is False
     assert lumen_router_config._looks_like_freshness_query("the actual reason is simple") is False
@@ -207,8 +208,8 @@ def test_looks_like_freshness_query_multilingual_ignores_common_words():
 
 
 def test_looks_like_search_request_detects_explicit_tool_asks():
-    # Прод 11.10.2026: "найди с веб поиском" без слов свежести уходило на модели
-    # без поиска — явная просьба искать теперь тоже ведёт на свежий маршрут.
+    # Prod 11.10.2026: "search the web" without freshness words went to models
+    # without a search — an explicit request to search now also goes to the fresh route.
     assert lumen_router_config._looks_like_search_request("погугли что с ДЦ Яндекса") is True
     assert lumen_router_config._looks_like_search_request("найди инфу с помощью веб-поиска") is True
     assert lumen_router_config._looks_like_search_request("ищи через поиск, что там с дата-центрами") is True
@@ -217,8 +218,8 @@ def test_looks_like_search_request_detects_explicit_tool_asks():
 
 
 def test_looks_like_search_request_ignores_code_searches():
-    # Голые "найди/ищи" без упоминания поиска — про код, а не про веб: иначе
-    # "найди баг" гнал бы тяжёлый разбор кода на поисковый маршрут.
+    # Bare "find/search" without mentioning search — refers to code, not the web: otherwise
+    # "find the bug" would send heavy code analysis to the search route.
     assert lumen_router_config._looks_like_search_request("найди баг в скрипте") is False
     assert lumen_router_config._looks_like_search_request("найди ошибку") is False
     assert lumen_router_config._looks_like_search_request("привет") is False
@@ -226,7 +227,7 @@ def test_looks_like_search_request_ignores_code_searches():
 
 
 def test_looks_like_heavy_query_detects_english():
-    # Внешний аудит: "write a Python parser" пролетал в light-ветку.
+    # External audit: "write a Python parser" slipped into the light branch.
     assert lumen_router_config._looks_like_heavy_query("write a Python parser for csv") is True
     assert lumen_router_config._looks_like_heavy_query("fix this bug, it crashes on empty input") is True
     assert lumen_router_config._looks_like_heavy_query("compare iphone and samsung") is True
@@ -234,19 +235,46 @@ def test_looks_like_heavy_query_detects_english():
 
 
 def test_looks_like_heavy_query_ignores_substrings_and_handles_plurals():
-    # Ревью ветки: prove ловил improve, solve — resolve; "write two scripts" пролетал мимо.
+    # Branch review: prove caught improve, and solve caught resolve; "write two scripts" slipped through.
     assert lumen_router_config._looks_like_heavy_query("please improve my text") is False
     assert lumen_router_config._looks_like_heavy_query("lets resolve this conflict") is False
     assert lumen_router_config._looks_like_heavy_query("write two scripts for backup") is True
 
 
-# ─────────── состав маршрута: Munito головой, цепочки Gemini резервом ───────────
-# OpenRouter, Groq-чат и Gemma из маршрута убраны 05.11.2026: текст и картинки
-# обслуживает Munito, Gemini — автоматический резерв; ссылки, YouTube и видео/аудио
-# остаются на Gemini, потому что Munito их физически не принимает.
+# ─────────── route composition: Munito as the head, Gemini chains as reserve ───────────
+# OpenRouter, Groq chat, and Gemma were removed from the route on 05.11.2026: text and images
+# serves Munito; Gemini is the automatic fallback; links, YouTube, and video/audio
+# remain on Gemini, because Munito cannot physically accept them.
+
+# Fixed contract (R7-10): expectations are not derived from the mutable state under test
+# Cooldown behavior is asserted explicitly for model IDs, not for
+#     provider-level rate limits,
+# in production would pass green (review 17.11.2026).
+_MUNITO_ORDER_FIXED = [
+    "deepseek-ai/deepseek-v4.1-flash-1017",
+    "zai-org/glm-5.3-flash",
+    "deepseek-ai/deepseek-v4-flash",
+]
+_GEMINI_HEAVY_FIXED = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
+]
+_GEMINI_SEARCH_FIXED = [
+    "gemini-2.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+]
+
 
 def _munito_mode(monkeypatch, *, disabled=False, key="fake-munito-key-123"):
-    """Выключатель — данные роутера (считываются при импорте), ключ — bot.py: патчить надо оба места."""
+    """The switch is router data (read at import), the key is bot.py: both places must be patched."""
     import bot
     monkeypatch.setattr(lumen_router_config, "_MUNITO_DISABLED", disabled)
     monkeypatch.setattr(bot, "MUNITO_API_KEY", key)
@@ -263,53 +291,51 @@ def _route_for(**kwargs):
 
 
 @pytest.mark.parametrize("kwargs, reserve", [
-    ({"is_heavy": False, "needs_freshness": False}, lumen_router_config.GEMINI_HEAVY_CHAIN),
-    ({"is_heavy": True, "needs_freshness": False}, lumen_router_config.GEMINI_HEAVY_CHAIN),
-    ({"is_heavy": False, "needs_freshness": True}, lumen_router_config.GEMINI_SEARCH_CHAIN),
-    ({"is_heavy": True, "needs_freshness": True}, lumen_router_config.GEMINI_SEARCH_CHAIN),
+    ({"is_heavy": False, "needs_freshness": False}, _GEMINI_HEAVY_FIXED),
+    ({"is_heavy": True, "needs_freshness": False}, _GEMINI_HEAVY_FIXED),
+    ({"is_heavy": False, "needs_freshness": True}, _GEMINI_SEARCH_FIXED),
+    ({"is_heavy": True, "needs_freshness": True}, _GEMINI_SEARCH_FIXED),
 ])
 def test_build_route_text_goes_to_munito_with_gemini_reserve(monkeypatch, kwargs, reserve):
-    # Резерв теперь безусловный (MUNITO_KEEP_FALLBACKS удалён): бесплатный тариф
-    # Munito отвечает 503 "no free capacity", и без цепочки Gemini это молчание бота.
-    # Обычный и тяжёлый текст резервируются одной тяжёлой цепочкой — лёгкой не было.
+    # Fallback is now unconditional (MUNITO_KEEP_FALLBACKS removed): the free tier
+    # Munito returns 503 "no free capacity", and without the Gemini chain this means the bot goes silent.
+    # Regular and heavy text share one heavy chain — there was no light chain.
     _munito_mode(monkeypatch)
     route = _route_for(**kwargs)
-    n = len(lumen_router_config._MUNITO_ORDER)
-    assert route[:n] == [("munito", m) for m in lumen_router_config._MUNITO_ORDER]
-    assert route[n:] == [("gemini", m) for m in reserve]
-    assert route[0] == ("munito", "deepseek-ai/deepseek-v4.1-flash-1017")
+    assert route == ([("munito", m) for m in _MUNITO_ORDER_FIXED]
+                     + [("gemini", m) for m in reserve])
 
 
 @pytest.mark.parametrize("needs_freshness", [False, True])
 def test_build_route_image_goes_to_munito_unless_it_needs_search(monkeypatch, needs_freshness):
-    # Vision голов Munito проверен 05.11.2026 живым вызовом, а живого поиска у него
-    # нет — "покажи картинку и найди, что это за новость" целиком уходит в Gemini.
+    # Munito vision heads were verified by a live call on 05.11.2026, but live search
+    # no — "show the image and find which news story it is" goes entirely to Gemini.
     _munito_mode(monkeypatch)
     route = _route_for(media_mime="image/png", needs_freshness=needs_freshness)
-    n = len(lumen_router_config._MUNITO_ORDER)
     if needs_freshness:
-        assert route == [("gemini", m) for m in lumen_router_config.GEMINI_SEARCH_CHAIN]
+        assert route == [("gemini", m) for m in _GEMINI_SEARCH_FIXED]
     else:
-        assert route[:n] == [("munito", m) for m in lumen_router_config._MUNITO_ORDER]
-        assert route[n:] == [("gemini", m) for m in lumen_router_config.GEMINI_HEAVY_CHAIN]
+        assert route == ([("munito", m) for m in _MUNITO_ORDER_FIXED]
+                         + [("gemini", m) for m in _GEMINI_HEAVY_FIXED])
 
 
 @pytest.mark.parametrize("kwargs, chain", [
-    ({"media_mime": "video/mp4"}, lumen_router_config.GEMINI_HEAVY_CHAIN),
-    ({"media_mime": "audio/ogg"}, lumen_router_config.GEMINI_HEAVY_CHAIN),
-    ({"media_mime": "video/mp4", "needs_freshness": True}, lumen_router_config.GEMINI_SEARCH_CHAIN),
-    ({"needs_website": True}, lumen_router_config.GEMINI_LINK_CHAIN),
-    ({"needs_youtube": True}, lumen_router_config.GEMINI_LINK_CHAIN),
-    ({"needs_website": True, "needs_freshness": True}, lumen_router_config.GEMINI_LINK_SEARCH_CHAIN),
-    ({"needs_youtube": True, "needs_freshness": True}, lumen_router_config.GEMINI_LINK_SEARCH_CHAIN),
+    ({"media_mime": "video/mp4"}, _GEMINI_HEAVY_FIXED),
+    ({"media_mime": "audio/ogg"}, _GEMINI_HEAVY_FIXED),
+    ({"media_mime": "video/mp4", "needs_freshness": True}, _GEMINI_SEARCH_FIXED),
+    ({"needs_website": True}, _GEMINI_HEAVY_FIXED),
+    ({"needs_youtube": True}, _GEMINI_HEAVY_FIXED),
+    ({"needs_website": True, "needs_freshness": True}, _GEMINI_SEARCH_FIXED),
+    ({"needs_youtube": True, "needs_freshness": True}, _GEMINI_SEARCH_FIXED),
 ])
 def test_build_route_gemini_only_shapes(monkeypatch, kwargs, chain):
-    # Munito принимает только текст и картинки: эскалировать ссылки и видео некуда,
-    # поэтому они Gemini-only даже при активном Munito.
+    # Munito accepts only text and images: links and video cannot be escalated,
+    # therefore they are Gemini-only even when Munito is active. LINK cases are pinned by the same
+    # heavy/search lists: GEMINI_LINK_CHAIN is a copy of heavy (827-828), and the live
+    # divergence between copies will turn red here instead of going unnoticed.
     _munito_mode(monkeypatch)
     route = _route_for(**kwargs)
     assert route == [("gemini", m) for m in chain]
-    assert all(p == "gemini" for p, _ in route)
 
 
 @pytest.mark.parametrize("disabled, key", [
@@ -317,8 +343,8 @@ def test_build_route_gemini_only_shapes(monkeypatch, kwargs, chain):
     (False, ""),
 ])
 def test_build_route_without_active_munito_is_gemini_only(monkeypatch, disabled, key):
-    # Два независимых способа выключить провайдер: флаг и удаление ключа из Space.
-    # Маршрут обязан целиком вернуться на Gemini, а не остаться без Munito-головы.
+    # Two independent ways to disable a provider: a flag and removing the key from Space.
+    # The route must fall back entirely to Gemini, rather than remain without a Munito head.
     _munito_mode(monkeypatch, disabled=disabled, key=key)
     route = _route_for()
     assert route and all(p == "gemini" for p, _ in route)
@@ -333,9 +359,9 @@ def test_build_route_without_active_munito_is_gemini_only(monkeypatch, disabled,
     (True, "", False),
 ])
 def test_munito_active_requires_key_and_enabled_flag(monkeypatch, disabled, key, expected):
-    # Выключатель, а не включатель: если _munito_active перестанет смотреть на флаг,
-    # MUNITO_ENABLED=0 не вернёт трафик с Munito (503 на каждое сообщение), а если
-    # перестанет смотреть на ключ — маршрут уйдёт в провайдер, которого нет в Space.
+    # An off switch, not an on switch: if _munito_active stops consulting the flag,
+    # MUNITO_ENABLED=0 will not return traffic from Munito (503 on every message), and if
+    # stops checking the key, routing will go to a provider that is absent from the Space.
     _munito_mode(monkeypatch, disabled=disabled, key=key)
     assert lumen_router_config._munito_active() is expected
     assert bool(lumen_router_config._munito_route()) is expected
@@ -351,9 +377,9 @@ def test_munito_active_requires_key_and_enabled_flag(monkeypatch, disabled, key,
     {"needs_youtube": True},
 ])
 def test_build_route_never_returns_retired_providers(monkeypatch, kwargs):
-    # Ключей OpenRouter и Groq-чат в проде больше нет, Gemma вычеркнута из
-    # GEMINI_MODELS: вернувшийся в цепочку ID дал бы 401/404 в самом конце маршрута,
-    # когда живые попытки уже потрачены.
+    # OpenRouter keys and Groq chat are no longer in production; Gemma was removed from
+    # GEMINI_MODELS: a returned ID would cause 401/404 at the very end of the route,
+    # when live attempts have already been spent.
     _munito_mode(monkeypatch)
     route = _route_for(**kwargs)
     assert route
@@ -370,10 +396,10 @@ def test_build_route_never_returns_retired_providers(monkeypatch, kwargs):
     ("minimal", {"reasoning_effort": "minimal"}),
 ])
 def test_munito_payload_extras_default_low_and_absent_when_unset(monkeypatch, value, expected):
-    # protected поведение: по умолчанию запросы уходят с минимальным размышлением
-    # (замер 05.11.2026: ~0.2s вместо ~1s) и поле НЕ отправляется, когда переменная
-    # пустая — Munito отвечает 400 на незнакомый параметр, так что глушить эксперимент
-    # должно можно без правки кода.
+    # protected behavior: by default, requests go out with minimal reasoning
+    # (measured 05.11.2026: ~0.2s instead of ~1s), and the field is NOT sent when the variable
+    # is empty — Munito returns 400 for an unknown parameter, so silence the experiment
+    # must be possible without a code change.
     if value is None:
         monkeypatch.delenv("MUNITO_REASONING_EFFORT", raising=False)
     else:
@@ -381,53 +407,54 @@ def test_munito_payload_extras_default_low_and_absent_when_unset(monkeypatch, va
     assert lumen_router_config._munito_payload_extras() == expected
 
 
-# ─────────────────────────── новые модели Gemini (3.6 Flash / 3.5 Flash-Lite) ───────────────────────────
+# new Gemini models (3.6 Flash / 3.5 Flash-Lite)
 
 def test_new_gemini_models_present_and_prioritized():
-    # Дашборд 17.11.2026: 3.7 и 3.5 Flash сняты (0/0), живы 3.8/3.6 Flash,
-    # обе Flash Lite и 3 Flash.
+    # Dashboard 17.11.2026: 3.7 and 3.5 Flash were removed (0/0); 3.8/3.6 Flash are alive,
+    # both Flash Lite and 3 Flash.
     assert "gemini-3.8-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.6-flash" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.5-flash-lite" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.7-flash" not in lumen_router_config.GEMINI_MODELS
     assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
     assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.8-flash"
-    # Голова поиска — единственная живая с квотой search grounding (бакет 2.5).
+    # The search head is the only live one with a search grounding quota (bucket 2.5).
     assert lumen_router_config.GEMINI_SEARCH_CHAIN[0] == "gemini-2.5-flash-lite"
 
 
 def test_gemini_3_flash_preview_restored_after_official_docs_confirmation():
-    # ИСТОРИЯ: удалена 17.08.2026 (ошибочный вывод — источники были Vertex AI
-    # Enterprise Agent Platform и сторонний GitHub Copilot changelog, ни один не
-    # офиц. страница модели самого Gemini API). ВОССТАНОВЛЕНА 22.08.2026: владелец
-    # прислал скриншот ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview —
-    # "Last updated 2026-08-18 UTC", живая таблица возможностей, Model code
-    # gemini-3-flash-preview. Первоисточник перевешивает прежний (неверный) вывод.
-    # 08.10.2026: вся линейка 3.x снова убрана из цепочек — на этот раз прод
-    # 05.10.2026 (HTTP 503 разом на пяти моделях). Конфиг в GEMINI_MODELS оставлен:
-    # возврат — одной правкой цепочек, если дашборд покажет их живыми.
+    # HISTORY: removed 17.08.2026 (an erroneous conclusion — the sources were Vertex AI
+    # Enterprise Agent Platform and a third-party GitHub Copilot changelog; neither
+    # the official model page of the Gemini API itself). RESTORED 22.08.2026: the owner
+    # sent a screenshot of ai.google.dev/gemini-api/docs/models/gemini-3-flash-preview—
+    # "Last updated 2026-08-18 UTC", a live capabilities table, Model code
+    # gemini-3-flash-preview. The primary source outweighs the previous (incorrect) conclusion.
+    # 08.10.2026: the entire 3.x lineup was removed from the chains again — this time production
+    # 05.10.2026 (HTTP 503 across five models at once). The configuration in GEMINI_MODELS is retained:
+    # return — with a single chain edit, if the dashboard shows them alive.
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_MODELS
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_HEAVY_CHAIN
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_SEARCH_CHAIN
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_LINK_CHAIN
     assert "gemini-3-flash-preview" in lumen_router_config.GEMINI_LINK_SEARCH_CHAIN
-    # 08.10.2026 (пересмотр после скриншота дашборда): модель жива, у неё есть
-    # лимит 5 RPM / 250K TPM / 20 RPD, и официальный список моделей Google
-    # (обновлён 06.10.2026) подтверждает код gemini-3-flash-preview. Продовые 503
-    # были временным отказом, поэтому откат снятия — вернуть в цепочки, а отход
-    # обеспечивает остывка по "unavailable" (_mark_model_unavailable).
+    # 08.10.2026 (reassessment after a dashboard screenshot): the model is alive and has
+    # limits of 5 RPM / 250K TPM / 20 RPD, and Google's official model list
+    # (updated 06.10.2026) confirms the gemini-3-flash-preview model. Production 503s
+    # were a temporary failure, so undoing the removal means returning them to the
+    # chains, while moving
+    # provides cooldown for "unavailable" (_mark_model_unavailable).
     chain = lumen_router_config.GEMINI_HEAVY_CHAIN
     assert chain.index("gemini-3.6-flash") < chain.index("gemini-3-flash-preview")
-    # 05.11.2026: Gemma вычеркнута из GEMINI_MODELS, поэтому хвост цепочки теперь
-    # не на ней, а на последней живой 3.x-модели.
+    # 05.11.2026: Gemma was removed from GEMINI_MODELS, so the chain tail is now
+    # not on it, but on the last live 3.x model.
     assert chain[-1] == "gemini-3-flash-preview"
 
 
 def test_gemini_3_flash_preview_quota_config_matches_dashboard():
-    # Страница модели говорит "Search grounding: Supported"/"Grounding with Google
-    # Maps: Supported" — модель технически умеет. Но реальная бесплатная КВОТА на
-    # оба (что и кодируют эти два флага) по дашборду AI Studio — 0/0, тот же паттерн,
-    # что и у всей остальной линейки 3.x (см. заметку про бакеты в начале GEMINI_MODELS).
+    # The model page says "Search grounding: Supported"/"Grounding with Google
+    # Maps: Supported” — the model technically can. But the actual free QUOTA for
+    # both (as encoded by these two flags) from the AI Studio dashboard — 0/0, the same pattern,
+    # as with the rest of the 3.x lineup (see the note about buckets at the start of GEMINI_MODELS).
     conf = lumen_router_config.GEMINI_MODELS["gemini-3-flash-preview"]
     assert conf.get("search_grounding") is False
     assert conf.get("map_grounding") is False
@@ -436,21 +463,22 @@ def test_gemini_3_flash_preview_quota_config_matches_dashboard():
 
 
 def test_gemini_3_7_flash_removed_after_dashboard_retirement():
-    # Дашборд 17.11.2026: 3.7 Flash в списке нет (0/0) — снята из конфига и цепочек.
+    # Dashboard 17.11.2026: 3.7 Flash is not in the list (0/0) — removed from the config and chains.
     assert "gemini-3.7-flash" not in lumen_router_config.GEMINI_MODELS
     assert "gemini-3.7-flash" not in lumen_router_config.GEMINI_HEAVY_CHAIN
     assert "gemini-3.7-flash" not in lumen_router_config.GEMINI_SEARCH_CHAIN
 
 
 def test_check_unconfirmed_model_quotas_no_warnings_once_all_models_confirmed(caplog):
-    # РЕГРЕССИЯ (24.07.2026): gemini-3.6-flash и gemini-3.5-flash-lite были
-    # подтверждены по реальному дашборду AI Studio (см. комментарии в GEMINI_MODELS
-    # в bot.py), флаг quota_unconfirmed снят у обеих. Раньше этот тест проверял, что
-    # именно эти две модели ЕЩЁ вызывают предупреждение (see git history) — теперь,
-    # когда обе подтверждены, предупреждений быть не должно вообще ни у одной модели.
-    # Если этот тест начнёт падать — значит либо quota_unconfirmed вернули по ошибке,
-    # либо добавили новую неподтверждённую модель (тогда тест нужно обновить под
-    # новую модель, а не просто "починить").
+    # REGRESSION (24.07.2026): gemini-3.6-flash and gemini-3.5-flash-lite were
+    # confirmed against the real AI Studio dashboard (see the comments in
+    # GEMINI_MODELS
+    # in bot.py), quota_unconfirmed was cleared for both. Previously, this test checked that
+    # these two models STILL emit the warning (see git history); now,
+    # when both are confirmed, no model should produce any warnings at all.
+    # If this test starts failing, either quota_unconfirmed was restored by mistake,
+    # or added a new unconfirmed model (in which case the test must be updated for
+    # a new model, not simply "fixing" it).
     import logging
     with caplog.at_level(logging.WARNING, logger="bot"):
         lumen_router_config._check_unconfirmed_model_quotas()
@@ -458,13 +486,12 @@ def test_check_unconfirmed_model_quotas_no_warnings_once_all_models_confirmed(ca
     assert warnings == []
 
 
-# ─────────── снятые ID остаются в детекте утечки личности ───────────
-# Реестр здоровья OpenRouter (_OR_MODEL_HEALTH), его order-списки и Gemma-цепочка
-# удалены из роутера 05.11.2026 вместе с самими провайдерами. Из всей этой истории
-# остаётся одно требование: дословный ID снятой модели по-прежнему нельзя видеть в
-# ответе — модель может назвать себя прежним слагом, и детект ловит его только если
-# ID лежит в _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION. Даты снятия каждого — в git-истории
-# (404/403, платная отсечка, порча текста на калибровке).
+# ─────────── retired IDs remain in the identity-leak detector ───────────
+# The OpenRouter health registry (_OR_MODEL_HEALTH), its order lists and the Gemma chain
+# were removed on 05.11.2026 with the providers themselves. One requirement remains: an exact
+# removed-model ID must not appear in an answer. The model may call itself by its old slug,
+# and detection catches it only when the ID is in _KNOWN_MODEL_IDS_FOR_LEAK_DETECTION.
+# Removal dates for each ID are in git history (404/403, paid cutoff, corrupted calibration text).
 
 _RETIRED_MODEL_IDS = (
     "qwen/qwen3-next-80b-a3b-instruct:free",
@@ -500,44 +527,45 @@ _RETIRED_MODEL_IDS = (
 
 @pytest.mark.parametrize("model_id", _RETIRED_MODEL_IDS)
 def test_retired_model_ids_stay_in_leak_detection_registry(model_id):
-    # Падает, если кто-то "почистил" реестр под актуальный каталог провайдера:
-    # снятая модель перестаёт выбираться, но её ID всё ещё может прийти в тексте
-    # ответа, и без строки в реестре скраб её не увидит.
+    # Fails if someone "cleaned up" the registry to match the provider's current catalog:
+    # a removed model stops being selected, but its ID may still arrive in text
+    # the answer, and without a line in the registry the scrub will not see it.
     assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
     assert model_id not in lumen_router_config._MUNITO_ORDER
 
 
 def test_live_munito_model_ids_are_known_to_leak_detection():
-    # Munito отвечает вместо OpenRouter с ноября 2026: без его ID в реестре бот
-    # назвал бы хоста и модель в первом же ответе про своё устройство.
+    # Munito has answered instead of OpenRouter since November 2026: without its ID in the registry, the bot
+    # would name the host and model in its very first answer about its device.
     for model_id in lumen_router_config._MUNITO_ORDER:
         assert model_id in lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
 
 
-# ─────────────────── TEXT_MODEL_ORDER переименован, алиас сохранён ───────────────────
+# ─────────────────── TEXT_MODEL_ORDER renamed, alias preserved ───────────────────
 
 def test_text_model_order_alias_still_works():
     assert lumen_router_config.TEXT_MODEL_ORDER is lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
     assert "nvidia/nemotron-3-super-120b-a12b:free" in lumen_router_config.TEXT_MODEL_ORDER
 
 
-# ─────────────────── GEMINI_TTS_MODELS централизованы ───────────────────
+# ─────────────────── GEMINI_TTS_MODELS centralized ───────────────────
 
 def test_gemini_tts_models_centralized_in_router_config():
     assert lumen_router_config.GEMINI_TTS_MODELS == ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"]
 
 
-# ─────────────────── линейка Gemini 3.x в цепочках ───────────────────
-# Снятые слаги OpenRouter из аудита 17.09.2026 переехали в _RETIRED_MODEL_IDS выше:
-# роутер их больше не выбирает вовсе, поэтому здесь только позиции моделей Gemini.
+# Gemini 3.x model lineup in chains
+# Retired OpenRouter slugs from the 17.09.2026 audit moved to _RETIRED_MODEL_IDS above:
+# Cooldown also covers a model that is absent from Gemini.
 
 
 def test_gemini_3_8_flash_heads_heavy_chain_and_default():
-    # 08.10.2026 (пересмотр после скриншота дашборда AI Studio): линейка 3.x жива,
-    # лимиты у неё есть (5 RPM / 250K TPM / 20 RPD), официальный список модерий
-    # Google (обновлён 06.10.2026) подтверждает коды. Продовые 503 05.10.2026 — временный
-    # отказ, поэтому 3.8 остаётся в цепочках вторым резервом после 2.5-flash
-    # (единственной, кто реально отвечал в проде и у кого есть квота поиска).
+    # 08.10.2026 (rechecked after an AI Studio dashboard screenshot): the 3.x
+    # lineup is alive,
+    # limits (5 RPM / 250K TPM / 20 RPD); the official list of model
+    # Google (updated 06.10.2026) confirms the codes. Production 503s on 05.10.2026 were temporary
+    # refusal, so 3.8 remains the second fallback after 2.5-flash in the chains
+    # (the only one that actually answered in prod and has a search quota).
     assert "gemini-3.8-flash" in lumen_router_config.GEMINI_MODELS
     assert lumen_router_config.DEFAULT_GEMINI_MODEL == "gemini-3.8-flash"
     assert lumen_router_config.GEMINI_HEAVY_CHAIN[0] == "gemini-3.8-flash"
@@ -555,19 +583,19 @@ def test_gemini_3_8_flash_heads_heavy_chain_and_default():
 
 
 def test_registry_and_default_chain_have_no_silent_aliases():
-    # Аудит 26.09.2026: GEMINI_DEFAULT_CHAIN был АЛИАСОМ GEMINI_HEAVY_CHAIN (тот же
-    # объект списка), а "openrouter/free" дублировался в реестре.
+    # Audit 26.09.2026: GEMINI_DEFAULT_CHAIN was an ALIAS of GEMINI_HEAVY_CHAIN (the same
+    # a list object), and “openrouter/free” was duplicated in the registry.
     assert lumen_router_config.GEMINI_DEFAULT_CHAIN is not lumen_router_config.GEMINI_HEAVY_CHAIN
     assert lumen_router_config.GEMINI_DEFAULT_CHAIN == lumen_router_config.GEMINI_HEAVY_CHAIN
     registry = lumen_router_config._KNOWN_MODEL_IDS_FOR_LEAK_DETECTION
     assert len(registry) == len(set(registry)), "в реестре моделей есть дубли"
 
 
-# ─────────────── исчерпавшая квота больше не тратит попытку (аудит 26.09.2026) ───────────────
+# ─────────────── an exhausted quota no longer consumes an attempt (audit 26.09.2026) ───────────────
 
 def test_munito_route_skips_models_marked_exhausted(monkeypatch):
-    # Метку 429 вешают на провайдера "munito"; без фильтра каждое сообщение
-    # платило бы попыткой модели, у которой квота кончилась ещё вчера.
+    # A 429 mark is attached to provider "munito"; without the filter, every message
+    # would pay for an attempt on a model whose quota ran out yesterday.
     import bot
     _munito_mode(monkeypatch)
     monkeypatch.setattr(lumen_router_config, "_MUNITO_ORDER", ["probe/exhausted", "probe/alive"])
@@ -576,8 +604,8 @@ def test_munito_route_skips_models_marked_exhausted(monkeypatch):
 
 
 def test_gemini_route_skips_exhausted_and_cooling_models():
-    # Короткая остывка минутного 429 (cooldown_until) считается наравне с суточной
-    # меткой: иначе маршрут тратит попытку на модель, которая откажет снова.
+    # A short cooldown for a minute-level 429 (cooldown_until) counts the same as a daily
+    # label: otherwise the route spends an attempt on a model that will refuse again.
     import bot
     bot.GLOBAL_QUOTA.setdefault("gemini", {})["gemini-probe-dead"] = {"used": 0, "exhausted_at": 123.0}
     bot.GLOBAL_QUOTA.setdefault("gemini", {})["gemini-probe-cooling"] = {"used": 0, "cooldown_until": float("inf")}
@@ -586,8 +614,8 @@ def test_gemini_route_skips_exhausted_and_cooling_models():
 
 
 def test_route_never_becomes_empty_when_every_model_is_exhausted(monkeypatch):
-    # Пустой маршрут = мгновенный отказ вместо внятного сообщения о лимите, поэтому
-    # по одному кандидату на провайдера остаётся — это и потолок лишней платы.
+    # An empty route means an immediate refusal instead of a clear limit message, so
+    # one candidate per provider remains, and this is also the ceiling for extra spending.
     import bot
     _munito_mode(monkeypatch)
     for mid in lumen_router_config._MUNITO_ORDER:
@@ -600,8 +628,9 @@ def test_route_never_becomes_empty_when_every_model_is_exhausted(monkeypatch):
 
 
 def test_skip_exhausted_returns_single_first_allowed_variant():
-    # Все мёртвы — один первый вариант, а не вся цепочка: иначе каждое сообщение
-    # платило HTTP-вызовом за каждую модель цепочки при исчерпанной квоте.
+    # If all are dead, use one first option, not the whole chain; otherwise every
+    # message
+    # paid with an HTTP call for every model in the chain when quota was exhausted.
     import bot
     dead = ["probe/dead1", "probe/dead2", "probe/dead3"]
     for mid in dead:
@@ -611,8 +640,8 @@ def test_skip_exhausted_returns_single_first_allowed_variant():
 
 
 def test_successful_usage_clears_exhausted_mark(monkeypatch):
-    # Метка снимается успешным ответом, иначе после сброса суток или починки
-    # провайдера модель навсегда выпадала бы из роутинга.
+    # A successful response clears the marker; otherwise, after a daily reset or repair
+    # provider, the model would be removed from routing forever.
     import bot
     _munito_mode(monkeypatch)
     head = lumen_router_config._MUNITO_ORDER[0]
@@ -622,22 +651,22 @@ def test_successful_usage_clears_exhausted_mark(monkeypatch):
 
 
 def test_all_gemini_models_declare_url_context_explicitly():
-    # Аудит A2-11: дефолт True в conf.get давал инструмент молча — теперь ключ
-    # прописан явно у каждой модели (поведение то же, намерение видно).
+    # Audit A2-11: a True default in conf.get silently enabled the tool — now the key
+    # specified explicitly for each model (same behavior, visible intent).
     missing = [m for m, c in lumen_router_config.GEMINI_MODELS.items() if "url_context" not in c]
     assert missing == []
 
 
 def test_freshness_year_window_tracks_current_year():
-    # Аудит A2-13: окно строится от текущей даты. Проверяем поведением, а не
-    # грепом по .pattern: мутант с зашитым годом проходил греп (ревью 17.11.2026).
+    # Audit A2-13: the window is built from the current date. Verify by behavior, not
+    # by grepping .pattern: a mutant with a hardcoded year passed the grep (review 17.11.2026).
     year = date.today().year
     assert lumen_router_config._looks_like_freshness_query(f"события {year + 1}") is True
     assert lumen_router_config._looks_like_freshness_query(f"события {year + 4}") is False
 
 
 def test_quota_exhausted_logs_broken_state_loudly(monkeypatch, caplog):
-    # Аудит A2-10: битое состояние квоты раньше давало молчаливый fail-open.
+    # A2-10 audit: corrupt quota state previously caused a silent fail-open.
     import bot
 
     class _BrokenQuota(dict):
@@ -651,7 +680,7 @@ def test_quota_exhausted_logs_broken_state_loudly(monkeypatch, caplog):
 
 
 def test_quarantine_triggers_after_three_consecutive_bad_and_skips_model(caplog, monkeypatch):
-    # Три плохих подряд — карантин до конца суток: роутер объезжает модель.
+    # Three bad results in a row mean quarantine until the end of the day: the router avoids the model.
     import bot
     _munito_mode(monkeypatch)
     head = lumen_router_config._MUNITO_ORDER[0]
@@ -665,8 +694,8 @@ def test_quarantine_triggers_after_three_consecutive_bad_and_skips_model(caplog,
 
 
 def test_quarantine_needs_bad_answers_from_more_than_one_chat(monkeypatch):
-    # Аудит run-2: счётчик карантина не знал про чат, и три пустых ответа из одного
-    # чата выключали головную модель для всех остальных до конца квотных суток.
+    # Audit run-2: the quarantine counter did not account for the chat, and three empty answers from one
+    # chat disabled the primary model for everyone else until the end of the quota day.
     import bot
     _munito_mode(monkeypatch)
     head = lumen_router_config._MUNITO_ORDER[0]
@@ -688,8 +717,8 @@ def test_quarantine_needs_bad_answers_from_more_than_one_chat(monkeypatch):
 
 
 def test_quarantine_counts_one_person_across_their_chats(monkeypatch):
-    # Аудит 16.11.2026: вклад в карантин считает человек, а не чат. Два чата одного
-    # человека раньше давали два вклада и вдвоём выключали модель всем остальным.
+    # Audit 16.11.2026: quarantine contributions are counted per person, not per chat. Two chats of one
+    # earlier gave a person two contributions and together switched the model off for everyone else.
     import bot
     _munito_mode(monkeypatch)
     head = lumen_router_config._MUNITO_ORDER[0]
@@ -702,7 +731,7 @@ def test_quarantine_counts_one_person_across_their_chats(monkeypatch):
             bot._record_model_outcome("munito", head, bad=True)
             bot._record_model_outcome("munito", head, bad=True)
         assert bot._is_quarantined("munito", head) is False
-        # Другой человек в том же чате даёт третий вклад — порог достигнут.
+        # Another person in the same chat contributes a third time — the threshold is reached.
         tokens.append((bot._LOG_USER, bot._LOG_USER.set("user=8")))
         bot._record_model_outcome("munito", head, bad=True)
         assert bot._is_quarantined("munito", head) is True
@@ -713,7 +742,7 @@ def test_quarantine_counts_one_person_across_their_chats(monkeypatch):
 
 
 def test_quarantine_never_empties_route_and_success_resets(caplog):
-    # Последняя доступная модель не карантинится де-факто: пустой маршрут не возвращаем.
+    # The last available model is not quarantined de facto: do not return an empty route.
     import bot
     for _ in range(5):
         bot._record_model_outcome("munito", "only-model", bad=True)
@@ -725,7 +754,7 @@ def test_quarantine_never_empties_route_and_success_resets(caplog):
 
 
 def test_quarantine_resets_on_quota_day_change(monkeypatch):
-    # Карантин только до конца суток квоты: новый день — чистый счётчик.
+    # Quarantine lasts only until the end of the quota day: a new day means a clean counter.
     import bot
     monkeypatch.setattr(bot, "_current_quota_day", lambda: "2099-01-01")
     for _ in range(3):
@@ -737,7 +766,7 @@ def test_quarantine_resets_on_quota_day_change(monkeypatch):
 
 
 def test_quarantine_threshold_reads_env(monkeypatch):
-    # N из env: при 2 карантин наступает раньше (дефолт 3 проверен выше).
+    # N from env: with 2, quarantine starts earlier (the default of 3 is checked above).
     import bot
     monkeypatch.setenv("MODEL_QUARANTINE_BAD_LIMIT", "2")
     assert lumen_router_config._quarantine_threshold() == 2
@@ -748,8 +777,8 @@ def test_quarantine_threshold_reads_env(monkeypatch):
 
 
 def test_quarantine_window_expires_and_stats_agree_with_routing(monkeypatch):
-    # Окно вместо суток: после истечения модель снова в маршруте, и /stats не
-    # показывает её карантинной (ревью 08.11.2026 нашло расхождение status и is_quarantined).
+    # A window instead of a day: after expiry, the model is back in the route, and /stats does not
+    # shows it as quarantined (the 08.11.2026 review found a mismatch between status and is_quarantined).
     import time
     import bot
     lumen_router_config._QUARANTINE.clear()
@@ -770,12 +799,12 @@ def test_quarantine_window_expires_and_stats_agree_with_routing(monkeypatch):
         lumen_router_config._QUARANTINE.clear()
 
 
-# ─────────────────────────── автовыбор усилия и возможностей моделей ───────────────────────────
+# ──────────────── automatic effort selection and model capabilities ────────────────
 
 @pytest.mark.parametrize(("text", "kwargs", "expected"), [
-    # Регрессия 12.11.2026: плоский MUNITO_REASONING_EFFORT=low давал glm-5.3-flash
-    # неверную арифметику (64 вместо 60), а на «подумай как следует» усилие не
-    # менялось вовсе. Здесь проверяется именно переключение по смыслу запроса.
+    # Regression 12.11.2026: a flat MUNITO_REASONING_EFFORT=low made glm-5.3-flash
+    # incorrect arithmetic (64 instead of 60), and on “think properly” the effort is not
+    # changed at all. This checks switching based on the meaning of the query.
     ("привет", {}, "low"),
     ("спасибо!", {}, "low"),
     ("сколько будет 27*43", {}, "medium"),
@@ -784,12 +813,12 @@ def test_quarantine_window_expires_and_stats_agree_with_routing(monkeypatch):
     ("спроектируй архитектуру и докажи выбор", {}, "xhigh"),
     ("сравни все три варианта по шагам", {}, "xhigh"),
     ("какая сейчас цена билета", {"needs_freshness": True}, "medium"),
-    # Просьба коротко не имеет права опускаться до minimal: на нём glm ошибался.
+    # A request to be brief must not downgrade to minimal: glm made mistakes at that level.
     ("коротко: сколько будет 27*43", {}, "low"),
-    # Исправление в тексте самого сообщения поднимает ступень: база здесь
-    # medium (семь слов), а «ты не прав» + «перепроверь» дают overthink-шаг
-    # вверх. Прежняя метка medium была следствием правила «короче 40 знаков»,
-    # которое роняло базу в low (регрессия сетки 12.11.2026).
+    # A correction in the message text itself raises the tier: the base here
+    # medium (seven words), while 'you are wrong' + 'recheck' trigger an overthink step
+    # upward. The former medium label resulted from the “fewer than 40 characters” rule,
+    # which dropped the base to low (12.11.2026 grid regression).
     ("реши задачу ещё раз, ты не прав", {}, "high"),
     ("реши задачу", {"corrections": 2}, "medium"),
     ("объясни", {"history_len": 60}, "medium"),
@@ -799,13 +828,13 @@ def test_pick_reasoning_effort_switches_on_request_shape(text, kwargs, expected)
 
 
 @pytest.mark.parametrize(("text", "expected"), [
-    # Короткая болтовня остаётся на low на любом языке: решение по длине, а
-    # не по наличию русских слов (сетка effort_grid.py, 12.11.2026).
+    # Short small talk stays at low in every language: the decision is based on length, and
+    # not by the presence of Russian words (effort_grid.py mapping, 12.11.2026).
     ("สวัสดี", "low"),
     ("gracias amigo", "low"),
     ("تم بخير", "low"),
-    # Вопрос без знака вопроса на любой письменности обязан думать дольше:
-    # раньше «почему небо голубое» и «wat is de hoofdstad» уезжали на low.
+    # A question without a question mark in any writing system must think longer:
+    # previously, "why is the sky blue" and "wat is de hoofdstad" were sent to low.
     ("তুমি কে", "medium"),
     ("आप कौन हैं", "medium"),
     ("คุณเป็นใคร", "medium"),
@@ -813,8 +842,9 @@ def test_pick_reasoning_effort_switches_on_request_shape(text, kwargs, expected)
     ("تم کون ہو", "medium"),
     ("deux fois deux font combien", "medium"),
     ("quantos dias você tem", "medium"),
-    # Перевёрнутый знак испанского — тоже знак вопроса: «¿Que hora es» без
-    # ударения в слове «que» иначе оставался на low (проверка 12.11.2026).
+    # An inverted Spanish question mark also marks a question: "¿Que hora es"
+    # without
+    # the accent in "que" otherwise remained on low (check 12.11.2026).
     ("¿Que hora es", "medium"),
 ])
 def test_pick_reasoning_effort_question_signal_is_multilingual(text, expected):
@@ -822,36 +852,36 @@ def test_pick_reasoning_effort_question_signal_is_multilingual(text, expected):
 
 
 def test_ask_words_split_by_script_not_by_trailing_char():
-    # В деванагари и бенгали гласные и носовые знаки не считаются буквами, поэтому
-    # "\b" рвётся ВНУТРИ слова. Прошлое деление по последнему знаку давало ложные
-    # вопросы: граница для «किस» ловила «किसी» («чей-то»), а подстрока для «কে»
-    # ловила «থেকে» («из, от»), и бытовая фраза на хинди или бенгали теряла low
-    # (блоклер адверсариального ревью 12.11.2026). Теперь граница проверяется по
-    # диапазону самой письменности с обеих сторон слова.
+    # In Devanagari and Bengali, vowels and nasal marks are not letters, so
+    # "" breaks INSIDE a word. The old split at the last symbol produced false
+    # questions: the boundary for the Hindi word “kis” matched “kisi” (“someone’s”), while the substring for “ke”
+    # caught "থেকে" ("from"), and an everyday Hindi or Bengali phrase lost the low
+    # (blocker from the adversarial review 12.11.2026). The boundary is now checked by
+    # the writing system's range on both sides of the word.
     for word in lumen_router_config._ASK_WORDS_INDIC:
         assert lumen_router_config._is_indic(word) is True
         assert word not in lumen_router_config._ASK_WORDS_SPACED
     for word in ("что", "wat", "kim", "کجا", "أين", "siapa", "kailan"):
         assert lumen_router_config._is_indic(word) is False
         assert word in lumen_router_config._ASK_WORDS_SPACED
-    # Именно эти фразы раньше становились «вопросом», хотя человеком были сказаны
-    # без всякого вопроса:
+    # These exact phrases used to become “questions,” even though they were spoken by a person
+    # without any question:
     assert lumen_router_config._ASK_INDIC_RE.search("वो किसी के पास है") is None
     assert lumen_router_config._ASK_INDIC_RE.search("कबूतर उड गया") is None
     assert lumen_router_config._ASK_INDIC_RE.search("াজার থেকে আসছি") is None
     assert lumen_router_config._ASK_INDIC_RE.search("কারণ আমি ক্লান্ত") is None
-    # А настоящий вопрос того же ряда обязана ловиться:
+    # But a real question from the same category must be caught:
     assert lumen_router_config._ASK_INDIC_RE.search("কোথায় আছো") is not None
     assert lumen_router_config._ASK_INDIC_RE.search("तुम कहाँ रहते हो") is not None
     assert lumen_router_config._ASK_WORDS_RE.search("wat is de hoofdstad")
-    # Отрицание «не» (кириллица) не должно подменять казахское «не» (латиница).
+    # Cyrillic "ne" as negation must not be replaced with Kazakh Latin "ne".
     assert lumen_router_config.pick_reasoning_effort("это не я") == "low"
 
 
 def test_leading_and_horizon_signals_do_not_fire_on_ordinary_words():
-    # Три блоклера ревью 12.11.2026: дальний горизонт без границ слова, просьба
-    # «коротко» из слов, которые в других языках значат другое, и союзы-омонимы
-    # в начале фразы.
+    # Three review blockers 12.11.2026: a distant horizon without word boundaries, a request
+    # "short" from words that mean something else in other languages, and homonymous conjunctions
+    # at the start of the phrase.
     assert lumen_router_config.pick_reasoning_effort("Планирую отпуск на месяц") == "low"
     assert lumen_router_config.pick_reasoning_effort(
         "Планета Венера, месяц за месяцем") == "medium"
@@ -863,16 +893,17 @@ def test_leading_and_horizon_signals_do_not_fire_on_ordinary_words():
     for small_talk in ("que bom!", "ne bouge pas", "co-founder thing", "https://var.io",
                        "var i = arr", "när du kommer"):
         assert lumen_router_config.pick_reasoning_effort(small_talk) == "low", small_talk
-    # MULTILINE: «ok\n¿qué es esto?» — одна реплика человека, а не две строки.
+    # MULTILINE: "ok
+    # ¿qué es esto?" is one user utterance, not two lines.
     assert lumen_router_config.pick_reasoning_effort("ok\n¿qué es esto?") == "medium"
-    # «huh????» — один вопрос с четырьмя знаками, а не четыре вопроса в столбик.
+    # “huh????” is one question with four question marks, not four questions in a column.
     assert lumen_router_config.pick_reasoning_effort("huh????") != "xhigh"
 
 
 def test_quarantine_window_env_falls_back_instead_of_crashing(monkeypatch):
-    # Мусор в QUARANTINE_WINDOW_SEC не имеет права валить импорт модуля — а с ним
-    # и весь бот. С «int()» напрямую так и было: ValueError на старте
-    # (проверено 12.11.2026 отдельным процессом с QUARANTINE_WINDOW_SEC=abc).
+    # Garbage in QUARANTINE_WINDOW_SEC must not crash module import, and with it
+    # and the whole bot. With int() directly, that is exactly what happened: ValueError at startup
+    # (verified 12.11.2026 in a separate process with QUARANTINE_WINDOW_SEC=abc).
     monkeypatch.setenv("QUARANTINE_WINDOW_SEC", "abc")
     assert lumen_router_config._quarantine_window_sec() == 900
     monkeypatch.setenv("QUARANTINE_WINDOW_SEC", "5")
@@ -884,7 +915,7 @@ def test_quarantine_window_env_falls_back_instead_of_crashing(monkeypatch):
 
 
 def test_pick_reasoning_effort_never_returns_unknown_level():
-    # Неизвестный уровень = 400 от провайдера или молчаливое отсутствие поля.
+    # Unknown level = 400 from the provider or silent absence of the field.
     for text in ("", "?", "докажи", "а он точно не в клубе?", "x" * 5000):
         assert lumen_router_config.pick_reasoning_effort(text) in lumen_router_config.EFFORT_LEVELS
 
@@ -896,27 +927,27 @@ def test_bump_effort_clamps_at_both_ends():
 
 
 @pytest.mark.parametrize(("model_id", "param", "expected"), [
-    # 400 на reasoning_effort у gemma-4-12b и pplx-decider-v1.2 — замер 12.11.2026;
-    # тест падает, если кто-то поставит такую модель в цепочку без замера.
+    # 400 on reasoning_effort for gemma-4-12b and pplx-decider-v1.2—measured 12.11.2026;
+    # the test fails if someone puts such a model in the chain without measurement.
     ("deepseek-ai/deepseek-v4.1-flash-1017", "reasoning_effort", True),
     ("zai-org/glm-5.3-flash", "tools", True),
     ("google/gemma-4-12b", "reasoning_effort", False),
     ("perplexity-ai/pplx-decider-v1.2", "reasoning_effort", False),
-    # tools у этих двух не замеряли, поэтому он у них не снят: снято только то,
-    # по чему есть подтверждённый 400.
+    # tools were not measured for these two, so it was not removed from them; only what
+    # for which there is a confirmed 400.
     ("google/gemma-4-12b", "tools", True),
     ("неизвестная/модель", "reasoning_effort", True),
     (None, "reasoning_effort", True),
 ])
 def test_munito_model_supports_only_measured_capabilities(model_id, param, expected):
-    # Неизвестной модели поле остаётся (прежнее поведение): иначе новая голова
-    # цепочки молча теряет усилие. Снято только то, что замерено как 400.
+    # For an unknown model, the field remains (previous behavior): otherwise a new head
+    # the chain silently loses effort. Only what was measured as 400 was removed.
     assert lumen_router_config._munito_model_supports(model_id, param) is expected
 
 
 def test_every_munito_chain_model_has_capability_record():
-    # Модель без записи = усилие и tools для неё молча выключаются: либо замерь и
-    # добавь, либо не ставь в цепочку (правило датированных подтверждений).
+    # A model with no entry silently disables effort and tools for it: either measure and
+    # add it, or keep it out of the chain (dated-evidence rule).
     for model_id in lumen_router_config._MUNITO_ORDER:
         assert model_id in lumen_router_config._MUNITO_CAPS, model_id
         assert lumen_router_config._MUNITO_CAPS[model_id]["reasoning_effort"] is True
@@ -924,10 +955,10 @@ def test_every_munito_chain_model_has_capability_record():
 
 
 @pytest.mark.parametrize(("value", "effort", "expected"), [
-    (None, None, {"reasoning_effort": "low"}),      # прежний дефолт без аргументов
-    (None, "high", {"reasoning_effort": "high"}),   # автовыбор, переменная не задана
-    ("", "high", {}),                               # пустая = выключатель поля
-    ("minimal", "high", {"reasoning_effort": "minimal"}),  # пин важнее автовыбора
+    (None, None, {"reasoning_effort": "low"}),      # the previous default without arguments
+    (None, "high", {"reasoning_effort": "high"}),   # automatic selection, the variable is unset
+    ("", "high", {}),                               # empty = disable the field
+    ("minimal", "high", {"reasoning_effort": "minimal"}),  # the pin is more important than automatic selection
 ])
 def test_munito_payload_extras_precedence(monkeypatch, value, effort, expected):
     if value is None:
@@ -952,15 +983,16 @@ def test_agent_max_searches_follows_effort(monkeypatch, effort, expected):
 
 
 def test_agent_searches_table_names_searches_not_steps():
-    # Револьвер ревью: лимит обязан считаться поисками. Если в таблице снова
-    # окажутся шаги, одна строка с тремя tool_calls израсходует «один поиск».
+    # Review revolver: the limit must be counted in searches. If the table again
+    # turn out to be steps, one line with three tool_calls consumes "one search".
     assert lumen_router_config._AGENT_SEARCHES_BY_EFFORT["medium"] == 2
-    # Поведением, а не грепом по докстрингу (ревью 17.11.2026).
+    # Assert behavior, not a grep over the docstring (review 17.11.2026).
     assert lumen_router_config.agent_max_searches("xhigh") == 3
 
 
 def test_unknown_effort_pin_is_warned_but_sent(monkeypatch, caplog):
-    # Провайдер не отклоняет мусорное значение, поэтому хотя бы видно в логе.
+    # The provider does not reject the garbage value, so at least it is visible in
+    # the log.
     monkeypatch.setenv("MUNITO_REASONING_EFFORT", "none")
     with caplog.at_level("WARNING", logger="bot"):
         assert lumen_router_config._munito_payload_extras("high") == {"reasoning_effort": "none"}
@@ -968,7 +1000,7 @@ def test_unknown_effort_pin_is_warned_but_sent(monkeypatch, caplog):
 
 
 def test_agent_max_searches_env_override(monkeypatch):
-    # Владелец обязан уметь глушить цикл поиска цифрой, без правки кода.
+    # The owner must be able to disable the search loop with a digit, without editing code.
     monkeypatch.setenv("AGENT_MAX_SEARCHES", "0")
     assert lumen_router_config.agent_max_searches("xhigh") == 0
     monkeypatch.setenv("AGENT_MAX_SEARCHES", "3")
@@ -981,8 +1013,8 @@ def test_agent_max_searches_env_override(monkeypatch):
     ("gemini-3.8-flash", "low", ("thinking_level", "low")),
     ("gemini-3.8-flash", "xhigh", ("thinking_level", "high")),
     ("gemini-2.5-flash", "low", ("thinking_budget", 0)),
-    ("gemini-2.5-flash", "high", ("", None)),   # дефолт модели: калибровка 18.08.2026
-    ("gemini-3.8-flash", None, ("", None)),     # EFFORT_AUTO=0 — прежняя эвристика снаружи
+    ("gemini-2.5-flash", "high", ("", None)),   # the model default: calibration 18.08.2026
+    ("gemini-3.8-flash", None, ("", None)),     # EFFORT_AUTO=0 — the previous heuristic outside
     ("gemini-unknown", "high", ("", None)),
 ])
 def test_gemini_thinking_for_maps_effort(model_id, effort, expected):
@@ -1001,9 +1033,10 @@ def test_recent_corrections_counts_only_short_user_turns():
 
 
 def test_munito_route_yields_to_gemini_when_daily_ceiling_is_reached(monkeypatch):
-    # Аудит 16.11.2026: MUNITO_DAILY_LIMIT был только цифрой в /stats, и 251-й
-    # запрос получал 429 с остыванием на всех моделях сразу. Потолок обязан
-    # уводить маршрут на безусловный резерв Gemini, а не в шторм отказов.
+    # Audit 16.11.2026: MUNITO_DAILY_LIMIT was only a number in /stats, and the
+    # 251st
+    # request got 429 with cooldown across all models at once. The cap must
+    # move the route to the unconditional Gemini fallback, not into a storm of refusals.
     import bot
 
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key-for-test")
@@ -1022,8 +1055,8 @@ def test_munito_route_yields_to_gemini_when_daily_ceiling_is_reached(monkeypatch
 
 
 def test_munito_ceiling_reads_zero_on_a_new_quota_day(monkeypatch):
-    # Третий проход аудита 16.11.2026: троттл сброса суток не давал роутеру увидеть
-    # новый день, и первую минуту после полуночи PT он читал вчерашние 250.
+    # Third audit pass 16.11.2026: the daily-reset throttle did not let the router see
+    # a new day, and for the first minute after PT midnight it read the previous day's 250.
     import bot
 
     real = dict(bot.GLOBAL_QUOTA)
@@ -1037,14 +1070,14 @@ def test_munito_ceiling_reads_zero_on_a_new_quota_day(monkeypatch):
 
 
 def test_build_route_classifies_pdf_and_sticker(monkeypatch):
-    # Критика полноты 16.11.2026: классы входов документ/стикер не проверялись.
-    # PDF — не картинка, поэтому идёт в Gemini-цепочку как видео/аудио;
-    # стикер — image/webp, то есть обычная картинка Munito с резервом Gemini.
+    # Completeness critique 16.11.2026: the document/sticker input classes were not checked.
+    # PDF is not an image, so it goes to the Gemini chain like video/audio;
+    # a sticker is image/webp, an ordinary Munito image with a Gemini fallback.
     _munito_mode(monkeypatch)
     pdf = _route_for(media_mime="application/pdf")
-    # Явный ожидаемый список, а не вызов той же функции: тавтология скрывала
-    # потерю резерва (ревью 17.11.2026).
-    assert pdf == [("gemini", model) for model in lumen_router_config.GEMINI_HEAVY_CHAIN]
+    # An explicit expected list, not a call to the same function: the tautology hid
+    # loss of the reserve (review 17.11.2026).
+    assert pdf == [("gemini", model) for model in _GEMINI_HEAVY_FIXED]
     sticker = _route_for(media_mime="image/webp")
-    assert sticker[0][0] == "munito"
-    assert any(provider == "gemini" for provider, _ in sticker)
+    assert sticker == ([("munito", m) for m in _MUNITO_ORDER_FIXED]
+                       + [("gemini", m) for m in _GEMINI_HEAVY_FIXED])

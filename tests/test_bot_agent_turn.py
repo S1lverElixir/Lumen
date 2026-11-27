@@ -1,13 +1,13 @@
-"""
-test_bot_agent_turn.py — сквозные тесты агентного хода в _handle_message_core.
+"""test_bot_agent_turn.py — end-to-end tests of the agent turn in _handle_message_core.
 
-Что защищают: с 12.11.2026 свежие источники собирает цикл, где запросы пишет сама
-модель (lumen_agent.run_search_turn), а прежнее поведение — один внешний поиск по
-сырой фразе человека — остаётся резервом. Тесты ниже проверяют ровно те грани,
-где новая надстройка может или потерять поиск вовсе (обрыв цикла), или сделать
-лишнюю работу (выключатель, отсутствие источников), или соврать про усилие.
+What they protect: since 12.11.2026, fresh sources are collected by a loop in which
+    the model writes the queries (lumen_agent.run_search_turn), while the previous
+    behavior — one external search of the user's raw phrase — remains a fallback.
+    The tests below cover the boundaries where the new layer could either lose the
+    search entirely (loop termination), do unnecessary work (switch disabled, no
+    sources), or misreport effort.
 
-Запуск:
+Run:
     pytest tests/test_bot_agent_turn.py -v
 """
 import asyncio
@@ -21,7 +21,7 @@ from tests.bot_test_helpers import _FakeStatus
 
 
 def _run_core(message, monkeypatch, *, captured=None):
-    """Прогон _handle_message_core с захватом и промпта, и kwargs маршрута."""
+    """Runs _handle_message_core while capturing both the prompt and route kwargs."""
 
     async def fake_run_route(chat_id, ai_prompt, route, message, **kwargs):
         if captured is not None:
@@ -48,8 +48,8 @@ def _turn(snippets=None, queries=None, failed=False):
 def test_fresh_question_searches_with_model_queries_not_user_words(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "кто сейчас главный тренер сборной Беларуси?"
-    # Голова текстового маршрута live — Munito: без ключа роутер отдаёт весь текст
-    # Gemini, а цикл планирования живёт именно у Munito.
+    # The live head of the text route is Munito: without a key, the router sends all text
+    # Gemini, while the planning loop lives in Munito.
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     seen = {"fetch": [], "loop": 0}
 
@@ -73,8 +73,8 @@ def test_fresh_question_searches_with_model_queries_not_user_words(rate_guard_se
     _run_core(message, monkeypatch, captured=captured)
 
     assert seen["loop"] == 1
-    # Резервный поиск по сырой фразе не запускается, когда цикл уже принёс источники:
-    # второй fetch на том же сообщении стоил бы ещё один сетевой круг впустую.
+    # Fallback search on the raw phrase does not run when the loop already found sources:
+    # a second fetch on the same message would cost another wasted network round trip.
     assert seen["fetch"] == []
     assert "главный тренер сборной Беларуси 2026" in captured["prompt"]
     assert "https://example.org/a" in captured["prompt"]
@@ -82,8 +82,8 @@ def test_fresh_question_searches_with_model_queries_not_user_words(rate_guard_se
 
 
 def test_broken_search_loop_falls_back_to_plain_fetch(rate_guard_setup, monkeypatch):
-    # Регрессия, которую нельзя допустить: падение надстройки лишает человека поиска
-    # вовсе (пометка «без живого поиска» на вопросе, где источники есть).
+    # Regression that must not be allowed: a failure in the add-on deprives the person of search
+    # at all (a "no live search" marker on a question that has sources).
     message = rate_guard_setup()
     message.text = "какая сейчас ключевая ставка"
     seen = {"fetch": []}
@@ -133,8 +133,8 @@ def test_empty_search_loop_still_runs_the_plain_fetch(rate_guard_setup, monkeypa
 def test_kill_switch_returns_to_single_fetch(rate_guard_setup, monkeypatch):
     message = rate_guard_setup()
     message.text = "погоде сегодня в Минске верить?"
-    # Без головы Munito цикл не запустился бы и без выключателя: ключ обязателен,
-    # иначе assert «цикл не звали» тривиален.
+    # Without the Munito head, the loop would not start even without the switch: the key is required,
+    # otherwise the assertion “the loop was not called” is trivial.
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     seen = {"loop": 0, "fetch": 0}
 
@@ -158,8 +158,8 @@ def test_kill_switch_returns_to_single_fetch(rate_guard_setup, monkeypatch):
 
 
 def test_search_disabled_switch_skips_the_loop_too(rate_guard_setup, monkeypatch):
-    # WEB_SEARCH_ENABLED=0 обязан глушить и цикл: иначе модель продолжала бы дёргать
-    # планирующие вызовы, когда внешний поиск запрещён владельцем.
+    # WEB_SEARCH_ENABLED=0 must disable the loop too: otherwise the model would keep calling
+    # planning calls when external search is forbidden by the owner.
     message = rate_guard_setup()
     message.text = "кто сейчас главный тренер сборной"
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
@@ -185,7 +185,7 @@ def test_search_disabled_switch_skips_the_loop_too(rate_guard_setup, monkeypatch
 def test_effort_of_the_message_reaches_the_route(rate_guard_setup, monkeypatch, text, expected):
     message = rate_guard_setup()
     message.text = text
-    monkeypatch.setenv("MUNITO_REASONING_EFFORT", "")   # без пина: проверяем автовыбор
+    monkeypatch.setenv("MUNITO_REASONING_EFFORT", "")   # without a pin: verify automatic selection
     captured = {}
     _run_core(message, monkeypatch, captured=captured)
     assert captured["kwargs"]["effort"] == expected
@@ -210,16 +210,16 @@ def test_effort_auto_off_passes_none_and_disables_the_loop(rate_guard_setup, mon
     monkeypatch.setattr(lumen_agent, "run_search_turn", fake_turn)
     monkeypatch.setattr("lumen_message_core.fetch_web_snippets", fake_fetch)
     _run_core(message, monkeypatch, captured=captured)
-    # Это не свежий вопрос, поэтому поиска нет вовсе; главное — effort=None и
-    # цикл не звался: EFFORT_AUTO=0 обязан возвращать прежнюю плоскую схему.
+    # This is not a fresh question, so there is no search at all; the key points are effort=None and
+    # the loop was not called: EFFORT_AUTO=0 must return the previous flat schema.
     assert captured["kwargs"]["effort"] is None
     assert seen["loop"] == 0
     bot.chat_state.pop(123, None)
 
 
 def test_gemini_only_route_does_not_run_munito_loop(rate_guard_setup, monkeypatch):
-    # Ссылку и YouTube читает только Gemini: планирующий вызов Munito там нечем
-    # заменить, и цикл не имеет права его подставлять.
+    # Only Gemini reads links and YouTube: the planning Munito call has no way to
+    # replace, and the loop has no right to substitute it.
     message = rate_guard_setup()
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     message.text = "расскажи про https://example.org/page что там нового"
@@ -238,9 +238,9 @@ def test_gemini_only_route_does_not_run_munito_loop(rate_guard_setup, monkeypatc
 
 
 def test_search_marker_asks_the_loop_not_the_user_words(rate_guard_setup, monkeypatch):
-    # Регрессия старого механизма: на маркер [[SEARCH]] бот искал сырой фразой,
-    # то есть ровно теми словами, на которых модель уже сказала «не знаю». Теперь
-    # просьба модели уходит в тот же цикл, и запросы пишет она.
+    # Regression of the old mechanism: on the [[SEARCH]] marker, the bot searched the raw phrase,
+    # that is, with the exact words for which the model had already said "I do not know." Now
+    # the model's request enters the same loop, and the model writes the queries.
     from lumen_search import _SearchRequested
 
     message = rate_guard_setup()
@@ -283,8 +283,8 @@ def test_search_marker_asks_the_loop_not_the_user_words(rate_guard_setup, monkey
     bot.chat_state.pop(123, None)
 
 def test_search_loop_status_shows_query_then_one_closed_step(rate_guard_setup, monkeypatch):
-    # Регрессия трейса: два «поискал · нашёл N» в одном пузыре (ревью 12.11.2026).
-    # Живой этап показывает запрос модели, закрытый этап — один на весь ответ.
+    # Trace regression: two "searched · found N" lines in one bubble (review 12.11.2026).
+    # A live stage shows the model request; a closed stage is one for the whole answer.
     from types import SimpleNamespace
 
     message = rate_guard_setup()
@@ -297,8 +297,8 @@ def test_search_loop_status_shows_query_then_one_closed_step(rate_guard_setup, m
         return fake_status
 
     async def fake_turn(**kw):
-        # Цикл показывает живой запрос и НЕ печатает закрытый этап: один раз на
-        # ответ его закрывает вызывающий код.
+        # The loop shows a live request and does NOT print the closed stage: once per
+        # the caller's code closes the answer.
         await fake_status.set_phase("progress_search_query", query="тренер сборной Беларуси")
         return _turn(queries=["тренер сборной Беларуси"],
                      snippets=[{"url": f"https://src{i}.by/a", "publisher": f"src{i}.by"}
@@ -320,13 +320,20 @@ def test_search_loop_status_shows_query_then_one_closed_step(rate_guard_setup, m
 
 
 def test_search_loop_failure_closes_the_step_once(rate_guard_setup, monkeypatch):
-    # Если цикл упал, закрытый этап обязан появиться из резервной ветки — ровно
-    # один раз и с числом источников резервного поиска.
+    # If the loop crashed, the closed stage must appear from the fallback branch: exactly
+    # once and with the number of fallback search sources.
     message = rate_guard_setup()
     message.text = "кто сейчас главный тренер сборной Беларуси?"
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
+    fake_status = _FakeStatus()
+
+    async def fake_start(reply_to, lang, key, *, timed=False, **kwargs):
+        fake_status.started = (key, timed)
+        return fake_status
 
     async def boom(**kwargs):
+        assert kwargs["status"] is fake_status
+        await kwargs["status"].set_phase("progress_search_query", query=message.text)
         raise RuntimeError("planning exploded")
 
     async def fake_fetch(query, *, timeout_sec=None, max_results=None, context=""):
@@ -340,23 +347,27 @@ def test_search_loop_failure_closes_the_step_once(rate_guard_setup, monkeypatch)
         return await fake_fetch(query, **kw)
 
     captured = {}
+    monkeypatch.setattr("lumen_message_core.StatusMessage", SimpleNamespace(start=fake_start))
     monkeypatch.setattr(lumen_agent, "run_search_turn", boom)
     monkeypatch.setattr("lumen_message_core.fetch_web_snippets", spy_fetch)
     _run_core(message, monkeypatch, captured=captured)
 
     assert seen["fetch"] == [message.text]
     assert "https://example.org/1" in captured["prompt"]
+    assert fake_status.started == ("progress_searching", False)
+    assert {"query": message.text} in fake_status.phase_kwargs
+    assert fake_status.done == [("progress_search_done", {"count": 2})], fake_status.done
     bot.chat_state.pop(123, None)
 
 
 def test_group_chat_gets_the_agent_status_bubble(rate_guard_setup, monkeypatch):
-    # Решение владельца 12.11.2026: претензии по слабому поиску пришли скриншотами
-    # из группы, поэтому живой этап обязан быть и там, где чат не личный.
+    # Owner decision 12.11.2026: complaints about weak search arrived as screenshots
+    # from a group, so the live stage must also run where the chat is not private.
     message = rate_guard_setup()
     message.chat = SimpleNamespace(id=123, type=bot.ChatType.GROUP)
     message.text = "кто сейчас главный тренер сборной Беларуси?"
-    # Фоновое сообщение группы бот не отвечает вовсе: адресованность нужна,
-    # иначе тест мерял бы ранний выход, а не пузырь.
+    # The bot does not answer background group messages at all: addressee detection is needed,
+    # otherwise the test would measure the early exit, not the bubble.
     monkeypatch.setattr(bot, "message_mentions_bot", lambda msg: True)
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
     fake_status = _FakeStatus()
@@ -382,7 +393,7 @@ def test_group_chat_gets_the_agent_status_bubble(rate_guard_setup, monkeypatch):
 
 
 def test_guest_does_not_get_the_bubble(rate_guard_setup, monkeypatch):
-    # Гостям тишина: их ответ уходит через answerGuestQuery, где правок не делают.
+    # Silence for guests: their answer goes through answerGuestQuery, where no edits are made.
     message = rate_guard_setup()
     message.text = "кто сейчас главный тренер сборной Беларуси?"
     monkeypatch.setattr(bot, "is_guest_message", lambda msg: True)
@@ -404,10 +415,10 @@ def test_guest_does_not_get_the_bubble(rate_guard_setup, monkeypatch):
 
 
 def test_outbound_search_daily_budget_stops_everything(monkeypatch):
-    # После дневного потолка бот перестаёт ходить в источники и отвечает с честной
-    # пометкой; и цикл, и прежняя ветка идут через ту же границу.
-    # Сетевой вход замокан: ослабленный гейт раньше звал DNS и оставался зелёным,
-    # потому что ошибки сети тоже дают [] (ревью 17.11.2026).
+    # After the daily cap, the bot stops visiting sources and replies with an honest
+    # marker; both the loop and the previous branch go through the same boundary.
+    # Network access is mocked: the weakened gate previously called DNS and still stayed green,
+    # because network errors also return [] (review 17.11.2026).
     import contextlib
     import lumen_search
 
@@ -438,8 +449,9 @@ def test_outbound_search_daily_budget_stops_everything(monkeypatch):
 
 
 def test_search_query_placeholder_exists_in_every_language():
-    # Новый ключ статуса подставляет {query}: пакет без плейсхолдера показал бы
-    # «Ищу в интернете» без запроса, и тест полноты таблиц этого не поймает.
+    # The new status key substitutes {query}: a pack without the placeholder would show
+    # "Searching the internet" without a request, and the table completeness test
+    # will not catch it.
     from lumen_lang import SUPPORTED_LANGS, t
 
     for lang in SUPPORTED_LANGS:
@@ -449,9 +461,9 @@ def test_search_query_placeholder_exists_in_every_language():
 
 
 def test_loop_metrics_reach_the_devtrace(rate_guard_setup, monkeypatch, tmp_path):
-    # Офлайн-разбор ветки возможен только если след различает «искал цикл» и
-    # «искал прежний путь»: без этих полей ревью не отличило бы одну ветку от
-    # другой даже при включённом DEV_TRACE.
+    # Offline branch analysis is possible only if the trace distinguishes "searched a loop" and
+    # "looked for the old path": without these fields, the review could not distinguish one branch from
+    # another even when DEV_TRACE is enabled.
     monkeypatch.setenv("DEV_TRACE", "1")
     monkeypatch.setenv("DEV_TRACE_PATH", str(tmp_path / "trace.jsonl"))
     message = rate_guard_setup()
@@ -481,10 +493,10 @@ def test_loop_metrics_reach_the_devtrace(rate_guard_setup, monkeypatch, tmp_path
     bot.chat_state.pop(123, None)
 
 def test_search_marker_after_evidence_retries_and_reports_one_step(rate_guard_setup, monkeypatch):
-    # Регрессия 12.11.2026: первый проход уже принёс источники, модель всё равно
-    # ответила [[SEARCH]]. mark_stats связывалась только внутри ветки «источников
-    # ещё нет», поэтому второй проход падал в служебную ошибку, а пузырь получал
-    # две противоречивые строки («нашёл 1» и «ничего не нашёл»).
+    # Regression 12.11.2026: the first pass already brought sources, yet the model still
+    # answered [[SEARCH]]. mark_stats was bound only inside the 'sources
+    # not yet", so the second pass fell into a service error, while the bubble received
+    # two contradictory lines (“found 1” and “found nothing”).
     import lumen_search
     from types import SimpleNamespace
 
@@ -524,8 +536,8 @@ def test_search_marker_after_evidence_retries_and_reports_one_step(rate_guard_se
 
 
 def test_exploding_status_object_does_not_cost_the_answer(rate_guard_setup, monkeypatch):
-    # Пузырь — украшение ответа: правка статуса не имеет права оставить человека
-    # без текста (ревью 12.11.2026: вызовы статуса в message_core шли без suppress).
+    # The bubble decorates the answer: editing the status must not leave the person
+    # without text (review 12.11.2026: status calls in message_core omitted suppress).
     from types import SimpleNamespace
 
     class _Boom:
@@ -580,8 +592,8 @@ def test_exploding_status_object_does_not_cost_the_answer(rate_guard_setup, monk
 
 
 def test_spent_daily_search_budget_does_not_spend_planning_calls(rate_guard_setup, monkeypatch):
-    # Потолок обращений исчерпан: цикл всё равно ничего не найдёт, но успевает
-    # извести до трёх планирующих вызовов модели. Ревью приватности 12.11.2026.
+    # Call cap exhausted: the loop still will not find anything, but it manages to
+    # notice up to three planning model calls. Privacy review 12.11.2026.
     message = rate_guard_setup()
     message.text = "какая ключевая ставка ЦБ России сегодня?"
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
@@ -601,15 +613,15 @@ def test_spent_daily_search_budget_does_not_spend_planning_calls(rate_guard_setu
     _run_core(message, monkeypatch)
 
     assert seen["loop"] == 0, "при нулевом бюджете планировать не за чем"
-    # Один fetch обязателен (прежняя ветка), второй возможен на пост-хок ретрае
-    # свежести: цикл тут ни при чём, важны ноль планирующих вызовов.
+    # One fetch is mandatory (the old branch); a second is possible on a post-hook retry
+    # freshness: the loop has nothing to do with it; zero planning calls matter.
     assert seen["fetch"] >= 1, "прежний один поиск остаётся и честно вернёт пустоту"
     bot.chat_state.pop(123, None)
 
 
 def test_stop_during_evidence_skips_fallback_fetch(rate_guard_setup, monkeypatch):
-    # Аудит 16.11.2026: /stop в фазе поиска всё равно делал резервный запрос
-    # по сырой фразе (до 6 с и один учтённый поиск) до проверки флага.
+    # Audit 16.11.2026: /stop during the search phase still triggered a reserve request
+    # on the raw phrase (up to 6s and one counted search) before checking the flag.
     message = rate_guard_setup()
     message.text = "какая сейчас ключевая ставка"
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "fake-key")
@@ -620,8 +632,8 @@ def test_stop_during_evidence_skips_fallback_fetch(rate_guard_setup, monkeypatch
         return []
 
     async def empty_turn(**kwargs):
-        # Стоп приходит, пока идёт планирование: область уже стоит (её ставит
-        # обёртка апдейта), флаг выставляется внутри фазы.
+        # Stop arrives during planning: the area is already set (it is set by
+        # the update wrapper), the flag is set inside the phase.
         bot._request_stream_stop(message.chat.id)
         return _turn()
 
@@ -646,8 +658,8 @@ def test_stop_during_evidence_skips_fallback_fetch(rate_guard_setup, monkeypatch
 
 
 def test_gemini_reserve_loop_gets_phase_deadline(rate_guard_setup, monkeypatch):
-    # Аудит 16.11.2026: в ветке Gemini deadline был None, и три шага цикла
-    # могли дойти до 66 с вместо 45. Фазовый дедлайн считается один раз.
+    # Audit 16.11.2026: in the Gemini branch, deadline was None, and three loop steps
+    # could reach 66 seconds instead of 45. The phase deadline is computed once.
     message = rate_guard_setup()
     message.text = "кто сейчас канцлер Германии?"
     monkeypatch.setattr(bot, "MUNITO_API_KEY", "")
